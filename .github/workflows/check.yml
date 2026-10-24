@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      validation:
+        description: Full validation, or automatic release-metadata proof
+        type: choice
+        options: [full, auto]
+        default: full
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
@@ -14,55 +21,72 @@ permissions:
   contents: read
 
 jobs:
-  reuse:
-    if: ${{ github.event_name == 'push' }}
+  plan:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     permissions:
       contents: read
       actions: read
       pull-requests: read
     outputs:
-      proven: ${{ steps.proof.outputs.proven }}
+      mode: ${{ steps.proof.outputs.mode }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-dependencies
-      - name: Verify the merged tree has full PR validation
-        id: proof
+      - name: Select evidence lookup
+        id: scope
         uses: actions/github-script@v8
+        env:
+          VALIDATION: ${{ inputs.validation || 'full' }}
         with:
           script: |
-            // this small GitHub API adapter delegates proof decisions to the shared schema-checked policy
-            core.setOutput('proven', 'false');
+            // ordinary PRs and manual full dispatches need no source lookup before their full checks
+            const pr = context.payload.pull_request;
+            const repository = `${context.repo.owner}/${context.repo.repo}`;
+            const release = context.eventName === 'pull_request'
+              ? pr?.head.ref === 'changeset-release/main' && pr?.head.repo?.full_name === repository && pr?.base.ref === 'main'
+              : context.eventName === 'workflow_dispatch' && process.env.VALIDATION === 'auto' && context.ref === 'refs/heads/changeset-release/main';
+            core.setOutput('needed', String((context.eventName === 'push' && context.ref === 'refs/heads/main') || release));
+      - uses: actions/checkout@v4
+        if: ${{ steps.scope.outputs.needed == 'true' }}
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+      - uses: ./.github/actions/setup-dependencies
+        if: ${{ steps.scope.outputs.needed == 'true' }}
+      - name: Prove the validation plan
+        id: proof
+        uses: actions/github-script@v8
+        env:
+          VALIDATION: ${{ inputs.validation || 'full' }}
+          EVIDENCE_NEEDED: ${{ steps.scope.outputs.needed }}
+        with:
+          script: |
+            core.setOutput('mode', 'full');
+            if (process.env.EVIDENCE_NEEDED !== 'true') return;
             try {
               const { pathToFileURL } = require('node:url');
               const root = pathToFileURL(`${process.cwd()}/package.json`).href;
               const localRequire = require('node:module').createRequire(root);
               const { tsImport } = localRequire('tsx/esm/api');
-              const { decodeCiRuns, newestPrRun, proveMergedValidation } = await tsImport('./scripts/ci-proof.ts', root);
-              const repository = `${context.repo.owner}/${context.repo.repo}`;
-              const { data: prs } = await github.rest.repos.listPullRequestsAssociatedWithCommit({ ...context.repo, commit_sha: context.sha, per_page: 100 });
-              const pr = prs.find(pr => pr.merged_at && pr.merge_commit_sha === context.sha && pr.base.ref === 'main' && pr.head.repo?.full_name === repository);
-              if (!pr) throw new Error('no matching merged PR');
-              const { data: merged } = await github.rest.git.getCommit({ ...context.repo, commit_sha: context.sha });
-              const { data: head } = await github.rest.git.getCommit({ ...context.repo, commit_sha: pr.head.sha });
-              const { data: workflow } = await github.rest.actions.getWorkflow({ ...context.repo, workflow_id: 'check.yml' });
-              const expected = { repository, workflowId: workflow.id, head: pr.head.sha, branch: pr.head.ref, tree: merged.tree.sha };
-              const { data: response } = await github.rest.actions.listWorkflowRuns({ ...context.repo, workflow_id: workflow.id, head_sha: pr.head.sha, per_page: 100 });
-              const runs = decodeCiRuns(response.workflow_runs);
-              const run = newestPrRun(runs, expected);
-              if (!run || run.status !== 'completed' || run.conclusion !== 'success') throw new Error('no successful latest PR run');
-              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { ...context.repo, run_id: run.id, filter: 'latest', per_page: 100 });
-              const proof = proveMergedValidation({ expected, headTree: head.tree.sha, runs, jobs });
-              await core.summary.addHeading('Full PR validation reused').addRaw(`The merged tree matches the checked PR head. All full jobs passed in [run ${proof.runId}](https://github.com/${repository}/actions/runs/${proof.runId}).`).write();
-              core.setOutput('proven', 'true');
+              const { runCiPlan } = await tsImport('./scripts/ci-evidence.ts', root);
+              const plan = await runCiPlan({ github, context, validation: process.env.VALIDATION });
+              core.setOutput('mode', plan.mode);
+              if (plan.mode === 'full') {
+                core.notice('Complete validation selected: release-only equivalence and full source evidence were not both proven.');
+                return;
+              }
+              const link = id => `[run ${id}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${id})`;
+              const detail = plan.mode === 'release'
+                ? `Release ${plan.from} → ${plan.to}: full baseline ${link(plan.baselineRunId)}; static, package and container checks still run on this version.`
+                : `Exact merged tree reuses ${link(plan.runId)}.${plan.baselineRunId ? ` Full release baseline: ${link(plan.baselineRunId)}.` : ''}`;
+              await core.summary.addHeading(plan.mode === 'release' ? 'Release metadata fast track' : 'Exact validation reused').addRaw(detail).write();
             } catch {
-              core.notice('Matching full PR validation could not be proven; running complete validation on main.');
+              core.setOutput('mode', 'full');
+              core.notice('Validation evidence unavailable; running complete checks.');
             }
 
   static:
-    needs: reuse
-    if: ${{ always() && !cancelled() && needs.reuse.outputs.proven != 'true' }}
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -98,8 +122,8 @@ jobs:
         run: node --import tsx scripts/smoke-release.ts image t3-supervisor:ci-check
 
   main:
-    needs: reuse
-    if: ${{ always() && !cancelled() && needs.reuse.outputs.proven != 'true' }}
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' && needs.plan.outputs.mode != 'release' }}
     name: main (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -116,8 +140,8 @@ jobs:
       - run: pnpm test --shard=${{ matrix.shard }}/4 --maxWorkers=1
 
   harness:
-    needs: reuse
-    if: ${{ always() && !cancelled() && needs.reuse.outputs.proven != 'true' }}
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' && needs.plan.outputs.mode != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -129,26 +153,34 @@ jobs:
 
   check:
     if: ${{ always() }}
-    needs: [reuse, static, main, harness]
+    needs: [plan, static, main, harness]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Require every validation job to pass
         env:
-          EVENT: ${{ github.event_name }}
-          REUSE_PROVEN: ${{ needs.reuse.outputs.proven }}
-          REUSE_RESULT: ${{ needs.reuse.result }}
+          MODE: ${{ needs.plan.outputs.mode }}
+          PLAN_RESULT: ${{ needs.plan.result }}
           STATIC_RESULT: ${{ needs.static.result }}
           MAIN_RESULT: ${{ needs.main.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
         run: |
-          if [ "$EVENT" = push ] && [ "$REUSE_PROVEN" = true ]; then
-            test "$REUSE_RESULT" = success
-            test "$STATIC_RESULT" = skipped
-            test "$MAIN_RESULT" = skipped
-            test "$HARNESS_RESULT" = skipped
-          else
-            test "$STATIC_RESULT" = success
-            test "$MAIN_RESULT" = success
-            test "$HARNESS_RESULT" = success
-          fi
+          test "$PLAN_RESULT" = success
+          case "$MODE" in
+            reuse)
+              test "$STATIC_RESULT" = skipped
+              test "$MAIN_RESULT" = skipped
+              test "$HARNESS_RESULT" = skipped
+              ;;
+            release)
+              test "$STATIC_RESULT" = success
+              test "$MAIN_RESULT" = skipped
+              test "$HARNESS_RESULT" = skipped
+              ;;
+            full)
+              test "$STATIC_RESULT" = success
+              test "$MAIN_RESULT" = success
+              test "$HARNESS_RESULT" = success
+              ;;
+            *) exit 1 ;;
+          esac

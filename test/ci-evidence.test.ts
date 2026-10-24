@@ -1,0 +1,153 @@
+import assert from "node:assert/strict";
+import {readFileSync, readdirSync} from "node:fs";
+import {spawnSync} from "node:child_process";
+import {runInNewContext} from "node:vm";
+import {it} from "@effect/vitest";
+import {Effect} from "effect";
+import {parse} from "yaml";
+import * as policy from "../scripts/ci-proof.js";
+import {planCi, type CiGithub} from "../scripts/ci-evidence.js";
+
+const B = "a".repeat(40), H = "b".repeat(40), S = "c".repeat(40), M = "d".repeat(40), T = "e".repeat(40), U = "f".repeat(40);
+const repository = "jfet97/t3-supervisor";
+const manifest = '{\n  "name": "@jfet97/t3-supervisor",\n  "version": "0.0.4"\n}\n';
+const run = (id: number, head_sha: string, event: string, branch: string): typeof policy.CiRun.Type => ({id, workflow_id: 42, head_sha, head_branch: branch, event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
+const full = (id: number) => policy.requiredFullJobs.map(name => ({name, run_id: id, conclusion: "success"}));
+const release = (id: number) => ["plan", "static", "check", "harness", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "check"].includes(name) ? "success" : "skipped"}));
+const pr = (merge: string | null, head: string, branch: string) => ({merged_at: merge ? "2026-10-25T00:00:00Z" : null, merge_commit_sha: merge, base: {ref: "main"}, head: {sha: head, ref: branch, repo: {full_name: repository}}});
+const rawChange = (path: string, status = "M") => `:100644 ${status === "D" ? "000000" : "100644"} ${B} ${status === "D" ? "0".repeat(40) : H} ${status}\0${path}\0`;
+
+const fixture = () => {
+  const runs = new Map<string, Array<typeof policy.CiRun.Type>>([[B, [run(20, B, "push", "main")]], [S, [run(10, S, "pull_request", "feature")]], [H, [run(30, H, "workflow_dispatch", "changeset-release/main")]]]);
+  const jobs = new Map([[10, full(10)], [20, [{name: "check", run_id: 20, conclusion: "success"}]], [30, release(30)]]);
+  const context = {eventName: "pull_request", sha: H, ref: "refs/pull/21/merge", repo: {owner: "jfet97", repo: "t3-supervisor"}, payload: {pull_request: pr(null, H, "changeset-release/main")}};
+  const state = {raw: rawChange("package.json") + rawChange("CHANGELOG.md") + rawChange(".changeset/quiet.md", "D"), headPackage: manifest.replace("0.0.4", "0.0.5"), truncated: false, badApi: false, chain: false, changedTree: false, freshFailure: false, freshAttempt: false, runReads: new Map<string, number>(), gitReads: [] as string[]};
+  const github: CiGithub = {rest: {actions: {
+    getWorkflow: async () => ({data: {id: 42}}),
+    listWorkflowRuns: async args => {
+      const sha = String(args.head_sha), count = (state.runReads.get(sha) ?? 0) + 1;state.runReads.set(sha, count);
+      const values = runs.get(sha) ?? [];
+      const fresh = state.freshFailure && sha === B && count > 1 ? [...values, {...run(21, B, "push", "main"), status: "in_progress", conclusion: null}] : values;
+      return {data: {total_count: state.truncated ? 101 : fresh.length, workflow_runs: state.freshAttempt && count > 1 ? fresh.map(value => ({...value, run_attempt: 2})) : fresh}};
+    },
+    listJobsForWorkflowRun: async args => ({data: {total_count: jobs.get(Number(args.run_id))?.length ?? 0, jobs: jobs.get(Number(args.run_id)) ?? []}}),
+  }, repos: {
+    getBranch: async () => ({data: {commit: {sha: M}}}),
+    compareCommitsWithBasehead: async () => ({data: state.badApi ? {} : {status: "ahead", merge_base_commit: {sha: B}}}),
+    listPullRequestsAssociatedWithCommit: async args => ({data: [args.commit_sha === B ? pr(B, S, state.chain ? "changeset-release/main" : "feature") : pr(M, H, "changeset-release/main")]}),
+  }}};
+  const git = (args: readonly string[]) => Effect.try(() => {
+    state.gitReads.push(args.join(" "));
+    if (args[0] === "fetch") return "";
+    if (args[0] === "rev-list") return `${H} ${B}\n`;
+    if (args[0] === "diff") return state.raw;
+    if (args[0] === "show") return args[1] === `${B}:scripts/ci-proof.ts` ? readFileSync(new URL("../scripts/ci-proof.ts", import.meta.url), "utf8") : args[1] === `${B}:package.json` ? manifest : state.headPackage;
+    if (args[0] === "rev-parse") return ([`${B}^{tree}`, `${S}^{tree}`].includes(args[1]!) ? T : state.changedTree && args[1] === `${M}^{tree}` ? T : U) + "\n";
+    throw new Error("unexpected git operation");
+  });
+  return {github, context, git, state, runs, jobs, loadPolicy: () => Effect.succeed(policy)};
+};
+
+it.effect("release proof follows a lightweight baseline only to its directly checked full PR, while new-version static checks remain required", () => Effect.gen(function*() {
+  const f = fixture();
+  assert.deepEqual(yield* planCi(f), {mode: "release", baselineRunId: 10, from: "0.0.4", to: "0.0.5"});
+  f.jobs.set(20, full(20));
+  assert.equal((yield* planCi(f)).baselineRunId, 20);
+}));
+
+it.effect("ordinary PRs, forks and default manual dispatches remain full; only automatic version dispatch may fast-track", () => Effect.gen(function*() {
+  for (const input of [
+    {...fixture(), context: {...fixture().context, payload: {pull_request: pr(null, H, "feature")}}},
+    {...fixture(), context: {...fixture().context, payload: {pull_request: {...pr(null, H, "changeset-release/main"), head: {...pr(null, H, "changeset-release/main").head, repo: {full_name: "fork/repo"}}}}}},
+    {...fixture(), context: {...fixture().context, eventName: "workflow_dispatch", ref: "refs/heads/changeset-release/main", payload: {}}},
+  ]) assert.deepEqual(yield* planCi(input), {mode: "full"});
+  const f = fixture();
+  assert.equal((yield* planCi({...f, context: {...f.context, eventName: "workflow_dispatch", ref: "refs/heads/changeset-release/main", payload: {}}, validation: "auto"})).mode, "release");
+}));
+
+it.effect("source changes, bad manifest inputs, incomplete API responses, reruns and stale evidence select full", () => Effect.gen(function*() {
+  for (const change of ["source", "manifest", "truncated", "badApi", "freshFailure", "freshAttempt", "baselineRed", "sourcePending", "sourceFork", "missingJobs", "chain"] as const) {
+    const f = fixture();
+    if (change === "source") f.state.raw += rawChange("src/main.ts");
+    if (change === "manifest") f.state.headPackage = f.state.headPackage.replace('"name"', '"scripts": {},\n  "name"');
+    if (change === "truncated" || change === "badApi" || change === "freshFailure" || change === "freshAttempt") f.state[change] = true;
+    if (change === "baselineRed") f.runs.set(B, [{...run(20, B, "push", "main"), conclusion: "failure"}]);
+    if (change === "sourcePending") {f.runs.set(S, [run(10, S, "pull_request", "feature"), {...run(11, S, "pull_request", "feature"), status: "in_progress", conclusion: null}]);f.jobs.set(11, full(11));}
+    if (change === "sourceFork") f.runs.set(S, [{...run(10, S, "pull_request", "feature"), head_repository: null}]);
+    if (change === "missingJobs") f.jobs.set(10, full(10).slice(1));
+    if (change === "chain") {f.state.chain = true;f.runs.set(S, [run(10, S, "workflow_dispatch", "changeset-release/main")]);f.jobs.set(10, release(10));}
+    assert.deepEqual(yield* planCi(f), {mode: "full"}, change);
+  }
+}));
+
+it.effect("missing baseline policy never lets the implementing PR approve its own shortcut", () => Effect.gen(function*() {
+  const f = fixture();
+  assert.deepEqual(yield* planCi({...f, loadPolicy: () => Effect.fail(new Error("old policy has no release proof"))}), {mode: "full"});
+  assert.deepEqual(yield* planCi({...f, context: {eventName: "pull_request"}}), {mode: "full"});
+}));
+
+it.effect("main independently rederives a fast release and baseline, while ordinary full PR reuse remains valid", () => Effect.gen(function*() {
+  const f = fixture(), context = {...f.context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}};
+  assert.deepEqual(yield* planCi({...f, context}), {mode: "reuse", runId: 30, baselineRunId: 10});
+  f.jobs.set(30, full(30));
+  assert.deepEqual(yield* planCi({...f, context}), {mode: "reuse", runId: 30});
+  f.jobs.set(30, release(30));f.state.raw += rawChange("scripts/ci-proof.ts");
+  assert.deepEqual(yield* planCi({...f, context}), {mode: "full"});
+}));
+
+it.effect("main rejects a different merged tree or an unsuccessful latest release validation", () => Effect.gen(function*() {
+  for (const kind of ["tree", "run", "static"] as const) {
+    const f = fixture();
+    if (kind === "tree") f.state.changedTree = true;
+    if (kind === "run") f.runs.set(H, [{...run(30, H, "workflow_dispatch", "changeset-release/main"), conclusion: "cancelled"}]);
+    if (kind === "static") f.jobs.set(30, release(30).filter(job => job.name !== "static"));
+    assert.deepEqual(yield* planCi({...f, context: {...f.context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}}}), {mode: "full"});
+  }
+}));
+
+const workflow = parse(readFileSync(new URL("../.github/workflows/check.yml", import.meta.url), "utf8"));
+it.live("loads the baseline TypeScript policy through the real scoped adapter and removes its temporary directory", () => Effect.gen(function*() {
+  const before = readdirSync(process.cwd()).filter(name => name.startsWith(".ci-base-"));
+  const f = fixture();
+  const input = {github: f.github, context: f.context, git: f.git};
+  assert.equal((yield* planCi(input)).mode, "release");
+  f.state.raw += rawChange("scripts/ci-proof.ts");
+  assert.deepEqual(yield* planCi(input), {mode: "full"});
+  assert.deepEqual(readdirSync(process.cwd()).filter(name => name.startsWith(".ci-base-")), before);
+}));
+
+it.effect("the actual scope adapter preserves default full dispatch and selects only same-repository release metadata candidates", () => Effect.gen(function*() {
+  const script = workflow.jobs.plan.steps[0].with.script as string;
+  for (const [eventName, ref, validation, pull, expected] of [
+    ["workflow_dispatch", "refs/heads/changeset-release/main", "full", undefined, "false"],
+    ["workflow_dispatch", "refs/heads/changeset-release/main", "auto", undefined, "true"],
+    ["workflow_dispatch", "refs/heads/feature", "auto", undefined, "false"],
+    ["pull_request", "refs/pull/21/merge", "full", pr(null, H, "changeset-release/main"), "true"],
+    ["pull_request", "refs/pull/21/merge", "full", pr(null, H, "feature"), "false"],
+    ["push", "refs/heads/main", "full", undefined, "true"],
+  ] as const) {
+    const outputs: Record<string, string> = {};
+    yield* Effect.tryPromise(() => runInNewContext(`(async()=>{${script}})()`, {context: {eventName, ref, repo: {owner: "jfet97", repo: "t3-supervisor"}, payload: {pull_request: pull}}, process: {env: {VALIDATION: validation}}, core: {setOutput: (key: string, value: string) => {outputs[key] = value;}}}));
+    assert.equal(outputs.needed, expected);
+  }
+  assert.equal(workflow.on.workflow_dispatch.inputs.validation.default, "full");
+  const version = parse(readFileSync(new URL("../.github/workflows/version.yml", import.meta.url), "utf8"));
+  assert.match(version.jobs.version.steps.at(-1).with.script, /validation: 'auto'/u);
+}));
+
+it.live("the actual aggregate shell rejects missing proof, skipped static, failed suites and unknown modes", () => Effect.sync(() => {
+  const script = workflow.jobs.check.steps[0].run as string;
+  for (const [mode, plan, stat, main, harness, succeeds] of [
+    ["full", "success", "success", "success", "success", true],
+    ["release", "success", "success", "skipped", "skipped", true],
+    ["reuse", "success", "skipped", "skipped", "skipped", true],
+    ["release", "success", "skipped", "skipped", "skipped", false],
+    ["release", "success", "success", "failure", "skipped", false],
+    ["reuse", "failure", "skipped", "skipped", "skipped", false],
+    ["full", "success", "success", "skipped", "success", false],
+    ["", "success", "success", "success", "success", false],
+  ] as const) {
+    const result = spawnSync("/bin/bash", ["-e", "-c", script], {env: {MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, MAIN_RESULT: main, HARNESS_RESULT: harness}});
+    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, main, harness}));
+  }
+}));
