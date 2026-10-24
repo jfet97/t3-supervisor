@@ -1,3 +1,4 @@
+import { checkoutObservation, type CheckoutObservationInfo } from "../../src/checkout-observation.js";
 import {definitionGuidanceFields, type DefinitionGuidance} from "../../src/definition-references.js";
 import {fixtureJourney, journeyTitle, type JourneyCase} from "./journey.js";
 import {assessmentForTask} from "../../src/workflow-assessment.js";
@@ -204,11 +205,12 @@ export class FixtureModel {
   private partialInventory = false;
   private orphanedInterface = false;
   setPartialInventory() {this.partialInventory = true;}
-  setOrphanedWorktrees() {
+  setOrphanedWorktrees(attention = false) {
     const project = this.project(fixtureIds.projectA);
     this.orphanedInterface = true;
     project.checkouts = [
       {...project.checkouts.find(target => target.threadId === null)!, branch: "release"},
+      ...(attention ? [{origin: "project" as const, threadId: fixtureIds.threadA2, workspaceRoot: "/fixture/worktrees/attention-removed", branch: null, isGitRepository: false, folderStatus: "missing" as const}] : []),
       {origin: "project", threadId: fixtureIds.threadA1, workspaceRoot: "/fixture/worktrees/trunk", branch: "trunk", isGitRepository: true, folderStatus: "present"},
       {origin: "project", threadId: fixtureIds.threadA3, workspaceRoot: "/fixture/worktrees/removed", branch: null, isGitRepository: false, folderStatus: "missing"},
     ];
@@ -247,6 +249,7 @@ export class FixtureModel {
   }
 
   reset() {
+    this.folderObservations.clear();
     this.journey = null;
     this.largeInterface = false;
     this.partialInventory = false;
@@ -283,6 +286,8 @@ export class FixtureModel {
 
   threadPolicy(): ThreadPolicySettings {return {generation: this.data.threadPolicy.generation, excludedThreadIds: [...this.data.threadPolicy.excludedThreadIds]};}
 
+  private folderObservations = new Map<string, CheckoutObservationInfo>();
+
   private work(): DashboardWorkInfo[] {
     return this.data.threads.flatMap(thread => {
       const project = this.project(thread.projectId);
@@ -298,7 +303,10 @@ export class FixtureModel {
       const assessment = journey ? assessmentForTask(live?.assessment, journey.task) : null;
       const attention = journey ? workAttention({enabled: supervision === "enabled", bindingState: thread.binding?.state ?? null, task: journey.task, assessment})
         : supervision === "enabled" && thread.binding?.state === "rejected" ? ["Supervisor access was rejected."] : [];
+      const observation = this.folderObservations.get(`${this.current}:${thread.projectId}`);
+      const missing = observation?.missing.find(folder => folder.threadIds.includes(thread.id));
       return [{
+        ...(missing && observation ? {folder: {state: "missing" as const, workspaceRoot: missing.workspaceRoot, checkedAt: observation.checkedAt}} : {}),
         projectId: thread.projectId, mainThreadId: thread.id, title: this.titleOf(thread),
         supervisorThreadId: thread.binding?.threadId ?? `fixture-supervisor-${thread.id.slice("fixture-thread-".length)}`,
         stop: stopped && stop ? {route: stop.stoppedBy, callerThreadId: null, userMessageId: null, stoppedAt: stop.stoppedAt} : null,
@@ -319,6 +327,7 @@ export class FixtureModel {
       observedAt: now, revision: sha256(JSON.stringify(work)), available: true, globallyEnabled: this.data.global.enabled,
       ...overviewWorkPage(work, page),
       projects: this.data.projects.filter(project => project.classification === "project").map(project => ({
+        ...(this.folderObservations.has(`${this.current}:${project.id}`) ? {orphanedThreadIds: this.folderObservations.get(`${this.current}:${project.id}`)!.missing.flatMap(folder => folder.threadIds), foldersCheckedAt: this.folderObservations.get(`${this.current}:${project.id}`)!.checkedAt} : {}),
         id: project.id, title: project.title, available: true, enabled: project.control.enabled, effectiveEnabled: this.effective(project),
         detectionStatus: this.folderPresent(project) ? "present" : "missing", attentionTotal: work.filter(item => item.projectId === project.id && item.attention.length > 0).length,
       })),
@@ -584,7 +593,9 @@ export class FixtureModel {
     const project = this.project(projectId);
     const targets = project.checkouts.filter(target => !this.partialInventory || target.threadId !== fixtureIds.threadA3).map(target => ({workspaceRoot: target.workspaceRoot, threadId: target.threadId, branch: target.branch, isGitRepository: target.folderStatus === "present" && target.isGitRepository, vcsAvailable: target.folderStatus === "present", presence: target.folderStatus, isProjectFolder: target.threadId === null, isDefaultBranch: target.folderStatus === "present" && target.branch === (this.orphanedInterface ? "trunk" : "main"),
       members: this.data.threads.filter(thread => thread.projectId === projectId && (target.threadId === null ? !project.checkouts.some(checkout => checkout.threadId === thread.id) : target.threadId === thread.id)).map(thread => ({threadId: thread.id, title: thread.title}))}));
-    return {projectId, available: true, complete: !this.partialInventory, reason: null, defaultBranch: projectId === fixtureIds.projectA ? this.orphanedInterface ? "trunk" : "main" : null, issues: this.partialInventory ? [{threadId: fixtureIds.threadA3, message: "Working folder unavailable for Fixture chat A3: workspace_binding_unavailable."}] : [], targets};
+    const inventory = {projectId, available: true, complete: !this.partialInventory, reason: null, defaultBranch: projectId === fixtureIds.projectA ? this.orphanedInterface ? "trunk" : "main" : null, issues: this.partialInventory ? [{threadId: fixtureIds.threadA3, message: "Working folder unavailable for Fixture chat A3: workspace_binding_unavailable."}] : [], targets};
+    this.folderObservations.set(`${this.current}:${projectId}`, checkoutObservation(inventory, this.now()));
+    return inventory;
   }
 
   saveProjectConfiguration(input: ProjectConfigSave, forced: ForcedOutcome | null): ProjectConfigSaveOutcome {
@@ -607,7 +618,7 @@ export class FixtureModel {
 export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
-  "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
+  "orphaned-attention", "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
 export type ScenarioName = typeof scenarioNames[number];
@@ -630,6 +641,7 @@ const setupPath = "/api/guidance/supervision-setup";
 const plan = (arms: Arm[], revokeSessions = false): ScenarioPlan => ({arms, revokeSessions});
 
 export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (params: ScenarioParams) => ScenarioPlan}> = {
+  "orphaned-attention": {description: "Missing folders on retained attention and stopped work.", plan: () => ({arms: [], revokeSessions: false})},
   "orphaned-worktrees": {description: "Missing working folder and a separate trunk checkout.", plan: () => ({arms: [], revokeSessions: false})},
   "partial-inventory": {description: "independently readable project folder with one unavailable conversation binding", plan: () => plan([])},
   "large-interface": {description: "synthetic 149-conversation collection, 45 additional full duties and distinct/shared working folders", plan: () => plan([])},

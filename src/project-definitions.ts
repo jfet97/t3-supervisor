@@ -1,4 +1,5 @@
-import { Cause, Context, Data, Deferred, Duration, Effect, Exit, Layer, RcMap, Result, Schema, SchemaIssue, SchemaParser, SchemaTransformation, Scope, Semaphore } from "effect";
+import { checkoutObservation, type CheckoutObservationInfo } from "./checkout-observation.js";
+import { Clock, Cause, Context, Data, Deferred, Duration, Effect, Exit, Layer, RcMap, Result, Schema, SchemaIssue, SchemaParser, SchemaTransformation, Scope, Semaphore } from "effect";
 import { posix } from "node:path";
 import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
@@ -34,6 +35,7 @@ export interface ProjectDefinitionSetupWriter {
 }
 export interface ProjectDefinitionLoaderOptions {
   globalRoot?: string | null;
+  recordCheckoutObservation?: (projectId: string, observation: CheckoutObservationInfo) => Effect.Effect<void, unknown>;
   // reads of the supervision stores; a failure is a definition source failure
   useGlobalDefinitions?: (projectId: string) => Effect.Effect<boolean, unknown>;
   isScratchProject?: (projectId: string, registeredWorkspaceRoot: string) => Effect.Effect<boolean, unknown>;
@@ -1124,7 +1126,14 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     presenceGlobal: (cancel?: Deferred.Deferred<void>) => presenceGlobal.pipe(definitionsOperation(cancel)),
     presenceForCheckout: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => presenceForCheckout(projectId, threadId).pipe(definitionsOperation(cancel)),
     checkoutTargets: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, false).pipe(Effect.map(value => value.targets.map(({presence: _presence, isProjectFolder: _projectFolder, isDefaultBranch: _defaultBranch, ...target}) => target)), definitionsOperation(cancel)),
-    checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => readCheckoutTargets(projectId, true).pipe(Effect.map(({targets, issues, defaultBranch}) => ({projectId, available: true, complete: issues.length === 0, reason: null, defaultBranch, targets, issues})), definitionsOperation(cancel)),
+    checkoutInventory: (projectId: string, cancel?: Deferred.Deferred<void>) => Effect.gen(function* () {
+      const checkedAt = yield* Clock.currentTimeMillis;
+      const {targets, issues, defaultBranch} = yield* readCheckoutTargets(projectId, true);
+      const inventory = {projectId, available: true, complete: issues.length === 0, reason: null, defaultBranch, targets, issues};
+      // observation persistence is advisory; a failed write does not hide the actual folder read
+      if (options.recordCheckoutObservation && !(yield* definitionsCanceled)) yield* options.recordCheckoutObservation(projectId, checkoutObservation(inventory, checkedAt)).pipe(Effect.catch(() => Effect.void));
+      return inventory;
+    }).pipe(definitionsOperation(cancel)),
     currentWorkspace: (projectId: string, threadId: string | null, cancel?: Deferred.Deferred<void>) => currentWorkspace(projectId, threadId).pipe(definitionsOperation(cancel)),
     globalFingerprint: (cancel?: Deferred.Deferred<void>) => globalFingerprint.pipe(definitionsOperation(cancel)),
     initialize: (projectId: string, threadId: string | null, input: ProjectDefinitionSetupInput, cancel?: Deferred.Deferred<void>) =>

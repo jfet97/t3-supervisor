@@ -76,6 +76,7 @@ export const runGuidanceApplication = (
     // the definitions and the config editor are built once in the supervision run scope
     const definitions = yield* ProjectDefinitions.make({source, t3, files: yield* Effect.provide(ProjectFiles.make(endpoint(readToken.trim())), nativeClients), options: {
       globalRoot: "~",
+      recordCheckoutObservation: supervisionStore.recordCheckoutObservation,
       useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
       isScratchProject: (projectId, workspaceRoot) => Effect.map(store.classification(projectId), (classification) => classification !== "unclassified"
         ? classification === "scratch" : managedScratchRoot !== null && posix.normalize(workspaceRoot) === managedScratchRoot),

@@ -1,3 +1,4 @@
+import { CheckoutObservation, type CheckoutObservationInfo } from "./checkout-observation.js";
 import { dashboardInvalidation } from "./dashboard-updates.js";
 import { projectKeys } from "./dashboard-events.js";
 import { ConversationFacts } from "./supervision-conversation-contract.js";
@@ -96,6 +97,8 @@ type StoreEffect<A> = Effect.Effect<A, ProjectSupervisorStoreError>;
 
 /** The project supervision store; each method joins the caller's transaction when it runs inside one. */
 export interface ProjectSupervisorStoreShape {
+  readonly checkoutObservation: (projectId: string) => StoreEffect<CheckoutObservationInfo | null>;
+  readonly recordCheckoutObservation: (projectId: string, observation: CheckoutObservationInfo) => StoreEffect<void>;
   /** Whether the stored supervision scope is this version's; read once when the layer is built. */
   readonly scopeCompatible: boolean;
   /** Permanent root and helper ownership: preloaded when the layer is built, extended only after the outermost commit. */
@@ -215,6 +218,17 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     const value = yield* metaValue(key);
     return value === undefined ? null : yield* storedDocument<A, ProjectSupervisorStoreError>(value, guard, rowInvalid("meta"));
   });
+  const checkoutObservationKey = (projectId: string) => `supervisor_checkout_observation:${projectId}`;
+  const checkoutObservation = (projectId: string) => read(metaDocument<CheckoutObservationInfo>(checkoutObservationKey(projectId), Schema.is(CheckoutObservation)));
+  const recordCheckoutObservation = (projectId: string, observation: CheckoutObservationInfo) => write(Effect.gen(function* () {
+    const key = checkoutObservationKey(projectId);
+    const before = yield* metaDocument<CheckoutObservationInfo>(key, Schema.is(CheckoutObservation));
+    // a check records its start time, so an earlier slow request cannot replace a later observation
+    if (before && before.checkedAt >= observation.checkedAt) return;
+    const value = JSON.stringify(observation);
+    yield* sql`INSERT INTO meta VALUES(${key},${value}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+    yield* invalidate(["overview", `project:${projectId}`], before, observation);
+  }));
   const putMeta = (key: string, value: string) => Effect.gen(function* () {
     const [previous] = yield* sql`SELECT value FROM meta WHERE key=${key}`;
     yield* sql`INSERT INTO meta VALUES(${key},${value}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
@@ -719,7 +733,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   }));
 
   return {
-    scopeCompatible, ownedIds: owned, recordOwnedThread, chatEnabledAt, recordChatEnable, noProjectControl, saveNoProjectControl, start, starts, startOperation, saveStartOperation,
+    checkoutObservation, recordCheckoutObservation, scopeCompatible, ownedIds: owned, recordOwnedThread, chatEnabledAt, recordChatEnable, noProjectControl, saveNoProjectControl, start, starts, startOperation, saveStartOperation,
     saveStart, chatStop, saveUnboundStop, activation, baseline, baselineOrdinal, projectBoundary, folderPresenceNeedsBoundary, setFolderPresence,
     clearFolderPresence, recordFolderPresence, autoControlInitialized, isManual, control, setGlobalFolderPresence, globalDefinitionsControl,
     useGlobalDefinitions, saveGlobalDefinitionsControl, hasGlobalDefinitionsEvent, globalDefinitionsChangeAuthorized, definitionUserGlobalToggle,
@@ -739,6 +753,7 @@ export class ProjectSupervisorStore extends Context.Service<ProjectSupervisorSto
 // the meta documents the project store reads, by key prefix (or exact key), with the guard its reader applies and when the run
 // reads them
 const metaDocumentKinds: ReadonlyArray<{readonly pattern: string; readonly kind: string; readonly guard: (value: unknown) => boolean; readonly read: StoredRowFinding["read"]}> = [
+  {pattern: "supervisor_checkout_observation:%", kind: "checkout observation", guard: Schema.is(CheckoutObservation), read: "call"},
   {pattern: "supervisor_start_operation:%", kind: "start operation", guard: isStoredObject, read: "open"},
   {pattern: "supervisor_start:%", kind: "start", guard: isStoredStart, read: "cycle"},
   {pattern: "supervisor_control:%", kind: "control", guard: isStoredObject, read: "cycle"},

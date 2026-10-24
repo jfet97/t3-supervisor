@@ -1,3 +1,4 @@
+import type { CheckoutObservationInfo } from "./checkout-observation.js";
 import { ConversationEngagement, deriveConversationEngagement } from "./supervision-conversation-contract.js";
 import { Schema } from "effect";
 import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
@@ -6,6 +7,7 @@ import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
 import type { ThreadInfo } from "./types.js";
 
 export const DashboardWork = Schema.Struct({
+  folder: Schema.optionalKey(Schema.Struct({state: Schema.Literal("missing"), workspaceRoot: Schema.String, checkedAt: Schema.Finite})),
   projectId: Schema.String,
   mainThreadId: Schema.String,
   title: Schema.String,
@@ -37,6 +39,7 @@ export const DashboardOverview = Schema.Struct({
   query: Schema.Struct({q: Schema.String, projectId: Schema.String, filter: Schema.Literals(["all", "attention", "active", "stopped"])}),
   hasMore: Schema.Boolean,
   projects: Schema.Array(Schema.Struct({
+    orphanedThreadIds: Schema.optionalKey(Schema.Array(Schema.String)), foldersCheckedAt: Schema.optionalKey(Schema.Finite),
     id: Schema.String, title: Schema.String, available: Schema.Boolean,
     enabled: Schema.Boolean, effectiveEnabled: Schema.Boolean,
     detectionStatus: Schema.String, attentionTotal: Schema.optional(Schema.Number),
@@ -108,19 +111,23 @@ export function workAttention(input: {
 export function buildDashboardOverview(input: {
   fingerprint: (value: unknown) => string;
   observedAt: number; available: boolean; globallyEnabled: boolean;
-  projects: readonly {project: {id: string; title: string}; available: boolean}[];
+  projects: readonly {project: {id: string; title: string; workspaceRoot?: string}; available: boolean}[];
   threads: readonly ThreadInfo[]; bindings: readonly BindingRecord[];
   tasks: (projectId: string) => readonly TaskRecord[];
   control: (projectId: string) => SupervisionControlInfo;
   monitoring: (binding: BindingRecord) => SupervisorMonitoringStatus;
   assessment?: (binding: BindingRecord, task: TaskRecord | undefined) => DashboardWorkInfo["assessment"];
   scopeEnabled?: (projectId: string, mainThreadId: string) => boolean;
+  checkoutObservations?: ReadonlyMap<string, CheckoutObservationInfo | null>;
   excluded: ReadonlySet<string>;
   offset: number; limit: number; q?: string; projectId?: string; filter?: OverviewQuery["filter"]; mainThreadIds?: readonly string[];
 }): DashboardOverviewInfo {
   const projects = input.projects.map(({project, available}) => {
     const control = input.control(project.id);
-    return {id: project.id, title: project.title, available, enabled: control.enabled,
+    const observation = input.checkoutObservations?.get(project.id);
+    const folders = observation && project.workspaceRoot && observation.projectRoot === project.workspaceRoot ? observation : null;
+    const liveIds = new Set(input.threads.filter(thread => thread.projectId === project.id && !thread.deletedAt && !thread.archivedAt).map(thread => thread.id));
+    return {...(folders ? {orphanedThreadIds: [...new Set(folders.missing.flatMap(folder => folder.threadIds).filter(id => liveIds.has(id)))], foldersCheckedAt: folders.checkedAt} : {}), id: project.id, title: project.title, available, enabled: control.enabled,
       effectiveEnabled: control.effectiveEnabled, detectionStatus: control.detectionStatus};
   });
   const projectById = new Map(projects.map(project => [project.id, project]));
@@ -139,7 +146,9 @@ export function buildDashboardOverview(input: {
       settlementState: binding.settlement?.state ?? null, monitoring, task, assessment});
     const nativeState = main.activityRunStatus === "waiting" ? "waiting" : main.activeRunId ? "active"
       : main.activityRunStatus || main.latestRunCompletedAt ? "quiet" : "unknown";
-    work.push({projectId: project.id, mainThreadId: main.id, title: main.title,
+    const observation = input.checkoutObservations?.get(project.id);
+    const missing = project.orphanedThreadIds?.includes(main.id) ? observation?.missing.find(folder => folder.threadIds.includes(main.id)) : null;
+    work.push({...(missing && observation ? {folder: {state: "missing" as const, workspaceRoot: missing.workspaceRoot, checkedAt: observation.checkedAt}} : {}), projectId: project.id, mainThreadId: main.id, title: main.title,
       supervisorThreadId: binding.threadId, nativeState, supervision, stop: supervision === "stopped" ? binding.supervisionStop ?? null : null,
       engagement: deriveConversationEngagement({task, enabled: supervision === "enabled", available: input.available && project.available, bindingState: binding.state, monitoringState: monitoring.state}),
       objective: task?.objective?.slice(0, 800) ?? null,

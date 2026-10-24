@@ -51,7 +51,10 @@ application without competing with work content.
 
 ## Operate navigation and disclosure contract
 
-Project entry opens its conversation list. An explicit Back to conversations link and
+Project entry opens its conversation list. Project Conversations, Definitions and
+Project settings provide an explicit Back to Projects link; the directory keeps
+its search and page. The editor returns to Definitions in the same top-left slot,
+and template details retain their Back to catalog control. An explicit Back to conversations link and
 project breadcrumb both return to that list, retaining its search, page and scroll;
 a remembered conversation is an optional Continue link. Conversations offer Task,
 Supervision and Connected work as separate views.
@@ -71,3 +74,9 @@ visible statuses. Global On never claims that every conversation is supervised. 
 engagement uses the typed current mode and availability, separately from execution and agreement.
 
 Conversation lists read the visible conversation identities within their own project. Home search and page selection never determine their status or objective. Project attention counts cover the available project independently of Home filters.
+
+Home retains supervised work and attention even when a working folder was confirmed
+missing. It labels these rows as orphaned with the last folder-check time and path;
+project cards separate the default conversation count from orphaned chats. These
+are retained observations from project entry or Refresh folders, not live Home
+filesystem probes. Unknown or denied folder access never establishes an orphan.

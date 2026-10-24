@@ -2,7 +2,7 @@ import { localThreadToolRules, redact } from "./supervisor-workflow.js";
 import { emptyConversation } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
-import { resolve } from "node:path";
+import { posix, resolve } from "node:path";
 import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
 import { buildDashboardOverview, type DashboardOverviewInfo, type OverviewPage } from "./dashboard-overview.js";
 import { readTeamViewData, supervisorTeamView } from "./supervisor-team-view.js";
@@ -184,6 +184,7 @@ export const readDashboardOverview = (input: {readonly page: OverviewPage; reado
     const excluded = new Set((yield* policy.get()).excludedThreadIds);
     const projectIds = input.catalog.projects.map(({project}) => project.id);
     const controls = new Map(yield* Effect.forEach(projectIds, (projectId) => Effect.map(effectiveControl(store, scope, projectId), (control) => [projectId, control] as const)));
+    const checkoutObservations = new Map(yield* Effect.forEach(projectIds, projectId => Effect.map(store.checkoutObservation(projectId), observation => [projectId, observation] as const)));
     const tasks = new Map(yield* Effect.forEach(projectIds, (projectId) => Effect.map(store.tasks(projectId), (rows) => [projectId, rows] as const)));
     // the bindings the overview presents: an available project and its live main in the catalog
     const available = new Map(input.catalog.projects.map(({project, available}) => [project.id, available]));
@@ -203,7 +204,7 @@ export const readDashboardOverview = (input: {readonly page: OverviewPage; reado
     const presentedOf = (binding: BindingRecord) => work.get(binding)!;
     return buildDashboardOverview({...input.page, fingerprint, observedAt: input.observedAt,
       available: input.available, globallyEnabled,
-      projects: input.catalog.projects, threads: input.catalog.threads, bindings,
+      checkoutObservations, projects: input.catalog.projects.map(item => ({...item, project: {...item.project, workspaceRoot: posix.normalize(item.project.workspaceRoot)}})), threads: input.catalog.threads, bindings,
       tasks: projectId => tasks.get(projectId)!,
       control: projectId => controls.get(projectId)!,
       scopeEnabled: (projectId, mainThreadId) => enabled.get(supervisorScopeKey(projectId, mainThreadId))!,
