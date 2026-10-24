@@ -147,7 +147,7 @@ it.live("the actual aggregate shell rejects missing proof, skipped static, faile
     ["full", "success", "success", "skipped", "success", false],
     ["", "success", "success", "success", "success", false],
   ] as const) {
-    const result = spawnSync("/bin/bash", ["-e", "-c", script], {env: {MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, MAIN_RESULT: main, HARNESS_RESULT: harness}});
+    const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, MAIN_RESULT: main, HARNESS_RESULT: harness}});
     assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, main, harness}));
   }
 }));

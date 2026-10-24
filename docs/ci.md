@@ -68,6 +68,11 @@ ordinary branches or changes that fail eligibility. The job summary links the fu
 baseline run and records the version change. The first PR implementing this policy
 runs full; the next real version PR supplies its first live fast-track evidence.
 
+If version preparation finishes before its parent's main CI, the proof selects
+full validation. After main CI succeeds, a new **Check Supervisor** dispatch on
+the version branch with `validation: auto` can retry the proof. There is no need
+to update the branch or relax the evidence requirement.
+
 ## Lightweight main validation
 
 After merging, main first tries to reuse GitHub's full PR verdict. Reuse requires:
