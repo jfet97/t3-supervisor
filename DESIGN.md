@@ -607,7 +607,17 @@ Interaction references: [Carbon pagination](https://www.carbondesignsystem.com/b
 [inset text](https://design-system.service.gov.uk/components/inset-text/) and
 [back links](https://design-system.service.gov.uk/components/back-link/), and the
 [GitHub workflow graph](https://docs.github.com/en/actions/how-tos/monitor-workflows/use-the-visualization-graph).
-The brief explicitly requires both a list-targeted Back link and breadcrumbs.
+The current return hierarchy uses one top-left link: project Conversations,
+Definitions and Project settings return to Projects; the editor returns to
+Definitions; a conversation returns to its retained conversation list. Template
+details keep Back to catalog inside the panel. Breadcrumbs remain independently
+clickable. Returning to Projects preserves directory state and retained drafts.
+
+Home's search summary and pager sit inside the filter panel as a full-width row,
+keeping its outer border joined to the work table. Confirmed missing-folder rows
+retain their attention/work position and show a path and check time; project cards
+separate orphaned chats from their default conversation count. Folder observations
+refresh only through the existing project-folder read, never Home filesystem fanout.
 
 At narrow widths the status header stays in normal document flow so its wrapping labels do not obscure the work while scrolling. Desktop retains the sticky header. Conversation badges use the same icon-plus-text treatment, and connected rows explicitly name Workflow and Conversation status.
 

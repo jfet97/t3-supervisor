@@ -8,7 +8,7 @@ import {ProjectFileError} from "../src/project-files.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
 import {branchLabel, CheckoutChooser, orphanedConversations} from "../ui/src/checkout-identity.js";
 import {HelpDisclosure, EntityDetails} from "../ui/src/disclosure.js";
-import {DefinitionsContent} from "../ui/src/project-definitions.js";
+import {DefinitionsContent, ProjectBackLink} from "../ui/src/project-definitions.js";
 import {configurationDrafts, configurationScope} from "../ui/src/project-configuration-editor.js";
 import {GlobalSupervisionStatus, ProjectSupervisionStatus} from "../ui/src/supervision-status.js";
 import {conversationLabel} from "../ui/src/conversation-status.js";
@@ -141,3 +141,19 @@ it.effect("the project folder and Git-reported trunk checkout are distinct, dedu
   assert.equal((html.match(/checkout-prominent/g) ?? []).length, 1);
   assert.match(html, /Project folder/); assert.match(html, /Default branch trunk/);
 }));
+
+it("every workspace level renders one explicit parent link while retaining conversation and checkout context", () => {
+  const list = {page: "projects" as const, projectId: "p", main: null, section: "conversations" as const, q: "needle", listPage: 3, showOrphaned: true};
+  for (const section of ["conversations", "definitions", "settings"] as const) {
+    const html = renderToStaticMarkup(createElement(ProjectBackLink, {route: {...list, section}, listRoute: list, navigate: () => {}}));
+    assert.match(html, /href="#\/projects"/);
+    assert.match(html, />Back to Projects</);
+  }
+  const chat = renderToStaticMarkup(createElement(ProjectBackLink, {route: {...list, main: "chat", section: "task"}, listRoute: list, navigate: () => {}}));
+  assert.match(chat, /Back to conversations/);
+  assert.match(chat, /orphaned=show&amp;q=needle&amp;page=3/);
+  const editor = renderToStaticMarkup(createElement(ProjectBackLink, {route: {...list, section: "editor", checkout: "/folder"}, listRoute: list, navigate: () => {}}));
+  assert.match(editor, /Back to Definitions/);
+  assert.match(editor, /definitions\?orphaned=show&amp;q=needle&amp;page=3&amp;checkout=%2Ffolder/);
+  assert.doesNotMatch(editor, /Back to Projects/);
+});
