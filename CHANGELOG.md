@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.4
+
+### Patch Changes
+
+- 222c1b5: Add explicit project return navigation, distinguish retained chats with missing working folders on Home and project cards, and keep search help and pagination inside the work filters.
+
 ## 0.0.3
 
 ### Patch Changes
