@@ -40,16 +40,21 @@ pnpm build
 
 `pnpm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
 
-GitHub CI runs lint, type checking and build once, the runner harness once, and
-the complete main suite across four native Vitest shards on separate runners.
+Ordinary PR CI runs lint, type checking and build once, the runner harness once,
+and the complete main suite across four native Vitest shards on separate runners.
 Each shard uses one test worker so database worker startup does not compete with
 another suite in the same runner. Isolation, the leak gate, per-test bounds and
-the 20-minute watchdog stay the same. The `check` status requires every job
-to pass, including every shard; failed, cancelled or skipped jobs fail the gate.
+the 20-minute watchdog stay the same. In full mode, the `check` status requires
+every job to pass, including every shard. A generated version PR can skip only
+the suites after directly proving full baseline validation; its new-version
+static/build/package/container checks still run. Main may reuse an exact checked
+tree after independently verifying its evidence. The aggregate always requires
+the jobs appropriate to the proved mode; unexpected skips, failures and
+cancellations fail it. See [CI policy](docs/ci.md) for eligibility and fallback.
 One shared setup action caches the pnpm package store by OS, architecture, Node
 major and lockfile. A changed lockfile can reuse an older store and fetch only
-missing packages. Every job still validates a frozen install and executes its
-checks; installed trees, build outputs and test results are never cached.
+missing packages. Every executed validation job still validates a frozen install
+and runs its checks; installed trees, build outputs and test results are never cached.
 New runs cancel older runs of this workflow for the same branch or pull request,
 including `main`; unrelated branches and pull requests run independently.
 
