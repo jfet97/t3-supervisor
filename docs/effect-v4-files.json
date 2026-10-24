@@ -24129,6 +24129,20 @@
     "kind": "config-or-asset",
     "baselineDisposition": "update"
    },
+   "scripts/ci-evidence.ts": {
+    "kind": "script",
+    "baselineDisposition": null,
+    "status": "entry",
+    "reason": "GitHub Actions entry runs a scoped Effect proof. Small Git, filesystem, TypeScript-loader and GitHub Promise adapters bound reads and clean up the baseline module; no application runtime or polling.",
+    "facadeImports": []
+   },
+   "scripts/ci-proof.ts": {
+    "kind": "script",
+    "baselineDisposition": null,
+    "status": "pure",
+    "reason": "Pure Schema-decoded release-equivalence and exact CI provenance calculations; no I/O or Effect execution.",
+    "facadeImports": []
+   },
    "scripts/cutover-conversation.ts": {
     "kind": "source",
     "baselineDisposition": null,

@@ -16,7 +16,12 @@ With `RELEASE_VERSIONING_ENABLED=true`, **Prepare version** collects the notes i
 a `changeset-release/main` PR, bumps `package.json`, updates `CHANGELOG.md` and
 consumes the notes. It explicitly dispatches required CI on that branch. The
 version PR is reviewed and merged manually; the workflow never enables auto-merge.
-Required `check` still includes all four main shards, the harness and static checks.
+Its automatic CI dispatch requests the narrow [release metadata fast track](docs/ci.md#release-metadata-fast-track):
+a generated version/changelog/consumed-note change may reuse directly verified
+full validation of its parent on main. Static checks, build, package and container
+smoke checks still run on the new version, and the required aggregate `check`
+always runs. Any other change or uncertain evidence selects all four main shards
+and the harness too. Manual **Check Supervisor** dispatches default to full checks.
 
 ## Channels
 
@@ -48,8 +53,10 @@ do not update themselves.
 **Publish release** resolves a main commit and requires successful push-to-main CI
 for that exact SHA, including the aggregate `check`. PR checks alone are not enough.
 Main may reuse full PR validation only after proving that its file tree equals
-the checked PR head and every full job passed in the latest matching run. Otherwise
-main runs the complete checks. See [CI policy](docs/ci.md).
+the checked PR head and every full job passed in the latest matching run. For a
+fast-tracked version PR, main separately verifies its successful static checks and
+rederives both the exact release-only diff and the parent's full job evidence.
+Otherwise main runs the complete checks. See [CI policy](docs/ci.md).
 Successful main CI immediately releases only an approved version PR. The overnight
 job handles nightly snapshots separately and retains the same exact-source checks.
 Stable requires consumed changesets;
@@ -68,7 +75,8 @@ fixture. It checks health metadata, CLI version, dashboard HTML, its hashed asse
 and clean cancellation. It checks a local container before pushing, then exercises
 both published image variants by their immutable index digest before moving an
 image channel or publishing the package. ARM64 runs under QEMU on the hosted runner.
-It reuses the successful full CI verdict; it does not run the full suite again.
+It reuses the successful exact-source CI verdict, including any independently
+proved release baseline; it does not run the full suite again.
 
 The npm package, Linux amd64/arm64 image, Git tag and GitHub release share one
 version and source revision. The release records the archive SHA256, image index
