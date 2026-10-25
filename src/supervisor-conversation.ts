@@ -2054,7 +2054,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         messageId: `supervisor-notice:workflow:${task.id}:${taskScopeRevision(task).slice(0, 20)}`, targetRunId: null, error: null};
       const contactable = yield* admitted((guard) => Effect.gen(function* () {
         if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId))) return "stop" as const;
-        if (operativeRunStopped(agent) || !(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== binding.projectId || !sourceUnchanged(task, agent)) return "skip" as const;
+        if (!(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== binding.projectId || !sourceUnchanged(task, agent)) return "skip" as const;
         if (!canSupervisorContact(supervisor.thread, agent.thread)) {
           // a creation refuses only while no introduction exists: a send another caller recorded meanwhile is never refused
           if (yield* holdsIntroduction(task.id, previous ?? null))
@@ -2713,7 +2713,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (introduction.dispatchMode && introduction.definiteRejection === false) {
         yield* requests.saveIntroduction({...introduction, state: "uncertain", error: "Proposal delivery is uncertain; its message identity is retained and only observed."});return false;
       }
-      if (operativeRunStopped(agent) || hasPendingOwnerInput(agent)) return false;
+      if (hasPendingOwnerInput(agent)) return false;
       if (!(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== task.projectId || !sourceUnchanged(task, agent)) {
         yield* blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return false;
       }

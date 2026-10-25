@@ -95,26 +95,3 @@ for (const variant of ["identical", "retained", "changed", "stopped"] as const) 
     }
   }), {timeout: 60_000});
 }
-
-for (const phase of ["interpretation", "ready"] as const) {
-  it.live(`an operative stopped during ${phase} receives no proposal without any checkout relocation`, () => Effect.gen(function* () {
-    const f = yield* startInterpretationFixture();
-    f.addRequest("stopped-request", "Implement the requested repository change.");
-    f.main().runs.at(-1)!.status = "running";
-    yield* f.runOnce();
-    yield* f.runOnce();
-    const task = yield* f.task();
-    assert.equal((yield* f.submitFields(task, planFields(task))).value.status, "submitted");
-    f.endRun(task, "completed");
-    if (phase === "ready") {
-      yield* f.runOnce();
-      assert.equal((yield* f.core.requests.introduction(task.id))?.state, "ready");
-    }
-    f.main().runs.at(-1)!.status = "interrupted";
-    yield* f.runOnce();
-    yield* f.runOnce();
-    assert.equal(f.operativeSends().length, 0);
-    assert.equal(f.interpretationDispatches().length, 1);
-    assert.equal((yield* f.task()).workflow?.workspaceRoot, task.definitionSnapshot?.workspaceRoot);
-  }), {timeout: 60_000});
-}
