@@ -1,6 +1,7 @@
 import {RefreshAction} from "./refresh-action.js";
 import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
+import {GuideLink} from "./guide-link.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
 import {alignmentLabel, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
@@ -332,8 +333,8 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
       <h3 id="supervisor-team-title">Supervisor team</h3>
       <span className="pill">Saved maximum helpers per root: {settings.maxHelpersPerRoot}</span>
     </div>
-    <HelpDisclosure title={<>How the Supervisor team works</>} ><div className="stack"><p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p>
-    <p className="small muted">A person who messages a helper in T3 follows T3’s native follow-up behavior. Root-to-helper notes and routine check-ins use Supervisor team operations, not raw <code>t3_thread_send</code>.</p>
+    <HelpDisclosure title={<>How the Supervisor team works</>} ><div className="stack"><p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p><p><GuideLink topic="helper">Root, helper and handover terms</GuideLink> · <GuideLink topic="team">Supervisor team and assignments</GuideLink></p>
+    <p className="small muted">A message you send to a helper in T3 follows that conversation’s normal follow-up behavior. Supervisor coordinates root-to-helper notes and routine check-ins.</p>
     <p className="small muted">Quarantine revokes a helper’s Supervisor authority and returns coverage to the root. Unresolved effects stay fenced, and the helper’s native T3 conversation or a turn already running there may continue.</p>
     </div></HelpDisclosure>
     {!mainThreadId
@@ -483,13 +484,15 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
   </EntityDetails>;
 }
 
+const settlementText = {pending: "Parking this idle Supervisor is pending.", uncertain: "It is not confirmed whether this idle Supervisor was parked.", settled: "This idle Supervisor is parked.", superseded: "The earlier parking request no longer applies."} as const;
+
 export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
   workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode}) {
   const children = threads.filter(thread => thread.threadId !== mainThreadId);
   const mainCoverage = coverage.get(mainThreadId);
 
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
-    <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
+    <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><HelpDisclosure title="About child conversations and contributions"><p><GuideLink topic="connected-child">Native and delegated children</GuideLink> are different ways of connecting conversations. A contribution links work to a parent step; a <GuideLink topic="helper">Supervisor assignment</GuideLink> identifies who follows it. Neither a finished conversation nor an assignment proves that a parent step is complete. <GuideLink topic="children">How child tasks contribute</GuideLink>.</p></HelpDisclosure><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
     <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
@@ -558,6 +561,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
         <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<RefreshAction label="Refresh task and supervision state" busy={refreshing} enabled={connected} onRefresh={onRefresh}/></span>
       </div>
     </section>
+    <HelpDisclosure title="How to read this task and plan"><p><GuideLink topic="task">Task outcomes and step states</GuideLink> are separate from <GuideLink topic="agreement">proposal and acceptance</GuideLink>. An accepted plan does not prove work was performed.</p><p><GuideLink topic="task-local-step">Task-local steps</GuideLink> add duties for this request. <GuideLink topic="task-interpretation">Understanding and draft duties</GuideLink> and <GuideLink topic="plan-provenance">plan provenance</GuideLink> explain its context. Open <GuideLink topic="records">step records and evidence</GuideLink> to inspect assessments and contributions.</p></HelpDisclosure>
     <ConversationUnderstanding draft={task?.conversation?.draft}/>
     {(attention.length > 0 || task?.definitionReview || task?.workflowProtocolDiagnostic) && <section className="notice stack attention-band" aria-labelledby="task-attention-title">
       <h2 id="task-attention-title">Needs attention</h2>
@@ -740,10 +744,10 @@ export function ProjectSupervisorView({
         : snapshot.binding
           ? <p>Bound conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
-      <EntityDetails title={<>Conversation and model details</>} ><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
-      {snapshot.binding?.settlementState && <p>Automatic settlement: {snapshot.binding.settlementState}. Resumed work uses this same conversation.</p>}
-      {snapshot.binding?.settlementBlockedBy && !snapshot.binding.settlementState && <p className="muted">Automatic settlement is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
-      {snapshot.binding?.keptActive && <p>Automatic settlement is held by a user keep-active choice.</p>}
+      <HelpDisclosure title="About Supervisor health and controls"><p>A <GuideLink topic="supervisor-conversation">bound Supervisor conversation</GuideLink> is assigned to this main chat. Its readiness is separate from task progress. <GuideLink topic="monitoring">Monitoring and check-ins</GuideLink> explain when reviews are due; <GuideLink topic="stop-vs-exclusion">Stop, disable and exclude</GuideLink> act at different scopes.</p></HelpDisclosure><EntityDetails title={<>Conversation and model details</>} ><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
+      {snapshot.binding?.settlementState && <p>{settlementText[snapshot.binding.settlementState]} Resumed work uses this same conversation.</p>}
+      {snapshot.binding?.settlementBlockedBy && !snapshot.binding.settlementState && <p className="muted">Parking this idle Supervisor is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
+      {snapshot.binding?.keptActive && <p>This Supervisor stays active because you chose to keep its conversation active.</p>}
       <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
       <p><strong>Project default for new Supervisors:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>
       {snapshot.mainThreadId && <p><strong>Selected Supervisor model in T3:</strong> {formatModel(snapshot, snapshot.modelSelection)}. Edit this conversation’s model using T3 controls.</p>}
@@ -759,7 +763,7 @@ export function ProjectSupervisorView({
 
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
         {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
-          <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><EntityDetails title={<>Monitoring details and check-ins</>} ><div className="stack">
+          <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><p className="small"><GuideLink topic="monitoring">About pending activity and check-ins</GuideLink></p><EntityDetails title={<>Monitoring details and check-ins</>} ><div className="stack">
           <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
           <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
           <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
@@ -807,30 +811,30 @@ export function ProjectSupervisorView({
       </fieldset>
       <fieldset disabled={fieldsDisabled} className="settings-section">
         <legend>Ongoing monitoring</legend><div className="settings-fields">
-        <p className="muted">Monitoring wakes each main conversation’s own Supervisor chat when pending activity reaches its maximum age or the finalized activity threshold. Defaults apply to new task workflows; existing objective-only tasks are not reprocessed.</p>
+        <p className="muted">Monitoring asks each conversation’s Supervisor to review finished activity records when they reach the age or count limit. Defaults apply to new task workflows. Earlier records containing only a task objective are retained without being reprocessed.</p>
         <div className="field-group">
           <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
           <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={monitoringIntervalMinutes.min} max={monitoringIntervalMinutes.max} step={1} required
             value={monitoring.intervalMinutes} aria-invalid={intervalError ? true : undefined}
             aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"
             onChange={event => onMonitoringChange({...monitoring, intervalMinutes: event.target.value})} />
-          <span id="supervisor-monitoring-interval-help" className="small muted">Enter 1 or 2 minutes; 2 is the default and the upper bound. A check-in also waits for the cooldown and any check-in still in flight.</span>
+          <span id="supervisor-monitoring-interval-help" className="small muted">Enter 1 or 2 minutes; 2 is the default and the upper bound. A check-in also waits for the pause between reviews and any review already running.</span>
           <span id="supervisor-monitoring-interval-error" className="small" aria-live="polite">{intervalError}</span>
         </div>
         <div className="field-group">
-          <label htmlFor="supervisor-monitoring-threshold">Finalized activities per operative chat</label>
+          <label htmlFor="supervisor-monitoring-threshold">Finished activity records per supervised conversation</label>
           <input id="supervisor-monitoring-threshold" name="activityThreshold" type="number" min={3} max={100} step={1} required
             value={monitoring.activityThreshold} aria-invalid={thresholdError ? true : undefined}
             aria-describedby="supervisor-monitoring-threshold-help supervisor-monitoring-threshold-error"
             onChange={event => onMonitoringChange({...monitoring, activityThreshold: event.target.value})} />
-          <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finalized activities.</span>
+          <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finished activity records. <GuideLink topic="monitoring">How monitoring thresholds and check-ins work</GuideLink>.</span>
           <span id="supervisor-monitoring-threshold-error" className="small" aria-live="polite">{thresholdError}</span>
         </div>
-        <HelpDisclosure title="Fixed monitoring limits"><p><strong>Supervisor cooldown:</strong> 30 seconds between monitoring sends.</p><p><strong>Model review limit:</strong> one in-flight review per Supervisor.</p></HelpDisclosure></div>
+        <HelpDisclosure title="Fixed monitoring limits"><p><strong>Supervisor cooldown:</strong> 30 seconds between monitoring sends.</p><p><strong>Model review limit:</strong> one review at a time per Supervisor.</p></HelpDisclosure></div>
       </fieldset>
       <fieldset disabled={fieldsDisabled} className="settings-section">
         <legend>Supervisor team</legend><div className="settings-fields">
-        <p className="muted">Set the maximum number of helpers the root may recruit. The limit applies to new recruitment; existing helpers remain when the value is 0 or the limit is lowered.</p>
+        <p className="muted">Set the maximum number of helpers the root may recruit. The limit applies to new recruitment; existing helpers remain when the value is 0 or the limit is lowered. <GuideLink topic="helper">About root Supervisors, helpers and handovers</GuideLink>.</p>
         <div className="field-group"><label htmlFor="supervisor-team-max-helpers">Maximum helpers per root</label>
         <input id="supervisor-team-max-helpers" name="maxHelpersPerRoot" type="number" min={0} max={20} step={1} required
           value={teamSettings.maxHelpersPerRoot} aria-invalid={teamSettingsError ? true : undefined}

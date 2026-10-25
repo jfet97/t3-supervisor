@@ -3,6 +3,8 @@ import { it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { StepsAndWorkflowsGuide } from "../ui/src/steps-and-workflows-guide.js";
+import {parseRoute} from "../ui/src/navigation.js";
+import {guideTerms} from "../ui/src/guide-terms.js";
 
 it("steps and workflows guide documents the approved layout, syntax and planning boundaries", () => {
   const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
@@ -76,11 +78,11 @@ it("guide FAQs use native disclosures with visible summaries and no headings ins
 
 it("the Guide teaches the operator journey first, then the authoring reference, with one focusable heading per contents entry", () => {
   const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
-  assert.match(html, /<h1 id="steps-guide-title">Guide<\/h1>/);
+  assert.ok(/<h1\b[^>]*id="steps-guide-title"[^>]*tabindex="-1"[^>]*>Guide<\/h1>/u.test(html), "the Guide has a focusable primary heading");
   const follow = html.indexOf("guide-follow-title"), write = html.indexOf(">Write steps and workflows</h2>");
   assert.ok(follow > 0 && write > follow, "the operator walkthrough comes before the authoring reference");
   const walkthrough = html.slice(follow, write);
-  const order = ["<strong>Home</strong>", "<strong>Task</strong> shows", "<strong>Agent and Supervisor</strong>", "<strong>Plan note</strong>", "<strong>Supervision</strong> shows", "<strong>Definitions</strong>, read from a checkout you choose"];
+  const order = ["<strong>Home</strong>", "<strong>Task</strong> shows", "<strong>Agent and Supervisor</strong>", "<strong>Plan note</strong>", "<strong>Supervision</strong> shows", "<strong>Definitions</strong>, read from a working folder you choose"];
   assert.deepEqual(order.map(label => walkthrough.indexOf(label) >= 0), order.map(() => true));
   assert.deepEqual([...order.map(label => walkthrough.indexOf(label))].sort((a, b) => a - b), order.map(label => walkthrough.indexOf(label)), "the walkthrough follows Home → Task → acceptance → evidence → Supervision → Definitions");
   for (const label of ["Needs attention", "Supervised work", "Proposed update awaiting acceptance", "Update proposed", "Supervisor assessment", "Earlier step records", "Evidence and history", "Supervisor health", "Stop supervision", "Project folder", "Project settings"])
@@ -92,8 +94,23 @@ it("the Guide teaches the operator journey first, then the authoring reference, 
   assert.match(html, /A conversation’s <strong>Supervision<\/strong> view displays this team/);
   const contents = html.slice(html.indexOf('aria-label="Guide contents"'), html.indexOf("</nav>"));
   assert.match(contents, /<strong>Follow supervised work<\/strong><ol>[\s\S]*<\/ol><\/div><div><strong>Write steps and workflows<\/strong><ul>/);
-  const ids = [...html.matchAll(/<h3 id="(guide-[a-z]+-title)" tabindex="-1">/g)].map(match => match[1]);
+  const ids = [...html.matchAll(/<h[23] id="(guide-[a-z-]+-title)" tabindex="-1">/g)].map(match => match[1]);
   assert.equal(new Set(ids).size, ids.length, "every focus target is unique");
-  assert.equal([...contents.matchAll(/<button type="button">/g)].length, ids.length, "every contents entry has its own heading");
-  assert.equal(ids.length, 18);
+  const links = [...contents.matchAll(/href="(#[^"]+)"/gu)].map(match => match[1]!);
+  assert.equal(new Set(links).size, links.length, "the contents has distinct topic links");
+  for (const href of links) {
+    const topic = parseRoute(href).guideTopic;
+    assert.ok(topic && ids.includes(`guide-${topic}-title`), `contents target ${href} exists and can receive focus`);
+  }
+  assert.ok(links.includes("#/guide?topic=terms"), "the glossary is findable from the contents");
+  for (const term of guideTerms) assert.ok(ids.includes(`guide-${term.id}-title`), `${term.title} has an addressable definition`);
+});
+
+it("the orphan glossary preserves missing-folder truth, history and the different list/Home behavior", () => {
+  const html = renderToStaticMarkup(createElement(StepsAndWorkflowsGuide));
+  const start = html.indexOf('id="guide-orphaned-chat-title"');
+  const entry = html.slice(start, html.indexOf('</p>', start));
+  for (const concept of [/confirmed missing/u, /history remains/iu, /hide these chats by default/u, /Home keeps/u, /unknown, denied or unavailable/u, /does not establish/u]) {
+    assert.ok(concept.test(entry), `orphan definition retains ${concept.source}`);
+  }
 });

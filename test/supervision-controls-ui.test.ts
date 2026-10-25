@@ -20,6 +20,19 @@ it("the master switch and shared definition switch explain their separate effect
   assert.match(definitions, /Enable global definitions/);
 });
 
+it("definition folder help names what was checked and explains unavailable or unchecked states", () => {
+  const handlers = {busy: false, blocked: false, message: "", onToggle: () => {}, onReload: () => {}};
+  for (const detectionStatus of ["present", "missing", "unavailable", "not_checked"] as const) {
+    const html = renderToStaticMarkup(createElement(SupervisionControlView, {...handlers,
+      control: {projectId: "project", generation: 0, enabled: false, manual: true, globallyEnabled: true, effectiveEnabled: false, detectionStatus, detectionError: null}}));
+    assert.match(html, /Supervisor definitions folder.*\.t3-supervisor/);
+    assert.doesNotMatch(html, /Folder detection:|not_checked/);
+    if (detectionStatus === "missing") assert.match(html, /Not found/);
+    if (detectionStatus === "unavailable") assert.match(html, /Could not be checked/);
+    if (detectionStatus === "not_checked") assert.match(html, /Not checked yet/);
+  }
+});
+
 it("setup keeps the two creation actions for a selected checkout with no definitions", () => {
   const checkout = {threadId: "main-a", workspaceRoot: "/work/feature-a", branch: "feature-a", isGitRepository: true, folderStatus: "missing" as const, origin: "project" as const};
   const options = {projectId: "p", generation: 1, available: true, message: "Choose where to create definitions.", checkouts: [checkout]};

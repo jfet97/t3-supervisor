@@ -1,5 +1,6 @@
 import { StatusBadge } from "./supervision-status.js";
 import { EntityDetails } from "./disclosure.js";
+import {GuideLink} from "./guide-link.js";
 import React from "react";
 import type { ConversationEngagement, ConversationDraft } from "../../src/supervision-conversation-contract.js";
 
@@ -15,7 +16,7 @@ export function ConversationStatus({engagement, fresh, explicitlyStopped = false
   const label = conversationLabel(engagement, fresh, explicitlyStopped);
   const current = fresh && engagement?.availability === "current";
   const off = engagement?.availability === "stopped";
-  return label ? <div aria-live={engagement?.availability === "catching_up" ? "off" : "polite"} aria-atomic="true"><StatusBadge compact label={label} tone={current ? "on" : off ? "off" : "unknown"} icon={current ? "shield" : off ? "pause" : "alert"}/></div> : null;
+  return label ? <div className="row"><div aria-live={engagement?.availability === "catching_up" ? "off" : "polite"} aria-atomic="true"><StatusBadge compact label={label} tone={current ? "on" : off ? "off" : "unknown"} icon={current ? "shield" : off ? "pause" : "alert"}/></div><GuideLink className="small" topic="conversation-mode">About conversation states</GuideLink></div> : null;
 }
 
 export function ConversationUnderstanding({draft}: {draft: ConversationDraft | undefined}) {

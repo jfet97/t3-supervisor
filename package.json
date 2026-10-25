@@ -9,7 +9,7 @@
   "files": [
     "dist",
     "ui-dist",
-    "skills"
+    "skills/usage"
   ],
   "packageManager": "pnpm@12.14.0",
   "engines": {

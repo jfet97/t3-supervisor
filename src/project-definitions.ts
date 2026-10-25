@@ -766,7 +766,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
     const candidates = catalog.threads.filter(thread => thread.projectId === projectId && thread.lineage.parentThreadId === null && !thread.deletedAt && !thread.archivedAt);
     if (candidates.length > 200) {
       if (!partial) return yield* new DefinitionCheckoutUnavailable({reason: "checkout_target_limit"});
-      issues.push({threadId: null, message: "Conversation folders were not enumerated: checkout_target_limit (more than 200 conversations). The project folder remains independently selectable."});
+      issues.push({threadId: null, message: "Conversation folders were not checked because this project has more than 200 conversations. The project folder remains independently selectable."});
     }
     for (const candidate of candidates.length > 200 ? [] : candidates) {
       const observed = yield* Effect.result(readProjection(candidate.id));

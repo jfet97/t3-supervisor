@@ -3,6 +3,7 @@ import { CheckoutChooser, CheckoutIdentity, orphanedConversations } from "./chec
 import { projectCheckouts } from "./project-definitions-api.js";
 import type { ProjectCheckoutInventoryInfo } from "../../src/project-definitions-contract.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
+import {GuideLink} from "./guide-link.js";
 import React, { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { Option } from "effect";
@@ -89,7 +90,8 @@ export function DefinitionsContent({definitions, selectedDefinition = null, onSe
   return <div className="stack definition-workspace">
     <div className="definition-health"><strong>{statusText[definitions.status]}</strong><span className={`pill ${valid ? "green" : "amber"}`}>{valid ? "Valid and complete" : definitions.complete ? "Review validity" : "Read incomplete"}</span></div>
     {!valid && <p className="notice">{definitions.status === "missing" ? "No definitions were found in this folder. Another enabled scope may still have requirements." : "Requirements may be unreadable or incomplete. Review the issues before interpreting this catalog as complete."}</p>}
-    {selected ? <section className="definition-detail stack"><button type="button" className="back-link quiet-button" onClick={() => select(null)}><Icon name="back" size={17}/>Back to catalog</button>
+    {!selected && <HelpDisclosure title="How definitions are used"><p>The catalog combines reusable project and enabled global definitions. The index lists available files; a task can add local duties while preserving required and fixed commitments. Edit project.yaml changes only that existing index file. Full duty text, references and skills are available in each definition.</p><p><GuideLink topic="config">Project configuration and requirements</GuideLink> · <GuideLink topic="fixed">Fixed commitments</GuideLink> · <GuideLink topic="references">References and skills</GuideLink></p></HelpDisclosure>}
+    {selected ? <section className="definition-detail stack"><button type="button" className="back-link quiet-button" onClick={() => select(null)}><Icon name="back" size={17}/>Back to catalog</button><p className="small muted"><GuideLink topic="definition">About definitions and commitments</GuideLink> · <GuideLink topic="fixed">What fixed protects</GuideLink></p>
       {entry ? <><header className="stack"><div className="row between"><h2>{entry.name}</h2><span className="pill">{entry.origin === "global" ? "Global · read-only" : "Project"}</span></div><p className="small muted">{workflow ? "Workflow template" : "Reusable step"} · <code>{entry.id}</code>{workflow?.fixed && " · Fixed structure"}</p><DefinitionSource definition={entry}/></header>
         <p className="definition-copy">{entry.description}</p><DefinitionReferences references={entry.references} skills={entry.skills}/>{workflow && <TemplateTopology workflow={workflow} definitions={definitions}/>}</> : <p className="notice">This definition is unreadable or no longer in the selected folder. Its reference is retained; return to the catalog to inspect the current issues.</p>}
     </section> : <><EffectiveConfiguration definitions={definitions}/><section className="stack"><div className="row between"><h2>Definition catalog</h2><span className="small muted">Templates, not execution records</span></div>
@@ -100,7 +102,6 @@ export function DefinitionsContent({definitions, selectedDefinition = null, onSe
       })}</ul>{!entries.length && <p className="empty-state muted">No definitions match this view.</p>}<ListPager label="Definition catalog" total={entries.length} page={range.page} onPage={setPage}/>
     </section></>}
     {definitions.issues.length > 0 && <section className="definition-issues stack"><h3>Definition issues</h3><ul>{definitions.issues.map((issue, i) => <li key={`${issue.path}:${i}`}><code>{issue.path}</code><p>{issue.message}</p></li>)}</ul></section>}
-    <HelpDisclosure title="How definitions are used"><p>The catalog combines reusable project and enabled global definitions. The index lists available files; a task can add local duties while preserving required and fixed commitments. Edit project.yaml changes only that existing index file. Full duty text, references and skills are available in each definition.</p></HelpDisclosure>
   </div>;
 }
 
@@ -316,6 +317,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   return <section className="stack project-definitions" aria-label="Projects">
     <div hidden={inWorkspace} className="stack">
       <div className="page-heading heading-actions"><div><h1>Projects</h1><p className="muted">A workspace for each project, with its conversations, definitions and supervision settings.</p></div><ReadTime value={overview?.data?.observedAt ?? null}/></div>
+      <HelpDisclosure title="About project counts and status"><p>Conversation totals distinguish <GuideLink topic="orphaned-chat">orphaned chats</GuideLink>, whose folders were last confirmed missing. Folders checked is a retained observation, not a live filesystem watch. <GuideLink topic="global-supervision">Global and project supervision</GuideLink> have separate switches; unavailable status remains unknown. <GuideLink topic="scratch-workspace">Scratch workspace</GuideLink> identifies a temporary T3 working area.</p></HelpDisclosure>
       <label className="search project-search"><Icon name="search" size={18}/><span className="sr-only">Find a project</span><input type="search" aria-label="Find a project" placeholder="Find a project" value={projectQuery} onChange={event => {setProjectQuery(event.target.value);setProjectPage(1);}}/></label>
       <div className="project-list">
         {matchingProjects.slice(projectRange.offset, projectRange.offset + projectRange.size).map(project => {
@@ -353,7 +355,8 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
       {dirty && !onDraftTargetChange && <p className="draft-notice" role="status">Unsaved changes · <RouteLink to={{...workspaceRoute, section: configurationDirty ? "editor" : "settings"}} navigate={navigate}>Return to your draft</RouteLink>. Switching views keeps your changes.</p>}
       {(route.section === "conversations" || route.main === null && conversationSections.includes(route.section)) && <div className="panel stack">
         <label className="search"><span className="sr-only">Find a conversation</span><input aria-label="Find a conversation" type="search" placeholder="Search conversation titles" value={conversationQuery} onChange={event => navigate({...listRoute, q: event.target.value, listPage: 1}, {replace: true})}/></label>
-        <div className="row between conversation-filters"><label className="toggle"><input type="checkbox" checked={route.showOrphaned ?? false} onChange={event => navigate({...listRoute, showOrphaned: event.target.checked, listPage: 1})}/><span>Show orphaned chats{orphaned.size ? ` (${orphaned.size})` : ""}</span></label><button type="button" className="quiet-button" onClick={() => registry.refresh(projectCheckouts(inventoryKey))} disabled={!data.connected}>Refresh folders</button></div>
+        <div className="row between conversation-filters"><label className="toggle" htmlFor="show-orphaned-chats"><input id="show-orphaned-chats" type="checkbox" aria-describedby="orphaned-chats-help" checked={route.showOrphaned ?? false} onChange={event => navigate({...listRoute, showOrphaned: event.target.checked, listPage: 1})}/><span>Show orphaned chats{orphaned.size ? ` (${orphaned.size})` : ""}</span></label><button type="button" className="quiet-button" onClick={() => registry.refresh(projectCheckouts(inventoryKey))} disabled={!data.connected}>Refresh folders</button></div>
+        <p id="orphaned-chats-help" className="small muted">Chats whose working folder was confirmed missing at the last folder check. Their history is retained. <GuideLink topic="orphaned-chat">What is an orphaned chat?</GuideLink></p>
         {inventory && !inventory.complete && <p className="small muted">Some folder checks are unavailable. Those chats remain visible until their folders can be verified.</p>}
         {resume && matchingThreads.some(thread => thread.id === resume.main) && <p className="small muted">Continue where you left off: <RouteLink to={resume} navigate={navigate}>{threads.find(thread => thread.id === resume.main)?.title} · {resume.section === "task" ? "Task" : resume.section === "connected" ? "Connected work" : "Supervision"}</RouteLink></p>}
         <ListPager label="Conversations" total={matchingThreads.length} page={conversationRange.page} onPage={listPage => navigate({...listRoute, listPage})}/>

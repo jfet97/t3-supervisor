@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ProjectCheckoutInventoryInfo } from "../../src/project-definitions-contract.js";
-import { EntityDetails } from "./disclosure.js";
+import { EntityDetails, HelpDisclosure } from "./disclosure.js";
+import {GuideLink} from "./guide-link.js";
 import { Icon } from "./icons.js";
 import { ListPager, pageWindow } from "./pagination.js";
 
@@ -27,6 +28,7 @@ export function CheckoutChooser({inventory, selected, onSelect, disabled, onRefr
   </li>;
   const content = <section className="stack checkout-chooser" aria-labelledby="checkout-chooser-title"><div className="row between"><h2 id="checkout-chooser-title">Working folder</h2><button className="quiet-button" type="button" onClick={onRefresh} disabled={disabled}>Refresh folders</button></div>
     <p className="muted small">Choose the folder whose definitions you want to read. The project folder and the default branch are shown first; they share one entry when they coincide.</p>
+    <HelpDisclosure title="About working folders"><p>Conversations that use the same folder share its definitions. <GuideLink topic="working-folder">Working folders and checkouts</GuideLink> explains project, separate and default-branch folders.</p><p>Missing means absence was confirmed; unverified means the folder could not be checked. <GuideLink topic="folder-check">Folder checks and branch information</GuideLink> and <GuideLink topic="orphaned-chat">orphaned chats</GuideLink> explain these retained observations.</p></HelpDisclosure>
     {!inventory ? <p role="status">Reading folder and branch identities…</p> : !inventory.available ? <p className="notice" role="status">{inventory.reason} Refresh folders after access or workspace bindings are available.</p> : <>
       {!inventory.complete && <EntityDetails title="Some folder identities could not be verified"><ul>{inventory.issues.map((issue, i) => <li key={issue.threadId ?? i}>{issue.message}</li>)}</ul></EntityDetails>}
       {!inventory.defaultBranch && <p className="small muted">Default branch not reported by Git.</p>}

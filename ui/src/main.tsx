@@ -1,5 +1,6 @@
 import { ListPager, pageWindow } from "./pagination.js";
 import { HelpDisclosure } from "./disclosure.js";
+import {GuideLink, GuideNavigation} from "./guide-link.js";
 import { GlobalSupervisionStatus, ConnectionStatus } from "./supervision-status.js";
 import {activityTitle} from "./activity-presentation.js";
 import {NoProjectPanel, StartSupervisionPanel, useChatCandidates} from "./no-project.js";
@@ -206,16 +207,17 @@ const labels: Record<string, string> = {
 const label = (value: string) => labels[value] ?? value.replaceAll("_", " ");
 function History({
   items,
-  title, data, navigate,
+  title, data, navigate, route,
 }: {
   items: ReadonlyArray<GuidanceActivity>;
-  title: string; data: GuidanceSnapshot; navigate: (route: Route) => void;
+  title: string; data: GuidanceSnapshot; route: Route; navigate: (route: Route, options?: {replace?: boolean}) => void;
 }) {
-  const [filter, setFilter] = useState("");
-  const [page, setPage] = useState(1);
+  const filter = route.q ?? "";
+  const page = route.listPage ?? 1;
+  const setPage = (listPage: number) => navigate({...route, listPage}, {replace: true});
   const matching = [...items].filter(item => JSON.stringify(item).toLowerCase().includes(filter.toLowerCase())).sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
   const range = pageWindow(matching.length, page);
-  useEffect(() => {if (page !== range.page) setPage(range.page);}, [page, range.page]);
+  useEffect(() => {if (page !== range.page) navigate({...route, listPage: range.page}, {replace: true});}, [page, range.page, route, navigate]);
   const [selected, setSelected] = useState<GuidanceActivity | null>(null);
   const dialog = useRef<HTMLDialogElement>(null);
   const inspect = (item: GuidanceActivity) => {setSelected(item);dialog.current?.showModal();};
@@ -231,11 +233,12 @@ function History({
           <input
             aria-label="Filter activity"
             value={filter}
-            onChange={(e) => {setFilter(e.target.value); setPage(1);}}
+            onChange={(e) => navigate({...route, q: e.target.value, listPage: 1}, {replace: true})}
             placeholder="State, chat ID or reason"
           />
         </label>
       </div>
+      <HelpDisclosure title="About activity outcomes"><p>Observation, transport acceptance and visibility in a chat are separate records. A sent message does not establish that work was performed. <GuideLink topic="activity-outcomes">Activity and delivery outcomes</GuideLink> explains these states, unconfirmed delivery and run identifiers.</p></HelpDisclosure>
       <p className="small muted">Searches all {items.length} retained events in this read.</p><ListPager label="Retained activity" total={matching.length} page={range.page} onPage={setPage}/>
       <div className="panel audit">
         {matching.slice(range.offset, range.offset + range.size).map((item, index, rows) => {
@@ -264,8 +267,7 @@ function History({
             "Detailed evidence was not retained or has expired."}
         </pre>
         <p className="muted">
-          Run: {selected?.runId ?? "Not available"} · Rule:{" "}
-          {selected?.ruleId ?? "Not applicable"}
+          T3 run: {selected?.runId ?? "Not available"}{selected?.ruleId && <> · Historical rule ID: {selected.ruleId}</>} · <GuideLink topic="activity-outcomes">About these records</GuideLink>
         </p>
         {selected?.threadId && (
           <a href={`t3-thread://v1/${selected.threadId}`}>
@@ -347,9 +349,9 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
     <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
     <fieldset><legend>Excluded chats</legend>
       <p>Project Supervisors skip excluded chats. Existing project, workflow and conversation state is retained.</p>
-      <p>Only explicit exclusions in enabled scopes appear here. Hidden or unavailable exclusions stay saved.</p>
+      <p>Only explicit exclusions in projects or No Project chats where supervision is enabled appear here. Hidden or unavailable exclusions stay saved. <GuideLink topic="stop-vs-exclusion">How exclusions differ from Stop</GuideLink>.</p>
       <ul className="candidate-list">{chats.map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}</p></div><button type="button" disabled={saving} aria-label={`Remove exclusion for ${chat.title}`} onClick={() => {change({excludedThreadIds: form.excludedThreadIds.filter(id => id !== chat.id)});searchRef.current?.focus();}}>Remove exclusion</button></li>)}</ul>
-      {!chats.length && candidates.data && <p>No explicit exclusions in enabled scopes.</p>}
+      {!chats.length && candidates.data && <p>No explicit exclusions in currently enabled projects or No Project chats.</p>}
       <div className="field-group"><label htmlFor="chat-search">Add an exclusion</label><input ref={searchRef} id="chat-search" name="chatSearch" type="search" value={query} maxLength={512} autoCapitalize="off" autoCorrect="off" spellCheck={false} disabled={saving} aria-describedby="exclusion-help" onChange={e => setQuery(e.target.value)} />
       <p id="exclusion-help" className="small muted">{candidates.error || (query ? candidates.data?.message : "Search for a chat title, ID or native T3 link.")}</p></div>
       {candidates.error && <button type="button" onClick={candidates.reload}>Reload exclusion search</button>}
@@ -431,15 +433,16 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
       </aside>
       <div className="app-body">
       <header className="app-header"><div className="environment-context"><RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate} className="header-global"><GlobalSupervisionStatus compact enabled={overview.data && !overview.error ? overview.data.globallyEnabled : null}/></RouteLink><ConnectionStatus connected={connected}/></div><SignOutButton blocked={dirty} onSignOut={() => void signOutNow()}/></header>
-      <main id="workspace" tabIndex={-1}>
+      <main id="workspace" tabIndex={-1}><GuideNavigation.Provider value={navigate}>
         {dirty && <p id="pending-changes" className="notice" role="status">Save drafts and resolve pending changes before signing out. {projectDirty && projectDraftTarget && <RouteLink to={projectDraftTarget} navigate={navigate}>Review project changes</RouteLink>}{projectDirty && settingsDirty && " · "}{settingsDirty && <RouteLink to={{...directoryRoute, page: "settings"}} navigate={navigate}>Review instance settings</RouteLink>}</p>}
         {signOutError && <p className="notice" role="alert">{signOutError}</p>}
         {alert && <p className="notice" role="alert">{alert}</p>}
         <div hidden={view !== "home"}><Home route={route} data={data} overview={overview} navigate={navigate} startPanel={<StartSupervisionPanel active={view === "home"} onStateChange={setStartPending} onChanged={refresh}/>}/></div>
         <div hidden={view !== "projects"}><ProjectDefinitionsPanel data={data} dataCurrent={!snapshot.waiting && !AsyncResult.isFailure(snapshot)} overview={overview} route={route} navigate={navigate} guard={guard} onDirtyChange={setProjectDirty} onDraftTargetChange={setProjectDraftTarget}/></div>
-        {view === "guide" && <StepsAndWorkflowsGuide />}
-        {view === "activity" && <History items={data.activity} title="Supervision activity" data={data} navigate={navigate} />}
+        {view === "guide" && <StepsAndWorkflowsGuide topic={route.guideTopic}/>}
+        {view === "activity" && <History items={data.activity} title="Supervision activity" data={data} navigate={navigate} route={route} />}
         {settingsOpened && <div hidden={view !== "settings"}><Settings data={data} active={view === "settings"} onDirtyChange={setSettingsDirty}/></div>}
+      </GuideNavigation.Provider>
       </main>
       </div>
     </div>

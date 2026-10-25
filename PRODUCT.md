@@ -33,6 +33,9 @@ must remain explicit. T3 source and its installed runtime are outside the write 
 - Keep project and conversation context visible as users move between related views.
 - Give detailed evidence a clear home without making it the default reading path.
 - Describe uncertainty honestly and preserve drafts and operational state.
+- Explain unfamiliar terms where people encounter them, with concise contextual
+  help and direct links to a maintained Guide/glossary. An expert's understanding
+  does not establish first-time usability.
 
 ## Accessibility and inclusion
 

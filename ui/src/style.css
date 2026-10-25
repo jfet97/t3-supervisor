@@ -490,11 +490,12 @@ button.danger-button:hover:not(:disabled):not([aria-disabled="true"]) { color: #
 .guide-introduction { padding: 20px 24px; background: var(--soft); border-radius: 12px; font-size: 1.15rem; max-width: 72ch; }
 .guide-contents { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px 32px; padding-block: 12px 20px; border-bottom: 1px solid var(--line); }
 .guide-contents > div { display: grid; gap: 6px; align-content: start; }
+.guide-glossary-contents { grid-column: 1 / -1; }
 .guide-contents ol, .guide-contents ul { display: grid; gap: 0 16px; padding: 0; margin: 0; list-style: none; }
 .guide-contents ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .guide-contents ol { counter-reset: guide-contents; }
-.guide-contents ol button::before { counter-increment: guide-contents; content: counter(guide-contents) "."; color: var(--quiet); min-inline-size: 1.4em; }
-.guide-contents button { padding: 8px 0; min-height: 40px; border: 0; background: transparent; color: var(--blue); justify-content: start; text-align: start; gap: 4px; }
+.guide-contents ol a::before { counter-increment: guide-contents; content: counter(guide-contents) "."; color: var(--quiet); min-inline-size: 1.4em; }
+.guide-contents a { display: flex; align-items: start; padding: 8px 0; min-block-size: 40px; color: var(--blue); text-align: start; gap: 4px; text-underline-offset: .16em; }
 .guide-walkthrough { margin: 0; padding-inline-start: 1.6em; display: grid; gap: 18px; }
 .guide-walkthrough > li::marker { color: var(--quiet); font-weight: 650; }
 .guide-walkthrough p { max-width: 72ch; }
@@ -678,7 +679,7 @@ select { max-width: 36rem; }
   .app-header { min-height: 48px; max-height: 56px; padding: 6px 12px; gap: 8px; position: static; }
   .app-header .environment-context { gap: 8px; }
   .app-header .scope-status-compact { font-size: 12px; padding: 3px 5px; gap: 5px; }
-  .app-header .connection.connected .connection-text { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .app-header .connection.connected .connection-text { font-size: 11px; white-space: nowrap; }
   .app-header .connection.disconnected { font-size: 11px; white-space: normal; max-width: 80px; }
   .app-header .scope-status-compact > span { white-space: normal; }
   .project-context-line { gap: 6px; }

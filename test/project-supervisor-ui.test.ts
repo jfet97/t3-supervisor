@@ -173,6 +173,23 @@ const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderT
   onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
 }));
 
+it("idle parking explains uncertainty without presenting it as confirmed settlement", () => {
+  for (const settlementState of ["pending", "uncertain", "settled", "superseded"] as const) {
+    const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
+      ...viewDefaults, snapshot: {...snapshot, binding: {...snapshot.binding!, settlementState}}, selection, monitoring, threadId: "task-thread", connected: true,
+      saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
+      onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
+    }));
+    assert.match(html, /Resumed work uses this same conversation/);
+    assert.doesNotMatch(html, /Idle Supervisor parking:/);
+    if (settlementState === "uncertain") {
+      assert.match(html, /not confirmed whether this idle Supervisor was parked/);
+      assert.doesNotMatch(html, /This idle Supervisor is parked/);
+    }
+    if (settlementState === "settled") assert.match(html, /This idle Supervisor is parked/);
+  }
+});
+
 it("Supervisor settings markup explains automatic conversation reuse and separates saved, current and task state", () => {
   const monitoringSnapshot = {
     ...snapshot,
@@ -213,7 +230,7 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
   assert.match(html, /Next review:<\/strong>/);
   assert.match(html, /Last notice:<\/strong> Not scheduled/);
   assert.match(html, /A monitoring review is running/);
-  assert.match(html, /existing objective-only tasks are not reprocessed/);
+  assert.ok(/Earlier records containing only a task objective are retained without being reprocessed/u.test(html), "monitoring defaults explain the boundary for earlier objective-only records");
   assert.doesNotMatch(html, /Create conversation/);
 });
 
@@ -303,7 +320,7 @@ it("Supervisor team stays distinct from operational workflows and shows member s
   assert.match(html, /the native conversation may still exist or run/);
   assert.match(html, /A required test failed/);
   assert.match(html, /The team snapshot is incomplete/);
-  assert.match(html, /Root-to-helper notes and routine check-ins use Supervisor team operations/);
+  assert.match(html, /Supervisor coordinates root-to-helper notes and routine check-ins/);
   assert.match(html, /Quarantine revokes a helper’s Supervisor authority/);
   assert.match(html, /Maximum helpers per root/);
   assert.match(html, /0 disables new recruitment/);

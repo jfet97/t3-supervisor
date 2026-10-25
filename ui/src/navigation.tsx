@@ -6,7 +6,7 @@ import { uiRuntime } from "./atoms.js";
 
 const sections = ["task", "supervision", "definitions", "settings", "conversations", "connected", "editor"] as const;
 export type ProjectSection = typeof sections[number];
-export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; showOrphaned?: boolean; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"};
+export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; showOrphaned?: boolean; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"; guideTopic?: string};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "conversations"};
 /** The views of one main conversation. */
 export const conversationSections: readonly ProjectSection[] = ["task", "supervision", "connected"];
@@ -35,19 +35,37 @@ export function parseRoute(hash: string): Route {
       const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
       return {...homeRoute, ...(q ? {q} : {}), ...(workProject ? {workProject} : {}), ...(workFilter !== "all" ? {workFilter} : {}), ...(listPage > 1 ? {listPage} : {})};
     }
-    if (page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
+    if (page === "guide") {
+      const topic = url.searchParams.get("topic") ?? "";
+      return {...directoryRoute, page, ...(/^[a-z][a-z0-9-]{0,95}$/u.test(topic) ? {guideTopic: topic} : {})};
+    }
+    if (page === "activity") {
+      const q = url.searchParams.get("q") ?? "";
+      const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      return {...directoryRoute, page, ...(q ? {q} : {}), ...(listPage > 1 ? {listPage} : {})};
+    }
+    if (page === "settings") return {...directoryRoute, page};
   } catch { /* Invalid addresses return to the project directory. */ }
   return directoryRoute;
 }
 
 export function routeHref(route: Route): string {
   const params = new URLSearchParams();
+  if (route.page === "guide") {
+    if (route.guideTopic) params.set("topic", route.guideTopic);
+    return `#/guide${params.size ? `?${params}` : ""}`;
+  }
   if (route.page === "home") {
     if (route.q) params.set("q", route.q);
     if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));
     if (route.workProject) params.set("project", route.workProject);
     if (route.workFilter && route.workFilter !== "all") params.set("filter", route.workFilter);
     return `#/home${params.size ? `?${params}` : ""}`;
+  }
+  if (route.page === "activity") {
+    if (route.q) params.set("q", route.q);
+    if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));
+    return `#/activity${params.size ? `?${params}` : ""}`;
   }
   if (route.page !== "projects" || !route.projectId) return `#/${route.page}`;
   if (route.showOrphaned) params.set("orphaned", "show");
@@ -183,10 +201,11 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
       accept(next);
     },
     historyChanged() {
-      rememberListScroll(route);
       const observed = host.read();
       const target = positionAt(observed);
       const next = parseRoute(observed.hash);
+      // popstate and hashchange can describe the same traversal before the destination frame restores its position
+      if (routeHref(next) !== routeHref(route)) rememberListScroll(route);
       if (restore && continueRestore(observed, target, next)) return;
       // a changed history length means the browser added this entry right after the current one
       const added = target === null && (observed.length === undefined || observed.length !== length);
@@ -242,7 +261,7 @@ export const navigationAtom: Atom.Atom<Navigation> = Atom.make((get) => {
   const changed = () => {
     const before = current.route;
     controller.historyChanged();
-    if (current.route !== before) focusAfterNavigation(before, current.route);
+    if (current.route !== before) focusAfterNavigation(before, current.route, true);
   };
   window.addEventListener("hashchange", changed);
   window.addEventListener("popstate", changed);
@@ -250,26 +269,35 @@ export const navigationAtom: Atom.Atom<Navigation> = Atom.make((get) => {
   return current;
 });
 
-const listScrollKey = (route: Route) => `supervisor-list-scroll:${route.projectId}:${route.q ?? ""}:${route.listPage ?? 1}`;
+const listScrollKey = (route: Route) => route.page === "projects"
+  ? `supervisor-list-scroll:${route.projectId}:${route.q ?? ""}:${route.listPage ?? 1}`
+  : `supervisor-list-scroll:${routeHref(route)}`;
 const isProjectList = (route: Route) => route.page === "projects" && route.projectId && route.main === null && route.section === "conversations";
+const isScrollableList = (route: Route) => isProjectList(route) || route.page === "home" || route.page === "activity";
 const rememberListScroll = (route: Route) => {
-  if (!isProjectList(route)) return;
+  if (!isScrollableList(route)) return;
   try {sessionStorage.setItem(listScrollKey(route), String(window.scrollY));} catch { /* storage is optional */ }
 };
 
-/** The native frame adapter focuses the destination heading and restores the explicit project's list position. */
-export function focusAfterNavigation(previous: Route, next: Route) {
+/** The native frame adapter focuses the destination and restores retained list positions. */
+export function focusAfterNavigation(previous: Route, next: Route, restoreListPosition = false) {
+  // the mounted Guide focuses its topic after rendering, including initial loads and query-only changes
+  if (next.page === "guide") return;
   if (previous.page === next.page && previous.projectId === next.projectId && previous.main === next.main && next.projectId) return;
   if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
   requestAnimationFrame(() => {
     const heading = [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]") && !element.closest(".sr-only"));
     let top = 0;
-    if (isProjectList(next)) try {top = Number(sessionStorage.getItem(listScrollKey(next))) || 0;} catch { /* storage is optional */ }
+    if (isProjectList(next) || restoreListPosition && isScrollableList(next)) try {top = Number(sessionStorage.getItem(listScrollKey(next))) || 0;} catch { /* storage is optional */ }
     window.scrollTo({top, behavior: "instant"});
     const rows = isProjectList(next) ? [...document.querySelectorAll<HTMLAnchorElement>(".conversation-list > a")] : [];
     const selected = rows.find(row => parseRoute(new URL(row.href).hash).main === previous.main);
     const visible = rows.find(row => {const rect = row.getBoundingClientRect();return rect.top >= 0 && rect.bottom <= window.innerHeight;});
-    const target = top > 0 ? selected ?? visible ?? heading : heading;
+    const visibleControl = top > 0 && !isProjectList(next) ? [...document.querySelectorAll<HTMLElement>("#workspace a[href], #workspace button:not(:disabled), #workspace summary, #workspace input:not(:disabled), #workspace select:not(:disabled)")].find(element => {
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && rect.top >= Math.max(0, document.querySelector(".app-header")?.getBoundingClientRect().bottom ?? 0) && rect.bottom <= window.innerHeight;
+    }) : null;
+    const target = top > 0 ? selected ?? visible ?? visibleControl ?? heading : heading;
     if (target) {if (target === heading) target.tabIndex = -1; target.focus({preventScroll: true});}
   });
 }

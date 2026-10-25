@@ -1,5 +1,7 @@
 import { EntityDetails } from "./disclosure.js";
-import React from "react";
+import React, {useEffect} from "react";
+import {GuideLink, focusGuideTopic} from "./guide-link.js";
+import {guideTerms} from "./guide-terms.js";
 
 const layoutExample = `.t3-supervisor/
   project.yaml
@@ -115,7 +117,7 @@ const walkthrough: ReadonlyArray<{id: string; title: string; body: React.ReactNo
   {id: "agreement", title: "Proposal, acceptance and refinement", body: <p><strong>Agent and Supervisor</strong> states once what the Supervisor proposed and whether the agent accepted it. Acceptance happens in their conversations and the dashboard only reads it; an accepted plan is not evidence that work was done. When the Supervisor proposes a refinement, <strong>Proposed update awaiting acceptance</strong> lists the changed steps and <strong>Update proposed</strong> marks them, while the earlier plan stays accepted and recorded progress stays as it is.</p>},
   {id: "records", title: "Evidence and history for each step", body: <p>Open a step for its <strong>Plan note</strong>, the <strong>Supervisor assessment</strong> that set its current status and any <strong>Earlier step records</strong>. <strong>Latest Supervisor record</strong> shows the newest one. <strong>Connected work</strong> lists contributing child conversations, and <strong>Evidence and history</strong> shows the retained Supervisor records and available earlier acceptance or workflow records.</p>},
   {id: "supervision", title: "Supervisor health and interventions", body: <p><strong>Supervision</strong> shows <strong>Supervisor health</strong>, <strong>Monitoring</strong> with its check-ins and the <strong>Supervisor team</strong> for this conversation. <strong>Stop supervision</strong> applies only to this chat and stays off until you enable it again; the chat itself is not changed. <strong>Open in T3</strong> opens the conversation.</p>},
-  {id: "definitions", title: "Definitions and project settings", body: <p>A project’s reusable steps and workflows are in <strong>Definitions</strong>, read from a checkout you choose: <strong>Project folder</strong> or a <strong>Separate working copy</strong>. Conversations sharing a folder share its definitions; the chooser shows the actual folder and reported branch. <strong>Project settings</strong> holds which conversations are supervised and the defaults for new Supervisors. Instance-wide switches and global definitions are in <strong>Settings</strong>. The reference below describes the files.</p>},
+  {id: "definitions", title: "Definitions and project settings", body: <p>A project’s reusable steps and workflows are in <strong>Definitions</strong>, read from a working folder you choose. The <strong>Project folder</strong> and Git’s <strong>Default branch working folder</strong> appear first; a <strong>Separate working copy</strong> has its own folder. Conversations sharing a folder share its definitions. Missing and unverified folders stay distinct; only confirmed missing folders make their retained chats orphaned. <strong>Refresh folders</strong> rechecks those observations. <strong>Project settings</strong> holds conversation eligibility and defaults for new Supervisors; instance switches and shared definitions are in <strong>Settings</strong>.</p>},
 ];
 
 const referenceTopics = [
@@ -123,7 +125,7 @@ const referenceTopics = [
 ] as const;
 
 function GuideLinks({items, ordered = false}: {items: ReadonlyArray<readonly [string, string]>; ordered?: boolean}) {
-  const links = items.map(([id, title]) => <li key={id}><button type="button" onClick={() => {const heading = document.getElementById(`guide-${id}-title`);heading?.focus();heading?.scrollIntoView({block: "start"});}}>{title}</button></li>);
+  const links = items.map(([id, title]) => <li key={id}><GuideLink topic={id}>{title}</GuideLink></li>);
   return ordered ? <ol>{links}</ol> : <ul>{links}</ul>;
 }
 
@@ -166,7 +168,7 @@ const questions = [
   },
   {
     question: "What happens when I message a helper directly in T3?",
-    answer: "T3 applies its native follow-up behavior to that helper conversation. The root sends routine notes and check-ins through Supervisor team operations; it does not use raw `t3_thread_send` for those check-ins.",
+    answer: "T3 applies that helper conversation’s normal follow-up behavior. Supervisor coordinates routine notes and check-ins between the root and helper.",
   },
   {
     question: "Does setting the helper limit to zero remove existing helpers?",
@@ -198,23 +200,29 @@ const questions = [
   },
 ];
 
-export function StepsAndWorkflowsGuide() {
+export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
+  useEffect(() => focusGuideTopic(topic), [topic]);
   return <section className="stack steps-guide" aria-labelledby="steps-guide-title">
-    <h1 id="steps-guide-title">Guide</h1>
+    <h1 id="steps-guide-title" tabIndex={-1}>Guide</h1>
     <p className="guide-introduction">Follow supervised work from Home to a task’s outcome, then look up how to write the steps and workflows the Supervisor plans with.</p>
     <nav className="guide-contents" aria-label="Guide contents">
       <div><strong>Follow supervised work</strong><GuideLinks ordered items={walkthrough.map(({id, title}) => [id, title] as const)}/></div>
       <div><strong>Write steps and workflows</strong><GuideLinks items={referenceTopics}/></div>
+      <div className="guide-glossary-contents"><strong>Glossary</strong><GuideLinks items={[["terms", "All terms and states"], ...guideTerms.slice(0, 5).map(({id, title}) => [id, title] as const)]}/></div>
     </nav>
 
     <h2 id="guide-follow-title">Follow supervised work</h2>
     <ol className="guide-walkthrough">{walkthrough.map(({id, title, body}) => <li key={id}><h3 id={`guide-${id}-title`} tabIndex={-1}>{title}</h3>{body}</li>)}</ol>
 
+    <h2 id="guide-terms-title" tabIndex={-1}>Glossary: terms and states</h2>
+    <p className="muted">Look up the words and statuses used in the dashboard. These definitions explain observations and controls; they do not grant permission or establish that work was performed.</p>
+    {guideTerms.map(term => <Topic key={term.id} id={`guide-${term.id}-title`} title={term.title}><p>{term.description}</p></Topic>)}
+
     <h2 id="guide-write-title">Write steps and workflows</h2>
     <p className="muted">Steps and workflows are files in a project’s checkout. These topics cover their format, requirements, review and recovery.</p>
 
     <Topic id="guide-layout-title" title="Where definitions live">
-      <p>Project definitions belong to the operative checkout, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. A project’s <strong>Definitions</strong> shows the active scope, source paths and origin.</p>
+      <p>Project definitions belong to the working folder, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. A project’s <strong>Definitions</strong> shows the active scope, source paths and origin.</p>
       <Example label="Project definition layout" value={layoutExample}/>
       <p><code>project.yaml</code> indexes every reusable definition, including optional ones, by path with a short summary and an optional required flag. Both the Supervisor and the supervised agent start there, then read the full relevant definitions in <code>steps/</code> and <code>workflows/</code> on demand. Summaries guide reading; full definitions remain authoritative policy.</p>
       <p>The project configuration editor changes only the selected checkout's <code>project.yaml</code>. Full definition files stay separate. For a new project, start with <code>workflows: []</code> and <code>steps: []</code>; when adding a reusable file, add its index entry too.</p>
@@ -244,7 +252,7 @@ skills:
   - .claude/skills/project-testing/SKILL.md
   - effect-v4-development
   - plugin:review`}</code></pre>
-      <p>File strings and local skill paths are relative to the operative checkout root, including for shared definitions. Entries with a slash or an ending of <code>.md</code> are paths and must name <code>SKILL.md</code> exactly, including a root <code>SKILL.md</code>. Skill paths have no empty, dot or parent segments; <code>./SKILL.md</code> is invalid. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
+      <p>File strings and local skill paths are relative to the working folder root, including for shared definitions. Entries with a slash or an ending of <code>.md</code> are paths and must name <code>SKILL.md</code> exactly, including a root <code>SKILL.md</code>. Skill paths have no empty, dot or parent segments; <code>./SKILL.md</code> is invalid. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
       <p>Omit either list or use <code>[]</code> for none. Each list allows at most 100 entries; skills cannot repeat. Paths allow up to 4096 characters and catalog names up to 256. Names use letters, digits, dots, underscores and hyphens with optional colon namespaces; each segment starts with a letter or digit. Absolute paths, home aliases, schemes, parent traversal, backslashes, control characters and credential-like values are rejected. References grant no access or authority; readers must respect filesystem and symlink boundaries.</p>
       <p>Definitions and Task show pointers read-only; introductions carry them without loading their contents. Read applicable guidance progressively within the available tools and context budget. Changing a locator changes definition identity; its content is not frozen or verified by that revision. A listed reference proves neither consultation nor execution. Global skills do not enable shared definitions or supervision.</p>
     </Topic>
@@ -279,7 +287,7 @@ skills:
     <Topic id="guide-team-title" title="Supervisor team and operational assignments">
       <p>The Supervisor team has one root and up to five helpers by default. Its project setting can be changed from 0 to 20; zero prevents new recruitment while preserving existing members. Each helper may cover several operational subtree roots, including verified descendants added later. The team stays flat even when the operational workflow is nested.</p>
       <p>The root coordinates the main and unassigned work. Helpers assess and guide their assigned children. A conversation’s <strong>Supervision</strong> view displays this team separately from connected operational conversations and marks each row with its effective assignee. An unknown or transferring owner stays explicit. Team membership and assignments do not change step ownership, contributor links or parent completion.</p>
-      <p>Use a T3 link to open a helper conversation. A person writing there follows T3's native follow-up behavior. Root context notes and routine helper check-ins go through Supervisor team operations, not raw <code>t3_thread_send</code>. Pending handovers and significant issues remain visible until their state is resolved.</p>
+      <p>Use a T3 link to open a helper conversation. A message you send there follows that conversation’s normal follow-up behavior. Supervisor coordinates root context notes and routine helper check-ins. Pending handovers and significant issues remain visible until their state is resolved.</p>
       <p>The team view is a current observation. Read its timestamp and any incomplete, unavailable or stale warning before relying on membership or assignment details. Reading the view does not wake chats or change workflow state.</p>
     </Topic>
 

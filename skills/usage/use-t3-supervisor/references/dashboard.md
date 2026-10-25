@@ -320,3 +320,9 @@ unavailable IDs remain saved. Removing an exclusion is an explicit Enable, not a
 way to enable the whole No Project group. Stop notices show the caller, original
 human-message ID and time; Home's Review and enable opens that conversation's
 scoped control. No extra confirmation or semantic reapproval is required for Stop.
+
+## Contextual help and vocabulary
+
+Use the visible help disclosures for section-specific explanations, or follow a contextual Guide link to its topic. Guide includes a glossary of conversation states, working folders, monitoring, team roles and delivery outcomes. Topics have stable addresses such as `#/guide?topic=orphaned-chat`; browser Back retains the prior list context and editing drafts.
+
+An orphaned chat refers to a working folder confirmed missing at the last folder check. Its history stays retained. Show orphaned chats restores these rows in the project list; Home retains their supervised work and attention. Unknown, denied or unavailable folder access does not prove missing. Project entry and Refresh folders own new folder observations; Home shows the retained check.
