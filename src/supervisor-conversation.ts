@@ -39,6 +39,7 @@ const rank = (mode: unknown) => ["approval-required", "auto-accept-edits", "auto
 const acceptedReceipt = (value: unknown): boolean => record(value) && Number.isSafeInteger(value.sequence) && Number(value.sequence) >= 0;
 const MAX_DESCENDANT_OBSERVATIONS_PER_CYCLE = 100;
 const MAX_DESCENDANT_OBSERVATIONS_PER_MAIN = 20;
+const MAX_ARCHIVED_RECONCILIATIONS_PER_MAIN = 5;
 const MAX_THREAD_PROJECTIONS_PER_CHECKIN = 100;
 const terminalRunStatuses = new Set(["completed", "failed", "interrupted", "cancelled"]);
 const protocolDiagnosticCodeSet = new Set<string>(workflowProtocolDiagnosticCodes);
@@ -474,6 +475,8 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const observedAt = yield* Ref.make(HashMap.empty<string, number>());
   const descendantObservedAt = yield* Ref.make(HashMap.empty<string, number>());
   const descendantOffsets = yield* Ref.make(HashMap.empty<string, number>());
+  // the native and workflow state at which each archived child's retained records were last reconciled
+  const archivedReconciled = yield* Ref.make(HashMap.empty<string, string>());
   const observeOffset = yield* Ref.make(0);
   // the last native detail read of each recorded interpretation submission, kept while the root's snapshot of its item is unchanged
   const submissionDetailMemo = yield* Ref.make(HashMap.empty<string, {signature: string; detail: unknown}>());
@@ -711,7 +714,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     }));
     if (!observedAgent) return;
     // verified native descendants observed in this cycle; each may record branch selections for its own workflow
-    const verifiedChildren: Projection[] = [];
+    const verifiedChildren: Array<{projection: Projection; archivedMarker?: string}> = [];
     if (introduction?.state === "sent") {
       const scope = resolveSupervisorScope(threads, task.projectId, task.threadId, store.ownedIds);
       const liveDescendants = scope.main && scope.allowedIds.has(scope.main.id) ? scope.descendants.filter(child => scope.allowedIds.has(child.id) && scope.liveIds.has(child.id)) : [];
@@ -786,12 +789,39 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
             projection: childProjection, now, includeDetachedChildItems: true,
             ...(unresolvedLifecycleSnapshot && !equivalentTerminalRun ? {preserveNativeChildLifecycle: true} : {}),
             ...(nativeChildLifecycle ? {nativeChildLifecycle} : {})});
-          if (parentVerified) verifiedChildren.push(childProjection);
+          if (parentVerified) verifiedChildren.push({projection: childProjection});
           return true;
         }));
         if (counted.ok && counted.value) observed++;
       }
       if (liveDescendants.length) yield* Ref.update(descendantOffsets, HashMap.set(task.threadId, (previousOffset + Math.max(1, observed)) % liveDescendants.length));
+      // an archived child is no longer observed for activity, but its retained final reply can still hold the selection its own workflow
+      // waits for; its projection is read only (nothing wakes it), and again only after its native or workflow state changed
+      const archivedChildren = scope.main && scope.allowedIds.has(scope.main.id)
+        ? scope.descendants.filter(child => scope.allowedIds.has(child.id) && !scope.liveIds.has(child.id) && !child.deletedAt) : [];
+      let reconciled = 0;
+      for (const child of archivedChildren) {
+        if (!workflows || cycle.descendantBudget <= 0 || reconciled >= MAX_ARCHIVED_RECONCILIATIONS_PER_MAIN) break;
+        const store_ = workflows;
+        const read = yield* attempt(Effect.gen(function* () {
+          const document = yield* store_.get(task.projectId, task.threadId, child.id);
+          if (!document || document.threadId !== child.id || document.sourceBinding?.taskId !== task.id ||
+            pendingBranchDecisions(document.plan, documentBranchSelections(document)).length === 0) return null;
+          const marker = `${String(child.archivedAt ?? "")}|${String(child.latestRunCompletedAt ?? "")}|${document.revision}`;
+          if (Option.getOrUndefined(HashMap.get(yield* Ref.get(archivedReconciled), child.id)) === marker) return null;
+          const childProjection = yield* readScopedProjection(child.id);
+          if (!childProjection || childProjection.thread.id !== child.id || childProjection.thread.lineage.relationshipToParent !== "subagent" ||
+            childProjection.thread.lineage.parentThreadId !== child.lineage.parentThreadId) return null;
+          const parentId = child.lineage.parentThreadId;
+          const parentInfo = parentId ? scope.byId.get(parentId) : null;
+          const parentProjection = parentId && parentInfo && scope.allowedIds.has(parentId) ? yield* readScopedProjection(parentId) : null;
+          const parentVerified = Boolean(parentId && parentProjection && parentInfo && parentProjection.thread.id === parentId &&
+            (parentId === task.threadId || parentProjection.thread.lineage.relationshipToParent === "subagent" &&
+              parentProjection.thread.lineage.parentThreadId === parentInfo.lineage.parentThreadId));
+          return parentVerified ? {projection: childProjection, archivedMarker: marker} : null;
+        }));
+        if (read.ok && read.value) {verifiedChildren.push(read.value);reconciled++;}
+      }
     }
     let supervisor = cycle.supervisorProjections.get(task.supervisorThreadId);
     if (supervisor === undefined) {
@@ -826,11 +856,13 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     yield* admitted((guard) => importExternalContributions(guard, task, introduction, agent, current, now));
     yield* admitted((guard) => importMainBranchSelections(guard, task, introduction, agent, current, now));
     const childSince = taskSourceTimestamp(task, agent);
-    for (const child of verifiedChildren) {
+    for (const {projection: child, archivedMarker} of verifiedChildren) {
       // a child's records follow the task source; its finished final reply stays importable while it remains in scope
       const messages = childSince === null ? [] : completedAssistantMessages(child, child.thread.id).filter(message => message.createdAt !== null && message.createdAt >= childSince);
       if (messages.length) yield* admitted((guard) => importBranchSelections(guard, task, child, messages, current,
         completedAssistantMessages(agent, task.threadId), now));
+      // an archived child is read again only after its native state or its workflow revision changes
+      if (archivedMarker !== undefined) yield* Ref.update(archivedReconciled, HashMap.set(child.thread.id, archivedMarker));
     }
   });
   const observe = (threads: readonly ThreadInfo[]): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {

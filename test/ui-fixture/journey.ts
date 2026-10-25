@@ -211,7 +211,7 @@ function branchJourney(phase: BranchCase, base: TaskInterpretationInfo, taskBase
     inCurrentPlan: true, current, path, revision, reason, condition: reviewCondition, sourceThreadId: threadId, sourceMessageId: `fixture-packing-selection-${revision}`,
     recordedAt: at, invalidatedAt: null});
   const event = (path: "then" | "else", revision: number, note: string, at: number): WorkflowProgressBranchEvent => ({id: `fixture-branch-event-${revision}`, kind: "selected",
-    nodeId: "packing-review-depth", revision, path, note, sourceThreadId: threadId, sourceMessageId: `fixture-packing-selection-${revision}`, recordedAt: at});
+    nodeId: "packing-review-depth", revision, path, condition: reviewCondition, note, sourceThreadId: threadId, sourceMessageId: `fixture-packing-selection-${revision}`, recordedAt: at});
   const thenReason = "Reconstructed example: one scan module changes and its behavior is covered by focused tests.";
   const elseReason = "Reconstructed example: the overfill rule turned out to touch shared carton accounting, so two paired reviews fit.";
   const live = phase === "branch-pending" ? {statuses: {...done, review: "underway"} as Statuses, selections: [] as WorkflowProgressBranchSelection[], events: [] as WorkflowProgressBranchEvent[],

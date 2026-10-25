@@ -250,6 +250,10 @@ function WorkflowProtocolDiagnosticView({diagnostic}: {diagnostic: WorkflowProto
   </section>;
 }
 
+// a recorded completion is not presented as current while its assessment carries a branch reassessment reason
+const workflowStatusLabel = (workflow: WorkflowProgressWorkflow) => workflow.status === "completed" && workflow.assessment?.reassessment
+  ? "Completion needs reassessment" : workflowExecutionStatusText[workflow.status];
+
 const workflowExecutionStatusText = {
   planned: "Planned",
   underway: "Underway",
@@ -473,11 +477,10 @@ function SupervisorRecords({workflow}: {workflow: WorkflowProgressWorkflow}) {
 function BranchDecisionHistory({workflow}: {workflow: WorkflowProgressWorkflow}) {
   const events = workflow.branchEvents ?? [];
   if (events.length === 0) return null;
-  const conditions = new Map((workflow.branchSelections ?? []).map(item => [item.nodeId, item.condition]));
   return <section className="stack"><h3>Branch decisions</h3>
     <p className="small muted">Each decision is the agent’s own record of which path applies. It is not evidence that the path’s work was performed. <GuideLink topic="branch-decision">Branch decisions</GuideLink></p>
     <ol className="stack supervisor-records">{events.map(event => <li key={event.id}>
-      <p>{event.kind === "selected" ? `${event.path === "then" ? "Then" : "Else"} path selected` : `Selection of the ${event.path} path no longer applies`}{conditions.get(event.nodeId) ? <> for “{conditions.get(event.nodeId)}”</> : null}</p>
+      <p>{event.kind === "selected" ? `${event.path === "then" ? "Then" : "Else"} path selected` : `Selection of the ${event.path} path no longer applies`}{event.condition ? <> for “{event.condition}”</> : <> (condition not recorded with this event)</>}</p>
       <p className="definition-copy">{event.note}</p>
       <p className="small muted">Revision {event.revision} · {formatProgressTime(event.recordedAt)}{event.sourceThreadId && <> · <a href={threadHref(event.sourceThreadId)}>Source conversation</a></>}{event.sourceMessageId && <> · message <code>{event.sourceMessageId}</code></>}</p>
     </li>)}</ol>
@@ -521,7 +524,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
       const notes = workflow ? stepNotes(task, {kind: "live", workflow, plan: workflow.plan ?? {kind: "sequence", templatePath: null, nodes: []}}) : null;
       return <li key={thread.threadId} className="workflow-progress-thread">
         <div className="row between">
-          <div><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · Workflow: ${workflowExecutionStatusText[workflow.status]}` : ""}</p></div>
+          <div><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · Workflow: ${workflowStatusLabel(workflow)}` : ""}</p></div>
           <span className={`pill ${lifecycle.tone}`}>Conversation: {lifecycle.label}</span>
         </div>
         <p className="small">{workflow?.parentNodeReferences.length ? <>Contributes to: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</> : "No recorded contribution to a parent step"}</p><div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>

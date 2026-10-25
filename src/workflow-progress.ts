@@ -63,13 +63,14 @@ export const WorkflowProgressBranchSelectionSchema = Schema.Struct({
   invalidatedAt: Schema.NullOr(Schema.Number),
 });
 export type WorkflowProgressBranchSelection = typeof WorkflowProgressBranchSelectionSchema.Type;
-// one recorded branch event, newest first: a selection revision or the invalidation of one
+// one recorded branch event, newest first: a selection revision or the invalidation of one, with the condition it answered when recorded
 export const WorkflowProgressBranchEventSchema = Schema.Struct({
   id: Schema.String,
   kind: Schema.Literals(["selected", "invalidated"]),
   nodeId: Schema.String,
   revision: Schema.Number,
   path: Schema.Literals(branchSelectionPaths),
+  condition: Schema.optionalKey(Schema.NullOr(Schema.String)),
   note: Schema.String,
   sourceThreadId: NullableText,
   sourceMessageId: NullableText,
@@ -232,7 +233,8 @@ const progressBranchSelections = (document: WorkflowStateDocument): WorkflowProg
 const progressBranchEvents = (document: WorkflowStateDocument): WorkflowProgressBranchEvent[] => document.evidence
   .flatMap(item => (item.kind === "branch_selected" || item.kind === "branch_selection_invalidated") && item.branch && item.targetNodeId
     ? [{id: item.id, kind: item.kind === "branch_selected" ? "selected" as const : "invalidated" as const, nodeId: item.targetNodeId, revision: item.branch.revision,
-      path: item.branch.path, note: item.note, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId, recordedAt: item.recordedAt}] : [])
+      path: item.branch.path, condition: item.branch.condition ?? null, note: item.note, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
+      recordedAt: item.recordedAt}] : [])
   .sort((left, right) => right.recordedAt - left.recordedAt).slice(0, 50);
 
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({

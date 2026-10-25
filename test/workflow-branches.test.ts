@@ -297,7 +297,7 @@ it.live("selections import under revision fences, and an invalidated selection s
   assert.equal(document.evidence.filter(item => item.kind === "branch_selection_invalidated").length, 1);
   assert.equal((yield* select(branch.nodeId, 1, "then", 1000, 2100)).status, "unchanged");
   assert.equal(documentBranchSelections(yield* main()).size, 0, "the rescan of an older record never reactivates it");
-  assert.deepEqual(yield* select(branch.nodeId, 2, "else", 1900, 2200), {status: "rejected", code: "branch_revision_stale"},
+  assert.deepEqual(yield* select(branch.nodeId, 2, "else", 1900, 2200), {status: "rejected", code: "branch_record_outdated"},
     "a record written before the change does not answer the changed branch");
   assert.equal((yield* select(branch.nodeId, 2, "else", 2300, 2300)).status, "applied");
   document = yield* main();
@@ -396,4 +396,36 @@ it.live("a not-selected path neither raises attention nor counts as active work"
   assert.equal(reach.get(branch.then.nodes[0]!.kind === "step" ? (branch.then.nodes[0] as {nodeId: string}).nodeId : ""), "selected");
   assert.equal(reach.get(planBranches(document.plan)[1]!.nodeId), "unconditional", "the task-local branch itself sits on the unconditional path");
   assert.equal(reach.get(planEntities(planBranches(document.plan)[1]!.then)[0]!.nodeId), "undecided");
+}));
+
+it.live("a record written before the latest change of its branch never selects it, with or without an earlier selection", () => Effect.gen(function* () {
+  const {main, apply, select} = yield* storeFixture;
+  let document = yield* main();
+  const branch = localBranch(document);
+  const reword = (condition: string, operationId: string, at: number) => Effect.gen(function* () {
+    const current = yield* main();
+    assert.equal((yield* apply(current, withLocalBranch(current.plan!, item => ({...item, condition})), operationId, at)).status, "applied");
+  });
+  // revision 1 written for condition A is observed only after A changed to B, with no selection ever recorded
+  yield* reword("The change rewrites stored data.", "to-b", 2000);
+  assert.deepEqual(yield* select(branch.nodeId, 1, "then", 1500, 2100), {status: "rejected", code: "branch_record_outdated"});
+  // a selection answering B is invalidated by B to C; a record written for C is observed only after C changed to D and never answers D
+  assert.equal((yield* select(branch.nodeId, 1, "then", 2050, 2100)).status, "applied");
+  yield* reword("The change rewrites shared stored data.", "to-c", 3000);
+  yield* reword("The change rewrites shared data across tenants.", "to-d", 4000);
+  assert.deepEqual(yield* select(branch.nodeId, 2, "else", 3500, 4100), {status: "rejected", code: "branch_record_outdated"});
+  // supporting work and a status change elsewhere leave the boundary where the last branch change put it
+  document = yield* main();
+  const support = {...document.plan!, nodes: [...document.plan!.nodes, {...localStep("notify"), nodeId: randomUUID(), templatePath: null, source: null, resolution: "resolved",
+    status: "planned", contributorThreadIds: []} as WorkflowPlanNodeInfo]};
+  assert.equal((yield* apply(document, support, "support", 5000)).status, "applied");
+  assert.equal((yield* select(branch.nodeId, 2, "else", 4500, 5100)).status, "applied", "a record after the last branch change but before unrelated edits still answers it");
+  document = yield* main();
+  assert.deepEqual([...documentBranchSelections(document)], [[branch.nodeId, "else"]]);
+  assert.deepEqual(document.branchSelections.map(item => [item.revision, item.condition]), [[2, "The change rewrites shared data across tenants."]]);
+  assert.deepEqual(document.evidence.filter(item => item.kind === "branch_changed").map(item => [item.targetNodeId, item.recordedAt]),
+    [[branch.nodeId, 2000], [branch.nodeId, 3000], [branch.nodeId, 4000]], "each change of this branch is a retained boundary; the support edit adds none");
+  assert.deepEqual(document.evidence.filter(item => item.kind === "branch_selected" || item.kind === "branch_selection_invalidated").map(item => [item.kind, item.recordedAt, item.branch?.condition]),
+    [["branch_selected", 2100, "The change rewrites stored data."], ["branch_selection_invalidated", 3000, "The change rewrites stored data."],
+      ["branch_selected", 5100, "The change rewrites shared data across tenants."]], "every selection event keeps the condition it answered");
 }));

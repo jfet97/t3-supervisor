@@ -493,12 +493,28 @@ const validBranchSelections = (value: unknown): value is BranchSelection[] => Ar
     validId(item.sourceThreadId) && validId(item.sourceRunId) && validId(item.sourceMessageId) && Number.isFinite(item.recordedAt));
 
 const validEvidenceBranch = (value: unknown): boolean => value === undefined || isRecord(value) && validBranchRevision(value.revision) &&
-  typeof value.path === "string" && branchPathSet.has(value.path) && typeof value.changed === "boolean";
+  typeof value.path === "string" && branchPathSet.has(value.path) && typeof value.changed === "boolean" &&
+  (value.condition === undefined || branchConditionText(value.condition) === value.condition);
+
+/** When a plan edit last added, removed or changed the identity of a branch occurrence, or null when no edit ever did. */
+export const branchChangedAt = (document: Pick<WorkflowStateDocument, "evidence">, nodeId: string): number | null =>
+  document.evidence.reduce<number | null>((latest, item) => item.kind === "branch_changed" && item.targetNodeId === nodeId &&
+    (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null);
+
+// the branch occurrences an edit added, removed or changed in condition, else path or enclosing position
+const changedBranches = (previous: WorkflowStatePlan, next: WorkflowStatePlan): Array<{nodeId: string; condition: string | null}> => {
+  const before = branchIdentityKeys(previous);
+  const after = branchIdentityKeys(next);
+  const conditions = new Map(planBranches(next).map(branch => [branch.nodeId, branch.condition]));
+  return [...new Set([...before.keys(), ...after.keys()])].filter(nodeId => before.get(nodeId) !== after.get(nodeId))
+    .map(nodeId => ({nodeId, condition: conditions.get(nodeId) ?? null}));
+};
 
 /**
  * Decides one selection revision against the author's own workflow document: revisions start at 1 and grow by exactly one, and an
- * identical replay is a no-op, so replaying an invalidated selection leaves its branch pending. The branch must be in the current plan;
- * a record from a message older than the selection's invalidation never selects the changed branch.
+ * identical replay is a no-op, so replaying an invalidated selection leaves its branch pending. The branch must be in the current plan,
+ * and a record from a message created before the latest edit that added, removed or changed that branch never selects it, whether or
+ * not a selection existed then.
  */
 export const branchSelectionImportDecision = (document: WorkflowStateDocument, input: Omit<BranchSelectionImport, "sourceThreadId" | "sourceRunId" | "sourceMessageId">):
   | {kind: "unchanged"}
@@ -510,8 +526,8 @@ export const branchSelectionImportDecision = (document: WorkflowStateDocument, i
   if (existing && input.revision === existing.revision) return reject("branch_revision_conflict");
   if (existing && input.revision < existing.revision) return reject("branch_revision_stale");
   if (input.revision !== (existing?.revision ?? 0) + 1) return reject("branch_revision_gap");
-  if (existing?.state === "invalidated" && (input.sourceCreatedAt === null || existing.invalidatedAt === null || input.sourceCreatedAt < existing.invalidatedAt))
-    return reject("branch_revision_stale");
+  const changedAt = branchChangedAt(document, input.nodeId);
+  if (changedAt !== null && (input.sourceCreatedAt === null || input.sourceCreatedAt < changedAt)) return reject("branch_record_outdated");
   const branch = planBranches(document.plan).find(item => item.nodeId === input.nodeId);
   const identity = branchIdentityKeys(document.plan).get(input.nodeId);
   if (!branch || identity === undefined) return reject("branch_node_unknown");
@@ -575,7 +591,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   (value.branchSelections === undefined || validBranchSelections(value.branchSelections)) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
     validId(item.id) && validId(item.operationId) && ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
-      "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated"].includes(String(item.kind)) &&
+      "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed"].includes(String(item.kind)) &&
     validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
@@ -940,7 +956,13 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       targetNodeId: selection.nodeId, targetNodeName: null, statusFrom: null, statusTo: null,
       sourceThreadId: selection.sourceThreadId, sourceRunId: selection.sourceRunId, sourceMessageId: selection.sourceMessageId, sourceItemId: null, agreementKey: null,
       note: `The branch changed its condition, else path or position, or left the plan; selection revision ${selection.revision} (${selection.path}) no longer applies and the decision is pending again.`,
-      branch: {revision: selection.revision, path: selection.path, changed: true}}));
+      branch: {revision: selection.revision, path: selection.path, changed: true, condition: selection.condition}}));
+    // every branch change moves that branch's boundary, with or without a selection: an older record never answers the changed branch
+    for (const change of changedBranches(current.plan, nextPlan)) evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "branch_changed", now: at,
+      targetNodeId: change.nodeId, targetNodeName: null, statusFrom: null, statusTo: null,
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null,
+      note: change.condition === null ? "The branch left the plan; a selection record written before this edit never selects it."
+        : "The branch was added or its condition, else path or position changed; a selection record written before this edit never selects it."}));
 
     const oldPlanHash = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan);
     const newPlanHash = workflowPlanSignature(validatedInput.objective, validatedInput.sourceBinding, validatedInput.requirements, validatedInput.issues, nextPlan);
@@ -1155,7 +1177,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const evidence = yield* makeEvidence({operationId: `branch:${fingerprint([current.workflowId, input.nodeId, input.revision])}`, owner, kind: "branch_selected", now: at,
       targetNodeId: input.nodeId, targetNodeName: null, statusFrom: null, statusTo: null,
       sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, agreementKey: null,
-      note: input.reason, branch: {revision: input.revision, path: input.path, changed}});
+      note: input.reason, branch: {revision: input.revision, path: input.path, changed, condition: branch.condition}});
     const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
       branchSelections: existing ? current.branchSelections.map(item => item.nodeId === entry.nodeId ? entry : item) : [...current.branchSelections, entry],
       evidence: [...current.evidence, evidence], updatedAt: at};

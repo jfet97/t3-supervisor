@@ -4,7 +4,7 @@ import {DefinitionReferences} from "./definition-references.js";
 import type { TaskInterpretationInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowAssessmentInfo } from "../../src/workflow-assessment.js";
 import type { WorkflowProgressBranchSelection, WorkflowProgressContribution, WorkflowProgressObservation, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
-import { branchPathGroups, isPlanGroup, pendingBranchDecisions, planEntities, planReach, type BranchPath, type PlanReach } from "../../src/workflow-plan-tree.js";
+import { branchPathGroups, isPlanGroup, pendingBranchDecisions, planBranches, planEntities, planReach, type BranchPath, type PlanReach } from "../../src/workflow-plan-tree.js";
 import { GuideLink } from "./guide-link.js";
 import { acceptedAgreement, pendingProposal, statusRecord, type PlanChange, type PlanChangeField, type StepNotes } from "./task-record.js";
 
@@ -28,6 +28,18 @@ export function planSteps(node: WorkflowPlanNodeInfo | null): Array<Extract<Work
   if (!node) return [];
   return planEntities(isPlanGroup(node) ? node : {kind: "sequence", templatePath: null, nodes: [node]})
     .filter((entity): entity is Extract<WorkflowPlanNodeInfo, {kind: "step"}> => entity.kind === "step");
+}
+
+/**
+ * Whether a workflow occurrence's recorded completion no longer stands as current: a decision it reaches is pending, or a selection
+ * inside it was recorded or invalidated after the completion record. The recorded status itself stays as history.
+ */
+export function completionNeedsReassessment(node: Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>, selections: readonly WorkflowProgressBranchSelection[],
+  completedAt: number | null): boolean {
+  if (node.status !== "completed" || !node.plan) return false;
+  if (pendingBranchDecisions(node.plan, currentBranchPaths({branchSelections: [...selections]})).length > 0) return true;
+  const inside = new Set(planBranches(node.plan).map(branch => branch.nodeId));
+  return completedAt !== null && selections.some(item => inside.has(item.nodeId) && (item.recordedAt > completedAt || (item.invalidatedAt ?? 0) > completedAt));
 }
 
 /** The current selected path of each branch in a live workflow; an invalidated or removed selection is not current. */
@@ -157,9 +169,11 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
   }
   if (node.kind === "branch") return <BranchJourney node={node} {...passed}/>;
   const alternative = live && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
-  const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : node.status;
+  const reassess = live && reach !== "not_selected" && node.kind === "workflow" &&
+    completionNeedsReassessment(node, selections ?? [], statusRecord(notes.records?.get(node.nodeId), "completed")?.recordedAt ?? null);
+  const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : reassess ? "needs_attention" : node.status;
   const label = !live ? modeLabels[mode] : alternative ? reach === "not_selected" ? "Not selected" : "Awaiting decision"
-    : reach === "not_selected" ? `${states[node.status]} · path not selected` : states[node.status];
+    : reassess ? "Completed earlier · needs reassessment" : reach === "not_selected" ? `${states[node.status]} · path not selected` : states[node.status];
   const accepted = notes.agreed?.get(node.nodeId)?.node;
   const proposed = notes.proposed?.get(node.nodeId)?.node;
   const acceptedNote = accepted && accepted.reason !== node.reason ? accepted.reason : null;
@@ -180,6 +194,7 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
         {node.reason && <div className="step-note"><strong>Plan note</strong><p>{node.reason}</p></div>}
         {acceptedNote && <div className="step-note"><strong>Accepted plan note</strong><p>{acceptedNote}</p></div>}
         {proposedNote && <div className="step-note proposed"><strong>Proposed plan note · awaiting acceptance</strong><p>{proposedNote}</p></div>}
+        {reassess && <p className="notice">This workflow was assessed completed, but a branch decision inside it is pending or changed afterwards, so its completion needs reassessment. The recorded status stays as history.</p>}
         {live && <StepRecords status={node.status} records={notes.records?.get(node.nodeId)}/>}
         {node.kind === "workflow" && node.omissions.length > 0 && <div className="step-note"><strong>Not applicable in this plan</strong><ul className="stack">{node.omissions.map((omission, index) =>
           <li key={`${omission.templatePath}:${omission.id}:${index}`}><strong>{omission.name}</strong> <span className="muted">({omission.kind} {omission.id})</span> — {omission.reason}</li>)}</ul></div>}

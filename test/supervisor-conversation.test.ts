@@ -6177,3 +6177,38 @@ it.effect("a verified child's finished final reply selects its own workflow's br
   const stored = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-reviewer"))!.branchSelections[0]!;
   assert.deepEqual([stored.sourceThreadId, stored.sourceRunId], ["child-reviewer", childRun.id]);
 }));
+
+it.effect("an archived child's retained final reply still selects its own workflow's branch, read without waking the child", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock);
+  const {document, task} = yield* agreeBranchWorkflow(fixture, clock.now);
+  const owner = {projectId, mainThreadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation};
+  assert.equal((yield* fixture.workflows.linkChild(owner, {operationId: "link-archived", lineage: {threadId: "child-archived", parentThreadId: operativeThreadId,
+    relationshipToParent: "subagent"}, note: "A reviewer archived after finishing."}, clock.now + 11_000)).status, "created");
+  const childDocument = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-archived"))!;
+  const childPlan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [{kind: "branch", condition: "The diff stays within one module.",
+    reason: "Review depth.", then: {kind: "sequence", nodes: [localDraftStep("single-pass", "Single pass")]}}]}},
+  {...task.definitionContext!, config: {required: []}, knownRequirementKeys: []});
+  assert.ok(childPlan?.plan);
+  assert.equal((yield* fixture.workflows.apply(owner, {operationId: "archived-child-plan", workflowId: childDocument.workflowId, expectedRevision: childDocument.revision,
+    status: "planned", objective: null, sourceBinding: document.sourceBinding, requirements: [], issues: [...task.agreement!.workflow.issues], plan: childPlan.plan,
+    note: "The reviewer's plan."}, {pinnedContext: task.definitionContext!, originalProposal: task.agreement!.workflow, expectedTaskId: task.id,
+    expectedProposalId: task.agreement!.proposalId, expectedSourceHash: task.sourceHash, acceptedTaskAgreement: task.agreement!,
+    acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}, clock.now + 12_000)).status, "applied");
+  const childBranch = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-archived"))!.plan!.nodes[0]!;
+  assert.ok(childBranch.kind === "branch");
+
+  const child = makeProjection({...makeThread({id: "child-archived", title: "Archived reviewer"}),
+    lineage: {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId}, archivedAt: new Date(clock.now + 14_000).toISOString()});
+  const childRun = appendRun({projection: child, id: "child-archived-run", ordinal: 1, status: "completed", messageId: "child-archived-input", text: "Review the change.", now: clock.now + 13_000});
+  const final = appendMessageToRun(child, childRun, {id: "child-archived-final", role: "assistant", text: `One pass covered it.\n${branchFence({taskId: task.id, nodeId: childBranch.nodeId,
+    revision: 1, path: "then", reason: "The diff stays inside the export module."})}`, now: clock.now + 13_001});
+  fixture.addChildProjection(child);
+  const callsBefore = fixture.calls.length;
+  yield* observeAgreement(fixture, clock.now + 40_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture, "child-archived"), [[childBranch.nodeId, 1, "then", "current", final.id]],
+    "the final record of a child archived before its observation slot still imports");
+  assert.equal(fixture.calls.slice(callsBefore).some(call => JSON.stringify(call).includes("child-archived")), false, "reconciliation reads; it never contacts the archived child");
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture, "child-archived"), [[childBranch.nodeId, 1, "then", "current", final.id]]);
+}));
