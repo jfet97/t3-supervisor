@@ -6212,3 +6212,47 @@ it.effect("an archived child's retained final reply still selects its own workfl
   yield* observeAgreement(fixture, clock.now + 60_000);
   assert.deepEqual(yield* branchSelectionsOf(fixture, "child-archived"), [[childBranch.nodeId, 1, "then", "current", final.id]]);
 }));
+
+it.effect("an archived child's revised final selection is reconciled although no decision was pending, still without waking the child", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock);
+  const {document, task} = yield* agreeBranchWorkflow(fixture, clock.now);
+  const owner = {projectId, mainThreadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation};
+  assert.equal((yield* fixture.workflows.linkChild(owner, {operationId: "link-revising", lineage: {threadId: "child-revising", parentThreadId: operativeThreadId,
+    relationshipToParent: "subagent"}, note: "A reviewer that revises its choice and is archived."}, clock.now + 11_000)).status, "created");
+  const childDocument = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-revising"))!;
+  const childPlan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [{kind: "branch", condition: "The diff stays within one module.",
+    reason: "Review depth.", then: {kind: "sequence", nodes: [localDraftStep("single-pass", "Single pass")]},
+    else: {kind: "sequence", nodes: [localDraftStep("two-pass", "Two passes")]}}]}}, {...task.definitionContext!, config: {required: []}, knownRequirementKeys: []});
+  assert.ok(childPlan?.plan);
+  assert.equal((yield* fixture.workflows.apply(owner, {operationId: "revising-child-plan", workflowId: childDocument.workflowId, expectedRevision: childDocument.revision,
+    status: "planned", objective: null, sourceBinding: document.sourceBinding, requirements: [], issues: [...task.agreement!.workflow.issues], plan: childPlan.plan,
+    note: "The reviewer's plan."}, {pinnedContext: task.definitionContext!, originalProposal: task.agreement!.workflow, expectedTaskId: task.id,
+    expectedProposalId: task.agreement!.proposalId, expectedSourceHash: task.sourceHash, acceptedTaskAgreement: task.agreement!,
+    acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}, clock.now + 12_000)).status, "applied");
+  const childBranch = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-revising"))!.plan!.nodes[0]!;
+  assert.ok(childBranch.kind === "branch");
+
+  // the live child selects revision 1; once imported, no decision of its workflow is pending
+  const child = makeProjection({...makeThread({id: "child-revising", title: "Revising reviewer"}),
+    lineage: {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId}});
+  const firstRun = appendRun({projection: child, id: "child-revising-run-1", ordinal: 1, status: "completed", messageId: "child-revising-input-1", text: "Review the change.", now: clock.now + 13_000});
+  const first = appendMessageToRun(child, firstRun, {id: "child-revising-first", role: "assistant", text: `One pass fits.\n${branchFence({taskId: task.id, nodeId: childBranch.nodeId,
+    revision: 1, path: "then", reason: "The diff stays inside the export module."})}`, now: clock.now + 13_001});
+  fixture.addChildProjection(child);
+  yield* observeAgreement(fixture, clock.now + 40_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture, "child-revising"), [[childBranch.nodeId, 1, "then", "current", first.id]]);
+
+  // its later final reply revises the choice, and it is archived before its next observation slot
+  const secondRun = appendRun({projection: child, id: "child-revising-run-2", ordinal: 2, status: "completed", messageId: "child-revising-input-2", text: "Continue.", now: clock.now + 50_000});
+  const revised = appendMessageToRun(child, secondRun, {id: "child-revising-final", role: "assistant", text: `Two passes after all.\n${branchFence({taskId: task.id,
+    nodeId: childBranch.nodeId, revision: 2, path: "else", reason: "The change also touches the shared carton format."})}`, now: clock.now + 50_001});
+  Object.assign(child.thread, {archivedAt: new Date(clock.now + 51_000).toISOString(), latestRunCompletedAt: new Date(clock.now + 50_000).toISOString()});
+  const callsBefore = fixture.calls.length;
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  const current = (yield* branchSelectionsOf(fixture, "child-revising")).filter(item => item[3] === "current");
+  assert.deepEqual(current, [[childBranch.nodeId, 2, "else", "current", revised.id]], "the archived child's revised final record is read and supersedes revision 1");
+  assert.equal(fixture.calls.slice(callsBefore).some(call => JSON.stringify(call).includes("child-revising")), false, "reconciliation reads; it never contacts the archived child");
+  yield* observeAgreement(fixture, clock.now + 80_000);
+  assert.deepEqual((yield* branchSelectionsOf(fixture, "child-revising")).filter(item => item[3] === "current"), current);
+}));

@@ -186,6 +186,9 @@ pending is rejected with `branch_decision_pending` and a pointer to the branch. 
 a decision changes or is invalidated after the workflow was assessed completed, the
 recorded status and evidence stay, and the assessment carries a `reassessment`
 reason. The dashboard then presents the completion as needing reassessment.
+A completed workflow occurrence inside the plan is dated by its latest completion
+record in the whole evidence, not only the recent observations. If it has decisions
+inside it but no recorded completion time, it also needs reassessment.
 
 A selection is a decision, not execution evidence. The Supervisor assesses the
 selected path's steps as usual. It never marks the not-selected path completed or

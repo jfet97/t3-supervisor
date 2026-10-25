@@ -795,8 +795,9 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         if (counted.ok && counted.value) observed++;
       }
       if (liveDescendants.length) yield* Ref.update(descendantOffsets, HashMap.set(task.threadId, (previousOffset + Math.max(1, observed)) % liveDescendants.length));
-      // an archived child is no longer observed for activity, but its retained final reply can still hold the selection its own workflow
-      // waits for; its projection is read only (nothing wakes it), and again only after its native or workflow state changed
+      // an archived child is no longer observed for activity, but its retained final reply can still hold a selection for its own workflow,
+      // a first one or a later revision of one already recorded; its projection is read only (nothing wakes it), and again only after
+      // its native or workflow state changed
       const archivedChildren = scope.main && scope.allowedIds.has(scope.main.id)
         ? scope.descendants.filter(child => scope.allowedIds.has(child.id) && !scope.liveIds.has(child.id) && !child.deletedAt) : [];
       let reconciled = 0;
@@ -805,8 +806,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         const store_ = workflows;
         const read = yield* attempt(Effect.gen(function* () {
           const document = yield* store_.get(task.projectId, task.threadId, child.id);
-          if (!document || document.threadId !== child.id || document.sourceBinding?.taskId !== task.id ||
-            pendingBranchDecisions(document.plan, documentBranchSelections(document)).length === 0) return null;
+          if (!document || document.threadId !== child.id || document.sourceBinding?.taskId !== task.id || planBranches(document.plan).length === 0) return null;
           const marker = `${String(child.archivedAt ?? "")}|${String(child.latestRunCompletedAt ?? "")}|${document.revision}`;
           if (Option.getOrUndefined(HashMap.get(yield* Ref.get(archivedReconciled), child.id)) === marker) return null;
           const childProjection = yield* readScopedProjection(child.id);

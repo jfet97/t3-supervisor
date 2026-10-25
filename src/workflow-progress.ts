@@ -78,6 +78,13 @@ export const WorkflowProgressBranchEventSchema = Schema.Struct({
 });
 export type WorkflowProgressBranchEvent = typeof WorkflowProgressBranchEventSchema.Type;
 
+/** A completed workflow occurrence and its latest completion record's time, or null when no completion record exists. */
+export const WorkflowProgressCompletionSchema = Schema.Struct({
+  nodeId: Schema.String,
+  completedAt: Schema.NullOr(Schema.Number),
+});
+export type WorkflowProgressCompletion = typeof WorkflowProgressCompletionSchema.Type;
+
 export const WorkflowProgressWorkflowSchema = Schema.Struct({
   workflowId: Schema.String,
   projectId: Schema.String,
@@ -101,6 +108,7 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   contributions: Schema.Array(WorkflowProgressContributionSchema),
   branchSelections: Schema.optionalKey(Schema.Array(WorkflowProgressBranchSelectionSchema)),
   branchEvents: Schema.optionalKey(Schema.Array(WorkflowProgressBranchEventSchema)),
+  completions: Schema.optionalKey(Schema.Array(WorkflowProgressCompletionSchema)),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -237,6 +245,12 @@ const progressBranchEvents = (document: WorkflowStateDocument): WorkflowProgress
       recordedAt: item.recordedAt}] : [])
   .sort((left, right) => right.recordedAt - left.recordedAt).slice(0, 50);
 
+// completion times come from the whole evidence, not the truncated observations, so an older completion still dates against later decisions
+const progressCompletions = (document: WorkflowStateDocument): WorkflowProgressCompletion[] =>
+  planEntities(document.plan).flatMap(node => node.kind !== "workflow" || node.status !== "completed" ? [] : [{nodeId: node.nodeId,
+    completedAt: document.evidence.reduce<number | null>((latest, item) => item.kind === "status_changed" && item.targetNodeId === node.nodeId &&
+      item.statusTo === "completed" && (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null)}]);
+
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
   projectId: document.projectId,
@@ -268,4 +282,5 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   contributions: progressContributions(document),
   branchSelections: progressBranchSelections(document),
   branchEvents: progressBranchEvents(document),
+  completions: progressCompletions(document),
 });
