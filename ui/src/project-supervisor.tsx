@@ -386,7 +386,7 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
               <p className="small"><strong>Model:</strong> {member.model ?? "Not reported by T3"}</p>
               {member.currentState && <p><strong>Current state:</strong> {member.currentState}</p>}
               {member.lastAssessment && <TeamAssessment assessment={member.lastAssessment}/>}
-              <div>
+              <div className="text-group">
                 <strong>Current assignments</strong>
                 {member.assignments.length === 0
                   ? <p className="small muted">No operational subtree is assigned.</p>
@@ -524,7 +524,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
       const notes = workflow ? stepNotes(task, {kind: "live", workflow, plan: workflow.plan ?? {kind: "sequence", templatePath: null, nodes: []}}) : null;
       return <li key={thread.threadId} className="workflow-progress-thread">
         <div className="row between">
-          <div><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · Workflow: ${workflowStatusLabel(workflow)}` : ""}</p></div>
+          <div className="text-group"><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · Workflow: ${workflowStatusLabel(workflow)}` : ""}</p></div>
           <span className={`pill ${lifecycle.tone}`}>Conversation: {lifecycle.label}</span>
         </div>
         <p className="small">{workflow?.parentNodeReferences.length ? <>Contributes to: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</> : "No recorded contribution to a parent step"}</p><div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>

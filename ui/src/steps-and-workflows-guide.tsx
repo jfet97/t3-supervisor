@@ -246,15 +246,15 @@ export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
       <div className="guide-glossary-contents"><strong>Glossary</strong><GuideLinks items={[["terms", "All terms and states"], ...guideTerms.slice(0, 5).map(({id, title}) => [id, title] as const)]}/></div>
     </nav>
 
-    <h2 id="guide-follow-title">Follow supervised work</h2>
+    <h2 id="guide-follow-title" className="guide-section-heading">Follow supervised work</h2>
     <ol className="guide-walkthrough">{walkthrough.map(({id, title, body}) => <li key={id}><h3 id={`guide-${id}-title`} tabIndex={-1}>{title}</h3>{body}</li>)}</ol>
 
-    <h2 id="guide-terms-title" tabIndex={-1}>Glossary: terms and states</h2>
-    <p className="muted">Look up the words and statuses used in the dashboard. These definitions explain observations and controls; they do not grant permission or establish that work was performed.</p>
+    <div className="text-group guide-section-heading"><h2 id="guide-terms-title" tabIndex={-1}>Glossary: terms and states</h2>
+    <p className="muted">Look up the words and statuses used in the dashboard. These definitions explain observations and controls; they do not grant permission or establish that work was performed.</p></div>
     {guideTerms.map(term => <Topic key={term.id} id={`guide-${term.id}-title`} title={term.title}><p>{term.description}</p></Topic>)}
 
-    <h2 id="guide-write-title">Write steps and workflows</h2>
-    <p className="muted">Steps and workflows are files in a project’s checkout. These topics cover their format, requirements, review and recovery.</p>
+    <div className="text-group guide-section-heading"><h2 id="guide-write-title">Write steps and workflows</h2>
+    <p className="muted">Steps and workflows are files in a project’s checkout. These topics cover their format, requirements, review and recovery.</p></div>
 
     <Topic id="guide-layout-title" title="Where definitions live">
       <p>Project definitions belong to the working folder, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. A project’s <strong>Definitions</strong> shows the active scope, source paths and origin.</p>

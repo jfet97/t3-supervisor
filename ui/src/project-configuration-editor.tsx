@@ -125,14 +125,18 @@ export function ProjectCatalogFields({kind, config, definitions, disabled, onCha
       return <EntityDetails key={index} icon={kind === "workflows" ? "tree" : "record"} title={<><span>{definition?.name ?? entry.path}</span><span className="small muted"> · {entry.required ? "Required" : "Optional"}</span></>}><fieldset className="stack project-config-entry">
         <legend>{kind === "steps" ? "Step" : "Workflow"} {index + 1}</legend>
         <div className="project-config-identity">
+          <div className="field-group">
           <label htmlFor={`${field}-path`}>Path
             <input id={`${field}-path`} value={entry.path} required autoCapitalize="none" spellCheck={false} aria-describedby={`${field}-path-help`} onChange={event => updateEntry(index, {path: event.target.value})}/>
           </label>
+          <p id={`${field}-path-help`} className="muted small definition-path">Use <code>{kind}/&lt;id&gt;.{kind === "steps" ? "md" : "yaml"}</code>; the file name is the definition ID{id ? <> (<code>{id}</code>)</> : null}.</p>
+          </div>
         </div>
-        <p id={`${field}-path-help`} className="muted small definition-path">Use <code>{kind}/&lt;id&gt;.{kind === "steps" ? "md" : "yaml"}</code>; the file name is the definition ID{id ? <> (<code>{id}</code>)</> : null}.</p>
+        <div className="field-group">
         <label htmlFor={`${field}-summary`}>Summary</label>
         <textarea id={`${field}-summary`} className="project-config-summary" rows={2} maxLength={catalogSummaryLimits.maxChars} required value={entry.summary} aria-describedby={`${field}-summary-help`} onChange={event => updateEntry(index, {summary: event.target.value})}/>
         <p id={`${field}-summary-help`} className="muted small">Briefly explain purpose or applicability from the full description. At most 2 lines · {entry.summary.length}/240 characters. The definition file remains the full policy.</p>
+        </div>
         <div className="row between">
           <label className="project-config-required" htmlFor={`${field}-required`}><input id={`${field}-required`} type="checkbox" checked={entry.required} onChange={event => updateEntry(index, {required: event.target.checked})}/> Required</label>
           <button type="button" onClick={() => onChange({...config, [kind]: entries.filter((_, position) => position !== index)})}>Remove {singular} {index + 1}</button>

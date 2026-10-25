@@ -55,6 +55,10 @@ states and unavailable scopes. A changed-page review cannot justify an all-page
 claim. Reconcile each original request with the matrix after the final changes.
 
 Consult available modern-web and accessibility guidance before frontend edits.
+Give each heading/copy group and form field an explicit spacing owner. Keep related
+text close and leave a larger interval before a separate section. Check computed
+gaps in collapsed and expanded states; a late generic stack rule must not override
+page-specific rhythm or compress nested forms and history sections.
 When Impeccable is installed, read its craft floor immediately before editing;
 the acceptance requirements here apply to every contributor. Verify actual renders at desktop and narrow
 widths, including 1280 and 320px where these are the affected targets, in both

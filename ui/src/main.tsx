@@ -222,9 +222,9 @@ function History({
   const dialog = useRef<HTMLDialogElement>(null);
   const inspect = (item: GuidanceActivity) => {setSelected(item);dialog.current?.showModal();};
   return (
-    <section>
+    <section className="stack activity-workspace">
       <div className="toolbar">
-        <div>
+        <div className="text-group">
           <h1>{title}</h1>
           <p className="muted">A chronological record of supervision decisions and delivery. These are historical events, not an unresolved issue list.</p>
         </div>
@@ -254,6 +254,7 @@ function History({
         )}
       </div>
       <dialog ref={dialog} aria-labelledby="detail-title">
+        <div className="stack">
         <div className="row between">
           <h2 id="detail-title">
             {selected ? activityTitle(selected) : "Activity"}
@@ -274,6 +275,7 @@ function History({
             Open originating chat
           </a>
         )}
+        </div>
       </dialog>
     </section>
   );
@@ -345,11 +347,13 @@ function ChatSettings({ data, onDirtyChange }: { data: GuidanceSnapshot; onDirty
   return <form className="panel stack" method="post" onSubmit={event => {
     event.preventDefault(); save(form);
   }}>
-    <h3>Chat exclusions</h3>
-    <p>Saved for this Supervisor instance. Changes apply without restarting.</p>
-    <fieldset><legend>Excluded chats</legend>
+    <div className="text-group"><h3>Chat exclusions</h3>
+    <p>Saved for this Supervisor instance. Changes apply without restarting.</p></div>
+    <fieldset className="settings-fields"><legend>Excluded chats</legend>
+      <div className="text-group">
       <p>Project Supervisors skip excluded chats. Existing project, workflow and conversation state is retained.</p>
       <p>Only explicit exclusions in projects or No Project chats where supervision is enabled appear here. Hidden or unavailable exclusions stay saved. <GuideLink topic="stop-vs-exclusion">How exclusions differ from Stop</GuideLink>.</p>
+      </div>
       <ul className="candidate-list">{chats.map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}</p></div><button type="button" disabled={saving} aria-label={`Remove exclusion for ${chat.title}`} onClick={() => {change({excludedThreadIds: form.excludedThreadIds.filter(id => id !== chat.id)});searchRef.current?.focus();}}>Remove exclusion</button></li>)}</ul>
       {!chats.length && candidates.data && <p>No explicit exclusions in currently enabled projects or No Project chats.</p>}
       <div className="field-group"><label htmlFor="chat-search">Add an exclusion</label><input ref={searchRef} id="chat-search" name="chatSearch" type="search" value={query} maxLength={512} autoCapitalize="off" autoCorrect="off" spellCheck={false} disabled={saving} aria-describedby="exclusion-help" onChange={e => setQuery(e.target.value)} />
@@ -474,8 +478,9 @@ function App() {
         <p className="muted">Use a one-time token from the machine running Supervisor.</p><HelpDisclosure title={<>How to get a sign-in token</>} ><div className="stack"><p>Generate a sign-in token on the machine running T3 Supervisor:</p>
         <pre><code>t3-supervisor auth forge</code></pre>
         <p className="muted">Run it in your terminal as the account running Supervisor. For Docker or a VM, run it inside that environment. Tokens expire after five minutes and can be used once.</p></div></HelpDisclosure>
-        <label htmlFor="access-token">Sign-in token</label>
+        <div className="field-group"><label htmlFor="access-token">Sign-in token</label>
         <input id="access-token" name="token" type="password" autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} required maxLength={128} value={token} onChange={event => setToken(event.target.value)} />
+        </div>
         <button className="primary" type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>
         {error && <p role="alert">{error}</p>}
       </form>}
