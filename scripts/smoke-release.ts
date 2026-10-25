@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import {createRequire} from "node:module";
+import {dirname, resolve} from "node:path";
 import { randomUUID } from "node:crypto";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Config, Effect, Schema } from "effect";
@@ -34,6 +36,18 @@ const program = Effect.gen(function* () {
     : yield* runProcess(target, ["--version"], { env: harness.env, cwd: harness.home, timeoutMs: 10_000 });
   assert.equal(version.code, 0);
   assert.equal(version.stdout, `t3-supervisor v${buildInfo.version}\n`);
+  // inspect the installed artifact, including images, so contributor-only guidance cannot leak through a packaging change
+  const skillsCheck = `const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+    const root=path.join(process.argv[1],'skills');
+    assert.deepEqual(fs.readdirSync(root),['usage']);
+    for(const name of ['use-t3-supervisor','author-supervisor-workflows']) {
+      const body=fs.readFileSync(path.join(root,'usage',name,'SKILL.md'),'utf8');
+      assert.ok(body.includes('name: '+name));
+    }`;
+  const skillProof = kind === "image"
+    ? yield* runProcess("docker", ["exec", name, "node", "-e", skillsCheck, "/app"], dockerOptions)
+    : yield* runProcess(process.execPath, ["-e", skillsCheck, dirname(createRequire(resolve(target)).resolve("@jfet97/t3-supervisor/package.json"))], {env: harness.env, cwd: harness.home, timeoutMs: 10_000});
+  assert.equal(skillProof.code, 0, "the artifact must contain only the two portable usage skills");
   process.kill(child.pid, "SIGTERM");
   const closed = yield* child.closed(30_000);
   assert.equal(closed.code, 130);

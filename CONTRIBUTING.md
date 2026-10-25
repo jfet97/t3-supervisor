@@ -25,10 +25,17 @@ when leaving. T3's setup launcher handles approval for worktrees it creates;
 for a checkout created manually, run `direnv allow` from its root after reviewing
 `.envrc`. Run it again if `.envrc` changes. Nix alone does not need this approval.
 
-The [usage skill](skills/use-t3-supervisor/SKILL.md) describes ordinary dashboard workflows for agent sessions.
-The [workflow-authoring skill](skills/author-supervisor-workflows/SKILL.md) derives
+The [usage skill](skills/usage/use-t3-supervisor/SKILL.md) describes ordinary dashboard workflows for agent sessions.
+The [workflow-authoring skill](skills/usage/author-supervisor-workflows/SKILL.md) derives
 reusable steps and workflows from project guidance, development history and human
 corrections, with a recommendation for two distinct models using high reasoning.
+
+Source contributors should read the repository-local
+[contributor skill](skills/maintenance/contribute-supervisor/SKILL.md).
+`skills/usage/` is the portable, packaged Skillshare source; `skills/maintenance/`
+contains contribution standards and is never propagated globally. The
+[interface acceptance reference](skills/maintenance/contribute-supervisor/references/interface-acceptance.md)
+records the product's navigation, terminology and evidence requirements.
 
 ```sh
 pnpm install --frozen-lockfile

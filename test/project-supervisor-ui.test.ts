@@ -213,7 +213,7 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
   assert.match(html, /Next review:<\/strong>/);
   assert.match(html, /Last notice:<\/strong> Not scheduled/);
   assert.match(html, /A monitoring review is running/);
-  assert.match(html, /existing objective-only tasks are not reprocessed/);
+  assert.ok(/Earlier records containing only a task objective are retained without being reprocessed/u.test(html), "monitoring defaults explain the boundary for earlier objective-only records");
   assert.doesNotMatch(html, /Create conversation/);
 });
 

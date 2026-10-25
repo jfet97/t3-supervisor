@@ -1,18 +1,22 @@
 ## Skill ownership
 
-Keep `skills/` focused on portable product usage. Personal installation policies,
-source maintenance and deployment procedures belong in the global `t3-supervisor`
-skill outside this repository. The Git-backed `use-t3-supervisor` skill is exposed
-globally through Skillshare; it must not depend on personal maintenance files.
+Portable product skills live in `skills/usage/`; only that folder is packaged and
+exposed through Skillshare. Repository contributor guidance lives in
+`skills/maintenance/` and stays local to the checkout. Before source work, read
+[contribute-supervisor](skills/maintenance/contribute-supervisor/SKILL.md), including
+its interface acceptance reference for frontend changes. Personal deployment and
+installation policies stay outside this repository; neither skill group depends
+on personal files to explain the product or contribution standards.
 
 Skill/documentation-only batches use Git and Skillshare propagation; they do not
 require rebuilding or restarting the application.
 
 ## Development discipline
 
-For authorized multi-agent work, use the global `orchestrate-agents` skill for
-ownership, delegation, provider recovery, bounded review and completion evidence.
-Keep the procedure there; the requirements below are specific to this product.
+For authorized multi-agent work, retain explicit ownership, exact review artifacts
+and terminal results as described in the contributor skill. Personal orchestration
+skills can supply transport details when available; the repository guidance is
+self-contained.
 
 All contributions go through a pull request. Do not push changes directly to
 `main`; the repository requires a PR and a passing `check` status. An explicit

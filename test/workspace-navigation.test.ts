@@ -14,6 +14,44 @@ it("deep links preserve exact opaque project and conversation identities and exp
   assert.deepEqual(parseRoute("#/projects/%ZZ/task"), directoryRoute);
 });
 
+it("Guide topic links round-trip independently of project context and reject malformed topic addresses", () => {
+  for (const guideTopic of ["orphaned-chat", "working-folder", "team", "not-a-known-topic"]) {
+    const route = {...directoryRoute, page: "guide" as const, guideTopic};
+    assert.deepEqual(parseRoute(routeHref(route)), route);
+  }
+  for (const topic of ["", "../outside", "<script>", "a".repeat(97)]) {
+    assert.equal(parseRoute(`#/guide?topic=${encodeURIComponent(topic)}`).guideTopic, undefined);
+  }
+  assert.equal(routeHref({...directoryRoute, guideTopic: "orphaned-chat"}), "#/projects");
+});
+
+it("Activity help returns to an address containing its retained filter and page", () => {
+  const activity = {...directoryRoute, page: "activity" as const, q: "delivery & visibility", listPage: 3};
+  assert.deepEqual(parseRoute(routeHref(activity)), activity);
+  assert.equal(routeHref(activity), "#/activity?q=delivery+%26+visibility&page=3");
+  assert.equal(parseRoute("#/activity?page=-1").listPage, undefined);
+  assert.equal(parseRoute("#/activity?page=bad").listPage, undefined);
+});
+
+it("native Guide hash links pass the navigation guard and leave the original list address intact", () => {
+  const list = {...directoryRoute, projectId: "project", q: "missing folder", listPage: 3, showOrphaned: true};
+  const guide = {...directoryRoute, page: "guide" as const, guideTopic: "orphaned-chat"};
+  let entry: {hash: string; state: unknown} = {hash: routeHref(list), state: null};
+  let current: Route = list, allowed = false, guardCalls = 0;
+  const controller = createNavigator(list, {
+    read: () => entry, push: (hash, state) => {entry = {hash, state};},
+    replace: (hash, state) => {entry = {hash, state};}, go: () => assert.fail("unindexed hashes must not guess traversal offsets"),
+  }, () => {guardCalls++;return allowed;}, next => {current = next;});
+  controller.start();
+  const original = {...entry};
+  entry = {hash: routeHref(guide), state: null};controller.historyChanged();
+  assert.deepEqual(current, list);assert.equal(entry.hash, original.hash);assert.equal(guardCalls, 1);
+  allowed = true;entry = {hash: routeHref(guide), state: null};controller.historyChanged();
+  assert.deepEqual(current, guide);assert.equal(guardCalls, 2);
+  entry = original;controller.historyChanged();
+  assert.deepEqual(current, list);assert.equal(entry.hash, routeHref(list));
+});
+
 it("project entry always opens its list while explicit deep links retain exact conversation identity", () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
   const values = new Map<string, string>();

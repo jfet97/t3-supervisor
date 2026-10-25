@@ -1,4 +1,5 @@
 import { EntityDetails } from "./disclosure.js";
+import {GuideLink} from "./guide-link.js";
 import React, { useEffect, useId, useRef, useState } from "react";
 import { useAtom, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { Cause, Exit, Option } from "effect";
@@ -210,7 +211,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     <div className="stack">
       <h3>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</h3>
       <p className="definition-path">Target: <code>{definitions.workspaceRoot}/.t3-supervisor/project.yaml</code></p>
-      <p className="muted">Edit this folder’s existing index. Every conversation working in this folder reads the same project.yaml. Full step and workflow files remain read-only here.</p>
+      <p className="muted">Edit this folder’s existing index. Every conversation working in this folder reads the same project.yaml. Full step and workflow files remain read-only here. <GuideLink topic="config">About the index, required entries and starting workflow</GuideLink>.</p>
       {!projectConfig && <><p className="panel" role="note">The current file could not be parsed. This replacement starts with empty workflows and steps lists; its original requirements remain unknown. Review the source before saving.</p>{unreadableSource}</>}
     </div>
     <ProjectCatalogFields kind="workflows" config={config} definitions={definitions} disabled={saving || blocked} onChange={update}/>

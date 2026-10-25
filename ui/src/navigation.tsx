@@ -6,7 +6,7 @@ import { uiRuntime } from "./atoms.js";
 
 const sections = ["task", "supervision", "definitions", "settings", "conversations", "connected", "editor"] as const;
 export type ProjectSection = typeof sections[number];
-export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; showOrphaned?: boolean; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"};
+export type Route = {page: "home" | "projects" | "activity" | "settings" | "guide"; projectId: string; main: string | null; section: ProjectSection; q?: string; listPage?: number; checkout?: string; definition?: string; showOrphaned?: boolean; workProject?: string; workFilter?: "all" | "attention" | "active" | "stopped"; guideTopic?: string};
 export const directoryRoute: Route = {page: "projects", projectId: "", main: null, section: "conversations"};
 /** The views of one main conversation. */
 export const conversationSections: readonly ProjectSection[] = ["task", "supervision", "connected"];
@@ -35,19 +35,37 @@ export function parseRoute(hash: string): Route {
       const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
       return {...homeRoute, ...(q ? {q} : {}), ...(workProject ? {workProject} : {}), ...(workFilter !== "all" ? {workFilter} : {}), ...(listPage > 1 ? {listPage} : {})};
     }
-    if (page === "activity" || page === "settings" || page === "guide") return {...directoryRoute, page};
+    if (page === "guide") {
+      const topic = url.searchParams.get("topic") ?? "";
+      return {...directoryRoute, page, ...(/^[a-z][a-z0-9-]{0,95}$/u.test(topic) ? {guideTopic: topic} : {})};
+    }
+    if (page === "activity") {
+      const q = url.searchParams.get("q") ?? "";
+      const listPage = Math.max(1, Number(url.searchParams.get("page")) || 1);
+      return {...directoryRoute, page, ...(q ? {q} : {}), ...(listPage > 1 ? {listPage} : {})};
+    }
+    if (page === "settings") return {...directoryRoute, page};
   } catch { /* Invalid addresses return to the project directory. */ }
   return directoryRoute;
 }
 
 export function routeHref(route: Route): string {
   const params = new URLSearchParams();
+  if (route.page === "guide") {
+    if (route.guideTopic) params.set("topic", route.guideTopic);
+    return `#/guide${params.size ? `?${params}` : ""}`;
+  }
   if (route.page === "home") {
     if (route.q) params.set("q", route.q);
     if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));
     if (route.workProject) params.set("project", route.workProject);
     if (route.workFilter && route.workFilter !== "all") params.set("filter", route.workFilter);
     return `#/home${params.size ? `?${params}` : ""}`;
+  }
+  if (route.page === "activity") {
+    if (route.q) params.set("q", route.q);
+    if ((route.listPage ?? 1) > 1) params.set("page", String(route.listPage));
+    return `#/activity${params.size ? `?${params}` : ""}`;
   }
   if (route.page !== "projects" || !route.projectId) return `#/${route.page}`;
   if (route.showOrphaned) params.set("orphaned", "show");
@@ -259,6 +277,8 @@ const rememberListScroll = (route: Route) => {
 
 /** The native frame adapter focuses the destination heading and restores the explicit project's list position. */
 export function focusAfterNavigation(previous: Route, next: Route) {
+  // the mounted Guide focuses its topic after rendering, including initial loads and query-only changes
+  if (next.page === "guide") return;
   if (previous.page === next.page && previous.projectId === next.projectId && previous.main === next.main && next.projectId) return;
   if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
   requestAnimationFrame(() => {

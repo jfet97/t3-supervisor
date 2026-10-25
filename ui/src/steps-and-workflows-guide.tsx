@@ -1,5 +1,7 @@
 import { EntityDetails } from "./disclosure.js";
-import React from "react";
+import React, {useEffect} from "react";
+import {GuideLink, focusGuideTopic} from "./guide-link.js";
+import {guideTerms} from "./guide-terms.js";
 
 const layoutExample = `.t3-supervisor/
   project.yaml
@@ -115,7 +117,7 @@ const walkthrough: ReadonlyArray<{id: string; title: string; body: React.ReactNo
   {id: "agreement", title: "Proposal, acceptance and refinement", body: <p><strong>Agent and Supervisor</strong> states once what the Supervisor proposed and whether the agent accepted it. Acceptance happens in their conversations and the dashboard only reads it; an accepted plan is not evidence that work was done. When the Supervisor proposes a refinement, <strong>Proposed update awaiting acceptance</strong> lists the changed steps and <strong>Update proposed</strong> marks them, while the earlier plan stays accepted and recorded progress stays as it is.</p>},
   {id: "records", title: "Evidence and history for each step", body: <p>Open a step for its <strong>Plan note</strong>, the <strong>Supervisor assessment</strong> that set its current status and any <strong>Earlier step records</strong>. <strong>Latest Supervisor record</strong> shows the newest one. <strong>Connected work</strong> lists contributing child conversations, and <strong>Evidence and history</strong> shows the retained Supervisor records and available earlier acceptance or workflow records.</p>},
   {id: "supervision", title: "Supervisor health and interventions", body: <p><strong>Supervision</strong> shows <strong>Supervisor health</strong>, <strong>Monitoring</strong> with its check-ins and the <strong>Supervisor team</strong> for this conversation. <strong>Stop supervision</strong> applies only to this chat and stays off until you enable it again; the chat itself is not changed. <strong>Open in T3</strong> opens the conversation.</p>},
-  {id: "definitions", title: "Definitions and project settings", body: <p>A project’s reusable steps and workflows are in <strong>Definitions</strong>, read from a checkout you choose: <strong>Project folder</strong> or a <strong>Separate working copy</strong>. Conversations sharing a folder share its definitions; the chooser shows the actual folder and reported branch. <strong>Project settings</strong> holds which conversations are supervised and the defaults for new Supervisors. Instance-wide switches and global definitions are in <strong>Settings</strong>. The reference below describes the files.</p>},
+  {id: "definitions", title: "Definitions and project settings", body: <p>A project’s reusable steps and workflows are in <strong>Definitions</strong>, read from a working folder you choose. The <strong>Project folder</strong> and Git’s <strong>Default branch working folder</strong> appear first; a <strong>Separate working copy</strong> has its own folder. Conversations sharing a folder share its definitions. Missing and unverified folders stay distinct; only confirmed missing folders make their retained chats orphaned. <strong>Refresh folders</strong> rechecks those observations. <strong>Project settings</strong> holds conversation eligibility and defaults for new Supervisors; instance switches and shared definitions are in <strong>Settings</strong>.</p>},
 ];
 
 const referenceTopics = [
@@ -123,7 +125,7 @@ const referenceTopics = [
 ] as const;
 
 function GuideLinks({items, ordered = false}: {items: ReadonlyArray<readonly [string, string]>; ordered?: boolean}) {
-  const links = items.map(([id, title]) => <li key={id}><button type="button" onClick={() => {const heading = document.getElementById(`guide-${id}-title`);heading?.focus();heading?.scrollIntoView({block: "start"});}}>{title}</button></li>);
+  const links = items.map(([id, title]) => <li key={id}><GuideLink topic={id}>{title}</GuideLink></li>);
   return ordered ? <ol>{links}</ol> : <ul>{links}</ul>;
 }
 
@@ -198,17 +200,23 @@ const questions = [
   },
 ];
 
-export function StepsAndWorkflowsGuide() {
+export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
+  useEffect(() => focusGuideTopic(topic), [topic]);
   return <section className="stack steps-guide" aria-labelledby="steps-guide-title">
-    <h1 id="steps-guide-title">Guide</h1>
+    <h1 id="steps-guide-title" tabIndex={-1}>Guide</h1>
     <p className="guide-introduction">Follow supervised work from Home to a task’s outcome, then look up how to write the steps and workflows the Supervisor plans with.</p>
     <nav className="guide-contents" aria-label="Guide contents">
       <div><strong>Follow supervised work</strong><GuideLinks ordered items={walkthrough.map(({id, title}) => [id, title] as const)}/></div>
       <div><strong>Write steps and workflows</strong><GuideLinks items={referenceTopics}/></div>
+      <div><strong>Glossary</strong><GuideLinks items={[["terms", "All terms and states"], ...guideTerms.slice(0, 5).map(({id, title}) => [id, title] as const)]}/></div>
     </nav>
 
     <h2 id="guide-follow-title">Follow supervised work</h2>
     <ol className="guide-walkthrough">{walkthrough.map(({id, title, body}) => <li key={id}><h3 id={`guide-${id}-title`} tabIndex={-1}>{title}</h3>{body}</li>)}</ol>
+
+    <h2 id="guide-terms-title" tabIndex={-1}>Glossary: terms and states</h2>
+    <p className="muted">Look up the words and statuses used in the dashboard. These definitions explain observations and controls; they do not grant permission or establish that work was performed.</p>
+    {guideTerms.map(term => <Topic key={term.id} id={`guide-${term.id}-title`} title={term.title}><p>{term.description}</p></Topic>)}
 
     <h2 id="guide-write-title">Write steps and workflows</h2>
     <p className="muted">Steps and workflows are files in a project’s checkout. These topics cover their format, requirements, review and recovery.</p>
