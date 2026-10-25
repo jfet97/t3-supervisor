@@ -261,7 +261,7 @@ export const navigationAtom: Atom.Atom<Navigation> = Atom.make((get) => {
   const changed = () => {
     const before = current.route;
     controller.historyChanged();
-    if (current.route !== before) focusAfterNavigation(before, current.route);
+    if (current.route !== before) focusAfterNavigation(before, current.route, true);
   };
   window.addEventListener("hashchange", changed);
   window.addEventListener("popstate", changed);
@@ -280,7 +280,7 @@ const rememberListScroll = (route: Route) => {
 };
 
 /** The native frame adapter focuses the destination and restores retained list positions. */
-export function focusAfterNavigation(previous: Route, next: Route) {
+export function focusAfterNavigation(previous: Route, next: Route, restoreListPosition = false) {
   // the mounted Guide focuses its topic after rendering, including initial loads and query-only changes
   if (next.page === "guide") return;
   if (previous.page === next.page && previous.projectId === next.projectId && previous.main === next.main && next.projectId) return;
@@ -288,7 +288,7 @@ export function focusAfterNavigation(previous: Route, next: Route) {
   requestAnimationFrame(() => {
     const heading = [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]") && !element.closest(".sr-only"));
     let top = 0;
-    if (isScrollableList(next)) try {top = Number(sessionStorage.getItem(listScrollKey(next))) || 0;} catch { /* storage is optional */ }
+    if (isProjectList(next) || restoreListPosition && isScrollableList(next)) try {top = Number(sessionStorage.getItem(listScrollKey(next))) || 0;} catch { /* storage is optional */ }
     window.scrollTo({top, behavior: "instant"});
     const rows = isProjectList(next) ? [...document.querySelectorAll<HTMLAnchorElement>(".conversation-list > a")] : [];
     const selected = rows.find(row => parseRoute(new URL(row.href).hash).main === previous.main);
