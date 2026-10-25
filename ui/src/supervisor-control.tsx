@@ -283,7 +283,7 @@ export function SupervisionControlPanel({projectId = null, onChanged, onStateCha
       setState(current => ({...current, control: read.value.control, readAt: read.value.readAt, blocked: false, uncertain: false, message: ""}));
     else if (AsyncResult.isFailure(read)) setState(current => ({...current, blocked: true, message: "Supervision status unavailable. Reload before changing it."}));
   }, [read, setState]);
-  if (!control) return <section className="panel"><p role="status">{message || "Loading supervision status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
+  if (!control) return <section className="panel stack"><p role="status">{message || "Loading supervision status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
   return <div className="stack"><SupervisionControlView readAt={state.readAt} control={control} busy={busy || setupBusy} blocked={blocked || setupUncertain} message={message}
     onReload={() => setRevision(value => value + 1)} onToggle={() => {
       if (!setupBusy && !setupUncertain) startControlChange(registry, stateKey, projectId);
@@ -349,7 +349,7 @@ function SupervisionSetupPanel({projectId, stateKey, locked}: {projectId: string
   }, [read, setSelected, setSetupState]);
   const {blocked, message} = setupState;
   const busy = setupState.operation !== null;
-  if (!options) return <section className="panel"><p role="status">{message || "Loading checkout choices…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload setup</button></section>;
+  if (!options) return <section className="panel stack"><p role="status">{message || "Loading checkout choices…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload setup</button></section>;
   const setup = (action: SupervisionSetupInput["action"]) => {
     const checkout = options.checkouts.find(value => checkoutKey(value) === selected);
     const expectedFolderStatus = action === "enable_existing" ? "present" : "missing";
@@ -400,7 +400,7 @@ export function GlobalDefinitionsControlPanel({refreshKey = 0, onStateChange, ac
       setState(current => ({...current, control: read.value.control, readAt: read.value.readAt, uncertain: false, blocked: false, message: ""}));
     else if (AsyncResult.isFailure(read)) setState(current => ({...current, blocked: true, message: "Global definitions status unavailable. Reload before changing it."}));
   }, [read, setState]);
-  if (!control) return <section className="panel"><p role="status">{message || "Loading global definitions status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
+  if (!control) return <section className="panel stack"><p role="status">{message || "Loading global definitions status…"}</p><button type="button" onClick={() => setRevision(value => value + 1)}>Reload status</button></section>;
   return <div className="stack"><GlobalDefinitionsControlView readAt={state.readAt} control={control} busy={busy} blocked={blocked} message={message} onReload={() => setRevision(value => value + 1)}
     onToggle={() => startGlobalDefinitionsChange(registry, stateKey)} /></div>;
 }
