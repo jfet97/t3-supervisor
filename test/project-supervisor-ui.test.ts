@@ -9,6 +9,8 @@ import { SessionAccess } from "../ui/src/access.js";
 import { confirmChatSupervisionChange, mergeLoadedDraft, ConnectedWork, progressView, ProjectSupervisorView, TaskWorkspace, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
+import { fixtureJourney } from "./ui-fixture/journey.js";
+import { PlanJourney } from "../ui/src/workflow-journey.js";
 
 // the client helpers are Effects on the page runtime of each test; they resolve request paths against the page location.
 // they run over a stubbed browser fetch without time, so these tests are it.effect
@@ -1246,4 +1248,69 @@ it("an earlier workflow cannot borrow the current task's agreement panel", () =>
   assert.doesNotMatch(html.slice(0, history), /Proposed plan|>Proposed</);
   assert.match(html.slice(history), /Earlier workflow: Review the source change/);
   assert.doesNotMatch(html.slice(history), /Current task acceptance only|Agent and Supervisor/);
+});
+
+it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {
+  const journey = (phase: "branch-pending" | "branch-selected") => fixtureJourney(phase, "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const pending = journey("branch-pending");
+  const pendingHtml = renderWorkspace([pending.progress], pending.task);
+  assert.match(pendingHtml, /Now: Decide: The change is contained, well understood and low risk\./);
+  assert.match(pendingHtml, /7 of 9 applicable steps assessed complete · 1 branch decision pending/);
+  const selected = journey("branch-selected");
+  const selectedHtml = renderWorkspace([selected.progress], selected.task);
+  assert.match(selectedHtml, /Now: Single independent review/);
+  assert.doesNotMatch(selectedHtml, /Decide:|branch decision pending/);
+  assert.match(selectedHtml, /7 of 10 applicable steps assessed complete/);
+  assert.match(selectedHtml, /<h3>Branch decisions<\/h3>/);
+  assert.match(selectedHtml, /Then path selected for “The change is contained, well understood and low risk\.”/);
+  const connected = renderConnected([selected.progress]);
+  assert.match(connected, /Reconstructed reviewer/);
+  assert.match(connected, /aria-label="Branch: if The diff stays within the packing scan module\."/);
+  assert.match(connected, /Then path selected/);
+  assert.match(connected, /No else path: if the condition does not hold, work continues with the next item\./);
+  assert.match(connected, /aria-label="Else path, when the condition does not hold: not selected"/);
+});
+
+it("a branch-selection diagnostic names its record and author without claiming a workflow acceptance problem", () => {
+  const {task, progress} = fixtureJourney("branch-pending", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const html = renderWorkspace([progress], {...task, workflowProtocolDiagnostic: {role: "operative", proposalId: null, messageId: "child-message", code: "branch_revision_gap",
+    observedAt: 1_800_000_000_000, detail: "child reviewer-thread"}});
+  assert.match(html, /Branch decision record needs follow-up/);
+  assert.match(html, /A child conversation’s latest branch-selection record was not recorded/);
+  assert.match(html, /Child branch selection · <strong>Conversation:<\/strong> <code>reviewer-thread<\/code>/);
+  assert.doesNotMatch(html, /workflow acceptance was not recognized|External contribution record/);
+});
+
+it("a completed child or nested workflow with a pending or changed decision is not presented as currently completed", () => {
+  const {progress} = fixtureJourney("branch-selected", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const childWorkflow = progress.workflows[1]!;
+  const completedChild = {...progress, workflows: [progress.workflows[0]!, {...childWorkflow, status: "completed" as const,
+    assessment: {...childWorkflow.assessment!, status: "completed", reassessment: "A branch decision is pending, so this completion needs reassessment."}}]};
+  const connected = renderConnected([completedChild]);
+  assert.match(connected, /Workflow: Completion needs reassessment/);
+  assert.doesNotMatch(connected, /Workflow: Completed/);
+
+  const pending = fixtureJourney("branch-pending", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000).progress.workflows[0]!;
+  const review = pending.plan!.nodes.find(node => node.kind === "workflow")!;
+  const completedReview = {...pending.plan!, nodes: pending.plan!.nodes.map(node => node === review ? {...review, status: "completed" as const} : node)};
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: completedReview, mode: "live", selections: []}));
+  const reviewHtml = html.slice(html.indexOf("Review<small>Workflow</small>"));
+  assert.match(reviewHtml, /^Review<small>Workflow<\/small><\/span><span class="step-state">Completed earlier · needs reassessment</);
+  assert.match(reviewHtml, /its completion needs reassessment\. The recorded status stays as history\./);
+  assert.match(reviewHtml, /class="step-state">Decision pending</);
+});
+
+it("branch decision history names the condition each event answered, not the branch's current condition", () => {
+  const {task, progress} = fixtureJourney("branch-changed", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const main = progress.workflows[0]!;
+  const replaced = {...progress, workflows: [{...main, branchEvents: [
+    {...main.branchEvents![0]!, condition: "The change touches shared carton accounting."},
+    {...main.branchEvents![1]!, condition: "The change is contained, well understood and low risk."},
+    {...main.branchEvents![1]!, id: "fixture-branch-event-legacy", condition: null},
+  ], branchSelections: main.branchSelections!.map(item => ({...item, condition: "The change touches shared carton accounting."}))}]};
+  const html = renderWorkspace([replaced], task);
+  assert.match(html, /Else path selected for “The change touches shared carton accounting\.”/);
+  assert.match(html, /Then path selected for “The change is contained, well understood and low risk\.”/);
+  assert.match(html, /Then path selected \(condition not recorded with this event\)/);
+  assert.doesNotMatch(html, /Then path selected for “The change touches shared carton accounting\.”/, "an old decision is never attributed to the newer condition");
 });

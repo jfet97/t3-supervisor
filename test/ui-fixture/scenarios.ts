@@ -105,6 +105,13 @@ const stepFiles: Record<string, {name: string; description: string} & Definition
 };
 const workflowFiles: Record<string, {name: string; description: string; sequence: DefinitionNode[]}> = {
   "fixture-delivery": {name: "Fixture delivery", description: "Fixture workflow: synthetic tests, then synthetic review.", sequence: [{step: "fixture-tests"}, {step: "fixture-review"}]},
+  "fixture-review-depth": {name: "Fixture review depth", description: "Fixture workflow: the agent chooses one review for a contained change or paired reviews otherwise.", sequence: [
+    {step: "fixture-tests"},
+    {branch: {if: "The change is contained, well understood and low risk.", then: [{step: "fixture-review"}],
+      else: [{parallel: [{step: "fixture-review"}, {step: {id: "fixture-second-review", name: "Fixture second review", description: "Fixture local step: a second independent model reviews the change."}}]},
+        {step: {id: "fixture-review-round", name: "Fixture review round", description: "Fixture local step: repeat review after fixes until important findings are resolved."}}]}},
+    {step: {id: "fixture-report", name: "Fixture report", description: "Fixture local step: report findings and remaining limitations; this follows the whole branch."}},
+  ]},
 };
 
 const activity: GuidanceActivity[] = [
@@ -136,7 +143,8 @@ const environmentA = (): FixtureData => ({
       checkouts: [{origin: "project", threadId: null, workspaceRoot: "/fixture/project-a", branch: "main", isGitRepository: true, folderStatus: "present"}],
       settings: projectSettings(),
       projectConfig: {
-        workflows: [{path: "workflows/fixture-delivery.yaml", summary: "Fixture workflow: synthetic delivery sequence.", required: false}],
+        workflows: [{path: "workflows/fixture-delivery.yaml", summary: "Fixture workflow: synthetic delivery sequence.", required: false},
+          {path: "workflows/fixture-review-depth.yaml", summary: "Fixture workflow: a review that chooses its depth with a branch.", required: false}],
         steps: [
           {path: "steps/fixture-tests.md", summary: "Fixture step: run the synthetic tests.", required: true},
           {path: "steps/fixture-review.md", summary: "Fixture step: synthetic review.", required: false},
@@ -618,6 +626,7 @@ export class FixtureModel {
 export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
+  "journey-branch-proposal", "journey-branch-pending", "journey-branch-selected", "journey-branch-changed",
   "orphaned-attention", "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -661,6 +670,10 @@ export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (
   "journey-completed": {description: "reconstructed packing example: reviewed pull request ready for handoff", plan: () => plan([])},
   "journey-stale": {description: "reconstructed packing example: acceptance out of date", plan: () => plan([])},
   "journey-retained": {description: "reconstructed packing example: accepted plan beside an unlinked earlier workflow", plan: () => plan([])},
+  "journey-branch-proposal": {description: "reconstructed packing example: a Review that chooses its depth, proposed with both alternatives", plan: () => plan([])},
+  "journey-branch-pending": {description: "reconstructed packing example: verified; the review-depth decision is pending", plan: () => plan([])},
+  "journey-branch-selected": {description: "reconstructed packing example: the agent selected one review; a child reviewer selected its own path", plan: () => plan([])},
+  "journey-branch-changed": {description: "reconstructed packing example: completed, then the review decision changed, so completion needs reassessment", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
   "session-expiry-next-call": {description: "the next /api/ call with a valid session revokes that session and answers 401", plan: () => plan([{kind: "session-expiry"}])},
   "signout-other-tab": {description: "revokes every fixture session now, as a sign-out in another tab does server-side", plan: () => plan([], true)},

@@ -358,3 +358,13 @@ it("recovery retains effective parsed global guidance and rewritten references",
   assert.deepEqual(envelope.observed.steps, [step]);
   assert.deepEqual(envelope.observed.workflows, [workflow]);
 });
+
+it("a stored snapshot with a branch round-trips; a malformed branch makes the snapshot unusable", () => {
+  const workflow = (branch: unknown): ProjectDefinitionSnapshot["workflows"][number] => ({id: "review", name: "Review", description: "Review the change.", summary: testSummary("review"), fixed: false,
+    sequence: [branch as ProjectDefinitionSnapshot["workflows"][number]["sequence"] extends readonly (infer N)[] | undefined ? N : never, {step: "verify"}],
+    origin: "project", path: ".t3-supervisor/workflows/review.yaml", sourceId: "review"});
+  const branched = definitions({workflows: [workflow({branch: {if: "The change is contained.", then: [{step: "verify"}], else: [{parallel: [{step: "verify"}, {workflow: "other"}]}]}})]});
+  assert.deepEqual(extractApprovedProjectDefinitions(task({definitionSnapshot: branched})), branched);
+  for (const broken of [{branch: {if: "Two\nlines", then: [{step: "verify"}]}}, {branch: {if: "Contained.", then: []}}, {branch: {if: "Contained.", then: [{step: "verify"}], elif: []}}])
+    assert.equal(extractApprovedProjectDefinitions(task({definitionSnapshot: definitions({workflows: [workflow(broken)]})})), null, JSON.stringify(broken));
+});

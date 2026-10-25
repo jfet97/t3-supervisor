@@ -20,7 +20,8 @@ export const DashboardWork = Schema.Struct({
   engagement: Schema.optionalKey(ConversationEngagement),
   taskStatus: Schema.NullOr(Schema.String),
   planStatus: Schema.NullOr(Schema.String),
-  assessment: Schema.NullOr(Schema.Struct({status: Schema.String, summary: Schema.String, updatedAt: Schema.Number})),
+  assessment: Schema.NullOr(Schema.Struct({status: Schema.String, summary: Schema.String, updatedAt: Schema.Number,
+    reassessment: Schema.optionalKey(Schema.NullOr(Schema.String))})),
   attention: Schema.Array(Schema.String),
   updatedAt: Schema.NullOr(Schema.Number),
 });
@@ -79,7 +80,7 @@ export function overviewWorkPage(all: readonly DashboardWorkInfo[], page: Overvi
 
 /** The same current-state explanations are used by the overview and the selected conversation. */
 /** The attention reason for a rejected workflow record; the task workspace shows the record's details beside it. */
-export const protocolDiagnosticAttention = "A plan record could not be accepted. Open the task to inspect the reported field and repair it.";
+export const protocolDiagnosticAttention = "A plan, contribution or branch decision record could not be accepted. Open the task to inspect the reported field and repair it.";
 /** The attention reason for an out-of-date acceptance; the task's agreement panel states it there. */
 export const staleAgreementAttention = "The saved agreement needs review against current definitions.";
 /** The attention reason for a current plan that cannot be used; the task's agreement panel states its status there. */
@@ -88,7 +89,7 @@ export const planStatusAttention = (status: string) => `The current plan is ${st
 export function workAttention(input: {
   enabled: boolean; bindingState: string | null; settlementState?: string | null;
   monitoring?: SupervisorMonitoringStatus | undefined; task?: TaskInterpretationInfo | undefined;
-  assessment?: {status: string; summary: string} | null;
+  assessment?: {status: string; summary: string; reassessment?: string | null | undefined} | null;
 }): string[] {
   if (!input.enabled) return [];
   const {monitoring, assessment} = input;
@@ -100,6 +101,7 @@ export function workAttention(input: {
   if (monitoring?.state === "unavailable" || monitoring?.state === "uncertain") attention.push(monitoring.message.slice(0, 700));
   if (task && ["needs_context", "unavailable", "uncertain"].includes(task.status)) attention.push(task.reason.slice(0, 700));
   if (assessment?.status === "needs_attention") attention.push(assessment.summary || "The current workflow needs attention.");
+  if (assessment?.status === "completed" && assessment.reassessment) attention.push(assessment.reassessment);
   if (task?.workflow && ["invalid", "stale", "unavailable"].includes(task.workflow.status)) attention.push(planStatusAttention(task.workflow.status));
   if (task?.agreement?.status === "stale") attention.push(staleAgreementAttention);
   if (task?.definitionReview?.status === "revert_requested") attention.push(task.definitionReview.message.slice(0, 700));

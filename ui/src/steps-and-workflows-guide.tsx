@@ -50,6 +50,29 @@ sequence:
       - step: security-review
   - step: report-findings`;
 
+const branchExample = `name: Review
+description: Review the change at a depth that fits its scope and risk.
+sequence:
+  - step: inspect-change
+  - branch:
+      if: The change is contained, well understood and low risk.
+      then:
+        - workflow: light-review
+      else:
+        - workflow: heavy-review
+  - step: report-findings`;
+
+const ifOnlyExample = `sequence:
+  - step: implementation
+  - branch:
+      if: The change migrates stored data.
+      then:
+        - step: backup-and-restore-check
+  - step: deployment`;
+
+const branchRecordExample = "```branch-selection\n" + JSON.stringify({taskId: "proposal-1", nodeId: "0b7c9a52-5f3e-4c1a-9d2e-6a1f2b3c4d5e", revision: 1, path: "then",
+  reason: "The diff touches one module and its behavior is well understood."}) + "\n```";
+
 const localStepExample = `sequence:
   - step: e2e-testing
   - step:
@@ -121,7 +144,7 @@ const walkthrough: ReadonlyArray<{id: string; title: string; body: React.ReactNo
 ];
 
 const referenceTopics = [
-  ["layout", "Definition files"], ["step", "Steps"], ["workflow", "Workflow structure"], ["references", "References and skills"], ["config", "Project configuration"], ["fixed", "Fixed commitments"], ["delegation", "Review and delegation"], ["children", "Child tasks"], ["team", "Supervisor team"], ["errors", "Recovery"], ["evidence", "Plans and evidence"], ["faq", "Common questions"],
+  ["layout", "Definition files"], ["step", "Steps"], ["workflow", "Workflow structure"], ["branches", "Branches"], ["references", "References and skills"], ["config", "Project configuration"], ["fixed", "Fixed commitments"], ["delegation", "Review and delegation"], ["children", "Child tasks"], ["team", "Supervisor team"], ["errors", "Recovery"], ["evidence", "Plans and evidence"], ["faq", "Common questions"],
 ] as const;
 
 function GuideLinks({items, ordered = false}: {items: ReadonlyArray<readonly [string, string]>; ordered?: boolean}) {
@@ -145,6 +168,18 @@ const questions = [
   {
     question: "Do I need a second E2E item when the required reviewer workflow already contains it?",
     answer: "No. Required items are checked recursively. Inclusion inside the referenced reviewer workflow accounts for the same reusable step, so it does not need a duplicate entry.",
+  },
+  {
+    question: "Can a step file or the Supervisor decide a branch?",
+    answer: "No. Branches exist only in workflow composition; a step file stays a description. The agent working on that workflow records its own branch-selection decision. The Supervisor does not approve or record it and objects only to a concrete contradiction or an explicit human instruction.",
+  },
+  {
+    question: "Does selecting a path complete it, or make the other path missing?",
+    answer: "Neither. A selection records which agreed path applies. The selected path's steps are assessed as usual, and the other path stays visible as Not selected: it is not completed and it is not a missing commitment.",
+  },
+  {
+    question: "What happens when a decision changes after work started?",
+    answer: "The agent records the next revision with its reason. Statuses and evidence already recorded on the earlier path stay as history, and a completion recorded before the change needs reassessment.",
   },
   {
     question: "What can be added to a fixed workflow?",
@@ -242,6 +277,20 @@ export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
       <Example label="A delivery workflow with a reusable reviewer" value={compositionExample}/>
       <Example label="Nested parallel lanes inside a sequence" value={reviewerExample}/>
       <p>A sequence communicates intended semantic order. Members of a parallel group may overlap and have no declared order; parallel does not require simultaneous execution or create child agents.</p>
+      <p>A workflow can also choose between coarse alternatives with a <GuideLink topic="branches">branch</GuideLink>.</p>
+    </Topic>
+
+    <Topic id="guide-branches-title" title="Branches choose between coarse alternatives">
+      <p>A <code>branch:</code> member holds a condition in <code>if</code>, a <code>then</code> path and an optional <code>else</code> path. Each path is an indented, ordered list of the same members a sequence holds: steps, local steps, workflow references, groups or further branches. The next member at the branch’s own indentation follows the whole branch, whichever path applies.</p>
+      <Example label="A review that chooses its depth" value={branchExample}/>
+      <p>Without <code>else</code>, a false condition skips the branch and work continues with the next member.</p>
+      <Example label="An if-only branch" value={ifOnlyExample}/>
+      <p>The condition is one line of at most 300 characters, and each path needs at least one member. Use branches only for substantially different pieces of work. Keep finer conditions, iteration and completion rules in descriptions. There is no <code>elif</code>, jump, loop or <code>goto</code>; nest a branch inside a path when a second choice depends on the first. Branches belong to workflow composition only: a step file stays a description with no structural fields, and a negotiated task plan can add task-local branches in the same shape.</p>
+      <p>Both paths are agreed commitments. When work reaches the branch, the agent working on that workflow decides which path applies from the actual context, without asking for approval, and records the decision with a short reason in its own reply:</p>
+      <pre><code>{branchRecordExample}</code></pre>
+      <p>The introduction gives the agent its task ID, each branch’s node ID and this exact format. A child conversation records the decisions for its own connected workflow. The Supervisor reads the decision and objects only to a concrete contradiction with the agreed condition, the evidence or an explicit human instruction; a human-pinned path wins. A changed decision uses the next revision. If the branch’s condition, else path or position later changes, the earlier selection no longer applies and the decision is pending again.</p>
+      <p>On a live workflow the dashboard shows <strong>Decision pending</strong> until a selection is recorded, then <strong>Then path selected</strong> or <strong>Else path selected</strong> with the reason, and marks the other path <strong>Not selected</strong>. Steps on an undecided or not-selected path are not counted as outstanding work, and a pending decision stays visible as current work. A selection is a decision, not evidence that the path’s work was performed, and the workflow cannot be assessed completed while a decision on its applicable path is pending. Work recorded on a path that is later not selected keeps its status as history. Accepted and earlier plans show their agreed alternatives without a later selection. <GuideLink topic="branch-decision">Branch decision states</GuideLink></p>
+      <p>A required step or workflow counts as included only when every path includes it; inside one alternative only, it stays unresolved until the plan includes it on every path or its applicability is assessed. A required workflow that contains a branch is included as a whole, and its alternatives are its own commitments. Fixed keeps a branch’s condition, its paths and which path each original member belongs to; supporting work may be added inside a path.</p>
     </Topic>
 
     <Topic id="guide-references-title" title="References and skills">
@@ -268,7 +317,7 @@ skills:
     </Topic>
 
     <Topic id="guide-fixed-title" title="What fixed protects">
-      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, references, skills and requirements, their relative order, and its declared parallel relationships, including nested commitments. Supporting work can be added around that fragment or between its original members.</p>
+      <p><code>fixed: true</code> preserves the workflow's original members, descriptions, references, skills and requirements, their relative order, its declared parallel relationships and its branches with their conditions and paths, including nested commitments. Supporting work can be added around that fragment, between its original members or inside a branch path. Fixed does not limit which path the agent selects.</p>
       <p>For example, the original <code>implementation → deployment</code> sequence may become <code>implementation → e2e-testing → deployment</code>.</p>
       <Example label="Required support work can be inserted between fixed members" value={fixedInsertionExample}/>
       <p>A genuinely not-applicable original member remains visible with its reason in the plan. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>
@@ -292,7 +341,7 @@ skills:
     </Topic>
 
     <Topic id="guide-errors-title" title="Cycles, invalid definitions and recovery">
-      <p>Direct and indirect workflow cycles are errors and include the exact reference chain. Reusing a workflow in separate branches is allowed; a cycle occurs when expansion returns to a workflow already on the current path. File, size, total expanded-node and depth bounds keep reading finite.</p>
+      <p>Direct and indirect workflow cycles are errors and include the exact reference chain. Reusing a workflow in separate places, including both paths of a branch, is allowed; a cycle occurs when expansion returns to a workflow already on the current path. File, size, total expanded-node and depth bounds keep reading finite.</p>
       <p>Missing indexed files, unlisted files, duplicate IDs and mismatched paths are diagnosed. Repair the index or the definition file explicitly; missing or invalid definitions do not silently lose their required flags.</p>
       <p>Definition errors appear in this UI and in the operational Supervisor context. Readable definitions and diagnostics are passed as bounded, untrusted data; a broken reference is not recursively expanded. The Supervisor raises the issue and can continue planning with a finite provisional plan. Incomplete or unreadable files never become a claim that requirements are absent, and unresolved required or fixed commitments stay visible.</p>
       <p>A <code>complete</code> read means the service finished reading the relevant files; it does not mean those definitions are valid. Check the reported issue and source, repair the repository file, then refresh. A global-only view is inspectable but is not editable through a project editor.</p>

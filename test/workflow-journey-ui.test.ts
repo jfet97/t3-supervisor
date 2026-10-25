@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {it} from "@effect/vitest";
 import {Schema} from "effect";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {ProjectSupervisorSnapshot, type WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js";
 import {WorkflowProgressSnapshotSchema} from "../src/workflow-progress.js";
-import {PlanChanges, PlanJourney, planSteps, TaskAlignment, TaskOutcome} from "../ui/src/workflow-journey.js";
+import {currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, TaskAlignment, TaskOutcome} from "../ui/src/workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, stepNotes} from "../ui/src/task-record.js";
 import {fixtureJourney, journeyCases, journeyObjective, journeyTitle} from "./ui-fixture/journey.js";
 import {FixtureModel, fixtureIds, isScenarioName} from "./ui-fixture/scenarios.js";
@@ -22,7 +23,7 @@ const states = (plan: WorkflowPlanGroupInfo) => planSteps(plan).map(step => [ste
 it("the complete nested plan retains parallel boundaries and every step beyond eight without completing its parent", () => {
   const {record, html} = live("nested");
   assert.ok(planSteps(record.plan).length > 8);
-  assert.match(html, /aria-label="Parallel branches"/);
+  assert.match(html, /aria-label="Parallel work"/);
   assert.match(html, /aria-label="Plan sequence"/);
   assert.match(html, /Deliver and close out/);
   assert.match(html, /aria-current="step"/);
@@ -90,15 +91,16 @@ it("plan changes match occurrences by ID, so a renamed step is changed rather th
 });
 
 type PlanNode = WorkflowPlanGroupInfo["nodes"][number];
-const mapPlan = (plan: WorkflowPlanGroupInfo, change: (node: Exclude<PlanNode, WorkflowPlanGroupInfo>) => PlanNode): WorkflowPlanGroupInfo => ({...plan, nodes: plan.nodes.map(node =>
-  "nodes" in node ? mapPlan(node, change) : change(node.kind === "workflow" && node.plan ? {...node, plan: mapPlan(node.plan, change)} : node))});
+const mapPlan = (plan: WorkflowPlanGroupInfo, change: (node: Extract<PlanNode, {kind: "step" | "workflow"}>) => PlanNode): WorkflowPlanGroupInfo => ({...plan, nodes: plan.nodes.map(node =>
+  "nodes" in node ? mapPlan(node, change) : node.kind === "branch" ? {...node, then: mapPlan(node.then, change), else: node.else ? mapPlan(node.else, change) : null}
+    : change(node.kind === "workflow" && node.plan ? {...node, plan: mapPlan(node.plan, change)} : node))});
 
 const accepted = () => example("agreed").task.agreement!.workflow.plan!;
 const changed = (before: WorkflowPlanGroupInfo, after: WorkflowPlanGroupInfo) =>
   planChanges(before, after).map(change => change.kind === "changed" ? [change.nodeId, ...change.fields] : [change.kind, change.nodeId]);
 const at = (plan: WorkflowPlanGroupInfo, key: string) => plan.nodes.findIndex(node => "nodeId" in node && node.nodeId === `packing-${key}`);
 
-it("plan changes report a same-ID reorder and steps regrouped into parallel branches", () => {
+it("plan changes report a same-ID reorder and steps regrouped into parallel work", () => {
   const before = accepted(), reordered = [...before.nodes];
   reordered.splice(at(before, "evidence"), 0, ...reordered.splice(at(before, "rollout"), 1));
   assert.deepEqual(changed(before, {...before, nodes: reordered}), [["packing-rollout", "order"]], "same IDs in a new sequence order");
@@ -206,4 +208,109 @@ it("a planned workflow opens to reveal active descendants without borrowing thei
     const accepted = renderToStaticMarkup(createElement(PlanJourney, {node, mode: "agreed"}));
     assert.doesNotMatch(accepted, /open=""|aria-current="step"/);
   }
+});
+
+const branchCase = (phase: "branch-proposal" | "branch-pending" | "branch-selected" | "branch-changed") => example(phase);
+const branchSection = (html: string, path: "Then" | "Else") => {
+  const start = html.indexOf(`aria-label="${path} path,`);
+  const end = path === "Then" ? html.indexOf('aria-label="Else path,', start) : html.indexOf("Account for findings", start);
+  return html.slice(start, end);
+};
+
+const branchParts = (html: string) => {
+  const head = html.slice(html.indexOf('class="branch-head"'), html.indexOf('class="branch-explanation'));
+  const explanation = html.slice(html.indexOf('class="branch-explanation'), html.indexOf('class="branch-paths"'));
+  const split = explanation.includes("Decision details") ? explanation.indexOf("Decision details") : explanation.length;
+  return {head, primary: explanation.slice(0, split), details: explanation.slice(split)};
+};
+
+it("a live branch shows its condition and labelled paths; a pending decision is current work and neither path is outstanding", () => {
+  const {task, progress} = branchCase("branch-pending");
+  const record = journeyRecord(task, progress.workflows[0]);
+  assert.equal(record.kind, "live");
+  if (record.kind !== "live") return;
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: record.plan, mode: "live", notes: stepNotes(task, record), selections: record.workflow.branchSelections}));
+  assert.match(html, /role="group" aria-label="Branch: if The change is contained, well understood and low risk\."/);
+  assert.match(html, /<span class="branch-label">Branch<\/span> <span>If The change is contained, well understood and low risk\.<\/span>/);
+  assert.match(html, /class="step-state">Decision pending</);
+  assert.match(html, /aria-label="Then path, when the condition holds: awaiting decision"/);
+  assert.match(html, /aria-label="Else path, when the condition does not hold: awaiting decision"/);
+  assert.match(branchSection(html, "Then"), /Single independent review.*class="step-state">Awaiting decision</su);
+  assert.doesNotMatch(branchSection(html, "Else"), />Planned</, "an undecided alternative is not shown as outstanding planned work");
+  assert.ok(html.indexOf("Account for findings") > html.indexOf('aria-label="Else path,'), "the following step comes after the whole branch");
+  assert.match(html, /How branches work/);
+  const {head, primary, details} = branchParts(html);
+  assert.match(head, /class="step-mark state-decision-pending"/, "a pending decision has its own marker");
+  assert.doesNotMatch(head, /state-completed|state-needs_attention/);
+  assert.match(branchSection(html, "Then"), /class="pill amber">Awaiting decision</);
+  assert.doesNotMatch(primary, /Plan note|Reason:/, "with no selection, only the condition, the decision state and the help link are primary");
+  assert.match(details, /Plan note: Review depth follows the change’s scope and risk\./);
+  const progressText = liveProgress(record.plan, currentBranchPaths(record.workflow));
+  assert.deepEqual(progressText.pending.map(branch => branch.nodeId), ["packing-review-depth"]);
+  assert.ok(!progressText.steps.some(step => ["packing-review-single", "packing-correctness", "packing-fit"].includes(step.nodeId)), "alternatives are not counted as applicable steps");
+});
+
+it("a selected path shows the agent's reason and the other path stays visible as not selected, never completed", () => {
+  const {task, progress} = branchCase("branch-selected");
+  const record = journeyRecord(task, progress.workflows[0]);
+  if (record.kind !== "live") throw new Error("live workflow expected");
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: record.plan, mode: "live", notes: stepNotes(task, record), selections: record.workflow.branchSelections}));
+  assert.match(html, /class="step-state">Then path selected</);
+  const {head, primary, details} = branchParts(html);
+  assert.match(head, /class="step-mark state-decision"/);
+  assert.doesNotMatch(head, /state-completed/, "a selection is a decision, not a completion checkmark");
+  assert.match(primary, /<p>Reason: Reconstructed example: one scan module changes[^<]*<\/p>/);
+  assert.doesNotMatch(primary, /revision|<code>|t3-thread:/, "provenance stays in the decision details");
+  assert.match(details, /revision 1 · .* · <a href="t3-thread:\/\/v1\/[^"]+">Open conversation<\/a> · message <code>[^<]+<\/code>/su);
+  assert.match(details, /A selection records the decision, not completed work\./);
+  assert.match(branchSection(html, "Then"), /class="pill blue">Selected</);
+  assert.match(html, /aria-label="Then path, when the condition holds: selected"/);
+  assert.match(html, /aria-label="Else path, when the condition does not hold: not selected"/);
+  assert.match(branchSection(html, "Then"), /aria-current="step"/);
+  assert.match(branchSection(html, "Else"), /Correctness review.*class="step-state">Not selected</su);
+  assert.doesNotMatch(branchSection(html, "Else"), /Completed|aria-current/);
+  const {steps, pending} = liveProgress(record.plan, currentBranchPaths(record.workflow));
+  assert.deepEqual(pending, []);
+  assert.ok(steps.some(step => step.nodeId === "packing-review-single") && !steps.some(step => step.nodeId === "packing-correctness"));
+
+  const accepted = renderToStaticMarkup(createElement(PlanJourney, {node: task.agreement!.workflow.plan!, mode: "agreed"}));
+  assert.match(accepted, /class="step-state">Agreed alternatives</, "the accepted plan shows its alternatives as of acceptance");
+  assert.doesNotMatch(accepted, /path selected|Not selected|Decision pending|Reason:/, "a later live selection is not applied to the accepted record");
+  const proposed = renderToStaticMarkup(createElement(PlanJourney, {node: branchCase("branch-proposal").task.workflow!.plan!, mode: "proposed"}));
+  assert.match(proposed, /class="step-state">Proposed alternatives</);
+  assert.doesNotMatch(branchParts(proposed).head + branchParts(proposed).primary, /agreed/i, "proposed alternatives are not described as agreed");
+});
+
+it("a decision changed after completion keeps the recorded status but presents completion as needing reassessment", () => {
+  const {task, progress} = branchCase("branch-changed");
+  const record = journeyRecord(task, progress.workflows[0]);
+  if (record.kind !== "live") throw new Error("live workflow expected");
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: record.plan, mode: "live", notes: stepNotes(task, record), selections: record.workflow.branchSelections}));
+  assert.match(html, /class="step-state">Else path selected</);
+  assert.match(branchSection(html, "Then"), /Single independent review.*class="step-state">Completed · path not selected</su, "work on the earlier path stays as history");
+  const outcome = renderToStaticMarkup(createElement(TaskOutcome, {assessment: record.workflow.assessment ?? null, fallback: "No assessment", stopped: false}));
+  assert.match(outcome, /<strong>Completion needs reassessment<\/strong>/);
+  assert.match(outcome, /A branch decision changed after this completion was assessed/);
+  assert.match(outcome, /Recorded assessment: Reconstructed example: the single review found nothing/);
+  assert.doesNotMatch(outcome, /Task completed/);
+});
+
+it("plan changes name a changed branch condition and an occurrence moved between alternatives", () => {
+  const before = branchCase("branch-proposal").task.workflow!.plan!;
+  const mapBranch = (plan: WorkflowPlanGroupInfo, change: (node: Extract<PlanNode, {kind: "branch"}>) => PlanNode): WorkflowPlanGroupInfo => ({...plan, nodes: plan.nodes.map(node =>
+    "nodes" in node ? mapBranch(node, change) : node.kind === "branch" ? change(node) : node.kind === "workflow" && node.plan ? {...node, plan: mapBranch(node.plan, change)} : node)});
+  assert.deepEqual(changed(before, mapBranch(before, node => ({...node, condition: "The change touches one module."}))), [["packing-review-depth", "condition"]]);
+  assert.deepEqual(changed(before, mapBranch(before, node => ({...node, else: null}))).find(change => change[0] === "packing-review-depth"), ["packing-review-depth", "paths"]);
+  const moved = changed(before, mapBranch(before, node => ({...node, then: {...node.then, nodes: [...node.then.nodes, ...(node.else!.nodes[0] as WorkflowPlanGroupInfo).nodes.slice(0, 1)]},
+    else: {...node.else!, nodes: [{...(node.else!.nodes[0] as WorkflowPlanGroupInfo), nodes: (node.else!.nodes[0] as WorkflowPlanGroupInfo).nodes.slice(1)}]}})));
+  assert.deepEqual(moved.find(change => change[0] === "packing-correctness"), ["packing-correctness", "grouping"], "moving into the other path is a regrouping");
+});
+
+it("branch styling keeps step chips on their own step, marks a selected path in blue and bounds narrow branch indentation", () => {
+  const css = readFileSync(new URL("../ui/src/style.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /\.state-(?:underway|completed|needs_attention) > \.journey-step \.step-state/, "a step's state chip does not colour nested branch or path chips");
+  assert.match(css, /\.state-completed > \.journey-step > summary \.step-state \{/);
+  assert.match(css, /\.branch-path\.path-selected \{ border-inline-start-color: var\(--blue\); \}/);
+  const narrow = css.slice(css.indexOf("@media (max-width: 600px) {\n  .branch-head"));
+  assert.match(narrow.slice(0, narrow.indexOf("\n}")), /\.journey-branch \.journey-step\.disclosure > \.disclosure-body \{ padding-inline-start: 8px; \}/);
 });

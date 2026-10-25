@@ -1,7 +1,8 @@
 import { Schema } from "effect";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
-import { externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
+import { effectiveBranchSelections, planBranches, planEntities } from "./workflow-plan-tree.js";
+import { branchSelectionPaths, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
   type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
 import { WorkflowAssessment, workflowAssessment } from "./workflow-assessment.js";
@@ -47,6 +48,43 @@ export const WorkflowProgressContributionSchema = Schema.Struct({
 });
 export type WorkflowProgressContribution = typeof WorkflowProgressContributionSchema.Type;
 
+// the workflow operative's latest decision for one branch; current is false once the branch changed or left the plan
+export const WorkflowProgressBranchSelectionSchema = Schema.Struct({
+  nodeId: Schema.String,
+  inCurrentPlan: Schema.Boolean,
+  current: Schema.Boolean,
+  path: Schema.Literals(branchSelectionPaths),
+  revision: Schema.Number,
+  reason: Schema.String,
+  condition: Schema.String,
+  sourceThreadId: Schema.String,
+  sourceMessageId: Schema.String,
+  recordedAt: Schema.Number,
+  invalidatedAt: Schema.NullOr(Schema.Number),
+});
+export type WorkflowProgressBranchSelection = typeof WorkflowProgressBranchSelectionSchema.Type;
+// one recorded branch event, newest first: a selection revision or the invalidation of one, with the condition it answered when recorded
+export const WorkflowProgressBranchEventSchema = Schema.Struct({
+  id: Schema.String,
+  kind: Schema.Literals(["selected", "invalidated"]),
+  nodeId: Schema.String,
+  revision: Schema.Number,
+  path: Schema.Literals(branchSelectionPaths),
+  condition: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  note: Schema.String,
+  sourceThreadId: NullableText,
+  sourceMessageId: NullableText,
+  recordedAt: Schema.Number,
+});
+export type WorkflowProgressBranchEvent = typeof WorkflowProgressBranchEventSchema.Type;
+
+/** A completed workflow occurrence and its latest completion record's time, or null when no completion record exists. */
+export const WorkflowProgressCompletionSchema = Schema.Struct({
+  nodeId: Schema.String,
+  completedAt: Schema.NullOr(Schema.Number),
+});
+export type WorkflowProgressCompletion = typeof WorkflowProgressCompletionSchema.Type;
+
 export const WorkflowProgressWorkflowSchema = Schema.Struct({
   workflowId: Schema.String,
   projectId: Schema.String,
@@ -68,6 +106,9 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   })),
   observations: Schema.Array(WorkflowProgressObservationSchema),
   contributions: Schema.Array(WorkflowProgressContributionSchema),
+  branchSelections: Schema.optionalKey(Schema.Array(WorkflowProgressBranchSelectionSchema)),
+  branchEvents: Schema.optionalKey(Schema.Array(WorkflowProgressBranchEventSchema)),
+  completions: Schema.optionalKey(Schema.Array(WorkflowProgressCompletionSchema)),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -163,17 +204,7 @@ type ParentNodeReference = {
   nodeName: string;
 };
 
-// the browser bundle imports this module's types, so it walks the plan itself instead of loading the store
-const planNodeNames = (plan: WorkflowPlanGroupInfo | null, names = new Map<string, string>()): Map<string, string> => {
-  for (const node of plan?.nodes ?? []) {
-    if ("nodes" in node) planNodeNames(node, names);
-    else {
-      names.set(node.nodeId, node.name);
-      if (node.kind === "workflow") planNodeNames(node.plan, names);
-    }
-  }
-  return names;
-};
+const planNodeNames = (plan: WorkflowPlanGroupInfo | null): Map<string, string> => new Map(planEntities(plan).map(node => [node.nodeId, node.name]));
 
 // a removed node keeps the last name recorded for it so its contributions stay recognizable as history
 const contributionNodeName = (document: WorkflowStateDocument, nodeId: string, planNames: ReadonlyMap<string, string>): string | null =>
@@ -198,6 +229,27 @@ const progressContributions = (document: WorkflowStateDocument): WorkflowProgres
       note: item.assessment.note, recordedAt: item.assessment.recordedAt} : null,
   }));
 };
+
+const progressBranchSelections = (document: WorkflowStateDocument): WorkflowProgressBranchSelection[] => {
+  const inPlan = new Set(planBranches(document.plan).map(branch => branch.nodeId));
+  const selected = effectiveBranchSelections(document.plan, document.branchSelections);
+  return document.branchSelections.map(item => ({nodeId: item.nodeId, inCurrentPlan: inPlan.has(item.nodeId), current: selected.get(item.nodeId) === item.path,
+    path: item.path, revision: item.revision, reason: item.reason, condition: item.condition, sourceThreadId: item.sourceThreadId,
+    sourceMessageId: item.sourceMessageId, recordedAt: item.recordedAt, invalidatedAt: item.invalidatedAt}));
+};
+
+const progressBranchEvents = (document: WorkflowStateDocument): WorkflowProgressBranchEvent[] => document.evidence
+  .flatMap(item => (item.kind === "branch_selected" || item.kind === "branch_selection_invalidated") && item.branch && item.targetNodeId
+    ? [{id: item.id, kind: item.kind === "branch_selected" ? "selected" as const : "invalidated" as const, nodeId: item.targetNodeId, revision: item.branch.revision,
+      path: item.branch.path, condition: item.branch.condition ?? null, note: item.note, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
+      recordedAt: item.recordedAt}] : [])
+  .sort((left, right) => right.recordedAt - left.recordedAt).slice(0, 50);
+
+// completion times come from the whole evidence, not the truncated observations, so an older completion still dates against later decisions
+const progressCompletions = (document: WorkflowStateDocument): WorkflowProgressCompletion[] =>
+  planEntities(document.plan).flatMap(node => node.kind !== "workflow" || node.status !== "completed" ? [] : [{nodeId: node.nodeId,
+    completedAt: document.evidence.reduce<number | null>((latest, item) => item.kind === "status_changed" && item.targetNodeId === node.nodeId &&
+      item.statusTo === "completed" && (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null)}]);
 
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
@@ -228,4 +280,7 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
       note: item.note,
     })),
   contributions: progressContributions(document),
+  branchSelections: progressBranchSelections(document),
+  branchEvents: progressBranchEvents(document),
+  completions: progressCompletions(document),
 });

@@ -44,6 +44,10 @@ const nodeIdsOf = (group: WorkflowPlanGroupInfo | null): string[] => {
       else if (node.kind === "workflow") {
         ids.push(node.nodeId);
         if (node.plan) walk(node.plan.nodes);
+      } else if (node.kind === "branch") {
+        ids.push(node.nodeId);
+        walk(node.then.nodes);
+        if (node.else) walk(node.else.nodes);
       } else walk(node.nodes);
     }
   };

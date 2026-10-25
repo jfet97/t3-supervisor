@@ -4,7 +4,7 @@ The main navigation is Home, Projects, Activity and Settings, with Guide as a ut
 
 Projects has Conversations, Definitions and Project settings. Open a conversation for Task and Supervision. A project remembers its last context in this browser tab. Hash addresses preserve project, conversation/checkout and view; an explicit address wins over remembered state. Definitions requires an explicit checkout choice: Project root or the checkout a main conversation works in; once chosen, the Checkout control shows its path and changes it. Switching project views retains that checkout draft. Unavailable selections never silently change checkout.
 
-- Task is the one workspace for the conversation's task: its statement, current outcome and current steps, one plan, and the agent/Supervisor agreement. Step statuses come only from the live workflow bound to the task; a proposed update never resets them. Each step shows its plan note, any accepted or proposed plan note, and the Supervisor assessment recorded for that step. The agreement panel states the proposal and the agent's acceptance once, with the acceptance record, plan provenance (definitions, requirements, revision) and task interpretation in disclosures; a pending update lists its actual changes there. Definition-change review and record diagnostics appear as attention above the plan. Evidence and history shows the retained Supervisor records, external contributions, native lifecycle and available earlier acceptance or workflow records. A current assessment must match both the task identity and source. Failed, loading and incomplete reads remain distinct from absence.
+- Task is the one workspace for the conversation's task: its statement, current outcome and current steps, one plan, and the agent/Supervisor agreement. Step statuses come only from the live workflow bound to the task; a proposed update never resets them. Each step shows its plan note, any accepted or proposed plan note, and the Supervisor assessment recorded for that step. The agreement panel states the proposal and the agent's acceptance once, with the acceptance record, plan provenance (definitions, requirements, revision) and task interpretation in disclosures; a pending update lists its actual changes there. A branch shows its condition and labelled then/else paths with its decision state; on accepted, proposed and earlier plans it shows the agreed alternatives without a later selection. Definition-change review and record diagnostics appear as attention above the plan. Evidence and history shows the retained Supervisor records, external contributions, native lifecycle and available earlier acceptance or workflow records. A current assessment must match both the task identity and source. Failed, loading and incomplete reads remain distinct from absence.
 - Supervision shows the bound Supervisor, team, assignments, monitoring details and explicit access recovery. Stop/Enable supervision is scoped to the selected chat; the Task view links here when recovery is needed.
 - Definitions shows read validity, effective requirements, reusable steps/workflows, collapsible raw sources and the local project.yaml editor.
 - Project settings first states which conversations are supervised (the supervision switch, or for No Project its mode from Instance settings, first setup and the off-by-default **Supervise conversations created by agents** checkbox), then the defaults for new Supervisors (model, monitoring, helper limit). It works without a selected conversation. That checkbox lets the agent that launched an ordinary conversation through T3's MCP server have its later requests there interpreted and negotiated, still attributed to that agent; Supervisor conversations, helpers and delegated child tasks are never included, and Start, Stop and definition approval remain human-only.
@@ -128,6 +128,18 @@ step, and the dashboard cannot edit or assess contributions. A
 `contribution_*` diagnostic means the main's latest record was not recorded and
 explains what needs attention. Follow its specific reason; a missing plan node
 can become available after a plan update without changing an otherwise valid record.
+
+A plan branch shows its condition, both labelled paths and, on the live workflow,
+"Decision pending", "Then path selected" or "Else path selected" with the operative's
+reason and source message. The other path is marked "Not selected", and its steps read
+"Not selected" or "Awaiting decision" instead of Planned. Work already recorded there
+keeps its status as history. Current steps (Now) include a pending decision as
+"Decide: …", and the step count covers applicable steps only. A completion recorded
+before a decision changed reads "Completion needs reassessment" and raises attention.
+Evidence and history lists branch decisions and invalidations. A `branch_*` diagnostic
+means an operative's latest selection record was not recorded; a child's carries
+its thread in the detail. Definitions shows the same branch structure without
+execution states.
 
 Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent

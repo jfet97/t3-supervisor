@@ -5,6 +5,7 @@ import type { Projection } from "./types.js";
 import { emptyConversation, type ConversationDecision, type ConversationFacts, type RequesterSource } from "./supervision-conversation-contract.js";
 import { conversationMayContact, type ConversationTask } from "./supervision-conversation-contract.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo } from "./project-supervisor-contract.js";
+import { isPlanGroup, planChildGroups } from "./workflow-plan-tree.js";
 
 export { taskScopeRevision, conversationEngaged, conversationMayContact, deriveConversationEngagement } from "./supervision-conversation-contract.js";
 export const requesterSources = (main: Projection, policy: TaskRequesterPolicy, floor = -1, enabledAt: number | null = null): RequesterSource[] =>
@@ -74,19 +75,23 @@ export const resolveConversationDecision = (input: {
 /** Reuse exact commitment occurrences, in occurrence order. Scope changes never turn a similarly named new duty into old work. */
 export const preserveOccurrenceIds = (next: WorkflowPlanGroupInfo, previous: WorkflowPlanGroupInfo | null): WorkflowPlanGroupInfo => {
   const occurrences = new Map<string, string[]>();
-  const key = (node: Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>) => fingerprint({kind: node.kind, definitionId: node.definitionId,
-    localId: node.kind === "step" ? node.localId : null, templatePath: node.templatePath, name: node.name, description: node.description,
-    references: node.references, skills: node.skills, ...(node.kind === "workflow" ? {fixed: node.fixed, omissions: node.omissions} : {})});
+  const key = (node: Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>) => node.kind === "branch"
+    ? fingerprint({kind: node.kind, templatePath: node.templatePath, condition: node.condition, else: node.else !== null})
+    : fingerprint({kind: node.kind, definitionId: node.definitionId,
+      localId: node.kind === "step" ? node.localId : null, templatePath: node.templatePath, name: node.name, description: node.description,
+      references: node.references, skills: node.skills, ...(node.kind === "workflow" ? {fixed: node.fixed, omissions: node.omissions} : {})});
   const remember = (node: WorkflowPlanNodeInfo): void => {
-    if ("nodes" in node) {node.nodes.forEach(remember);return;}
+    if (isPlanGroup(node)) {node.nodes.forEach(remember);return;}
     const id = key(node); occurrences.set(id, [...(occurrences.get(id) ?? []), node.nodeId]);
-    if (node.kind === "workflow" && node.plan) remember(node.plan);
+    planChildGroups(node).forEach(remember);
   };
   if (previous) remember(previous);
   const visit = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
-    if ("nodes" in node) return {...node, nodes: node.nodes.map(visit)};
+    if (isPlanGroup(node)) return {...node, nodes: node.nodes.map(visit)};
     const nodeId = occurrences.get(key(node))?.shift() ?? node.nodeId;
-    return node.kind === "workflow" ? {...node, nodeId, plan: node.plan ? group(node.plan) : null} : {...node, nodeId};
+    if (node.kind === "workflow") return {...node, nodeId, plan: node.plan ? group(node.plan) : null};
+    if (node.kind === "branch") return {...node, nodeId, then: group(node.then), else: node.else ? group(node.else) : null};
+    return {...node, nodeId};
   };
   const group = (node: WorkflowPlanGroupInfo): WorkflowPlanGroupInfo => ({...node, nodes: node.nodes.map(visit)});
   return group(next);

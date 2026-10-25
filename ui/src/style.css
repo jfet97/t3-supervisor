@@ -372,9 +372,9 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .step-state { font-size: .75rem; font-weight: 600; color: var(--quiet); padding: 3px 7px; background: var(--soft); border-radius: 5px; white-space: nowrap; }
 .state-underway > .journey-step { background: #e4f3f0; }
 .state-underway > .journey-step > summary { padding-inline-start: 6px; }
-.state-underway > .journey-step .step-state { background: #c8e8e0; color: #125d58; }
-.state-completed > .journey-step .step-state { background: #e2f1eb; color: #1d5d4b; }
-.state-needs_attention > .journey-step .step-state { background: #fcf0d9; color: #7b4b0d; }
+.state-underway > .journey-step > summary .step-state { background: #c8e8e0; color: #125d58; }
+.state-completed > .journey-step > summary .step-state { background: #e2f1eb; color: #1d5d4b; }
+.state-needs_attention > .journey-step > summary .step-state { background: #fcf0d9; color: #7b4b0d; }
 .step-chevron { width: 14px; height: 20px; margin-top: 3px; color: var(--quiet); }
 .journey-step[open] > summary .step-chevron { transform: rotate(90deg); }
 .step-explanation { display: grid; gap: 14px; padding: 0 16px 20px 44px; font-size: .9rem; max-width: 75ch; }
@@ -395,6 +395,41 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .group-parallel > .journey-track > li::before { display: none; }
 .nested-journey { margin-inline-start: 32px; padding-inline-start: 12px; border-inline-start: 1px solid var(--line); }
 .nested-journey .journey-group { margin-top: 0; }
+/* A branch: its condition, the decision on a live workflow and both labelled paths; the next item in the track follows the whole branch.
+   Meaning is carried by text labels; borders only repeat it. */
+.journey-branch, .template-branch { display: grid; gap: 8px; padding-block: 8px 4px; min-width: 0; }
+.branch-head { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: start; gap: 12px; }
+.branch-condition { font-weight: 600; overflow-wrap: anywhere; }
+.branch-label { display: inline-block; margin-inline-end: 4px; padding: 1px 7px; border-radius: 5px; background: var(--soft); color: var(--quiet); font-size: .75rem; font-weight: 650; }
+.decision-pending > .branch-head .step-state { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); }
+.branch-explanation { display: grid; gap: 4px; padding-inline-start: 38px; max-width: 75ch; overflow-wrap: anywhere; }
+.template-branch .branch-explanation, .template-branch > .small { padding-inline-start: 0; }
+/* paths hang beside the track line, so the line stays continuous and a path's own border stays visible */
+.branch-paths { display: grid; gap: 10px; margin-inline-start: 24px; min-width: 0; }
+.template-branch .branch-paths { margin-inline-start: 0; }
+.branch-path { min-width: 0; padding: 6px 0 4px 14px; border-inline-start: 3px solid var(--line); }
+.branch-path.path-selected { border-inline-start-color: var(--blue); }
+.branch-path.path-not_selected { border-inline-start-style: dashed; }
+.branch-path-label { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-weight: 600; font-size: .9rem; }
+.branch-path-label > span:not(.pill) { color: var(--quiet); font-weight: 400; font-size: .8rem; }
+.branch-path > .journey-group { margin-top: 4px; }
+.step-mark.state-not_selected, .step-mark.state-undecided { border-style: dashed; }
+/* a decision marker is neither completed nor underway work: a neutral fork, amber only while the decision is pending */
+.step-mark.state-decision, .step-mark.state-decision-pending { border-radius: 7px; }
+.step-mark.state-decision-pending { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
+.branch-help { margin: 0; }
+.branch-details > summary { min-height: 36px; font-size: .85rem; }
+@media (max-width: 600px) {
+  .branch-head { grid-template-columns: 26px minmax(0, 1fr); gap: 9px; }
+  .branch-head .step-state { grid-column: 2; justify-self: start; white-space: normal; }
+  .branch-explanation { padding-inline-start: 22px; }
+  .branch-paths { margin-inline-start: 20px; }
+  .branch-path { padding-inline-start: 8px; border-inline-start-width: 2px; }
+  /* within branch-containing subtrees the visual indent is bounded; labelled paths and the track keep the semantic nesting */
+  .nested-journey:has(.journey-branch), .journey-branch .nested-journey { margin-inline-start: 6px; padding-inline-start: 8px; }
+  .journey-step.disclosure:has(.journey-branch) > .disclosure-body, .journey-branch .journey-step.disclosure > .disclosure-body { padding-inline-start: 8px; }
+  .journey-branch .group-parallel { padding-inline-start: 8px; }
+}
 .task-alignment { padding: 20px; border-radius: 12px; background: var(--soft); display: grid; gap: 16px; }
 .task-alignment h3 { font-size: 1rem; }
 .task-alignment details > summary { min-height: 32px; }
@@ -434,9 +469,9 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .task-outcome.state-underway, .task-outcome.state-completed { background: light-dark(#e2f1eb, #203f3a); color: light-dark(#1d5d4b, #b6e7d6); }
 .task-outcome.state-needs_attention { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); }
 .state-underway > .journey-step { background: light-dark(#e4f3f0, #203f3a); }
-.state-underway > .journey-step .step-state { background: light-dark(#c8e8e0, #254846); color: light-dark(#125d58, #b9eee5); }
-.state-completed > .journey-step .step-state { background: light-dark(#e2f1eb, #254846); color: light-dark(#1d5d4b, #b9eee5); }
-.state-needs_attention > .journey-step .step-state { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
+.state-underway > .journey-step > summary .step-state { background: light-dark(#c8e8e0, #254846); color: light-dark(#125d58, #b9eee5); }
+.state-completed > .journey-step > summary .step-state { background: light-dark(#e2f1eb, #254846); color: light-dark(#1d5d4b, #b9eee5); }
+.state-needs_attention > .journey-step > summary .step-state { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
 .step-mark.state-needs_attention { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
 .step-mark.state-underway { outline-color: light-dark(#bce7df, #315c55); }
 .step-mark.state-completed { color: light-dark(var(--surface), #152032); }

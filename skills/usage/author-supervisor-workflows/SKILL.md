@@ -101,7 +101,20 @@ result, ordering or authority. Do not define either per tool call, model, turn o
 round.
 
 Reuse steps and named workflows. Split responsibilities when applicability, evidence or
-independently controlled decisions differ. Explain dependencies: later data constraints
+independently controlled decisions differ.
+
+Use a workflow `branch:` (`if`, `then`, optional `else`) only when one short, observable
+condition selects between substantially different pieces of work, such as a contained
+change getting one review instead of an iterative multi-model review. Keep finer
+conditions, iteration and completion rules in descriptions; there is no `elif`, jump,
+loop or `goto`. Branches belong in workflow files, never in step frontmatter. The next
+member after a branch follows whichever path applies. The operative working on the
+workflow selects the path from actual context with its own `branch-selection` record;
+do not write definitions that make the Supervisor approve each choice, and keep the
+project's review policy in the relevant descriptions rather than in the branch
+mechanism. A required definition counts as included only when every path includes it;
+put a duty that must always happen outside the branch or in both paths. Fixed keeps
+a branch's condition, its paths and which path each original member belongs to. Explain dependencies: later data constraints
 revise the same design decision, not a competing record. Parallelize independent work
 and order evidence and approval dependencies. Workflow references stay acyclic; parallel
 groups do not launch agents.
@@ -152,7 +165,8 @@ purpose is invoking Review. Distinguish reviewer assessment from author fixes. T
 reference explains reporting versus acceptance and persistent review.
 
 Check the ledger and concrete cases: factual answers, consequential changes, report-only
-review, contested rebuttals, fixes, changed bases and interrupted chats. Use the current
+review, contested rebuttals, fixes, changed bases, interrupted chats and both paths of
+every branch, including what follows it. Use the current
 definition reader or parser for fields, filenames and IDs, references, acyclic
 expansion, counts and complete diagnostics. Separately check supporting files. Parser
 success proves format and graph validity, not execution.

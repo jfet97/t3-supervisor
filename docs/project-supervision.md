@@ -144,8 +144,21 @@ Requirements are accounted for once per current main task, including recursive
 inclusion. Child contributions may overlap and expand several parent steps into a
 personal workflow; completion does not automatically roll up to the parent.
 
-Required controls inclusion; fixed preserves original commitments, relative order
-and parallel relationships. Added work may appear between fixed members. Description
+Branches are agreed alternatives under one short condition. The introduction shows
+each branch's node ID, condition and indented paths, and gives the operative a
+concrete `branch-selection` record to write when work reaches the branch. The
+operative decides from the actual context without asking for approval; the
+Supervisor objects only to a concrete contradiction or an explicit human instruction.
+A child records the decisions of its own connected workflow. Task shows a pending
+decision as current work, the selected path with its reason, and the other path as
+not selected; undecided and not-selected steps are not counted as outstanding.
+A selection never proves work, and a completion recorded before a changed decision
+is shown as needing reassessment. See [branch selections](workflow-mcp.md#branch-selections).
+
+Required controls inclusion; an applicable required item must be on every path of a
+branch to count as included. Fixed preserves original commitments, relative order,
+parallel relationships and branches with their conditions and paths. Added work may
+appear between fixed members or inside a branch path. Description
 text carries applicability, instructions, expected results and whole-workflow
 delegation/iteration guidance. The role distinction between main coordinator and
 assigned reviewers avoids recursive delegation. No semantic keyword launches an

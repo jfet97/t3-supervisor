@@ -90,8 +90,8 @@ export function useOverview(active: boolean, connected: boolean, route: Route): 
 export function WorkState({work, fresh = true}: {work: DashboardWorkInfo; fresh?: boolean}) {
   const off = work.supervision !== "enabled";
   const conversation = conversationLabel(work.engagement, fresh, work.supervision === "stopped");
-  const state = off ? work.supervision === "stopped" ? "Supervision stopped" : "Supervision disabled" : work.attention.length ? "Needs attention" : conversation ?? (work.assessment?.status === "completed" ? "Completed" : work.assessment?.status === "underway" ? "In progress" : work.planStatus === "agreed" ? "Plan agreed" : "Awaiting assessment");
-  const outcome = work.assessment?.status === "completed" ? "Completed" : work.assessment?.status === "underway" ? "In progress" : work.planStatus === "agreed" ? "Plan agreed" : null;
+  const state = off ? work.supervision === "stopped" ? "Supervision stopped" : "Supervision disabled" : work.attention.length ? "Needs attention" : conversation ?? (work.assessment?.status === "completed" ? work.assessment.reassessment ? "Completion needs reassessment" : "Completed" : work.assessment?.status === "underway" ? "In progress" : work.planStatus === "agreed" ? "Plan agreed" : "Awaiting assessment");
+  const outcome = work.assessment?.status === "completed" ? work.assessment.reassessment ? "Completion needs reassessment" : "Completed" : work.assessment?.status === "underway" ? "In progress" : work.planStatus === "agreed" ? "Plan agreed" : null;
   return <div className="work-state"><StatusBadge label={off ? state : conversation ?? state} tone={off ? "off" : fresh && work.engagement?.availability === "current" ? "on" : "unknown"} icon={off ? "pause" : fresh && work.engagement?.availability === "current" ? "shield" : "alert"}/>{!off && state !== conversation && <span className="pill amber">{state}</span>}{!off && conversation === "Engaged in the task" && outcome && <span className="small muted">{outcome}</span>}</div>;
 }
 

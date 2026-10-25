@@ -120,6 +120,7 @@ const fullyResolvedPlan = (workflow: WorkflowPlanValue): boolean => {
       case "parallel": return walk(node);
       case "step": return node.resolution === "resolved";
       case "workflow": return node.resolution === "resolved" && node.fixed !== null && node.plan !== null && walk(node.plan);
+      case "branch": return walk(node.then) && (node.else === null || walk(node.else));
     }
   });
   return walk(workflow.plan);

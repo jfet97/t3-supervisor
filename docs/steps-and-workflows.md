@@ -113,6 +113,64 @@ Parallel means members may overlap, with no declared order between them. It does
 not demand simultaneous wall-clock execution or automatically create subagents.
 Sequence expresses the intended semantic order, not an execution scheduler.
 
+## Branches
+
+A workflow member can choose between coarse alternatives. `branch:` holds exactly
+`if`, `then` and an optional `else`. The condition is one trimmed line of at most 300
+characters. Each path is a nonempty, indented list that runs as a sequence and
+holds the same members a sequence holds, including further branches. The next
+member at the branch's own indentation follows the whole branch.
+
+```yaml
+name: Review
+description: Review the change at a depth that fits its scope and risk.
+sequence:
+  - step: inspect-change
+  - branch:
+      if: The change is contained, well understood and low risk.
+      then:
+        - workflow: light-review
+      else:
+        - workflow: heavy-review
+  - step: report-findings
+```
+
+Without `else`, a false condition skips the branch:
+
+```yaml
+sequence:
+  - step: implementation
+  - branch:
+      if: The change migrates stored data.
+      then:
+        - step: backup-and-restore-check
+  - step: deployment
+```
+
+Use a branch only when the alternatives are substantially different pieces of work.
+Keep fine-grained conditions, iteration and completion rules in descriptions. There
+is no `elif`, jump, loop or `goto`; nest a branch inside a path when a second choice
+depends on the first. Branches belong to workflow composition only: a step file stays
+a description with no structural fields. Negotiated task plans may add task-local
+branches in the same shape. Validation, reference checks, cycle detection, local ID
+uniqueness and the expansion bounds cover both paths, whichever is later selected.
+
+Both paths are agreed commitments; the plan, agreement digest and fixed checks keep
+the condition and both paths. The operative working on a workflow selects a path when
+work reaches the branch, from the actual context and without asking for approval. The
+main records decisions for the main workflow and a native child for its own connected
+workflow; see [branch selections](workflow-mcp.md#branch-selections). The Supervisor
+objects only in ordinary dialogue, to a concrete contradiction with the agreed
+condition or evidence, or to an explicit human instruction; a human-pinned path wins.
+
+A selection records a decision, not execution. Steps on an undecided or not-selected
+path are not outstanding work, a reached decision without a selection is pending work
+of its own, and a workflow cannot be assessed completed while a decision on its
+applicable path is pending. A changed decision keeps the statuses and evidence
+already recorded on the earlier path as history, and a completion recorded before
+the change needs reassessment. Accepted and earlier plans show their agreed
+alternatives without a later selection.
+
 ## References and skills
 
 Steps, workflows and local step objects accept separate optional string lists:
@@ -167,8 +225,10 @@ enable shared definitions or supervision.
 ## Fixed workflows
 
 `fixed: true` protects the original members, their descriptions, references, skills and requirements,
-their relative order and the declared parallel relationships. It permits added
-support work between original members and around the fragment. A flexible outer
+their relative order, the declared parallel relationships and each branch with its
+condition, its paths and the path each original member belongs to. It permits added
+support work between original members, around the fragment and inside a branch path,
+and it does not limit which path the operative selects. A flexible outer
 plan cannot remove or weaken an inner fixed fragment.
 
 For example, a fixed implementation followed by deployment may gain required E2E
@@ -229,7 +289,12 @@ definition.
 The main agent and Supervisor negotiate the actual plan for the current task.
 The plan must account for each required item. Inclusion inside a referenced
 workflow counts, so a reviewer already containing E2E testing does not require a
-duplicate testing step. Hand-written and negotiated plans follow the same policy.
+duplicate testing step. Inclusion is structural and independent of any selection:
+an applicable required item counts as included only when every path includes it,
+outside any branch or in both alternatives. Found only inside one alternative, it
+stays unresolved until the plan includes it on every path or its applicability is
+assessed. A required workflow that contains a branch is included as a whole; its
+alternatives are its own commitments, never missing inclusion. Hand-written and negotiated plans follow the same policy.
 Missing items are integrated in an appropriate position, not blindly appended.
 This can include an insertion between fixed members without changing their order.
 
@@ -270,7 +335,8 @@ a reference in a plan. Inclusion does not prove delegation or successful executi
 ## Cycles and invalid definitions
 
 The service detects direct and indirect cycles in named workflow references and
-reports their exact chain. Reusing a workflow in separate branches is allowed;
+reports their exact chain. Reusing a workflow in separate places, including both
+paths of a branch, is allowed;
 returning to a workflow already on the current expansion chain is a cycle.
 File, size and depth bounds prevent unbounded processing.
 
@@ -325,7 +391,7 @@ Earlier accepted plans remain history. A new proposal for unchanged task materia
 cannot silently discard already accepted or live fixed commitments.
 
 The UI reference must explain the layout, complete step and workflow syntax, local
-steps, composition, sequence/parallel groups, fixed additions, required inclusion,
+steps, composition, sequence/parallel groups, branches and their decisions, fixed additions, required inclusion,
 whole-workflow delegation, child contributions, cycle diagnostics and invalid-file
 recovery. It must cover concrete examples and FAQ cases, including the difference
 between inclusion, agreement and execution, without requiring users to read source.

@@ -8,6 +8,7 @@ import {defaultSupervisorModel, type ProjectSupervisorStore} from "../src/projec
 import {proposalContextFromDefinitions, validateWorkflowApplyAgainstPinnedContext, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {acceptedWorkflowPlansForBinding, parseExternalContributionRecord, type WorkflowStateStore} from "../src/workflow-state-store.js";
 import {externalContributionLimits, workflowMutationLimits} from "../src/workflow-state-contract.js";
+import {planEntities as treePlanEntities} from "../src/workflow-plan-tree.js";
 import type {ExternalContributionImport, WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStateDocument, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
 import type {DefinitionReference, ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
@@ -212,21 +213,7 @@ const applyInput = (fixture: Fixture, document: WorkflowStateDocument, plan: Wor
   ...(options.evidence !== undefined ? {evidence: options.evidence} : {}),
 });
 
-const planEntities = (plan: WorkflowStatePlan): Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>[] => {
-  const result: Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>[] = [];
-  const walk = (group: WorkflowPlanGroupInfo | null): void => {
-    if (!group) return;
-    for (const node of group.nodes) {
-      if (node.kind === "sequence" || node.kind === "parallel") walk(node);
-      else if (node.kind === "step" || node.kind === "workflow") {
-        result.push(node);
-        if (node.kind === "workflow") walk(node.plan);
-      }
-    }
-  };
-  walk(plan);
-  return result;
-};
+const planEntities = (plan: WorkflowStatePlan) => treePlanEntities(plan);
 
 const reverseObjectKeys = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(reverseObjectKeys);
