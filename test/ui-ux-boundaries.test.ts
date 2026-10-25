@@ -42,7 +42,11 @@ it("catalog bounds a long collection and exposes full template duties only in th
   const definitions = model.projectDefinitions(fixtureIds.projectA, null);
   const catalog = renderToStaticMarkup(createElement(DefinitionsContent, {definitions}));
   assert.equal((catalog.match(/class="catalog-row"/g) ?? []).length, 25);
-  assert.match(catalog, /1–25 of 48/);
+  // the catalog counts every configured workflow and step; the large interface adds 45 synthetic duties to the base project
+  const total = definitions.config.workflows.length + definitions.config.steps.length;
+  assert.equal(definitions.config.steps.filter(entry => entry.id.startsWith("fixture-duty-")).length, 45);
+  assert.ok(total > 25, "the collection spans more than one page");
+  assert.match(catalog, new RegExp(`>1–25 of ${total} <span>· Page 1 of ${Math.ceil(total / 25)}</span>`, "u"));
   assert.doesNotMatch(catalog, /Definition source files|Preserve the actual scope/);
   const detail = renderToStaticMarkup(createElement(DefinitionsContent, {definitions, selectedDefinition: "step:fixture-duty-45"}));
   assert.match(detail, /Preserve the actual scope/);
