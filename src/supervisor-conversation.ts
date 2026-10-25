@@ -1,12 +1,12 @@
 import { conversationAuthorityCurrent, conversationMayContact, taskScopeRevision } from "./supervision-conversation.js";
 import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, Layer, Option, Ref } from "effect";
-import { mainRunNodeReader, hasUnansweredHuman, nativeUserMessageVisible, timestampMs } from "./domain.js";
+import { mainRunNodeReader, hasUnansweredHuman, nativeUserMessageVisible, operativeRunStopped, timestampMs, workspacePreparationPending } from "./domain.js";
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type ReviewOutcomeRecord, type ReviewPins, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { NativeOperateRpc, NativeRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
 import { fixedOccurrencesPreserved, localThreadToolRules, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
-import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest } from "./supervisor-definition-review.js";
+import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest, sameDefinitionContents } from "./supervisor-definition-review.js";
 import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type ProtocolAnchor, type TaskRecord } from "./project-supervisor-store.js";
 import { projectRequesterPolicy, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
@@ -899,16 +899,19 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     !intro || ["context", "ready"].includes(intro.state) && !intro.dispatchMode && !intro.acceptedAt && !intro.rejectedAttempts?.length);
   // the renewal identities are allocated by the caller before the block that checks and writes them
   const renewalIds = Effect.all([ids.uuid, ids.uuid]);
-  const renewUnsentTask = (task: TaskRecord, now: number, [renewalId, proposalId]: readonly [string, string]) => Effect.gen(function* () {
+  const renewedInterpretation = (current: TaskRecord, now: number, [renewalId, proposalId]: readonly [string, string]): TaskRecord => {
+    // the renewed request is a new attempt; the evidence of the old one never stands for it
+    const renewed: TaskRecord = {...current, interpretationEvidence: undefined, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${renewalId}`,
+      workflowProposalId: `${current.id}:renew:${proposalId}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+      reason: "Approved project definitions are ready; refresh the unsent proposal in the existing Supervisor conversation.", updatedAt: now};
+    delete renewed.definitionContext;delete renewed.definitionReadAttempts;delete renewed.revalidationAttempts;delete renewed.definitionNoticeKey;
+    return renewed;
+  };
+  const renewUnsentTask = (task: TaskRecord, now: number, renewal: readonly [string, string]) => Effect.gen(function* () {
     const current = yield* store.task(task.threadId);
     if (!current || current.id !== task.id || current.status !== "inferred" || !(yield* introductionUnsent(task.id)) ||
       current.definitionReview?.status !== "authorized" && current.definitionReview?.status !== "restored") return;
-    // the renewed request is a new attempt; the evidence of the old one never stands for it
-    const renewed: TaskRecord = {...current, interpretationEvidence: undefined, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${renewalId}`,
-      workflowProposalId: `${task.id}:renew:${proposalId}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
-      reason: "Approved project definitions are ready; refresh the unsent proposal in the existing Supervisor conversation.", updatedAt: now};
-    delete renewed.definitionContext;delete renewed.definitionReadAttempts;delete renewed.revalidationAttempts;delete renewed.definitionNoticeKey;
-    yield* transaction(Effect.andThen(requests.removeUnsentIntroduction(task.id), store.saveTask(renewed)));
+    yield* transaction(Effect.andThen(requests.removeUnsentIntroduction(task.id), store.saveTask(renewedInterpretation(current, now, renewal))));
   });
   const freshDefinitions = (task: TaskRecord): Effect.Effect<ProjectDefinitionSnapshot | null> => Effect.gen(function* () {
     const loaded = definitions ? yield* definitions.load(task.projectId, task.threadId) : undefined;
@@ -958,6 +961,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
   });
   const reviewDefinitions = (task: TaskRecord, observed: ProjectDefinitionSnapshot, agent: Projection, supervisor: Projection,
     now: number): Effect.Effect<boolean, SupervisionStoreError> => Effect.gen(function* () {
+    const relocationIds = !task.agreement && observed.workspaceRoot !== task.workflow?.workspaceRoot ? yield* renewalIds : null;
     // the checking review is written with the guard read last before it: the first one, or the one after the global fingerprint read
     const checking = (current: TaskRecord, prior: TaskRecord["definitionReview"], approved: ReturnType<typeof extractApprovedProjectDefinitions>, explicitConfigSave: boolean,
       observedGlobalFingerprint: string | null) => Effect.gen(function* () {
@@ -979,6 +983,23 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return {kind: "done" as const, value: false};
       if (observed.status === "unavailable" || observed.status === "permission_required") return {kind: "done" as const, value: false};
       const approved = extractApprovedProjectDefinitions(task);
+      if (relocationIds && !task.agreement && approved && observed.status === "ready" && observed.complete && observed.revision &&
+        observed.workspaceRoot !== approved.workspaceRoot && observed.workspaceRoot === agent.thread.worktreePath &&
+        !workspacePreparationPending(agent) && !operativeRunStopped(agent) && sameDefinitionContents(approved, observed) &&
+        (yield* introductionUnsent(task.id))) {
+        const current = yield* store.task(task.threadId);
+        if (!current || current.status !== "inferred" || fingerprint(current) !== fingerprint(task) || !sourceUnchanged(current, agent)) return {kind: "done" as const, value: false};
+        // a fresh interpretation must bind the unchanged policy to the actual checkout; old native proof is never rebased
+        yield* transaction(Effect.gen(function* () {
+          const renewed = {...renewedInterpretation({...current, definitionSnapshot: observed,
+            workflow: {...current.workflow!, workspaceRoot: observed.workspaceRoot, revision: observed.revision, status: "proposed",
+              message: "The selected working folder is ready; refresh the unsent workflow proposal."}}, now, relocationIds)};
+          delete renewed.definitionReview;
+          yield* requests.removeUnsentIntroduction(task.id);
+          yield* store.saveTask(renewed);
+        }));
+        return {kind: "done" as const, value: false};
+      }
       const matches = observed.workspaceRoot === task.workflow?.workspaceRoot && observed.revision === task.workflow?.revision &&
         Boolean(task.definitionContext && proposalContextMatches(task.definitionContext, observed));
       if (matches) {

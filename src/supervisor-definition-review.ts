@@ -16,6 +16,15 @@ const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024;
 const MAX_USER_REFERENCES = 100;
+
+/** Compares complete policy content without treating a checkout relocation as a file edit. */
+export const sameDefinitionContents = (left: ProjectDefinitionSnapshot, right: ProjectDefinitionSnapshot): boolean => {
+  const content = (value: ProjectDefinitionSnapshot) => ({projectId: value.projectId, threadId: value.threadId,
+    globalOnly: value.globalOnly ?? null, globalRevision: value.globalRevision ?? null, status: value.status,
+    steps: value.steps, workflows: value.workflows, config: value.config, projectConfig: value.projectConfig,
+    definitionFiles: value.definitionFiles, complete: value.complete, sources: value.sources, issues: value.issues});
+  return fingerprint(content(left)) === fingerprint(content(right));
+};
 const definitionIdPattern = /^[a-z0-9][a-z0-9_-]{0,63}$/u;
 const absent = (value: unknown): boolean => value === undefined || value === null;
 

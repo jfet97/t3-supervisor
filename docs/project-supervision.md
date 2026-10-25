@@ -7,6 +7,14 @@ Supervisors. Existing chats keep their native controls; unavailable models are
 reported rather than substituted. Project-root selection shows defaults, while a
 selected main shows its actual binding, requests and recovery controls.
 
+Initial workflow planning waits while T3 prepares the main's workspace. When a
+newly bound worktree contains identical definitions, an unsent initial proposal
+is refreshed in the same Supervisor conversation with a new interpretation proof.
+This does not approve edited policy or replay an uncertain delivery. Automatic
+checkout recovery stays held while the operative is interrupted. An interrupted
+operative run does not itself disable supervision: use Stop supervision to stop
+the pair. Existing agreements keep their source-change checks.
+
 ## Definitions and enable controls
 
 Read [steps and workflows](steps-and-workflows.md) for the definition model and

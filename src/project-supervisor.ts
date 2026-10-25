@@ -10,7 +10,7 @@ import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./
 import { fingerprint } from "./guidance-store.js";
 import { GuidanceDb } from "./db.js";
 import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
-import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs } from "./domain.js";
+import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs, workspacePreparationPending } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
 import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
@@ -1184,6 +1184,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     const run = step.run;
     yield* interpretationPhase("run_terminal", attemptFields(job));
     let source = yield* projection(job.threadId);
+    if (workspacePreparationPending(source)) return;
     // the attempt's recorded submission (item 7): the final chat text of the run is never read; an unreadable receipt is unusable
     const taskAttempt = job.attempt;
     const recorded = taskAttempt ? yield* readInterpretationReceipt(db, taskReceiptOwner(job, taskAttempt), taskAttempt.attemptId).pipe(
@@ -1448,6 +1449,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     let job: TaskRecord = decided.job;
     if (job.conversation?.observed && (job.conversation.observed.messageId !== job.sourceMessageId || job.conversation.observed.hash !== job.sourceHash)) return;
     const source = yield* projection(job.threadId);
+    if (workspacePreparationPending(source)) return;
     if (!(yield* projectEnabled(binding.projectId, binding.mainThreadId))) return;
     const sourced = job;
     // after the source read, the source and boundary checks and their closures run as one admission section
@@ -1616,6 +1618,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   // one discovery step for a candidate main: a new genuine human request becomes a queued interpretation task of its binding
   const discover = (thread: ThreadInfo, registered: {id: string}, previous: TaskRecord | null, catalog: CatalogValue) => Effect.gen(function* () {
     const main = yield* projection(thread.id);
+    if (workspacePreparationPending(main)) return;
     if (!(yield* scope.eligible(main.thread, catalog.threads)) || main.thread.projectId !== registered.id) return;
     const baseline = yield* sourceFloor(thread.id, main);if (baseline === null) return;
     // an explicit Enable or a new activation boundary supervises the chat's next request afresh, even after an agreed task
