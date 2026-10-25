@@ -201,10 +201,11 @@ export function createNavigator(initial: Route, host: NavigationHistory, allow: 
       accept(next);
     },
     historyChanged() {
-      rememberListScroll(route);
       const observed = host.read();
       const target = positionAt(observed);
       const next = parseRoute(observed.hash);
+      // popstate and hashchange can describe the same traversal before the destination frame restores its position
+      if (routeHref(next) !== routeHref(route)) rememberListScroll(route);
       if (restore && continueRestore(observed, target, next)) return;
       // a changed history length means the browser added this entry right after the current one
       const added = target === null && (observed.length === undefined || observed.length !== length);

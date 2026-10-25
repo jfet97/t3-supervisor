@@ -33,6 +33,35 @@ it("Activity help returns to an address containing its retained filter and page"
   assert.equal(parseRoute("#/activity?page=bad").listPage, undefined);
 });
 
+it("duplicate history events do not overwrite a list position before its destination frame restores it", () => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis, "sessionStorage");
+  const values = new Map<string, string>();
+  const frame = {scrollY: 900};
+  Object.defineProperty(globalThis, "window", {configurable: true, value: frame});
+  Object.defineProperty(globalThis, "sessionStorage", {configurable: true, value: {setItem: (key: string, value: string) => values.set(key, value)}});
+  try {
+    const activity = {...directoryRoute, page: "activity" as const, q: "guidance", listPage: 2};
+    let entry: {hash: string; state: unknown} = {hash: routeHref(activity), state: null};
+    const controller = createNavigator(activity, {
+      read: () => entry, push: (hash, state) => {entry = {hash, state};},
+      replace: (hash, state) => {entry = {hash, state};}, go: () => assert.fail("allowed Back does not need a recovery traversal"),
+    }, () => true, () => {});
+    controller.start();
+    const listEntry = {...entry};
+    controller.navigate({...directoryRoute, page: "guide", guideTopic: "activity-outcomes"});
+    assert.deepEqual([...values.values()], ["900"]);
+    frame.scrollY = 0;
+    entry = listEntry;
+    controller.historyChanged();
+    controller.historyChanged();
+    assert.deepEqual([...values.values()], ["900"], "the matching popstate/hashchange pair must keep the saved list position");
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow); else Reflect.deleteProperty(globalThis, "window");
+    if (previousStorage) Object.defineProperty(globalThis, "sessionStorage", previousStorage); else Reflect.deleteProperty(globalThis, "sessionStorage");
+  }
+});
+
 it("native Guide hash links pass the navigation guard and leave the original list address intact", () => {
   const list = {...directoryRoute, projectId: "project", q: "missing folder", listPage: 3, showOrphaned: true};
   const guide = {...directoryRoute, page: "guide" as const, guideTopic: "orphaned-chat"};
