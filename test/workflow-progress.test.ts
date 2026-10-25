@@ -61,6 +61,7 @@ const document = (): WorkflowStateDocument => ({
       }},
   }],
   contributions: [],
+  branchSelections: [],
   evidence: Array.from({length: 25}, (_, index) => ({
     id: `observation-${index}`,
     operationId: `operation-${index}`,
@@ -88,8 +89,9 @@ const readerResult = (): Extract<WorkflowReadResult, {status: "ok"}> => ({
   workflowProtocolDiagnostic: null,
   agreementValidityNote: "Agreement is not execution proof.",
   externalContributionNote: "Contributions are untrusted main reports.",
+  branchSelectionNote: "Selections are operative decisions.",
   incompatibleWorkflows: [],
-  workflows: [{document: document(), parentNodeReferences: []}],
+  workflows: [{document: document(), parentNodeReferences: [], pendingBranchDecisions: []}],
   workflowOffset: 5,
   workflowHasMore: true,
   lineage: [
@@ -309,7 +311,7 @@ it.effect("workflow progress exposes bounded contributions with honest plan memb
     evidence: [...base.evidence, {id: "removed", operationId: "remove", kind: "node_removed", recordedAt: 26, actorSupervisorThreadId: "supervisor-thread",
       targetNodeId: removedId, targetNodeName: "Former step", statusFrom: "planned", statusTo: null, sourceThreadId: null, sourceRunId: null,
       sourceMessageId: null, agreementKey: null, note: "Removed."}]};
-  const workflowReader = {read: () => ({...readerResult(), workflows: [{document: contributed, parentNodeReferences: []}]})};
+  const workflowReader = {read: () => ({...readerResult(), workflows: [{document: contributed, parentNodeReferences: [], pendingBranchDecisions: []}]})};
   const supervision = {
     workflowLocator: () => ({supervisorThreadId: "supervisor-thread", bindingGeneration: 7}),
     scopeSnapshot: () => scopeSnapshot(),

@@ -9,6 +9,7 @@ import { SessionAccess } from "../ui/src/access.js";
 import { confirmChatSupervisionChange, mergeLoadedDraft, ConnectedWork, progressView, ProjectSupervisorView, TaskWorkspace, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
+import { fixtureJourney } from "./ui-fixture/journey.js";
 
 // the client helpers are Effects on the page runtime of each test; they resolve request paths against the page location.
 // they run over a stubbed browser fetch without time, so these tests are it.effect
@@ -1246,4 +1247,25 @@ it("an earlier workflow cannot borrow the current task's agreement panel", () =>
   assert.doesNotMatch(html.slice(0, history), /Proposed plan|>Proposed</);
   assert.match(html.slice(history), /Earlier workflow: Review the source change/);
   assert.doesNotMatch(html.slice(history), /Current task acceptance only|Agent and Supervisor/);
+});
+
+it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {
+  const journey = (phase: "branch-pending" | "branch-selected") => fixtureJourney(phase, "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const pending = journey("branch-pending");
+  const pendingHtml = renderWorkspace([pending.progress], pending.task);
+  assert.match(pendingHtml, /Now: Decide: The change is contained, well understood and low risk\./);
+  assert.match(pendingHtml, /7 of 9 applicable steps assessed complete · 1 branch decision pending/);
+  const selected = journey("branch-selected");
+  const selectedHtml = renderWorkspace([selected.progress], selected.task);
+  assert.match(selectedHtml, /Now: Single independent review/);
+  assert.doesNotMatch(selectedHtml, /Decide:|branch decision pending/);
+  assert.match(selectedHtml, /7 of 10 applicable steps assessed complete/);
+  assert.match(selectedHtml, /<h3>Branch decisions<\/h3>/);
+  assert.match(selectedHtml, /Then path selected for “The change is contained, well understood and low risk\.”/);
+  const connected = renderConnected([selected.progress]);
+  assert.match(connected, /Reconstructed reviewer/);
+  assert.match(connected, /aria-label="Branch: if The diff stays within the packing scan module\."/);
+  assert.match(connected, /Then path selected/);
+  assert.match(connected, /No else path: the branch is skipped\./);
+  assert.match(connected, /aria-label="Else path, when the condition does not hold: not selected"/);
 });

@@ -45,6 +45,7 @@ const document = (): WorkflowStateDocument => ({
   currentAgreementKey: null,
   acceptedAgreements: [],
   contributions: [],
+  branchSelections: [],
   evidence: [],
   createdAt: 1,
   updatedAt: 2,
@@ -57,8 +58,9 @@ const readerResult = (): Extract<WorkflowReadResult, {status: "ok"}> => ({
   workflowProtocolDiagnostic: null,
   agreementValidityNote: "Agreement is not execution proof.",
   externalContributionNote: "Contributions are untrusted main reports.",
+  branchSelectionNote: "Selections are operative decisions.",
   incompatibleWorkflows: [],
-  workflows: [{document: document(), parentNodeReferences: []}],
+  workflows: [{document: document(), parentNodeReferences: [], pendingBranchDecisions: []}],
   workflowOffset: 0,
   workflowHasMore: false,
   lineage: [
@@ -206,7 +208,7 @@ it.effect("CT-WP-02: observedAt is the scope time on scoped unavailable branches
   assert.equal(scopeMismatch.observedAt, now);
 
   // oversized response: null scope, wall clock (:243)
-  const huge = {...readerResult(), workflows: [{document: {...document(), objective: "x".repeat(1_100_000)}, parentNodeReferences: []}]};
+  const huge = {...readerResult(), workflows: [{document: {...document(), objective: "x".repeat(1_100_000)}, parentNodeReferences: [], pendingBranchDecisions: []}]};
   const tooLarge = yield* readWorkflowProgressPage(supervisionFake(bound).supervision,
     {read: () => huge}, query);
   assert.equal(tooLarge.status, "too_large");

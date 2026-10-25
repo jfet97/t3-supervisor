@@ -275,3 +275,20 @@ it.effect("a CSRF token rotated by a restart leaves the save unknown, never repl
   globalThis.fetch = async () => new Response("{}", {status: 500});
   yield* rejects(saveProjectConfiguration(input), (error: unknown) => error instanceof ProjectConfigRequestError && !error.definitelyNotSaved);
 }).pipe(Effect.provide(pageLayer)));
+
+it("definition detail shows a branch's condition and both labelled paths before the following member, without execution states", () => {
+  const branching = {...definitions, workflows: [...definitions.workflows, {id: "review-depth", name: "Review depth", description: "Choose the review depth.", summary: "Choose the review depth.",
+    fixed: false, origin: "project" as const, path: ".t3-supervisor/workflows/review-depth.yaml", sourceId: "review-depth",
+    sequence: [{branch: {if: "The change is contained and low risk.", then: [{step: "e2e-testing"}]}}, {step: {id: "report", name: "Report", description: "Report the result."}}]}],
+  config: {...definitions.config, workflows: [...definitions.config.workflows, {id: "review-depth", path: "workflows/review-depth.yaml", summary: "Choose the review depth.", required: false,
+    origin: "project" as const, sourceId: "review-depth"}]}};
+  const html = renderToStaticMarkup(createElement(DefinitionsContent, {definitions: branching, selectedDefinition: "workflow:review-depth"}));
+  assert.match(html, /role="group" aria-label="Branch: if The change is contained and low risk\."/);
+  assert.match(html, /<span class="branch-label">Branch<\/span> <span>If The change is contained and low risk\.<\/span>/);
+  assert.match(html, /Then path <span>when the condition holds<\/span>/);
+  assert.match(html, /Else path <span>when the condition does not hold<\/span>/);
+  assert.match(html, /No else path: the branch is skipped\./);
+  assert.match(html, /How branches work/);
+  assert.ok(html.indexOf("Step: Report") > html.indexOf("No else path"), "the following member comes after the whole branch");
+  assert.doesNotMatch(html, /Decision pending|path selected|Not selected|Planned|Completed/);
+});

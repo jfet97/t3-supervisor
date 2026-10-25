@@ -20,7 +20,8 @@ export const DashboardWork = Schema.Struct({
   engagement: Schema.optionalKey(ConversationEngagement),
   taskStatus: Schema.NullOr(Schema.String),
   planStatus: Schema.NullOr(Schema.String),
-  assessment: Schema.NullOr(Schema.Struct({status: Schema.String, summary: Schema.String, updatedAt: Schema.Number})),
+  assessment: Schema.NullOr(Schema.Struct({status: Schema.String, summary: Schema.String, updatedAt: Schema.Number,
+    reassessment: Schema.optionalKey(Schema.NullOr(Schema.String))})),
   attention: Schema.Array(Schema.String),
   updatedAt: Schema.NullOr(Schema.Number),
 });
@@ -88,7 +89,7 @@ export const planStatusAttention = (status: string) => `The current plan is ${st
 export function workAttention(input: {
   enabled: boolean; bindingState: string | null; settlementState?: string | null;
   monitoring?: SupervisorMonitoringStatus | undefined; task?: TaskInterpretationInfo | undefined;
-  assessment?: {status: string; summary: string} | null;
+  assessment?: {status: string; summary: string; reassessment?: string | null | undefined} | null;
 }): string[] {
   if (!input.enabled) return [];
   const {monitoring, assessment} = input;
@@ -100,6 +101,7 @@ export function workAttention(input: {
   if (monitoring?.state === "unavailable" || monitoring?.state === "uncertain") attention.push(monitoring.message.slice(0, 700));
   if (task && ["needs_context", "unavailable", "uncertain"].includes(task.status)) attention.push(task.reason.slice(0, 700));
   if (assessment?.status === "needs_attention") attention.push(assessment.summary || "The current workflow needs attention.");
+  if (assessment?.status === "completed" && assessment.reassessment) attention.push(assessment.reassessment);
   if (task?.workflow && ["invalid", "stale", "unavailable"].includes(task.workflow.status)) attention.push(planStatusAttention(task.workflow.status));
   if (task?.agreement?.status === "stale") attention.push(staleAgreementAttention);
   if (task?.definitionReview?.status === "revert_requested") attention.push(task.definitionReview.message.slice(0, 700));

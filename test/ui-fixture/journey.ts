@@ -1,11 +1,12 @@
 import type { TaskInterpretationInfo, WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProposalInfo, WorkflowRequirementInfo } from "../../src/project-supervisor-contract.js";
-import type { WorkflowProgressObservation, WorkflowProgressSnapshot } from "../../src/workflow-progress.js";
+import type { WorkflowProgressBranchEvent, WorkflowProgressBranchSelection, WorkflowProgressObservation, WorkflowProgressSnapshot } from "../../src/workflow-progress.js";
 import {emptyConversation} from "../../src/supervision-conversation-contract.js";
 
 // A reconstructed example of a warehouse packing change: a GTIN scan selects an article and quantity-label scans add pieces.
 // Every text is labelled; none of it records Supervisor work, native messages or a run. The plan follows a project's
 // high-level change workflow; occurrence IDs stay the same across proposals and the live plan.
-export const journeyCases = ["request", "following", "catching-up", "paused", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained"] as const;
+export const journeyCases = ["request", "following", "catching-up", "paused", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained",
+  "branch-proposal", "branch-pending", "branch-selected", "branch-changed"] as const;
 export type JourneyCase = typeof journeyCases[number];
 
 export const journeyTitle = "Packing quantity scans (reconstructed example)";
@@ -157,6 +158,7 @@ export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: 
     : {...base, status: "inferred", workflow: proposalV1, workflowProposalId: "packing-proposal-1", agreement: agreement(proposalV1, "packing-proposal-1", now - 45 * 60_000)};
   task = {...task, engagement: {mode: ["following", "paused", "catching-up"].includes(phase) ? "following" : "engaged",
     availability: phase === "catching-up" || phase === "request" ? "catching_up" : phase === "stale" ? "stale" : "current", consideredAt: now}};
+  if (phase.startsWith("branch-")) return branchJourney(phase as BranchCase, task, base, agreement, projectId, threadId, supervisorThreadId, now);
   if (["following", "paused", "catching-up"].includes(phase)) {
     task = {...task, ...(phase !== "paused" ? {workflow: null, agreement: null} : {}), conversation: {...emptyConversation(now), draft: {objective: "Reconstructed example: discuss the quantity scan behavior before deciding on implementation.",
       constraints: ["No deployment is authorized."], questions: ["Should a quantity scan replace or add to the current amount?"],
@@ -179,6 +181,71 @@ export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: 
       {threadId, parentThreadId: null, depth: 0, origin: "main", title: journeyTitle, lifecycle: phase === "completed" ? "completed" : "running", lifecycleDetail: phase === "completed" ? "completed" : "running",
         archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Reconstructed example: no messages are sent."},
     ]}, coverage: [{threadId, state: "root", assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null}], incompatibleWorkflows: [], workflows,
+    workflowOffset: 0, workflowHasMore: false, lineageOffset: 0, lineageHasMore: false};
+  return {task, progress};
+}
+
+// the same packing change with a Review that chooses its depth: one independent review for a contained change, or two paired reviews;
+// the choice belongs to the agent, the dashboard only reads it, and a selection is not evidence that the selected review happened
+type BranchCase = "branch-proposal" | "branch-pending" | "branch-selected" | "branch-changed";
+const reviewCondition = "The change is contained, well understood and low risk.";
+const singleReview: WorkflowPlanStepInfo = {kind: "step", nodeId: "packing-review-single", definitionId: null, localId: "single-review", templatePath: null,
+  name: "Single independent review", description: "One reviewer other than the author assesses the contained change; small straightforward findings are fixed and checked without another round.",
+  source: null, resolution: "resolved", reason: "Part of the project’s fixed Review workflow.", status: "planned", contributorThreadIds: []};
+function branchPlan(statuses: Statuses & {single?: Status} = {}): WorkflowPlanGroupInfo {
+  const base = plan(notes.verify, statuses);
+  const node = (key: "correctness" | "fit" | "findings") => step(key, notes[key], statuses[key] ?? "planned");
+  return {...base, nodes: base.nodes.map(item => item.kind !== "workflow" ? item : {...item, plan: {kind: "sequence", templatePath: null, nodes: [
+    {kind: "branch", nodeId: "packing-review-depth", templatePath: null, condition: reviewCondition, reason: "Review depth follows the change’s scope and risk.",
+      then: {kind: "sequence", templatePath: null, nodes: [{...singleReview, status: statuses.single ?? "planned"}]},
+      else: {kind: "sequence", templatePath: null, nodes: [{kind: "parallel", templatePath: null, nodes: [node("correctness"), node("fit")]}]}},
+    node("findings")]}})};
+}
+function branchJourney(phase: BranchCase, base: TaskInterpretationInfo, taskBase: {id: string; sourceHash: string}, agreement: (accepted: WorkflowProposalInfo, proposalId: string, agreedAt: number) => WorkflowAgreementInfo,
+  projectId: string, threadId: string, supervisorThreadId: string, now: number) {
+  const proposed: WorkflowProposalInfo = {...proposal(notes.verify, "Reconstructed example: the Supervisor proposed the change workflow, whose Review chooses its depth."), plan: branchPlan()};
+  const task: TaskInterpretationInfo = phase === "branch-proposal" ? {...base, workflow: proposed, workflowProposalId: "packing-proposal-branch", agreement: null}
+    : {...base, workflow: proposed, workflowProposalId: "packing-proposal-branch", agreement: agreement(proposed, "packing-proposal-branch", now - 45 * 60_000)};
+  const done: Statuses = {scope: "completed", evidence: "completed", design: "completed", rollout: "completed", implement: "completed", recurrence: "completed", verify: "completed"};
+  const selection = (path: "then" | "else", revision: number, reason: string, at: number, current = true): WorkflowProgressBranchSelection => ({nodeId: "packing-review-depth",
+    inCurrentPlan: true, current, path, revision, reason, condition: reviewCondition, sourceThreadId: threadId, sourceMessageId: `fixture-packing-selection-${revision}`,
+    recordedAt: at, invalidatedAt: null});
+  const event = (path: "then" | "else", revision: number, note: string, at: number): WorkflowProgressBranchEvent => ({id: `fixture-branch-event-${revision}`, kind: "selected",
+    nodeId: "packing-review-depth", revision, path, note, sourceThreadId: threadId, sourceMessageId: `fixture-packing-selection-${revision}`, recordedAt: at});
+  const thenReason = "Reconstructed example: one scan module changes and its behavior is covered by focused tests.";
+  const elseReason = "Reconstructed example: the overfill rule turned out to touch shared carton accounting, so two paired reviews fit.";
+  const live = phase === "branch-pending" ? {statuses: {...done, review: "underway"} as Statuses, selections: [] as WorkflowProgressBranchSelection[], events: [] as WorkflowProgressBranchEvent[],
+    task: {status: "underway" as Status, note: "Reconstructed example: verified; the review depth is not decided yet."}, reassessment: null}
+    : phase === "branch-selected" ? {statuses: {...done, review: "underway", single: "underway"} as Statuses & {single?: Status}, selections: [selection("then", 1, thenReason, now - 9 * 60_000)],
+      events: [event("then", 1, thenReason, now - 9 * 60_000)], task: {status: "underway" as Status, note: "Reconstructed example: one independent review is underway."}, reassessment: null}
+    : phase === "branch-changed" ? {statuses: {...done, review: "completed", single: "completed", findings: "completed", deliver: "completed"} as Statuses & {single?: Status},
+      selections: [selection("else", 2, elseReason, now - 3 * 60_000)], events: [event("else", 2, elseReason, now - 3 * 60_000), event("then", 1, thenReason, now - 30 * 60_000)],
+      task: {status: "completed" as Status, note: "Reconstructed example: the single review found nothing; reviewed pull request ready for handoff."},
+      reassessment: "A branch decision changed after this completion was assessed, so it needs reassessment."}
+    : null;
+  const childId = "fixture-branch-reviewer";
+  const workflows: WorkflowProgressSnapshot["workflows"] = live ? [{workflowId: "fixture-workflow-packing", projectId, mainThreadId: threadId, threadId, parentThreadId: null, revision: 6,
+    status: live.task.status, objective: journeyObjective, plan: branchPlan(live.statuses), assessment: {taskId: taskBase.id, sourceHash: taskBase.sourceHash, status: live.task.status,
+      summary: live.task.note, updatedAt: now - 10 * 60_000, ...(live.reassessment ? {reassessment: live.reassessment} : {})}, updatedAt: now - 3 * 60_000, parentNodeReferences: [],
+    observations: [], contributions: [], branchSelections: live.selections, branchEvents: live.events},
+  ...(phase === "branch-selected" ? [{workflowId: "fixture-workflow-branch-reviewer", projectId, mainThreadId: threadId, threadId: childId, parentThreadId: threadId, revision: 3,
+    status: "underway" as Status, objective: "Reconstructed example: the delegated reviewer’s own plan.", plan: {kind: "sequence" as const, templatePath: null, nodes: [{kind: "branch" as const,
+      nodeId: "fixture-child-branch", templatePath: null, condition: "The diff stays within the packing scan module.", reason: "The reviewer decides whether one pass is enough.",
+      then: {kind: "sequence" as const, templatePath: null, nodes: [{...singleReview, nodeId: "fixture-child-one-pass", localId: "one-pass", name: "One review pass", status: "underway" as Status}]},
+      else: null}]}, assessment: {taskId: taskBase.id, sourceHash: taskBase.sourceHash, status: "underway", summary: "Reconstructed example: the reviewer’s pass is underway.",
+      updatedAt: now - 5 * 60_000}, updatedAt: now - 5 * 60_000,
+    parentNodeReferences: [{parentWorkflowId: "fixture-workflow-packing", parentThreadId: threadId, nodeId: "packing-review-single", nodeKind: "step" as const, nodeName: singleReview.name}],
+    observations: [], contributions: [], branchSelections: [{nodeId: "fixture-child-branch", inCurrentPlan: true, current: true, path: "then" as const, revision: 1,
+      reason: "Reconstructed example: the reviewer confirmed the diff stays inside the scan module.", condition: "The diff stays within the packing scan module.", sourceThreadId: childId,
+      sourceMessageId: "fixture-child-selection-1", recordedAt: now - 6 * 60_000, invalidatedAt: null}],
+    branchEvents: []}] : [])] : [];
+  type ScopeThread = NonNullable<WorkflowProgressSnapshot["scope"]>["threads"][number];
+  const mainThread: ScopeThread = {threadId, parentThreadId: null, depth: 0, origin: "main", title: journeyTitle, lifecycle: "running", lifecycleDetail: "running",
+    archivedAt: null, deletedAt: null, activityRefs: [], contactLimit: "Reconstructed example: no messages are sent."};
+  const threads: ScopeThread[] = phase === "branch-selected" ? [mainThread, {...mainThread, threadId: childId, parentThreadId: threadId, depth: 1, origin: "native_child", title: "Reconstructed reviewer"}] : [mainThread];
+  const progress: WorkflowProgressSnapshot = {status: "ok", message: null, projectId, mainThreadId: threadId, observedAt: now,
+    scope: {projectId, mainThreadId: threadId, supervisorThreadId, bindingGeneration: 1, observedAt: now, complete: true, lineageTotal: threads.length, lineageOffset: 0, lineageHasMore: false, issues: [], threads},
+    coverage: threads.map(thread => ({threadId: thread.threadId, state: "root" as const, assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null})), incompatibleWorkflows: [], workflows,
     workflowOffset: 0, workflowHasMore: false, lineageOffset: 0, lineageHasMore: false};
   return {task, progress};
 }

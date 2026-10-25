@@ -2,18 +2,30 @@ import {SupportingReferences, SupportingSkills, type SupportingReference} from "
 import { Effect, Schema } from "effect";
 
 export const workflowDefinitionExpansionLimits = {maxNodes: 500, maxDepth: 32} as const;
+/** A branch condition is one short line; finer conditions belong in step and workflow descriptions. */
+export const branchConditionMaxLength = 300;
+/** A branch condition after trimming, or null unless it is one nonempty line of at most branchConditionMaxLength characters. */
+export const branchConditionText = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const text = value.trim();
+  return text.length > 0 && text.length <= branchConditionMaxLength && !/[\u0000-\u001f\u007f\u2028\u2029]/u.test(text) ? text : null;
+};
 
 export const DefinitionNode = Schema.suspend((): Schema.Codec<DefinitionNode> => Schema.Union([
   Schema.Struct({step: Schema.Union([Schema.String, Schema.Struct({id: Schema.String, name: Schema.String, description: Schema.String, references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills)})])}),
   Schema.Struct({workflow: Schema.String}),
   Schema.Struct({sequence: Schema.Array(DefinitionNode)}),
   Schema.Struct({parallel: Schema.Array(DefinitionNode)}),
+  Schema.Struct({branch: Schema.Struct({if: Schema.String, then: Schema.Array(DefinitionNode), else: Schema.optionalKey(Schema.Array(DefinitionNode))})}),
 ]));
+/** A coarse semantic branch: a condition, the then path and an optional else path; the next member of the enclosing group follows the whole branch. */
+export type DefinitionBranch = {readonly if: string; readonly then: readonly DefinitionNode[]; readonly else?: readonly DefinitionNode[]};
 export type DefinitionNode =
   | {readonly step: string | {readonly id: string; readonly name: string; readonly description: string; readonly references?: readonly SupportingReference[]; skills?: readonly string[]}}
   | {readonly workflow: string}
   | {readonly sequence: readonly DefinitionNode[]}
-  | {readonly parallel: readonly DefinitionNode[]};
+  | {readonly parallel: readonly DefinitionNode[]}
+  | {readonly branch: DefinitionBranch};
 
 export const DefinitionReference = Schema.Union([
   Schema.Struct({step: Schema.String}),

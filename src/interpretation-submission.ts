@@ -3,6 +3,7 @@ import { Data, Effect, Schema, type SchemaAST, type SchemaIssue } from "effect";
 import { canonicalJson } from "./canonical-json.js";
 import type { LogFields } from "./logging.js";
 import { WorkflowProposal } from "./project-supervisor-contract.js";
+import { branchConditionMaxLength } from "./project-definitions-contract.js";
 import {
   interpretationFromFields,
   interpretationLimits,
@@ -165,6 +166,7 @@ export type InterpretationPlanNode =
   | {readonly kind: "step"; readonly definitionId: null; readonly localId: string; readonly name: string; readonly description: string;
     readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>; readonly skills?: ReadonlyArray<string>}
   | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string}
+  | {readonly kind: "branch"; readonly condition: string; readonly reason: string; readonly then: InterpretationPlanGroup; readonly else?: InterpretationPlanGroup | null}
   | InterpretationPlanGroup;
 export type InterpretationPlanGroup = {readonly kind: "sequence" | "parallel"; readonly nodes: ReadonlyArray<InterpretationPlanNode>};
 
@@ -177,6 +179,8 @@ const PlanNode: Schema.Codec<InterpretationPlanNode> = Schema.suspend((): Schema
   Schema.Struct({kind: Schema.Literal("step"), definitionId: Schema.Null, localId: DefinitionId, name: PlanText, description: PlanText, reason: Reason,
     references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills)}),
   Schema.Struct({kind: Schema.Literal("workflow"), definitionId: DefinitionId, reason: Reason}),
+  Schema.Struct({kind: Schema.Literal("branch"), condition: Schema.String.check(maxLength(branchConditionMaxLength)), reason: Reason,
+    then: PlanGroup, else: Schema.optionalKey(Schema.NullOr(PlanGroup))}),
   PlanGroup,
 ]));
 const PlanGroup: Schema.Codec<InterpretationPlanGroup> = Schema.Struct({
@@ -311,7 +315,8 @@ const captureRaw = (raw: unknown, withDefinitions: boolean): Captured => {
 
 // submitted groups and leaves, as the plan canonicalization counts them against the shared node limit
 const planNodeCount = (group: InterpretationPlanGroup): number =>
-  1 + group.nodes.reduce((count, node) => count + (node.kind === "sequence" || node.kind === "parallel" ? planNodeCount(node) : 1), 0);
+  1 + group.nodes.reduce((count, node) => count + (node.kind === "sequence" || node.kind === "parallel" ? planNodeCount(node)
+    : node.kind === "branch" ? 1 + planNodeCount(node.then) + (node.else ? planNodeCount(node.else) : 0) : 1), 0);
 
 const schemaFor = (context: InterpretationDecodeContext) => context.definitionContext
   ? context.pendingStart ? interpretationArgumentSchemas.workflowStart : interpretationArgumentSchemas.workflow

@@ -193,7 +193,17 @@ export type WorkflowPlanWorkflowInfo = {
   plan: WorkflowPlanGroupInfo | null;
 };
 export type WorkflowPlanGroupInfo = {kind: "sequence" | "parallel"; templatePath: string | null; nodes: readonly WorkflowPlanNodeInfo[]};
-export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanGroupInfo;
+/** A coarse semantic branch occurrence: both paths are agreed commitments; the operative selects one from actual context. */
+export type WorkflowPlanBranchInfo = {
+  kind: "branch";
+  nodeId: string;
+  templatePath: string | null;
+  condition: string;
+  reason: string;
+  then: WorkflowPlanGroupInfo;
+  else: WorkflowPlanGroupInfo | null;
+};
+export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanBranchInfo | WorkflowPlanGroupInfo;
 const WorkflowPlanStep = Schema.Struct({
   kind: Schema.Literal("step"),
   nodeId: Schema.String,
@@ -212,6 +222,7 @@ const WorkflowPlanStep = Schema.Struct({
 const workflowPlanNodeSchema = (): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.suspend((): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.Union([
   WorkflowPlanStep,
   WorkflowPlanWorkflow,
+  WorkflowPlanBranch,
   WorkflowPlanGroup,
 ]));
 const WorkflowPlanGroup: Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> = Schema.suspend((): Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> => Schema.Struct({
@@ -244,6 +255,15 @@ const WorkflowPlanWorkflow = Schema.Struct({
   omissions: Schema.Array(WorkflowOmission),
   plan: Schema.NullOr(WorkflowPlanGroup),
 });
+const WorkflowPlanBranch: Schema.Codec<WorkflowPlanBranchInfo, WorkflowPlanBranchInfo, never, never> = Schema.suspend((): Schema.Codec<WorkflowPlanBranchInfo, WorkflowPlanBranchInfo, never, never> => Schema.Struct({
+  kind: Schema.Literal("branch"),
+  nodeId: Schema.String,
+  templatePath: Schema.NullOr(Schema.String),
+  condition: Schema.String,
+  reason: Schema.String,
+  then: WorkflowPlanGroup,
+  else: Schema.NullOr(WorkflowPlanGroup),
+}));
 const WorkflowPlanNodeSchemaInternal = workflowPlanNodeSchema();
 export const WorkflowPlanGroupSchema = WorkflowPlanGroup;
 export const WorkflowPlanNodeSchema = WorkflowPlanNodeSchemaInternal;

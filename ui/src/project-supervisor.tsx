@@ -3,7 +3,7 @@ import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import {GuideLink} from "./guide-link.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
-import {alignmentLabel, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
+import {alignmentLabel, currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
@@ -463,6 +463,21 @@ function SupervisorRecords({workflow}: {workflow: WorkflowProgressWorkflow}) {
   </li>)}</ol>;
 }
 
+/** The operative's branch decisions on one workflow, newest first: selections and the invalidations a changed branch caused. */
+function BranchDecisionHistory({workflow}: {workflow: WorkflowProgressWorkflow}) {
+  const events = workflow.branchEvents ?? [];
+  if (events.length === 0) return null;
+  const conditions = new Map((workflow.branchSelections ?? []).map(item => [item.nodeId, item.condition]));
+  return <section className="stack"><h3>Branch decisions</h3>
+    <p className="small muted">Each decision is the agent’s own record of which path applies. It is not evidence that the path’s work was performed. <GuideLink topic="branch-decision">Branch decisions</GuideLink></p>
+    <ol className="stack supervisor-records">{events.map(event => <li key={event.id}>
+      <p>{event.kind === "selected" ? `${event.path === "then" ? "Then" : "Else"} path selected` : `Selection of the ${event.path} path no longer applies`}{conditions.get(event.nodeId) ? <> for “{conditions.get(event.nodeId)}”</> : null}</p>
+      <p className="definition-copy">{event.note}</p>
+      <p className="small muted">Revision {event.revision} · {formatProgressTime(event.recordedAt)}{event.sourceThreadId && <> · <a href={threadHref(event.sourceThreadId)}>Source conversation</a></>}{event.sourceMessageId && <> · message <code>{event.sourceMessageId}</code></>}</p>
+    </li>)}</ol>
+  </section>;
+}
+
 const contributionsByNode = (workflow: WorkflowProgressWorkflow) => {
   const byNode = new Map<string, WorkflowProgressContribution[]>();
   for (const item of workflow.contributions) if (item.inCurrentPlan) byNode.set(item.nodeId, [...byNode.get(item.nodeId) ?? [], item]);
@@ -507,7 +522,8 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
           {workflow?.objective && <p>{workflow.objective}</p>}
           {workflow?.parentNodeReferences.length ? <p className="small">Contributes to parent steps: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</p> : null}
-          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)}/>}
+          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections}/>}
+          {workflow && <BranchDecisionHistory workflow={workflow}/>}
           {workflow && <SupervisorRecords workflow={workflow}/>}
           <p className="small">Lifecycle: {lifecycle.label}{thread.lifecycleDetail ? ` · T3 detail: ${thread.lifecycleDetail}` : ""}</p>
           <SupportingActivity thread={thread}/>
@@ -536,8 +552,11 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const accepted = acceptedAgreement(task);
   const pending = pendingProposal(task);
   const changes = accepted && pending ? pending.plan ? planChanges(accepted.workflow.plan, pending.plan) : [] : null;
-  const steps = record.kind === "none" ? [] : planSteps(record.plan);
-  const current = record.kind === "live" ? steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name).join(" · ") : "";
+  // a live plan counts only the steps that currently apply; a pending decision is current work and its paths are not outstanding steps
+  const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow)) : null;
+  const steps = live?.steps ?? (record.kind === "none" ? [] : planSteps(record.plan));
+  const current = live ? [...steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name),
+    ...live.pending.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
   const latestObservation = record.kind === "live" ? [...record.workflow.observations].sort((a, b) => b.recordedAt - a.recordedAt)[0] : undefined;
   const retained = mainWorkflow && record.kind !== "live" ? [mainWorkflow] : [];
   const staleAgreement = task?.agreement?.status === "stale" ? task.agreement : null;
@@ -577,11 +596,11 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       <section className="workflow-plan-surface" aria-labelledby="journey-title">
         <div className="journey-head">
           <h2 id="journey-title">{record.kind === "live" ? "Workflow" : record.kind === "agreed" ? "Accepted plan" : record.kind === "proposed" ? "Proposed plan" : "Plan"}</h2>
-          <span className="small muted">{record.kind === "live" && !currentAssessment ? "Earlier scope assessments retained" : record.kind === "live" ? `${steps.filter(step => step.status === "completed").length} of ${steps.length} steps assessed complete` : record.kind === "agreed" ? "Not yet assessed" : record.kind === "proposed" ? "Awaiting acceptance" : ""}</span>
+          <span className="small muted">{record.kind === "live" && !currentAssessment ? "Earlier scope assessments retained" : record.kind === "live" ? `${steps.filter(step => step.status === "completed").length} of ${steps.length} applicable steps assessed complete${live?.pending.length ? ` · ${live.pending.length} branch decision${live.pending.length === 1 ? "" : "s"} pending` : ""}` : record.kind === "agreed" ? "Not yet assessed" : record.kind === "proposed" ? "Awaiting acceptance" : ""}</span>
         </div>
         {record.kind === "none"
           ? <p className="muted">{task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
-          : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow)} : {})}/>}
+          : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections} : {})}/>}
       </section>
       <aside className="workflow-context">
         <TaskAlignment task={task} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>
@@ -594,12 +613,13 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     <EntityDetails title={<>Evidence and history</>} className="evidence-history"><div className="stack">
       <p className="small muted">Statuses and notes are the Supervisor’s assessments of the conversation’s work; they are not independent proof of execution. A parent step does not complete when a child finishes.</p>
       {record.kind === "live" && <section className="stack"><h3>Supervisor records</h3><SupervisorRecords workflow={record.workflow}/></section>}
+      {record.kind === "live" && <BranchDecisionHistory workflow={record.workflow}/>}
       {removedContributions.length > 0 && <section className="stack"><h3>Contributions for steps no longer in the plan</h3><StepContributions items={removedContributions}/></section>}
       {mainThread && <section className="stack"><h3>Native conversation</h3><p className="small">{lifecyclePresentation(mainThread).label}{mainThread.lifecycleDetail ? ` · ${mainThread.lifecycleDetail}` : ""} · <a href={threadHref(threadId)}>Open in T3</a></p>{mainThread.contactLimit && <p className="small muted">{mainThread.contactLimit}</p>}<SupportingActivity thread={mainThread}/></section>}
       {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
       {retained.map(workflow => <EntityDetails title={<>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
         <p className="notice">Retained workflow record. It is not linked to the current task.</p>
-        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)}/>}
+        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections}/>}
         <SupervisorRecords workflow={workflow}/></EntityDetails>)}
       {(view.latest?.incompatibleWorkflows.length ?? 0) > 0 && <p className="notice" role="status">Some retained workflow records use an incompatible format and remain read-only: {view.latest!.incompatibleWorkflows.map(item => item.workflowId).join(", ")}.</p>}
     </div></EntityDetails>

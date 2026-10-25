@@ -46,8 +46,8 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   const prepared = prepareWorkflowRequest("thread-a", "message-a", taskText, goldenSnapshot);
   assert.ok(prepared.context);
   // interpretation describes separate reference and skill string lists
-  assert.equal(prepared.requestText.length, 9756);
-  assert.equal(sha256(prepared.requestText), "9bd479b71f55ef8642946541759d1a156c4e147acb6a6b4219274ad96bcada30");
+  assert.equal(prepared.requestText.length, 10665);
+  assert.equal(sha256(prepared.requestText), "de1166ce8fa365d93bf860e25c9f61c20aa7801bacde729761ce6ac25f2890e8");
   assert.equal(prepared.requestText.includes("github_pat_12345678901234567890"), false);
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");

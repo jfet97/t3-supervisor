@@ -42,6 +42,19 @@ function TemplateNode({node, definitions, ancestors = []}: {node: DefinitionNode
     const List = parallel ? "ul" : "ol";
     return <div className={parallel ? "template-parallel" : "template-sequence"}><p className="small muted">{parallel ? "In parallel — no declared order" : "In this order"}</p><List className="template-tree" role="list">{children.map((child, i) => <li key={i}><TemplateNode node={child} definitions={definitions} ancestors={ancestors}/></li>)}</List></div>;
   }
+  if ("branch" in node) {
+    const {branch} = node;
+    return <div className="template-branch" role="group" aria-label={`Branch: if ${branch.if}`}>
+      <p className="branch-condition"><span className="branch-label">Branch</span> <span>If {branch.if}</span></p>
+      <p className="small muted">When work reaches this point, the agent selects one path from the actual context. The next item follows the whole branch. <GuideLink topic="branches">How branches work</GuideLink></p>
+      <div className="branch-paths">
+        <section className="branch-path" aria-label="Then path, when the condition holds"><p className="branch-path-label">Then path <span>when the condition holds</span></p>
+          <TemplateNode node={{sequence: branch.then}} definitions={definitions} ancestors={ancestors}/></section>
+        <section className="branch-path" aria-label="Else path, when the condition does not hold"><p className="branch-path-label">Else path <span>when the condition does not hold</span></p>
+          {branch.else ? <TemplateNode node={{sequence: branch.else}} definitions={definitions} ancestors={ancestors}/> : <p className="small">No else path: the branch is skipped.</p>}</section>
+      </div>
+    </div>;
+  }
   if ("step" in node) {
     const step = typeof node.step === "string" ? definitions.steps.find(item => item.id === node.step) : node.step;
     return <EntityDetails icon="record" title={<>Step: {step?.name ?? String(node.step)}</>} className="template-node">

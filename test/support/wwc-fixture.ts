@@ -77,10 +77,8 @@ export const sequencePlan = (nodes: readonly unknown[], templatePath: string | n
   kind: "sequence", templatePath, nodes: [...nodes] as WorkflowPlanNodeInfo[],
 });
 
-export const planEntities = (plan: WorkflowPlanGroupInfo | null): Extract<WorkflowPlanNodeInfo, {kind: "step" | "workflow"}>[] => {
-  if (!plan) return [];
-  return plan.nodes.flatMap(node => "nodes" in node ? planEntities(node) : [node, ...(node.kind === "workflow" ? planEntities(node.plan) : [])]);
-};
+export {planEntities} from "../../src/workflow-plan-tree.js";
+import {planEntities} from "../../src/workflow-plan-tree.js";
 
 export const mainStep = (plan: WorkflowPlanGroupInfo | null, index = 0) => planEntities(plan).filter(node => node.kind === "step")[index];
 

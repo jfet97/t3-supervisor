@@ -8,9 +8,10 @@ import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { FreshGitProbe } from "./git-probe.js";
 import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult, type VcsInfo } from "./project-files.js";
-import {catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
+import {branchConditionMaxLength, branchConditionText, catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
   type DefinitionCatalogEntry, type DefinitionFileInfo, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo,
   type ProjectDefinitionSnapshot, type ProjectCheckoutInventoryInfo} from "./project-definitions-contract.js";
+import {definitionNodeChildren} from "./workflow-plan-tree.js";
 
 const MAX_FILES = 100;
 const MAX_FILE_BYTES = 64 * 1024;
@@ -193,7 +194,7 @@ export const definitionStepSource = (id: string) => Schema.String.pipe(
 const parseNode = (value: unknown, depth: number, budget: {count: number}): DefinitionNode => {
   if (depth > workflowDefinitionExpansionLimits.maxDepth || ++budget.count > workflowDefinitionExpansionLimits.maxNodes)
     throw new Error("Workflow structure exceeds the nesting or expanded-node limit.");
-  if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence or parallel key.");
+  if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence, parallel or branch key.");
   if (Object.hasOwn(value, "step")) {
     if (typeof value.step === "string" && definitionId.test(value.step)) return {step: value.step};
     if (record(value.step) && withOptionalGuidance(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
@@ -207,6 +208,23 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
     if (typeof value.workflow === "string" && definitionId.test(value.workflow)) return {workflow: value.workflow};
     throw new Error("workflow must name a reusable workflow identifier.");
   }
+  if (Object.hasOwn(value, "branch")) {
+    const branch = value.branch;
+    const condition = record(branch) ? branchConditionText(branch.if) : null;
+    const pathList = (path: unknown): path is unknown[] => Array.isArray(path) && path.length > 0;
+    if (!record(branch) || !(exact(branch, ["if", "then"]) || exact(branch, ["if", "then", "else"])) || condition === null ||
+      !pathList(branch.then) || Object.hasOwn(branch, "else") && !pathList(branch.else))
+      throw new Error(`branch needs exactly a one-line if condition of at most ${branchConditionMaxLength} characters, a nonempty then list and an optional nonempty else list; keep finer conditions in descriptions.`);
+    // each path is a sequence one level below the branch, counted like a group
+    const path = (members: unknown[]) => {
+      if (++budget.count > workflowDefinitionExpansionLimits.maxNodes) throw new Error("Workflow structure exceeds the nesting or expanded-node limit.");
+      return members.map(child => parseNode(child, depth + 2, budget));
+    };
+    const then = path(branch.then);
+    return {branch: {if: condition, then, ...(Object.hasOwn(branch, "else") ? {else: path(branch.else as unknown[])} : {})}};
+  }
+  if (!Object.hasOwn(value, "sequence") && !Object.hasOwn(value, "parallel"))
+    throw new Error("Each workflow node must contain exactly one step, workflow, sequence, parallel or branch key.");
   const key = Object.hasOwn(value, "sequence") ? "sequence" : "parallel";
   const children = value[key];
   if (!Array.isArray(children) || children.length === 0) throw new Error(`${key} must contain at least one workflow node.`);
@@ -218,8 +236,7 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
 const collectLocalStepIds = (nodes: readonly DefinitionNode[], into: string[] = []): string[] => {
   for (const node of nodes) {
     if ("step" in node && typeof node.step !== "string") into.push(node.step.id);
-    else if ("sequence" in node) collectLocalStepIds(node.sequence, into);
-    else if ("parallel" in node) collectLocalStepIds(node.parallel, into);
+    else collectLocalStepIds(definitionNodeChildren(node), into);
   }
   return into;
 };
@@ -305,8 +322,7 @@ const namespaceGlobal = (global: DefinitionScopeRead, project: DefinitionScopeRe
         workflowRefs.add(node.workflow);
         if (!knownWorkflows.has(node.workflow)) report("", "workflow_reference_missing", `A global workflow references missing or invalid workflow ${node.workflow}.`);
       }
-      else if ("sequence" in node) collectReferences(node.sequence);
-      else if ("parallel" in node) collectReferences(node.parallel);
+      else collectReferences(definitionNodeChildren(node));
     }
   };
   for (const workflow of global.workflows) {
@@ -332,6 +348,8 @@ const namespaceGlobal = (global: DefinitionScopeRead, project: DefinitionScopeRe
     if ("step" in node) return typeof node.step === "string" ? {step: stepMap.get(node.step)!} : node;
     if ("workflow" in node) return {workflow: workflowMap.get(node.workflow)!};
     if ("sequence" in node) return {sequence: node.sequence.map(rewriteNode)};
+    if ("branch" in node) return {branch: {if: node.branch.if, then: node.branch.then.map(rewriteNode),
+      ...(node.branch.else ? {else: node.branch.else.map(rewriteNode)} : {})}};
     return {parallel: node.parallel.map(rewriteNode)};
   };
   global.steps = global.steps.map(step => ({...step, id: stepMap.get(step.sourceId ?? step.id)!}));
@@ -370,8 +388,7 @@ const reportWorkflowGraph = (result: MutableSnapshot, projectScope: DefinitionSc
       if ("step" in node && typeof node.step === "string") {
         if (workflow.origin !== "global" && !stepsById.has(node.step)) issue(workflow.path ?? ".t3-supervisor/workflows", "workflow_step_missing", `Workflow ${workflow.sourceId ?? workflow.id} references missing or invalid step ${node.step}.`);
       } else if ("workflow" in node) refs.push(node.workflow);
-      else if ("sequence" in node) refs.push(...nodeReferences(node.sequence, workflow));
-      else if ("parallel" in node) refs.push(...nodeReferences(node.parallel, workflow));
+      else refs.push(...nodeReferences(definitionNodeChildren(node), workflow));
     }
     return refs;
   };
@@ -436,6 +453,14 @@ const reportWorkflowGraph = (result: MutableSnapshot, projectScope: DefinitionSc
       let child: ExpansionSummary | null = null;
       if ("sequence" in node) child = summarizeNodes(node.sequence, depth + 1, stack);
       else if ("parallel" in node) child = summarizeNodes(node.parallel, depth + 1, stack);
+      else if ("branch" in node) {
+        // each path is a sequence below the branch: one counted group whose members sit a further level down
+        child = {nodes: 0, depth: 0, cyclic: false};
+        for (const path of [node.branch.then, ...(node.branch.else ? [node.branch.else] : [])]) {
+          const summary = summarizeNodes(path, depth + 2, stack);
+          child = {nodes: boundedAdd(child.nodes, boundedAdd(1, summary.nodes)), depth: Math.max(child.depth, depth + 1, summary.depth), cyclic: child.cyclic || summary.cyclic};
+        }
+      }
       else if ("workflow" in node) child = summarizeWorkflow(node.workflow, stack);
       if (child) {
         count = boundedAdd(count, child.nodes);

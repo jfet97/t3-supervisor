@@ -122,11 +122,81 @@ export type WorkflowContributionAssessmentInput = {
   note: string;
 };
 
+export const branchSelectionPaths = ["then", "else"] as const;
+export type BranchSelectionPath = typeof branchSelectionPaths[number];
+
+export const branchSelectionLimits = {
+  maxSelections: 64,
+  maxRecordsPerMessage: 8,
+  maxTaskIdLength: 200,
+  maxNodeIdLength: 64,
+  maxRevision: 1_000_000,
+  maxReasonLength: 500,
+} as const;
+
+// fixed codes for the task protocol diagnostic slot; a rejected selection record changes nothing
+export const branchSelectionDiagnosticCodes = [
+  "branch_json_invalid",
+  "branch_record_invalid",
+  "branch_message_limit",
+  "branch_duplicate_in_message",
+  "branch_node_unknown",
+  "branch_revision_conflict",
+  "branch_revision_gap",
+  "branch_revision_stale",
+  "branch_capacity",
+] as const;
+export type BranchSelectionDiagnosticCode = typeof branchSelectionDiagnosticCodes[number];
+
+/** The exact fields of one operative-authored branch-selection chat record. */
+export type BranchSelectionRecord = {
+  taskId: string;
+  nodeId: string;
+  revision: number;
+  path: BranchSelectionPath;
+  reason: string;
+};
+
+/**
+ * The operative's latest selection for one branch occurrence of this workflow, recorded from its own native message. It answers the
+ * branch identity it was made for: a later change of condition, else path or enclosing position invalidates it for good, and only a
+ * next revision selects again. It never changes a status or the plan.
+ */
+export type BranchSelection = {
+  nodeId: string;
+  revision: number;
+  path: BranchSelectionPath;
+  reason: string;
+  condition: string;
+  branchKey: string;
+  state: "current" | "invalidated";
+  invalidatedAt: number | null;
+  sourceThreadId: string;
+  sourceRunId: string;
+  sourceMessageId: string;
+  recordedAt: number;
+};
+
+export type BranchSelectionImport = Omit<BranchSelectionRecord, "taskId"> & {
+  sourceThreadId: string;
+  sourceRunId: string;
+  sourceMessageId: string;
+  sourceCreatedAt: number | null;
+};
+
+export type BranchSelectionImportResult =
+  | WorkflowMutationReceipt
+  | {status: "unchanged"; workflowId: string; revision: number}
+  | {status: "rejected"; code: BranchSelectionDiagnosticCode}
+  | {status: "conflict"; reason: "revision"; currentRevision: number | null}
+  | {status: "owner_mismatch" | "not_found"}
+  | {status: "incompatible"; workflowId: string; formatVersion: number | null};
+
 export type WorkflowStateEvidence = {
   id: string;
   operationId: string;
   kind: "draft_created" | "lineage_linked" | "agreement_imported" | "plan_updated" | "status_changed" | "node_removed" | "note" | "observation" |
-    "contribution_recorded" | "contribution_assessed";
+    "contribution_recorded" | "contribution_assessed" | "branch_selected" | "branch_selection_invalidated";
   recordedAt: number;
   actorSupervisorThreadId: string;
   targetNodeId: string | null;
@@ -141,6 +211,8 @@ export type WorkflowStateEvidence = {
   note: string;
   // present only on contribution evidence; the summary and references stay on the current contribution entry
   contribution?: {contributionId: string; revision: number; state: ExternalContributionState | null; decision: ExternalContributionDecision | null};
+  // present only on branch evidence: the selection revision and its path; changed is whether it replaced a different or invalidated choice
+  branch?: {revision: number; path: BranchSelectionPath; changed: boolean};
 };
 
 export type WorkflowStateEvidenceInput = {
@@ -188,6 +260,8 @@ export type WorkflowStateDocument = {
   acceptedAgreements: AcceptedWorkflowAgreementRecord[];
   // main workflow only; a stored document without this field reads as empty
   contributions: ExternalContribution[];
+  // this workflow's own operative branch selections; a stored document without this field reads as empty
+  branchSelections: BranchSelection[];
   evidence: WorkflowStateEvidence[];
   createdAt: number;
   updatedAt: number;
@@ -318,7 +392,31 @@ export const workflowMutationLimits: WorkflowMutationLimits = {
 // stored shapes as the types above describe them; bounds, identities and cross-field rules stay with the store validators that run after decode
 const mutableArray = <S extends Schema.Top>(item: S) => Schema.mutable(Schema.Array(item));
 const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
-  "contribution_recorded", "contribution_assessed"] as const;
+  "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated"] as const;
+
+export const BranchSelectionSchema = Schema.Struct({
+  nodeId: Schema.String,
+  revision: Schema.Number,
+  path: Schema.Literals(branchSelectionPaths),
+  reason: Schema.String,
+  condition: Schema.String,
+  branchKey: Schema.String,
+  state: Schema.Literals(["current", "invalidated"]),
+  invalidatedAt: Schema.NullOr(Schema.Number),
+  sourceThreadId: Schema.String,
+  sourceRunId: Schema.String,
+  sourceMessageId: Schema.String,
+  recordedAt: Schema.Number,
+});
+
+/** One operative-authored branch-selection chat record; decode it with onExcessProperty "error" for the exact key set. */
+export const BranchSelectionRecordSchema = Schema.Struct({
+  taskId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(branchSelectionLimits.maxTaskIdLength)),
+  nodeId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(branchSelectionLimits.maxNodeIdLength)),
+  revision: Schema.Int.check(Schema.isBetween({minimum: 1, maximum: branchSelectionLimits.maxRevision})),
+  path: Schema.Literals(branchSelectionPaths),
+  reason: Schema.String.check(Schema.isMaxLength(branchSelectionLimits.maxReasonLength), Schema.makeFilter((value: string) => value.trim().length > 0)),
+});
 
 export const ExternalContributionReferenceSchema = Schema.Struct({
   kind: Schema.Literals(externalContributionReferenceKinds),
@@ -383,6 +481,7 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
     state: Schema.NullOr(Schema.Literals(externalContributionStates)),
     decision: Schema.NullOr(Schema.Literals(externalContributionDecisions)),
   })),
+  branch: Schema.optionalKey(Schema.Struct({revision: Schema.Number, path: Schema.Literals(branchSelectionPaths), changed: Schema.Boolean})),
 });
 
 export const AcceptedWorkflowAgreementRecordSchema = Schema.Struct({
@@ -420,6 +519,7 @@ export const WorkflowStateDocumentSchema = Schema.Struct({
   currentAgreementKey: Schema.NullOr(Schema.String),
   acceptedAgreements: mutableArray(AcceptedWorkflowAgreementRecordSchema),
   contributions: mutableArray(ExternalContributionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  branchSelections: mutableArray(BranchSelectionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   evidence: mutableArray(WorkflowStateEvidenceSchema),
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
@@ -443,6 +543,8 @@ const mirrors: [
   Same<typeof ExternalContributionSchema.Type, ExternalContribution>,
   Same<typeof ExternalContributionRecordSchema.Type, ExternalContributionRecord>,
   Same<typeof WorkflowStateEvidenceSchema.Type, WorkflowStateEvidence>,
+  Same<typeof BranchSelectionSchema.Type, BranchSelection>,
+  Same<typeof BranchSelectionRecordSchema.Type, BranchSelectionRecord>,
   Same<typeof AcceptedWorkflowAgreementRecordSchema.Type, AcceptedWorkflowAgreementRecord>,
-] = [true, true, true, true, true, true];
+] = [true, true, true, true, true, true, true, true];
 void mirrors;

@@ -6061,3 +6061,119 @@ it.effect("an uncertain Stop notice keeps its exact body through root replacemen
   assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice?.text, notice.text);
   assert.equal(fixture.calls.length, 1, "root replacement does not create a second unknown notice");
 }));
+
+const branchFence = (value: unknown) => "```branch-selection\n" + JSON.stringify(value) + "\n```";
+const localDraftStep = (localId: string, name: string) => ({kind: "step", definitionId: null, localId, name, description: `${name} for this change.`, reason: `The task needs ${name}.`});
+// a plan with one coarse review branch between required verification and delivery
+const branchPlanFor = (task: TaskRecord, condition = "The change is contained and well understood."): WorkflowPlanValue => {
+  const value = validateWorkflowPlan({requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The task changes behavior."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify the change."},
+      {kind: "branch", condition, reason: "Review depth depends on the change's scope.",
+        then: {kind: "sequence", nodes: [localDraftStep("single-review", "Single review")]},
+        else: {kind: "sequence", nodes: [localDraftStep("paired-review", "Paired review")]}},
+      localDraftStep("deliver", "Delivery")]}}, task.definitionContext!);
+  assert.ok(value?.plan);
+  return value;
+};
+const agreeBranchWorkflow = Effect.fnUntraced(function* (fixture: Fixture, now: number) {
+  yield* appendNoticeToOperative(fixture);
+  const accepted = workflowRecord(fixture.task, fixture.task.id, branchPlanFor(fixture.task));
+  yield* appendSupervisorProposal(fixture, fixture.task.id, accepted.workflow, now);
+  yield* appendOperativeAcceptance(fixture, accepted, now + 1);
+  yield* observeAgreement(fixture, now + 10_000);
+  const task = (yield* fixture.projectStore.task(fixture.task.threadId))!;
+  assert.equal(task.agreement?.status, "agreed");
+  yield* fixture.projectStore.saveTask({...task, protocolAnchor: {supervisorThreadId: fixture.binding.threadId, sourceHash: task.sourceHash, promptMessageId: "anchor-prompt"}});
+  const document = (yield* fixture.workflows.get(projectId, operativeThreadId))!;
+  const branch = document.plan?.nodes.find(node => node.kind === "branch");
+  assert.ok(branch?.kind === "branch");
+  return {branch, document, task: (yield* fixture.projectStore.task(fixture.task.threadId))!};
+});
+const branchSelectionsOf = Effect.fnUntraced(function* (fixture: Fixture, threadId = operativeThreadId) {
+  return (yield* fixture.workflows.get(projectId, operativeThreadId, threadId))?.branchSelections.map(item => [item.nodeId, item.revision, item.path, item.state, item.sourceMessageId]) ?? [];
+});
+
+it.effect("the introduction teaches the exact branch-selection record and the main's own later reply selects a path", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock);
+  const {branch, task} = yield* agreeBranchWorkflow(fixture, clock.now);
+  const text = workflowIntroductionText({...task, workflow: {...task.workflow!, ...branchPlanFor(task)}});
+  assert.match(text, /- branch \[branch:[0-9a-f-]{36}\] if: The change is contained and well understood\.\n  then:\n    - Single review \[local:single-review\]\n  else:\n    - Paired review \[local:paired-review\]\n- Delivery \[local:deliver\]/u,
+    "the outline labels both paths and dedents the following step");
+  const example = /```branch-selection\n(.+)\n```/u.exec(text);
+  assert.ok(example, "the introduction carries one concrete record");
+  const record = JSON.parse(example[1]!) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(record), ["taskId", "nodeId", "revision", "path", "reason"]);
+  assert.equal(record.taskId, task.id);
+  assert.match(String(record.nodeId), /^[0-9a-f-]{36}$/u);
+
+  const quoted = branchFence({taskId: task.id, nodeId: branch.nodeId, revision: 1, path: "then", reason: "Quoted example."});
+  appendAssistantTurn(fixture.supervisor, "supervisor-branch", quoted, clock.now + 100);
+  yield* appendMainReply(fixture, ["````md", quoted, "````"].join("\n"), clock.now + 101);
+  yield* observeAgreement(fixture, clock.now + 20_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture), [], "Supervisor copies and enclosed examples stay inert");
+
+  const chosen = yield* appendMainReply(fixture, `The diff touches one module, so one review fits.\n${branchFence({taskId: task.id, nodeId: branch.nodeId, revision: 1,
+    path: "then", reason: "The diff touches one module and its behavior is well understood."})}`, clock.now + 102);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture), [[branch.nodeId, 1, "then", "current", chosen.id]]);
+  const stored = (yield* fixture.workflows.get(projectId, operativeThreadId))!;
+  assert.deepEqual([stored.branchSelections[0]?.sourceThreadId, stored.branchSelections[0]?.sourceRunId], [operativeThreadId, chosen.runId]);
+  assert.equal((yield* fixture.projectStore.task(fixture.task.threadId))?.workflowProtocolDiagnostic ?? null, null);
+}));
+
+it.effect("a branch diagnostic is cleared only by a later valid branch record, never by a valid contribution", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock);
+  const {branch, task} = yield* agreeBranchWorkflow(fixture, clock.now);
+  const invalid = yield* appendMainReply(fixture, branchFence({taskId: task.id, nodeId: branch.nodeId, revision: 1, path: "then", reason: "   "}), clock.now + 100);
+  yield* observeAgreement(fixture, clock.now + 20_000);
+  let diagnostic = (yield* fixture.projectStore.task(fixture.task.threadId))?.workflowProtocolDiagnostic;
+  assert.deepEqual([diagnostic?.code, diagnostic?.messageId], ["branch_record_invalid", invalid.id], "a blank reason is not a selection");
+  const document = (yield* fixture.workflows.get(projectId, operativeThreadId))!;
+  const step = document.plan!.nodes.find(node => node.kind === "step")!;
+  yield* appendMainReply(fixture, contributionFence(contributionValue(fixture.task, (step as {nodeId: string}).nodeId)), clock.now + 101);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  diagnostic = (yield* fixture.projectStore.task(fixture.task.threadId))?.workflowProtocolDiagnostic;
+  assert.equal(diagnostic?.code, "branch_record_invalid", "the contribution imported but cannot clear another protocol's diagnostic");
+  const valid = yield* appendMainReply(fixture, branchFence({taskId: task.id, nodeId: branch.nodeId, revision: 1, path: "else", reason: "The change alters a stored format."}), clock.now + 102);
+  yield* observeAgreement(fixture, clock.now + 40_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture), [[branch.nodeId, 1, "else", "current", valid.id]]);
+  assert.equal((yield* fixture.projectStore.task(fixture.task.threadId))?.workflowProtocolDiagnostic, null);
+}));
+
+it.effect("a verified child's finished final reply selects its own workflow's branch and cannot select the main's", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock);
+  const {branch: mainBranch, document, task} = yield* agreeBranchWorkflow(fixture, clock.now);
+  const owner = {projectId, mainThreadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation};
+  assert.equal((yield* fixture.workflows.linkChild(owner, {operationId: "link-reviewer", lineage: {threadId: "child-reviewer", parentThreadId: operativeThreadId,
+    relationshipToParent: "subagent"}, note: "The reviewer child."}, clock.now + 11_000)).status, "created");
+  const childDocument = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-reviewer"))!;
+  const childPlan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [{kind: "branch", condition: "The diff stays within one module.",
+    reason: "Review depth.", then: {kind: "sequence", nodes: [localDraftStep("single-pass", "Single pass")]},
+    else: {kind: "sequence", nodes: [localDraftStep("two-pass", "Two passes")]}}]}}, {...task.definitionContext!, config: {required: []}, knownRequirementKeys: []});
+  assert.ok(childPlan?.plan);
+  const applied = yield* fixture.workflows.apply(owner, {operationId: "child-plan", workflowId: childDocument.workflowId, expectedRevision: childDocument.revision,
+    status: "planned", objective: null, sourceBinding: document.sourceBinding, requirements: [], issues: [...task.agreement!.workflow.issues], plan: childPlan.plan,
+    note: "The reviewer's plan."}, {pinnedContext: task.definitionContext!, originalProposal: task.agreement!.workflow, expectedTaskId: task.id,
+    expectedProposalId: task.agreement!.proposalId, expectedSourceHash: task.sourceHash, acceptedTaskAgreement: task.agreement!,
+    acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null}, clock.now + 12_000);
+  assert.equal(applied.status, "applied");
+  const childBranch = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-reviewer"))!.plan!.nodes[0]!;
+  assert.ok(childBranch.kind === "branch");
+
+  const child = makeProjection({...makeThread({id: "child-reviewer", title: "Reviewer"}),
+    lineage: {parentThreadId: operativeThreadId, relationshipToParent: "subagent", rootThreadId: operativeThreadId}});
+  const childRun = appendRun({projection: child, id: "child-reviewer-run", ordinal: 1, status: "completed", messageId: "child-reviewer-input", text: "Review the change.", now: clock.now + 13_000});
+  appendMessageToRun(child, childRun, {id: "child-foreign", role: "assistant", text: branchFence({taskId: task.id, nodeId: mainBranch.nodeId, revision: 1, path: "else",
+    reason: "The child tries to decide the main's branch."}), now: clock.now + 13_001});
+  const final = appendMessageToRun(child, childRun, {id: "child-final", role: "assistant", text: `Reviewed in one pass.\n${branchFence({taskId: task.id, nodeId: childBranch.nodeId,
+    revision: 1, path: "then", reason: "The diff stays inside the export module."})}`, now: clock.now + 13_002});
+  fixture.addChildProjection(child);
+  yield* observeAgreement(fixture, clock.now + 40_000);
+  assert.deepEqual(yield* branchSelectionsOf(fixture, "child-reviewer"), [[childBranch.nodeId, 1, "then", "current", final.id]], "the finished child's final reply imports");
+  assert.deepEqual(yield* branchSelectionsOf(fixture), [], "a child record never selects the main's branch");
+  const stored = (yield* fixture.workflows.get(projectId, operativeThreadId, "child-reviewer"))!.branchSelections[0]!;
+  assert.deepEqual([stored.sourceThreadId, stored.sourceRunId], ["child-reviewer", childRun.id]);
+}));

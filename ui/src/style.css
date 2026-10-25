@@ -395,6 +395,31 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .group-parallel > .journey-track > li::before { display: none; }
 .nested-journey { margin-inline-start: 32px; padding-inline-start: 12px; border-inline-start: 1px solid var(--line); }
 .nested-journey .journey-group { margin-top: 0; }
+/* A branch: its condition, the decision on a live workflow and both labelled paths; the next item in the track follows the whole branch.
+   Meaning is carried by text labels; borders only repeat it. */
+.journey-branch, .template-branch { display: grid; gap: 8px; padding-block: 8px 4px; min-width: 0; }
+.branch-head { display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; align-items: start; gap: 12px; }
+.branch-condition { font-weight: 600; overflow-wrap: anywhere; }
+.branch-label { display: inline-block; margin-inline-end: 4px; padding: 1px 7px; border-radius: 5px; background: var(--soft); color: var(--quiet); font-size: .75rem; font-weight: 650; }
+.decision-pending > .branch-head .step-state { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); }
+.branch-explanation { display: grid; gap: 4px; padding-inline-start: 38px; max-width: 75ch; overflow-wrap: anywhere; }
+.template-branch .branch-explanation, .template-branch > .small { padding-inline-start: 0; }
+.branch-paths { display: grid; gap: 10px; margin-inline-start: 12px; min-width: 0; }
+.template-branch .branch-paths { margin-inline-start: 0; }
+.branch-path { min-width: 0; padding: 6px 0 4px 14px; border-inline-start: 3px solid var(--line); }
+.branch-path.path-selected { border-inline-start-color: var(--teal); }
+.branch-path.path-not_selected { border-inline-start-style: dashed; }
+.branch-path-label { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-weight: 600; font-size: .9rem; }
+.branch-path-label > span:not(.pill) { color: var(--quiet); font-weight: 400; font-size: .8rem; }
+.branch-path > .journey-group { margin-top: 4px; }
+.step-mark.state-not_selected, .step-mark.state-undecided { border-style: dashed; }
+@media (max-width: 600px) {
+  .branch-head { grid-template-columns: 26px minmax(0, 1fr); gap: 9px; }
+  .branch-head .step-state { grid-column: 2; justify-self: start; white-space: normal; }
+  .branch-explanation { padding-inline-start: 0; }
+  .branch-paths { margin-inline-start: 0; }
+  .branch-path { padding-inline-start: 10px; }
+}
 .task-alignment { padding: 20px; border-radius: 12px; background: var(--soft); display: grid; gap: 16px; }
 .task-alignment h3 { font-size: 1rem; }
 .task-alignment details > summary { min-height: 32px; }
