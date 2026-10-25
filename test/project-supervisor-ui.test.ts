@@ -1267,7 +1267,7 @@ it("the task workspace treats a pending branch decision as current work, counts 
   assert.match(connected, /Reconstructed reviewer/);
   assert.match(connected, /aria-label="Branch: if The diff stays within the packing scan module\."/);
   assert.match(connected, /Then path selected/);
-  assert.match(connected, /No else path: the branch is skipped\./);
+  assert.match(connected, /No else path: if the condition does not hold, work continues with the next item\./);
   assert.match(connected, /aria-label="Else path, when the condition does not hold: not selected"/);
 });
 

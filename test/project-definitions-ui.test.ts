@@ -287,8 +287,10 @@ it("definition detail shows a branch's condition and both labelled paths before 
   assert.match(html, /<span class="branch-label">Branch<\/span> <span>If The change is contained and low risk\.<\/span>/);
   assert.match(html, /Then path <span>when the condition holds<\/span>/);
   assert.match(html, /Else path <span>when the condition does not hold<\/span>/);
-  assert.match(html, /No else path: the branch is skipped\./);
+  assert.match(html, /No else path: if the condition does not hold, work continues with the next item\./);
   assert.match(html, /How branches work/);
   assert.ok(html.indexOf("Step: Report") > html.indexOf("No else path"), "the following member comes after the whole branch");
+  assert.equal(html.match(/the next item follows the whole branch/g)?.length, 1, "the branch explanation is given once in the structure header, not repeated per branch");
+  assert.ok(html.indexOf("the next item follows the whole branch") < html.indexOf('aria-label="Branch: if'));
   assert.doesNotMatch(html, /Decision pending|path selected|Not selected|Planned|Completed/);
 });

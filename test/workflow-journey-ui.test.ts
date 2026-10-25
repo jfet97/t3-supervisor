@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {readFileSync} from "node:fs";
 import {it} from "@effect/vitest";
 import {Schema} from "effect";
 import {createElement} from "react";
@@ -216,6 +217,13 @@ const branchSection = (html: string, path: "Then" | "Else") => {
   return html.slice(start, end);
 };
 
+const branchParts = (html: string) => {
+  const head = html.slice(html.indexOf('class="branch-head"'), html.indexOf('class="branch-explanation'));
+  const explanation = html.slice(html.indexOf('class="branch-explanation'), html.indexOf('class="branch-paths"'));
+  const split = explanation.includes("Decision details") ? explanation.indexOf("Decision details") : explanation.length;
+  return {head, primary: explanation.slice(0, split), details: explanation.slice(split)};
+};
+
 it("a live branch shows its condition and labelled paths; a pending decision is current work and neither path is outstanding", () => {
   const {task, progress} = branchCase("branch-pending");
   const record = journeyRecord(task, progress.workflows[0]);
@@ -231,6 +239,12 @@ it("a live branch shows its condition and labelled paths; a pending decision is 
   assert.doesNotMatch(branchSection(html, "Else"), />Planned</, "an undecided alternative is not shown as outstanding planned work");
   assert.ok(html.indexOf("Account for findings") > html.indexOf('aria-label="Else path,'), "the following step comes after the whole branch");
   assert.match(html, /How branches work/);
+  const {head, primary, details} = branchParts(html);
+  assert.match(head, /class="step-mark state-decision-pending"/, "a pending decision has its own marker");
+  assert.doesNotMatch(head, /state-completed|state-needs_attention/);
+  assert.match(branchSection(html, "Then"), /class="pill amber">Awaiting decision</);
+  assert.doesNotMatch(primary, /Plan note|Reason:/, "with no selection, only the condition, the decision state and the help link are primary");
+  assert.match(details, /Plan note: Review depth follows the change’s scope and risk\./);
   const progressText = liveProgress(record.plan, currentBranchPaths(record.workflow));
   assert.deepEqual(progressText.pending.map(branch => branch.nodeId), ["packing-review-depth"]);
   assert.ok(!progressText.steps.some(step => ["packing-review-single", "packing-correctness", "packing-fit"].includes(step.nodeId)), "alternatives are not counted as applicable steps");
@@ -242,8 +256,14 @@ it("a selected path shows the agent's reason and the other path stays visible as
   if (record.kind !== "live") throw new Error("live workflow expected");
   const html = renderToStaticMarkup(createElement(PlanJourney, {node: record.plan, mode: "live", notes: stepNotes(task, record), selections: record.workflow.branchSelections}));
   assert.match(html, /class="step-state">Then path selected</);
-  assert.match(html, /Reason: Reconstructed example: one scan module changes/);
-  assert.match(html, /A selection records the decision, not completed work\./);
+  const {head, primary, details} = branchParts(html);
+  assert.match(head, /class="step-mark state-decision"/);
+  assert.doesNotMatch(head, /state-completed/, "a selection is a decision, not a completion checkmark");
+  assert.match(primary, /<p>Reason: Reconstructed example: one scan module changes[^<]*<\/p>/);
+  assert.doesNotMatch(primary, /revision|<code>|t3-thread:/, "provenance stays in the decision details");
+  assert.match(details, /revision 1 · .* · <a href="t3-thread:\/\/v1\/[^"]+">Open conversation<\/a> · message <code>[^<]+<\/code>/su);
+  assert.match(details, /A selection records the decision, not completed work\./);
+  assert.match(branchSection(html, "Then"), /class="pill blue">Selected</);
   assert.match(html, /aria-label="Then path, when the condition holds: selected"/);
   assert.match(html, /aria-label="Else path, when the condition does not hold: not selected"/);
   assert.match(branchSection(html, "Then"), /aria-current="step"/);
@@ -258,6 +278,7 @@ it("a selected path shows the agent's reason and the other path stays visible as
   assert.doesNotMatch(accepted, /path selected|Not selected|Decision pending|Reason:/, "a later live selection is not applied to the accepted record");
   const proposed = renderToStaticMarkup(createElement(PlanJourney, {node: branchCase("branch-proposal").task.workflow!.plan!, mode: "proposed"}));
   assert.match(proposed, /class="step-state">Proposed alternatives</);
+  assert.doesNotMatch(branchParts(proposed).head + branchParts(proposed).primary, /agreed/i, "proposed alternatives are not described as agreed");
 });
 
 it("a decision changed after completion keeps the recorded status but presents completion as needing reassessment", () => {
@@ -283,4 +304,13 @@ it("plan changes name a changed branch condition and an occurrence moved between
   const moved = changed(before, mapBranch(before, node => ({...node, then: {...node.then, nodes: [...node.then.nodes, ...(node.else!.nodes[0] as WorkflowPlanGroupInfo).nodes.slice(0, 1)]},
     else: {...node.else!, nodes: [{...(node.else!.nodes[0] as WorkflowPlanGroupInfo), nodes: (node.else!.nodes[0] as WorkflowPlanGroupInfo).nodes.slice(1)}]}})));
   assert.deepEqual(moved.find(change => change[0] === "packing-correctness"), ["packing-correctness", "grouping"], "moving into the other path is a regrouping");
+});
+
+it("branch styling keeps step chips on their own step, marks a selected path in blue and bounds narrow branch indentation", () => {
+  const css = readFileSync(new URL("../ui/src/style.css", import.meta.url), "utf8");
+  assert.doesNotMatch(css, /\.state-(?:underway|completed|needs_attention) > \.journey-step \.step-state/, "a step's state chip does not colour nested branch or path chips");
+  assert.match(css, /\.state-completed > \.journey-step > summary \.step-state \{/);
+  assert.match(css, /\.branch-path\.path-selected \{ border-inline-start-color: var\(--blue\); \}/);
+  const narrow = css.slice(css.indexOf("@media (max-width: 600px) {\n  .branch-head"));
+  assert.match(narrow.slice(0, narrow.indexOf("\n}")), /\.journey-branch \.journey-step\.disclosure > \.disclosure-body \{ padding-inline-start: 8px; \}/);
 });

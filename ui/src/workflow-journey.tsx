@@ -20,7 +20,8 @@ const formatTime = (value: number) => {
 
 export function StepMark({state}: {state: string}) {
   return <span className={`step-mark state-${state}`} aria-hidden="true"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-    {state === "completed" ? <path d="m5 10 3 3 7-7"/> : state === "needs_attention" ? <path d="M10 5v6m0 3h.01"/> : state === "underway" ? <circle cx="10" cy="10" r="3" fill="currentColor" stroke="none"/> : null}
+    {state === "completed" ? <path d="m5 10 3 3 7-7"/> : state === "needs_attention" ? <path d="M10 5v6m0 3h.01"/> : state === "underway" ? <circle cx="10" cy="10" r="3" fill="currentColor" stroke="none"/>
+      : state === "decision" || state === "decision-pending" ? <path d="M10 15v-4m0 0-4-5m4 5 4-5"/> : null}
   </svg></span>;
 }
 
@@ -125,31 +126,33 @@ function BranchJourney({node, mode, notes, contributions, selections, reach}: Jo
   const earlier = live && !current ? selections?.find(item => item.nodeId === node.nodeId) : undefined;
   const pending = live && !current && reach !== "not_selected" && reach !== "undecided";
   const decision = !live ? mode === "proposed" ? "Proposed alternatives" : "Agreed alternatives"
-    : reach === "not_selected" ? "In a path not selected" : current ? `${pathLabel[current.path]} selected` : reach === "undecided" ? "Waits for an earlier decision" : "Decision pending";
+    : reach === "not_selected" ? "In a path not selected" : current ? `${pathLabel[current.path]} selected` : reach === "undecided" ? "Waits for an earlier decision"
+    : earlier ? "Decision pending again" : "Decision pending";
   const pathState = (path: BranchPath): PlanReach => !live ? "unconditional" : reach === "not_selected" ? "not_selected" : !current ? "undecided" : current.path === path ? "selected" : "not_selected";
   const pathText: Record<PlanReach, string | null> = {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
   const childProps = {mode, notes, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {})};
+  // the condition, the decision and its short reason stay primary; provenance, history and the plan note are inspectable details
   return <div className={`journey-branch${pending ? " decision-pending" : ""}`} role="group" aria-label={`Branch: if ${node.condition}`}>
     <div className="branch-head">
-      <StepMark state={pending ? "needs_attention" : current ? "completed" : "planned"}/>
+      <StepMark state={pending ? "decision-pending" : "decision"}/>
       <p className="branch-condition"><span className="branch-label">Branch</span> <span>If {node.condition}</span></p>
       <span className="step-state">{decision}</span>
     </div>
     <div className="branch-explanation small">
-      {current ? <p>Reason: {current.reason} <span className="muted">· revision {current.revision} · {formatTime(current.recordedAt)} · <a href={`t3-thread://v1/${current.sourceThreadId}`}>Selected in conversation</a> · message <code>{current.sourceMessageId}</code></span></p>
-        : pending ? <p>The agent selects a path from the actual context when work reaches this point. Until then neither path is outstanding work.</p>
-        : !live ? <p className="muted">Both paths are agreed commitments; the agent selects one when work reaches this point.</p> : null}
-      {earlier && <p className="muted">An earlier selection ({pathLabel[earlier.path].toLowerCase()}, revision {earlier.revision}) no longer applies because the branch changed{earlier.inCurrentPlan ? "" : " or left the plan"}.</p>}
-      {current && <p className="muted">A selection records the decision, not completed work.</p>}
-      <p className="muted">The next item follows the whole branch. <GuideLink topic="branches">How branches work</GuideLink></p>
-      {node.reason && <p className="muted">Plan note: {node.reason}</p>}
+      {current && <p>Reason: {current.reason}</p>}
+      <p className="branch-help"><GuideLink topic="branches">How branches work</GuideLink></p>
+      {(current || earlier || node.reason) && <EntityDetails title={<>Decision details</>} className="branch-details"><div className="stack">
+        {current && <p>Recorded by the agent as revision {current.revision} · {formatTime(current.recordedAt)} · <a href={`t3-thread://v1/${current.sourceThreadId}`}>Open conversation</a> · message <code>{current.sourceMessageId}</code>. A selection records the decision, not completed work.</p>}
+        {earlier && <p>An earlier selection ({pathLabel[earlier.path].toLowerCase()}, revision {earlier.revision}) no longer applies because the branch changed{earlier.inCurrentPlan ? "" : " or left the plan"}.</p>}
+        {node.reason && <p>Plan note: {node.reason}</p>}
+      </div></EntityDetails>}
     </div>
     <div className="branch-paths">{(["then", "else"] as const).map(path => {
       const group = path === "then" ? node.then : node.else;
       const state = pathState(path);
       return <section key={path} className={`branch-path path-${state}`} aria-label={`${pathLabel[path]}, ${pathCondition[path]}${pathText[state] ? `: ${pathText[state]!.toLowerCase()}` : ""}`}>
-        <p className="branch-path-label">{pathLabel[path]} <span>{pathCondition[path]}</span>{pathText[state] && <span className={`pill ${state === "selected" ? "green" : state === "undecided" ? "amber" : ""}`}>{pathText[state]}</span>}</p>
-        {group ? <PlanJourney node={group} {...childProps} reach={deeper(reach, state)}/> : <p className="small">No else path: the branch is skipped.</p>}
+        <p className="branch-path-label">{pathLabel[path]} <span>{pathCondition[path]}</span>{pathText[state] && <span className={`pill ${state === "selected" ? "blue" : state === "undecided" ? "amber" : ""}`}>{pathText[state]}</span>}</p>
+        {group ? <PlanJourney node={group} {...childProps} reach={deeper(reach, state)}/> : <p className="small">No else path: if the condition does not hold, work continues with the next item.</p>}
       </section>;
     })}</div>
   </div>;

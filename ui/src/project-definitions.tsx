@@ -46,12 +46,12 @@ function TemplateNode({node, definitions, ancestors = []}: {node: DefinitionNode
     const {branch} = node;
     return <div className="template-branch" role="group" aria-label={`Branch: if ${branch.if}`}>
       <p className="branch-condition"><span className="branch-label">Branch</span> <span>If {branch.if}</span></p>
-      <p className="small muted">When work reaches this point, the agent selects one path from the actual context. The next item follows the whole branch. <GuideLink topic="branches">How branches work</GuideLink></p>
+      <p className="small branch-help"><GuideLink topic="branches">How branches work</GuideLink></p>
       <div className="branch-paths">
         <section className="branch-path" aria-label="Then path, when the condition holds"><p className="branch-path-label">Then path <span>when the condition holds</span></p>
           <TemplateNode node={{sequence: branch.then}} definitions={definitions} ancestors={ancestors}/></section>
         <section className="branch-path" aria-label="Else path, when the condition does not hold"><p className="branch-path-label">Else path <span>when the condition does not hold</span></p>
-          {branch.else ? <TemplateNode node={{sequence: branch.else}} definitions={definitions} ancestors={ancestors}/> : <p className="small">No else path: the branch is skipped.</p>}</section>
+          {branch.else ? <TemplateNode node={{sequence: branch.else}} definitions={definitions} ancestors={ancestors}/> : <p className="small">No else path: if the condition does not hold, work continues with the next item.</p>}</section>
       </div>
     </div>;
   }
@@ -72,7 +72,7 @@ function TemplateTopology({workflow, definitions}: {workflow: DefinitionWorkflow
   const root = useRef<HTMLDivElement>(null);
   const expand = (open: boolean) => root.current?.querySelectorAll("details").forEach(element => {element.open = open;});
   return <section className="template-topology stack" aria-label="Workflow template structure">
-    <div className="row between"><div><h3>Template structure</h3><p className="small muted">Required duties and their relationships. These are definitions, with no execution status.</p></div><div className="row"><button type="button" onClick={() => expand(true)}>Expand all</button><button type="button" onClick={() => expand(false)}>Collapse all</button></div></div>
+    <div className="row between"><div><h3>Template structure</h3><p className="small muted">Required duties and their relationships. These are definitions, with no execution status. A branch names its condition and labelled then and else paths; the agent selects one when work reaches it, and the next item follows the whole branch.</p></div><div className="row"><button type="button" onClick={() => expand(true)}>Expand all</button><button type="button" onClick={() => expand(false)}>Collapse all</button></div></div>
     <div ref={root}><TemplateNode node={workflow.sequence ? {sequence: workflow.sequence} : {parallel: workflow.parallel ?? []}} definitions={definitions} ancestors={[workflow.id]}/></div>
   </section>;
 }
