@@ -168,7 +168,7 @@ const questions = [
   },
   {
     question: "What happens when I message a helper directly in T3?",
-    answer: "T3 applies its native follow-up behavior to that helper conversation. The root sends routine notes and check-ins through Supervisor team operations; it does not use raw `t3_thread_send` for those check-ins.",
+    answer: "T3 applies that helper conversation’s normal follow-up behavior. Supervisor coordinates routine notes and check-ins between the root and helper.",
   },
   {
     question: "Does setting the helper limit to zero remove existing helpers?",
@@ -208,7 +208,7 @@ export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
     <nav className="guide-contents" aria-label="Guide contents">
       <div><strong>Follow supervised work</strong><GuideLinks ordered items={walkthrough.map(({id, title}) => [id, title] as const)}/></div>
       <div><strong>Write steps and workflows</strong><GuideLinks items={referenceTopics}/></div>
-      <div><strong>Glossary</strong><GuideLinks items={[["terms", "All terms and states"], ...guideTerms.slice(0, 5).map(({id, title}) => [id, title] as const)]}/></div>
+      <div className="guide-glossary-contents"><strong>Glossary</strong><GuideLinks items={[["terms", "All terms and states"], ...guideTerms.slice(0, 5).map(({id, title}) => [id, title] as const)]}/></div>
     </nav>
 
     <h2 id="guide-follow-title">Follow supervised work</h2>
@@ -222,7 +222,7 @@ export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
     <p className="muted">Steps and workflows are files in a project’s checkout. These topics cover their format, requirements, review and recovery.</p>
 
     <Topic id="guide-layout-title" title="Where definitions live">
-      <p>Project definitions belong to the operative checkout, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. A project’s <strong>Definitions</strong> shows the active scope, source paths and origin.</p>
+      <p>Project definitions belong to the working folder, so another checkout can have a different configuration. The opt-in global scope uses the same file layout. A project’s <strong>Definitions</strong> shows the active scope, source paths and origin.</p>
       <Example label="Project definition layout" value={layoutExample}/>
       <p><code>project.yaml</code> indexes every reusable definition, including optional ones, by path with a short summary and an optional required flag. Both the Supervisor and the supervised agent start there, then read the full relevant definitions in <code>steps/</code> and <code>workflows/</code> on demand. Summaries guide reading; full definitions remain authoritative policy.</p>
       <p>The project configuration editor changes only the selected checkout's <code>project.yaml</code>. Full definition files stay separate. For a new project, start with <code>workflows: []</code> and <code>steps: []</code>; when adding a reusable file, add its index entry too.</p>
@@ -252,7 +252,7 @@ skills:
   - .claude/skills/project-testing/SKILL.md
   - effect-v4-development
   - plugin:review`}</code></pre>
-      <p>File strings and local skill paths are relative to the operative checkout root, including for shared definitions. Entries with a slash or an ending of <code>.md</code> are paths and must name <code>SKILL.md</code> exactly, including a root <code>SKILL.md</code>. Skill paths have no empty, dot or parent segments; <code>./SKILL.md</code> is invalid. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
+      <p>File strings and local skill paths are relative to the working folder root, including for shared definitions. Entries with a slash or an ending of <code>.md</code> are paths and must name <code>SKILL.md</code> exactly, including a root <code>SKILL.md</code>. Skill paths have no empty, dot or parent segments; <code>./SKILL.md</code> is invalid. Global skill names match the consuming agent’s configured catalog exactly, including namespaces; missing or ambiguous names remain explicit gaps. Do not guess installation paths.</p>
       <p>Omit either list or use <code>[]</code> for none. Each list allows at most 100 entries; skills cannot repeat. Paths allow up to 4096 characters and catalog names up to 256. Names use letters, digits, dots, underscores and hyphens with optional colon namespaces; each segment starts with a letter or digit. Absolute paths, home aliases, schemes, parent traversal, backslashes, control characters and credential-like values are rejected. References grant no access or authority; readers must respect filesystem and symlink boundaries.</p>
       <p>Definitions and Task show pointers read-only; introductions carry them without loading their contents. Read applicable guidance progressively within the available tools and context budget. Changing a locator changes definition identity; its content is not frozen or verified by that revision. A listed reference proves neither consultation nor execution. Global skills do not enable shared definitions or supervision.</p>
     </Topic>
@@ -287,7 +287,7 @@ skills:
     <Topic id="guide-team-title" title="Supervisor team and operational assignments">
       <p>The Supervisor team has one root and up to five helpers by default. Its project setting can be changed from 0 to 20; zero prevents new recruitment while preserving existing members. Each helper may cover several operational subtree roots, including verified descendants added later. The team stays flat even when the operational workflow is nested.</p>
       <p>The root coordinates the main and unassigned work. Helpers assess and guide their assigned children. A conversation’s <strong>Supervision</strong> view displays this team separately from connected operational conversations and marks each row with its effective assignee. An unknown or transferring owner stays explicit. Team membership and assignments do not change step ownership, contributor links or parent completion.</p>
-      <p>Use a T3 link to open a helper conversation. A person writing there follows T3's native follow-up behavior. Root context notes and routine helper check-ins go through Supervisor team operations, not raw <code>t3_thread_send</code>. Pending handovers and significant issues remain visible until their state is resolved.</p>
+      <p>Use a T3 link to open a helper conversation. A message you send there follows that conversation’s normal follow-up behavior. Supervisor coordinates root context notes and routine helper check-ins. Pending handovers and significant issues remain visible until their state is resolved.</p>
       <p>The team view is a current observation. Read its timestamp and any incomplete, unavailable or stale warning before relying on membership or assignment details. Reading the view does not wake chats or change workflow state.</p>
     </Topic>
 

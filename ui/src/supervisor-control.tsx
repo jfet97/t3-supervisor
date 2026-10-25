@@ -12,6 +12,8 @@ import { ApiClient, type MutationFailure } from "./api.js";
 import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, scopeKey, uiRuntime, type MutationKey } from "./atoms.js";
 import { ScopeMismatch } from "./project-supervisor-api.js";
 
+const definitionFolderStatus = {present: "Found", missing: "Not found", unavailable: "Could not be checked", not_checked: "Not checked yet"} as const;
+
 export type ControlActivity = {busy: boolean; dirty: boolean; uncertain: boolean};
 export const idleControlActivity: ControlActivity = {busy: false, dirty: false, uncertain: false};
 
@@ -234,7 +236,7 @@ export function SupervisionControlView({control, busy, blocked, message, onToggl
   return <section className="panel stack settings-control" aria-label={global ? "Global supervision" : "Project supervision"}>
     <div className="row between control-heading"><Heading>{global ? "Global supervision" : "Project supervision"}</Heading>{global ? <GlobalSupervisionStatus enabled={control.globallyEnabled}/> : <ProjectSupervisionStatus enabled={control.enabled} effectiveEnabled={control.effectiveEnabled} globallyEnabled={control.globallyEnabled}/>}</div>{!global && control.enabled && !control.globallyEnabled && <p className="notice">The global supervision switch is off.</p>}
     <p>{global ? "The master switch allows Supervisor to follow work across this installation and starts enabled." : "This project is supervised only when both its switch and the master switch are enabled. An existing .t3-supervisor folder enables a project initially; your manual choice is remembered."}</p>
-    <HelpDisclosure title={<>How this switch works</>} >{global && <p>Global On applies only to enabled projects and eligible conversations. It does not mean every chat is supervised. <GuideLink topic="eligible-conversation">Which conversations are eligible?</GuideLink></p>}{!global && <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p>}
+    <HelpDisclosure title={<>How this switch works</>} >{global && <p>Global On applies only to enabled projects and eligible conversations. It does not mean every chat is supervised. <GuideLink topic="eligible-conversation">Which conversations are eligible?</GuideLink></p>}{!global && <p>Supervisor definitions folder (<code>.t3-supervisor</code>): {definitionFolderStatus[control.detectionStatus]}. {control.detectionError}</p>}
     <p>Disabling stops new supervisory work. An already-running model turn may finish. Chats, settings and recorded history are retained. <GuideLink topic="stop-vs-exclusion">How switches differ from Stop and exclusions</GuideLink>.</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable supervision" : "Enable supervision"}</button>
@@ -367,7 +369,7 @@ export function GlobalDefinitionsControlView({control, busy, blocked, message, o
     <p>Share reusable steps and workflows across enabled projects and No Project chats.</p><HelpDisclosure title={<>Shared definition files and behavior</>} ><p>Shared definitions: <code>~/.t3-supervisor/project.yaml</code>, <code>steps/</code>, and <code>workflows/</code> in the T3 server user's home.</p>
     <p>This starts disabled. First enabling creates the shared project.yaml and empty steps/ and workflows/ directories if needed. Existing definitions are preserved, and the files are left uncommitted. <GuideLink topic="definition">About shared definitions and their commitments</GuideLink>.</p>
     <p>These definitions supply policy to enabled Supervisors. This switch never activates a chat or changes No Project mode. Disabling them leaves project definitions available; No Project plans use task-local steps.</p>
-    <p>Folder detection: {control.detectionStatus}. {control.detectionError}</p></HelpDisclosure>
+    <p>Supervisor definitions folder (<code>.t3-supervisor</code>): {definitionFolderStatus[control.detectionStatus]}. {control.detectionError}</p></HelpDisclosure>
     <div className="row">
       <button type="button" className={control.enabled ? "danger-button" : "primary"} disabled={busy || blocked} onClick={onToggle}>{busy ? "Saving…" : control.enabled ? "Disable global definitions" : "Enable global definitions"}</button>
       <button type="button" className="quiet-button" title={readAt ? `Last read ${new Date(readAt).toLocaleTimeString()}` : undefined} disabled={busy} onClick={onReload}>Reload global definitions status</button>

@@ -490,6 +490,7 @@ button.danger-button:hover:not(:disabled):not([aria-disabled="true"]) { color: #
 .guide-introduction { padding: 20px 24px; background: var(--soft); border-radius: 12px; font-size: 1.15rem; max-width: 72ch; }
 .guide-contents { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 12px 32px; padding-block: 12px 20px; border-bottom: 1px solid var(--line); }
 .guide-contents > div { display: grid; gap: 6px; align-content: start; }
+.guide-glossary-contents { grid-column: 1 / -1; }
 .guide-contents ol, .guide-contents ul { display: grid; gap: 0 16px; padding: 0; margin: 0; list-style: none; }
 .guide-contents ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .guide-contents ol { counter-reset: guide-contents; }

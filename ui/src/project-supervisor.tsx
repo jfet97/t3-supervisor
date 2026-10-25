@@ -334,7 +334,7 @@ function ProjectSupervisorTeamPanel({team, settings, mainThreadId}: {team: Proje
       <span className="pill">Saved maximum helpers per root: {settings.maxHelpersPerRoot}</span>
     </div>
     <HelpDisclosure title={<>How the Supervisor team works</>} ><div className="stack"><p className="muted">The Supervisor team is separate from the operational workflow tree. The root owns unassigned work; each helper covers its assigned subtree and future operational descendants.</p><p><GuideLink topic="helper">Root, helper and handover terms</GuideLink> · <GuideLink topic="team">Supervisor team and assignments</GuideLink></p>
-    <p className="small muted">A person who messages a helper in T3 follows T3’s native follow-up behavior. Root-to-helper notes and routine check-ins use Supervisor team operations, not raw <code>t3_thread_send</code>.</p>
+    <p className="small muted">A message you send to a helper in T3 follows that conversation’s normal follow-up behavior. Supervisor coordinates root-to-helper notes and routine check-ins.</p>
     <p className="small muted">Quarantine revokes a helper’s Supervisor authority and returns coverage to the root. Unresolved effects stay fenced, and the helper’s native T3 conversation or a turn already running there may continue.</p>
     </div></HelpDisclosure>
     {!mainThreadId
@@ -483,6 +483,8 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
     </li>)}</ul>
   </EntityDetails>;
 }
+
+const settlementText = {pending: "Parking this idle Supervisor is pending.", uncertain: "It is not confirmed whether this idle Supervisor was parked.", settled: "This idle Supervisor is parked.", superseded: "The earlier parking request no longer applies."} as const;
 
 export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
   workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode}) {
@@ -743,7 +745,7 @@ export function ProjectSupervisorView({
           ? <p>Bound conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
       <HelpDisclosure title="About Supervisor health and controls"><p>A <GuideLink topic="supervisor-conversation">bound Supervisor conversation</GuideLink> is assigned to this main chat. Its readiness is separate from task progress. <GuideLink topic="monitoring">Monitoring and check-ins</GuideLink> explain when reviews are due; <GuideLink topic="stop-vs-exclusion">Stop, disable and exclude</GuideLink> act at different scopes.</p></HelpDisclosure><EntityDetails title={<>Conversation and model details</>} ><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
-      {snapshot.binding?.settlementState && <p>Idle Supervisor parking: {snapshot.binding.settlementState}. Resumed work uses this same conversation.</p>}
+      {snapshot.binding?.settlementState && <p>{settlementText[snapshot.binding.settlementState]} Resumed work uses this same conversation.</p>}
       {snapshot.binding?.settlementBlockedBy && !snapshot.binding.settlementState && <p className="muted">Parking this idle Supervisor is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
       {snapshot.binding?.keptActive && <p>This Supervisor stays active because you chose to keep its conversation active.</p>}
       <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
