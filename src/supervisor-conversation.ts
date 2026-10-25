@@ -899,16 +899,19 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
     !intro || ["context", "ready"].includes(intro.state) && !intro.dispatchMode && !intro.acceptedAt && !intro.rejectedAttempts?.length);
   // the renewal identities are allocated by the caller before the block that checks and writes them
   const renewalIds = Effect.all([ids.uuid, ids.uuid]);
-  const renewUnsentTask = (task: TaskRecord, now: number, [renewalId, proposalId]: readonly [string, string]) => Effect.gen(function* () {
+  const renewedInterpretation = (current: TaskRecord, now: number, [renewalId, proposalId]: readonly [string, string]): TaskRecord => {
+    // the renewed request is a new attempt; the evidence of the old one never stands for it
+    const renewed: TaskRecord = {...current, interpretationEvidence: undefined, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${renewalId}`,
+      workflowProposalId: `${current.id}:renew:${proposalId}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+      reason: "Approved project definitions are ready; refresh the unsent proposal in the existing Supervisor conversation.", updatedAt: now};
+    delete renewed.definitionContext;delete renewed.definitionReadAttempts;delete renewed.revalidationAttempts;delete renewed.definitionNoticeKey;
+    return renewed;
+  };
+  const renewUnsentTask = (task: TaskRecord, now: number, renewal: readonly [string, string]) => Effect.gen(function* () {
     const current = yield* store.task(task.threadId);
     if (!current || current.id !== task.id || current.status !== "inferred" || !(yield* introductionUnsent(task.id)) ||
       current.definitionReview?.status !== "authorized" && current.definitionReview?.status !== "restored") return;
-    // the renewed request is a new attempt; the evidence of the old one never stands for it
-    const renewed: TaskRecord = {...current, interpretationEvidence: undefined, status: "queued", requestText: "", messageId: `supervisor-task-renewal:${renewalId}`,
-      workflowProposalId: `${task.id}:renew:${proposalId}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
-      reason: "Approved project definitions are ready; refresh the unsent proposal in the existing Supervisor conversation.", updatedAt: now};
-    delete renewed.definitionContext;delete renewed.definitionReadAttempts;delete renewed.revalidationAttempts;delete renewed.definitionNoticeKey;
-    yield* transaction(Effect.andThen(requests.removeUnsentIntroduction(task.id), store.saveTask(renewed)));
+    yield* transaction(Effect.andThen(requests.removeUnsentIntroduction(task.id), store.saveTask(renewedInterpretation(current, now, renewal))));
   });
   const freshDefinitions = (task: TaskRecord): Effect.Effect<ProjectDefinitionSnapshot | null> => Effect.gen(function* () {
     const loaded = definitions ? yield* definitions.load(task.projectId, task.threadId) : undefined;
@@ -985,16 +988,15 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         !workspacePreparationPending(agent) && !operativeRunStopped(agent) && sameDefinitionContents(approved, observed) &&
         (yield* introductionUnsent(task.id))) {
         const current = yield* store.task(task.threadId);
-        if (!current || fingerprint(current) !== fingerprint(task) || !sourceUnchanged(current, agent)) return {kind: "done" as const, value: false};
+        if (!current || current.status !== "inferred" || fingerprint(current) !== fingerprint(task) || !sourceUnchanged(current, agent)) return {kind: "done" as const, value: false};
         // a fresh interpretation must bind the unchanged policy to the actual checkout; old native proof is never rebased
         yield* transaction(Effect.gen(function* () {
-          const adopted: TaskRecord = {...current, definitionSnapshot: observed, definitionContext: proposalContextFromDefinitions(observed),
+          const renewed = {...renewedInterpretation({...current, definitionSnapshot: observed,
             workflow: {...current.workflow!, workspaceRoot: observed.workspaceRoot, revision: observed.revision, status: "proposed",
-              message: "The selected working folder is ready; refresh the unsent workflow proposal."},
-            definitionReview: {status: "restored", expectedRevision: approved.revision!, observedRevision: observed.revision,
-              supervisorMessageId: null, userMessageIds: [], message: "The initial worktree contains unchanged policy; a fresh interpretation will bind its proposal.", updatedAt: now}, updatedAt: now};
-          yield* store.saveTask(adopted);
-          yield* renewUnsentTask(adopted, now, relocationIds);
+              message: "The selected working folder is ready; refresh the unsent workflow proposal."}}, now, relocationIds)};
+          delete renewed.definitionReview;
+          yield* requests.removeUnsentIntroduction(task.id);
+          yield* store.saveTask(renewed);
         }));
         return {kind: "done" as const, value: false};
       }
@@ -2052,7 +2054,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
         messageId: `supervisor-notice:workflow:${task.id}:${taskScopeRevision(task).slice(0, 20)}`, targetRunId: null, error: null};
       const contactable = yield* admitted((guard) => Effect.gen(function* () {
         if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId))) return "stop" as const;
-        if (!(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== binding.projectId || !sourceUnchanged(task, agent)) return "skip" as const;
+        if (operativeRunStopped(agent) || !(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== binding.projectId || !sourceUnchanged(task, agent)) return "skip" as const;
         if (!canSupervisorContact(supervisor.thread, agent.thread)) {
           // a creation refuses only while no introduction exists: a send another caller recorded meanwhile is never refused
           if (yield* holdsIntroduction(task.id, previous ?? null))
@@ -2711,7 +2713,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (introduction.dispatchMode && introduction.definiteRejection === false) {
         yield* requests.saveIntroduction({...introduction, state: "uncertain", error: "Proposal delivery is uncertain; its message identity is retained and only observed."});return false;
       }
-      if (hasPendingOwnerInput(agent)) return false;
+      if (operativeRunStopped(agent) || hasPendingOwnerInput(agent)) return false;
       if (!(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== task.projectId || !sourceUnchanged(task, agent)) {
         yield* blockIntroduction(task.id, "Task eligibility or project definitions changed; the draft was not sent.");return false;
       }

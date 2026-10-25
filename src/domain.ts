@@ -8,14 +8,16 @@ export { timestampMs } from "./timestamp.js";
 
 const activeRunStates = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const activeTaskStates = new Set(["pending", "running", "waiting"]);
+const latestRun = (projection: Projection): RunInfo | null =>
+  projection.runs.reduce<RunInfo | null>((found, run) => !found || run.ordinal > found.ordinal ? run : found, null);
 
 /** Workspace preparation precedes the operative's stable checkout binding. */
 export const workspacePreparationPending = (projection: Projection): boolean =>
-  projection.thread.activityRunStatus === "preparing" || projection.runs.some(run => run.status === "preparing");
+  projection.thread.activityRunStatus === "preparing" || latestRun(projection)?.status === "preparing";
 
 /** An interrupted or cancelled latest run stays stopped until another run exists. */
 export const operativeRunStopped = (projection: Projection): boolean => {
-  const latest = projection.runs.reduce<RunInfo | null>((found, run) => !found || run.ordinal > found.ordinal ? run : found, null);
+  const latest = latestRun(projection);
   return latest?.status === "interrupted" || latest?.status === "cancelled";
 };
 
