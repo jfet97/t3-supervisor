@@ -68,7 +68,10 @@ show bounded rows and truthful ranges. Home attention and project coverage are i
 
 Definitions are selected by actual working folder, with shared conversations grouped
 and branch names taken only from native checkout facts. Catalog and detail are separate;
-workflow templates show sequence and parallel structure without execution states.
+workflow templates show sequence, parallel and branch structure without execution states.
+A branch names its condition and both labelled paths in text. On a live workflow it shows the
+operative's decision as pending or selected with its reason, and the other path as not selected,
+never as completed or missing. Accepted and earlier plans keep their agreed alternatives.
 Edit index is a deliberate destination for the shared folder's project.yaml. Its draft
 and pending save identity belong to that folder and survive navigation and background reads.
 

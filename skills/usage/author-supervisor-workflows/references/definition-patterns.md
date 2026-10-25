@@ -124,6 +124,46 @@ explicit request for assessment is applicable even if the artifact is small. Gen
 inapplicability is requirement accounting, not a fabricated reviewer execution or a new
 execution status. A selected fixed commitment stays visible with its reason.
 
+## Coarse branches
+
+A branch lets a workflow agree two substantially different pieces of work in advance
+and leaves the choice to the operative when it reaches that point. A useful shape is a
+review whose depth follows the change's scope and risk:
+
+```yaml
+name: Review
+description: |
+  The main owns review coordination and findings accounting. The branch condition
+  is judged on the frozen change and its actual blast radius, not its line count.
+  A light reviewer who finds the choice disproportionate says so in its findings.
+sequence:
+  - branch:
+      if: The change is contained, well understood and low risk.
+      then:
+        - workflow: single-review
+      else:
+        - workflow: iterative-review
+  - step: account-for-findings
+```
+
+`account-for-findings` follows the whole branch on either path. Define `single-review`
+and `iterative-review` as ordinary workflows whose descriptions own their reviewer,
+model and repetition rules; the branch only chooses between them. Leave out `else`
+when a false condition simply skips the extra work. Each path needs at least one
+member, the condition is one line of at most 300 characters, and a path can hold
+groups, workflow references or a further branch. There is no `elif`, jump, loop or
+`goto`, and step files never contain branches.
+
+The operative records its choice with a short concrete reason in a `branch-selection`
+record; the Supervisor does not approve it and objects only to a concrete contradiction
+or an explicit human instruction. A selection is a decision, not evidence that the
+selected work happened, and the other path stays a visible, not-selected commitment.
+Inclusion is structural: an applicable required definition must appear on every path
+to count, so keep always-required duties outside the branch or in both paths. A
+required workflow containing a branch is included as a whole. `fixed: true` keeps the
+branch's condition, its paths and member placement, while supporting work may be added
+inside a path.
+
 ## Completion and reviewer identity
 
 State whether the task requests findings or acceptance. "Review this change" can finish

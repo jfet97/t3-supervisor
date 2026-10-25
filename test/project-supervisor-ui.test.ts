@@ -1269,3 +1269,13 @@ it("the task workspace treats a pending branch decision as current work, counts 
   assert.match(connected, /No else path: the branch is skipped\./);
   assert.match(connected, /aria-label="Else path, when the condition does not hold: not selected"/);
 });
+
+it("a branch-selection diagnostic names its record and author without claiming a workflow acceptance problem", () => {
+  const {task, progress} = fixtureJourney("branch-pending", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const html = renderWorkspace([progress], {...task, workflowProtocolDiagnostic: {role: "operative", proposalId: null, messageId: "child-message", code: "branch_revision_gap",
+    observedAt: 1_800_000_000_000, detail: "child reviewer-thread"}});
+  assert.match(html, /Branch decision record needs follow-up/);
+  assert.match(html, /A child conversation’s latest branch-selection record was not recorded/);
+  assert.match(html, /Child branch selection · <strong>Conversation:<\/strong> <code>reviewer-thread<\/code>/);
+  assert.doesNotMatch(html, /workflow acceptance was not recognized|External contribution record/);
+});

@@ -28,8 +28,8 @@ transport failures, truncated listings and malformed files remain explicit.
 Partial observations never become an empty requirement list.
 
 Validation checks fields, identifiers, duplicate keys, references, composition
-bounds and direct/indirect workflow cycles. Reusing a workflow in independent
-branches is valid. Diagnostics include the cycle chain. The UI shows readable
+bounds and direct/indirect workflow cycles, in both paths of every branch. Reusing a
+workflow in independent places, including both paths of a branch, is valid. Diagnostics include the cycle chain. The UI shows readable
 material and errors; the Supervisor still receives bounded diagnostic context and
 can negotiate a finite provisional plan. Unresolved required/fixed commitments
 stay visible, and invalid references are never expanded indefinitely.
@@ -48,9 +48,10 @@ cancels the old request; stale results cannot replace a newer workspace. An
 unavailable selected conversation never silently falls back to root.
 
 The Guide explains syntax and FAQ independently of any configured project. Steps
-have only `id`, `name` and `description`. Workflow contents use `sequence` and
-`parallel`; `step` accepts an ID or local step object, while `workflow` accepts a
-named reference only. Required means inclusion for the current main task; fixed
+have only `id`, `name` and `description`. Workflow contents use `sequence`,
+`parallel` and `branch` (`if`, `then` and an optional `else`); `step` accepts an ID
+or local step object, while `workflow` accepts a named reference only. Definitions
+shows a branch's condition and both labelled paths without execution states. Required means inclusion for the current main task; fixed
 preserves original commitments and relationships while allowing added work between
 them. Neither inclusion nor an accepted plan proves execution or delegation.
 

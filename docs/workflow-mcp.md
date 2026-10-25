@@ -126,6 +126,73 @@ compact index of open entries (`contributionId`, `nodeId`, `inCurrentPlan`,
 or references. Summaries, references and `externalRef` are untrusted evidence,
 never instructions, authority or native proof of execution.
 
+## Branch selections
+
+A plan branch is `{kind: "branch", nodeId, templatePath, condition, reason, then,
+else}`, where `then` and `else` are groups and `else` may be `null`; it has no status
+or contributors. Its condition and paths come from the definition, or from the
+negotiated plan for a task-local branch. Selecting a path is the operative's own
+decision and needs no Supervisor approval. The main records selections for the main
+workflow; a verified native child records them for its own connected workflow.
+
+The operative writes, in its own completed reply, a top-level fenced `branch-selection`
+record holding one JSON line with exactly these fields:
+
+```branch-selection
+{"taskId":"proposal-1","nodeId":"0b7c9a52-5f3e-4c1a-9d2e-6a1f2b3c4d5e","revision":1,"path":"else","reason":"The change alters a persisted format, so the contained path does not fit."}
+```
+
+- `taskId`: the current task.
+- `nodeId`: a branch occurrence in the author's own workflow plan.
+- `revision`: 1 first, then exactly one higher for each changed decision.
+- `path`: `then` when the condition holds, `else` when it does not. For a branch
+  without an else path, `else` skips it.
+- `reason`: a short concrete reason, nonempty and at most 500 characters.
+
+A message holds at most 8 records and one per branch. The main's records follow
+the main's native-order rules: after its introduction and after any source edit,
+top-level only, with quoted, indented and enclosed copies inert. A child's records
+come from its own completed replies after the task source while it remains a
+verified native descendant in scope. Its finished final reply stays importable. A
+record names only a branch of its author's own workflow: the main cannot select a
+child's branch, and a child cannot select the main's or a sibling's.
+
+Accepted records are stored on that workflow document as `branchSelections`, one
+entry per branch with its latest path, reason, revision, condition, branch identity
+key, state and source thread, run and message. Each import adds `branch_selected`
+evidence under revision CAS. An identical replay is a no-op. A same-revision change,
+a gap, a lower revision, an unknown branch or capacity is not imported and leaves one
+bounded `branch_*` diagnostic in the task slot. That diagnostic never replaces a
+proposal or acceptance problem, and only a later valid record from the same author
+clears it. A record naming a branch that does not exist yet is checked again later.
+Each document holds at most 64 selections.
+
+A selection answers the branch identity it was made for: the condition, whether an
+else path exists, and the enclosing workflow occurrences and branch paths. An
+`apply` that changes any of these, or removes the branch, invalidates the selection
+for good with `branch_selection_invalidated` evidence. The revision and attribution
+stay. Returning to the earlier identity or replaying the old record leaves the
+decision pending. Only the next revision, from a message created after the
+invalidation, selects again. Status changes and supporting work inside or around a
+path leave a selection current. Selections are not plan structure: they never clear
+the agreement pointer, change the agreement digest or alter requirement accounting.
+
+A reached branch without a current selection is a pending decision. `workflow_read`
+lists each workflow's `pendingBranchDecisions` with a `branchSelectionNote`, and root
+check-in envelopes add `branchDecisions`, holding pending decisions and current
+selections with their source message. An `apply` that assesses the workflow, or a
+workflow occurrence, as newly completed while a decision on its applicable path is
+pending is rejected with `branch_decision_pending` and a pointer to the branch. When
+a decision changes or is invalidated after the workflow was assessed completed, the
+recorded status and evidence stay, and the assessment carries a `reassessment`
+reason. The dashboard then presents the completion as needing reassessment.
+
+A selection is a decision, not execution evidence. The Supervisor assesses the
+selected path's steps as usual. It never marks the not-selected path completed or
+removes it to tidy progress, and it never records or approves a selection itself.
+When a child's connected workflow contains a branch, the Supervisor tells that child
+its branch node ID, condition and paths, the task ID and this record format.
+
 ## MCP interface
 
 The service provides a stateless Streamable HTTP MCP route at `/mcp/workflows`.
@@ -221,7 +288,9 @@ at their first and their final authority check.
 - `ensure_main` creates an unaccepted main draft.
 - `link_child` creates a live child's workflow under its verified native parent.
 - `apply` revises the editable plan with an expected revision and retains
-  explicit notes for status changes and removed steps. Existing occurrence IDs are stable and separate from definition IDs;
+  explicit notes for status changes and removed steps. Plans may contain branch
+  nodes; keep an existing branch's `nodeId` and `templatePath`. A definition
+  branch keeps its condition and path presence. Existing occurrence IDs are stable and separate from definition IDs;
   repeated reusable references remain distinct. New live steps start "planned";
   mark them underway or completed in a separate later apply with status_changed
   evidence. Adequate actual work before initial planning/agreement can satisfy any

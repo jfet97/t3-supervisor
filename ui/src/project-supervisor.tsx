@@ -225,6 +225,12 @@ function WorkflowProtocolDiagnosticView({diagnostic}: {diagnostic: WorkflowProto
   if (!diagnostic) return null;
   const isSupervisor = diagnostic.role === "supervisor";
   const notFormal = diagnostic.code === "plan_not_formal";
+  if (diagnostic.code.startsWith("branch_")) return <section className="notice stack" aria-labelledby="workflow-protocol-diagnostic-title">
+    <h5 id="workflow-protocol-diagnostic-title">Branch decision record needs follow-up</h5>
+    <p>{diagnostic.detail?.startsWith("child ") ? "A child conversation’s" : "The main assistant’s"} latest branch-selection record was not recorded. It needs one complete record naming a branch of its own workflow, the then or else path, a short reason and the next revision.</p>
+    <p className="muted">This diagnostic is informational. A branch without a recorded selection stays pending; nothing here selects a path, changes a status or proves work. <GuideLink topic="branches">How branches work</GuideLink></p>
+    <p className="small muted"><strong>Record:</strong> {diagnostic.detail?.startsWith("child ") ? <>Child branch selection · <strong>Conversation:</strong> <code>{diagnostic.detail.slice(6)}</code></> : "Main assistant branch selection"} · <strong>Code:</strong> <code>{diagnostic.code}</code> · <strong>Message ID:</strong> <code>{diagnostic.messageId}</code></p>
+  </section>;
   if (diagnostic.code.startsWith("contribution_")) return <section className="notice stack" aria-labelledby="workflow-protocol-diagnostic-title">
     <h5 id="workflow-protocol-diagnostic-title">External contribution record needs follow-up</h5>
     <p>The main assistant’s latest external-contribution record was not recorded. It needs a complete record with the next revision for an existing step of the current main workflow.</p>

@@ -48,8 +48,9 @@ Guide explains the format without requiring a configured project. Global
 definitions, when enabled, are separately marked and read-only in the project
 editor.
 
-Steps have id/name/description. Workflows compose sequence/parallel groups, step
-references/local steps and named workflow references. Instructions, applicability
+Steps have id/name/description. Workflows compose sequence/parallel groups, coarse
+`branch:` alternatives (`if`, `then`, optional `else`), step references/local steps
+and named workflow references. Instructions, applicability
 and delegation belong in description. Required references apply to the current main
 task; fixed protects original nested commitments and relationships while permitting
 support work. Repeated references have distinct occurrences.
@@ -119,6 +120,15 @@ for later rounds of that main's work. Send the changed artifact and responses to
 findings. Other mains own their reviewer conversations; a substantial scope change may
 justify fresh ones. A delegated task's backing thread cannot be continued as an ordinary
 review chat.
+
+When work reaches a plan branch, the operative working on that workflow decides which
+path applies from the actual context and records it in its own reply with an exact
+top-level `branch-selection` record holding one JSON line, for example
+`{"taskId":"proposal-1","nodeId":"0b7c9a52-5f3e-4c1a-9d2e-6a1f2b3c4d5e","revision":1,"path":"then","reason":"The diff touches one module."}`.
+Use the task ID and branch node ID from the introduction or Supervisor guidance, `then`
+when the condition holds and `else` when it does not, and the next revision for a changed
+decision. A child records decisions for its own workflow only. No Supervisor approval is
+needed; a selection is a decision, not evidence that the path's work was done.
 
 External work for a main-workflow step (an outside agent, tool, service or person)
 is reported by the main with an exact `external-contribution` record: use

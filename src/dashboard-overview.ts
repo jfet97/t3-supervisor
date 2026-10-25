@@ -80,7 +80,7 @@ export function overviewWorkPage(all: readonly DashboardWorkInfo[], page: Overvi
 
 /** The same current-state explanations are used by the overview and the selected conversation. */
 /** The attention reason for a rejected workflow record; the task workspace shows the record's details beside it. */
-export const protocolDiagnosticAttention = "A plan record could not be accepted. Open the task to inspect the reported field and repair it.";
+export const protocolDiagnosticAttention = "A plan, contribution or branch decision record could not be accepted. Open the task to inspect the reported field and repair it.";
 /** The attention reason for an out-of-date acceptance; the task's agreement panel states it there. */
 export const staleAgreementAttention = "The saved agreement needs review against current definitions.";
 /** The attention reason for a current plan that cannot be used; the task's agreement panel states its status there. */
