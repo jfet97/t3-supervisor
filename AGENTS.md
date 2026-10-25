@@ -66,10 +66,10 @@ This project has an LLM-maintained knowledge base in `knowledge/` (git-ignored).
 
 ## Release discipline
 
-- Include a changeset for user-visible changes, proposing patch for a fix, minor
-  for a feature, or major for an incompatible change. Explain the impact in user
-  terms. Ask Andrea when compatibility or the appropriate bump is unclear,
-  especially for breaking changes before 1.0; do not infer downgrade safety.
+- For now, include a patch changeset for every user-visible change, including
+  features. Do not propose minor or major bumps unless Andrea explicitly changes
+  this policy. Explain the impact in user terms. Ask Andrea when compatibility
+  is unclear; a patch version does not establish downgrade or state safety.
 - Keep the app version in `package.json`; do not hand-edit CLI/image versions or
   bump it on each push. Follow [RELEASING.md](RELEASING.md) for the separate version
   PR and changelog. Stable publication requires explicit approval of that PR or

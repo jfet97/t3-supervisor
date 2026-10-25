@@ -1,15 +1,15 @@
 # Maintaining releases
 
-The public installation guide is the [README](README.md). Release automation is
-installed by this change but remains disabled until the one-time setup below.
-It never deploys Supervisor or upgrades a running installation.
+The public installation guide is the [README](README.md). Release automation
+never deploys Supervisor or upgrades a running installation.
 
 ## Choose a version change
 
-For a user-visible PR, run `pnpm changeset`. Choose patch for a fix, minor for a
-feature, and major for an incompatible change; write a short note describing the
-effect on users. Before 1.0, read the notes carefully rather than assuming that a
-minor release preserves state compatibility. Infrastructure-only PRs may omit a
+For a user-visible PR, run `pnpm changeset` and choose **patch**, including for
+features. This patch-only policy remains in force until Andrea explicitly changes
+it; do not infer approval for a minor or major bump from the size of a change.
+Write a short note describing the effect on users. A patch number does not prove
+state compatibility or downgrade safety. Infrastructure-only PRs may omit a
 changeset. Every Effect package remains exactly pinned independently of app versions.
 
 With `RELEASE_VERSIONING_ENABLED=true`, **Prepare version** collects the notes in
