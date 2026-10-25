@@ -9,6 +9,16 @@ export { timestampMs } from "./timestamp.js";
 const activeRunStates = new Set(["preparing", "queued", "starting", "running", "waiting"]);
 const activeTaskStates = new Set(["pending", "running", "waiting"]);
 
+/** Workspace preparation precedes the operative's stable checkout binding. */
+export const workspacePreparationPending = (projection: Projection): boolean =>
+  projection.thread.activityRunStatus === "preparing" || projection.runs.some(run => run.status === "preparing");
+
+/** An interrupted or cancelled latest run stays stopped until another run exists. */
+export const operativeRunStopped = (projection: Projection): boolean => {
+  const latest = projection.runs.reduce<RunInfo | null>((found, run) => !found || run.ordinal > found.ordinal ? run : found, null);
+  return latest?.status === "interrupted" || latest?.status === "cancelled";
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
