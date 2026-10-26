@@ -16,6 +16,7 @@ import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/
 import { directParentChildLifecycle } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
+import { workflowMutationLimits } from "../src/workflow-state-contract.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { failsWith, rows } from "./support/guidance-store-services.js";
 import {
@@ -782,12 +783,17 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   ];
   const exactItemId = "turn-item:command%253Aopaque%3A1";
   const exactMessageId = "assistant%253Amessage%3A2";
-  const oversizedItemId = "x".repeat(201);
+  // a long native ID of a legitimate length is referenced exactly; one beyond the native reference bound is not
+  const longItemId = `turn-item:command%253Along%3A${"7".repeat(241 - "turn-item:command%253Along%3A".length)}`;
+  const oversizedItemId = "x".repeat(workflowMutationLimits.maxNativeReferenceLength + 1);
+  assert.equal(longItemId.length, 241);
   op.turnItems = [
     {id: exactItemId, threadId: opThread.id, runId: null, type: "command_execution", status: "completed",
       ordinal: 1, completedAt: iso(time + 1), updatedAt: iso(time + 1)},
-    {id: oversizedItemId, threadId: opThread.id, runId: null, type: "command_execution", status: "completed",
+    {id: longItemId, threadId: opThread.id, runId: null, type: "command_execution", status: "completed",
       ordinal: 2, completedAt: iso(time + 2), updatedAt: iso(time + 2)},
+    {id: oversizedItemId, threadId: opThread.id, runId: null, type: "command_execution", status: "completed",
+      ordinal: 3, completedAt: iso(time + 2), updatedAt: iso(time + 2)},
   ];
   op.messages.push({id: exactMessageId, threadId: opThread.id, runId, nodeId: "assistant-node", role: "assistant",
     text: "The result was inspected.", streaming: false, createdAt: iso(time + 1), updatedAt: iso(time + 1)});
@@ -825,13 +831,16 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   const activityRefs = targetEnvelope.activityRefs as Array<Record<string, string>>;
   assert.deepEqual(activityRefs.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))), [
     {sourceThreadId: "branch", sourceItemId: exactItemId},
+    {sourceThreadId: "branch", sourceItemId: longItemId},
     {sourceThreadId: "branch", sourceMessageId: exactMessageId},
   ].sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))));
+  assert.equal(activityRefs.some(reference => Object.values(reference).includes(oversizedItemId)), false,
+    "an ID beyond the native reference bound is never offered as a reference");
   assert.deepEqual(archivedEnvelope.activityRefs, [], "run-only synthetic activity has no ready reference");
   assert.ok(activityRefs.every(reference => !Object.hasOwn(reference, "sourceRunId")));
   assert.equal(request.text.includes("Omit sourceRunId"), true);
   assert.equal(request.text.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
-  assert.match(request.text, /mark them underway or completed in a separate later apply with status_changed evidence/u);
+  assert.match(request.text, /mark them underway or completed in a separate later apply \(statuses, without resending the plan\) with status_changed evidence/u);
   assert.doesNotMatch(request.text, /record completion in a separate apply/u, "role and check-in text state one planned-first rule");
   assert.match(request.text, /On rejection, read the reason, code, and path/u);
   assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
