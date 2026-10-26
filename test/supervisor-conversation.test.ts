@@ -15,7 +15,7 @@ import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { prepareWorkflowRequest, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { prepareWorkflowRequest, proportionatePlanRule, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, ReviewOutcomeKind, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
@@ -794,7 +794,7 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   assert.equal(introduction.state, "sent");
   assert.ok(introduction.text.length < 12_000, `the operative receives an outline and an acceptance record: ${introduction.text.length}`);
   assert.equal(introduction.text.split("END_correctness").length - 1, 0);
-  assert.match(introduction.text, /^Project Supervisor — proposal [^\n]+\nAgree a task-relevant workflow with your Supervisor for the requester-authorized outcome/u);
+  assert.match(introduction.text, /^Project Supervisor — proposal [^\n]+\nAgree a proportionate workflow with your Supervisor for the requester-authorized outcome/u);
   assert.ok(introduction.text.includes(workflowFence("workflow-acceptance", acceptance)));
   const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
   const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
@@ -1213,6 +1213,11 @@ it.effect("workflow editing guidance tells authors to start live steps planned a
   assert.match(role, /apply statuses, without resending the plan/u);
   assert.match(role, /draft pull request or a failing test run during implementation, is an observation on that member, which stays planned/u);
   assert.match(role, /A member that does not apply is never completed/u);
+  // revisions follow the same proportionate rule as the first plan, and an operative's scope exclusion is answered with a smaller plan
+  assert.equal(role.split(proportionatePlanRule).length - 1, 1, "the planning rule is stated once in the standing role");
+  assert.match(role, /agree a proportionate workflow with you/u);
+  assert.match(role, /As soon as you or the operative establish that agreed commitments are unnecessary for this task, including a scope exclusion the operative states with its acceptance, publish one smaller revised proposal promptly/u);
+  assert.doesNotMatch(role, /when work reaches it and its description makes it inapplicable/u, "omission is never deferred until the work reaches the member");
   assert.match(role, /review of a separately frozen dependency or library change is supporting work of the active step/u);
   assert.match(role, /never present it as a requester instruction/u);
   assert.match(role, /restate the unfinished task and its next authorized action/u);

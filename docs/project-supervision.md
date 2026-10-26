@@ -117,6 +117,19 @@ confirmation. “Yes, implement that” must bind to actual earlier content in t
 operative findings can describe the proposed fix but never grant authority. Sources
 retain human or launching-agent provenance. A launching agent cannot lift a human
 pause. Human-only Start, Stop and definition approval remain separate.
+
+Plans are proportionate. Before reading the catalog, the Supervisor decides whether a
+plan helps at all: quick routine work, such as bringing a checkout up to date or
+rerunning a documented refresh, is `not_needed` with no workflow, so there is no
+proposal, acceptance or Supervisor message, and Task shows No plan needed. Otherwise the
+plan holds only the commitments the task needs. Catalog entries that do not serve it are
+absent rather than listed as not applicable, even when none applies, and task-local steps
+are added only where they help. A workflow is referenced only when its composition fits;
+the first proposal can already omit members of a flexible workflow, each with a reason. A required definition is assessed against its own
+described applicability; being required never adds it to a plan where it does not apply.
+Whether files are tracked or ignored does not by itself decide that a review applies or
+not. When the operative says agreed commitments are unnecessary, the Supervisor promptly
+publishes a smaller revised proposal, and completed work stays recorded.
 Start rejects an excluded agent-created origin before reserving pending permission;
 turning that opt-in off also rejects an unprepared pending Start. Stop remains available.
 

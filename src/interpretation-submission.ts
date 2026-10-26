@@ -28,7 +28,7 @@ export const interpretationIssueCodes = [
   "missing_key", "unexpected_key", "invalid_type", "invalid_value", "too_long", "invalid_format", "not_integer", "too_small", "blank",
   "no_match", "ambiguous", "forbidden",
   "arguments_not_object", "arguments_not_json", "arguments_too_deep", "arguments_too_large", "plan_node_limit",
-  "objective_empty", "source_message_ids_mismatch", "not_needed_workflow_present", "attempt_pin_mismatch",
+  "objective_empty", "source_message_ids_mismatch", "not_needed_workflow_present", "workflow_omission_invalid", "attempt_pin_mismatch",
 ] as const;
 export type InterpretationIssueCode = typeof interpretationIssueCodes[number];
 export type InterpretationIssue = {readonly code: InterpretationIssueCode; readonly path: string};
@@ -53,7 +53,7 @@ const nonNegative = coded(Schema.isGreaterThanOrEqualTo(0), "too_small");
 const knownPathKeys = new Set([
   "supervisorThreadId", "bindingGeneration", "taskId", "attemptId", "sourcePin", "messageId", "runId", "ordinal", "hash",
   "objective", "reason", "sourceMessageIds", "supervision", "workflow", "startRequested", "requirements", "plan", "kind", "id",
-  "applies", "nodes", "definitionId", "localId", "name", "description", "references", "skills",
+  "applies", "nodes", "definitionId", "localId", "name", "description", "references", "skills", "omit", "member",
 ]);
 const pathOf = (segments: ReadonlyArray<PropertyKey>): string => {
   let path = "";
@@ -165,10 +165,12 @@ export type InterpretationPlanNode =
   | {readonly kind: "step"; readonly definitionId: string; readonly reason: string}
   | {readonly kind: "step"; readonly definitionId: null; readonly localId: string; readonly name: string; readonly description: string;
     readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>; readonly skills?: ReadonlyArray<string>}
-  | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string}
+  | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string; readonly omit?: ReadonlyArray<InterpretationOmission>}
   | {readonly kind: "branch"; readonly condition: string; readonly reason: string; readonly then: InterpretationPlanGroup; readonly else?: InterpretationPlanGroup | null}
   | InterpretationPlanGroup;
 export type InterpretationPlanGroup = {readonly kind: "sequence" | "parallel"; readonly nodes: ReadonlyArray<InterpretationPlanNode>};
+/** A member of a referenced flexible workflow that does not apply to this task, named by its definitionId or localId. */
+export type InterpretationOmission = {readonly member: string; readonly reason: string};
 
 const limits = interpretationLimits;
 const DefinitionId = Schema.String.check(maxLength(limits.maxDefinitionIdLength));
@@ -178,7 +180,8 @@ const PlanNode: Schema.Codec<InterpretationPlanNode> = Schema.suspend((): Schema
   Schema.Struct({kind: Schema.Literal("step"), definitionId: DefinitionId, reason: Reason}),
   Schema.Struct({kind: Schema.Literal("step"), definitionId: Schema.Null, localId: DefinitionId, name: PlanText, description: PlanText, reason: Reason,
     references: Schema.optionalKey(SupportingReferences), skills: Schema.optionalKey(SupportingSkills)}),
-  Schema.Struct({kind: Schema.Literal("workflow"), definitionId: DefinitionId, reason: Reason}),
+  Schema.Struct({kind: Schema.Literal("workflow"), definitionId: DefinitionId, reason: Reason,
+    omit: Schema.optionalKey(Schema.Array(Schema.Struct({member: DefinitionId, reason: Reason})).check(Schema.isMinLength(1), maxLength(limits.maxExpandedNodes)))}),
   Schema.Struct({kind: Schema.Literal("branch"), condition: Schema.String.check(maxLength(branchConditionMaxLength)), reason: Reason,
     then: PlanGroup, else: Schema.optionalKey(Schema.NullOr(PlanGroup))}),
   PlanGroup,
@@ -279,7 +282,7 @@ export type InterpretationDecodeContext = {
 
 export const interpretationInvalidCodes = [
   "arguments_not_object", "arguments_not_json", "arguments_too_deep", "arguments_too_large", "arguments_schema", "plan_node_limit",
-  "objective_empty", "source_message_ids_mismatch", "not_needed_workflow_present", "attempt_pin_mismatch",
+  "objective_empty", "source_message_ids_mismatch", "not_needed_workflow_present", "workflow_omission_invalid", "attempt_pin_mismatch",
 ] as const;
 export type InterpretationInvalidCode = typeof interpretationInvalidCodes[number];
 

@@ -510,3 +510,37 @@ it.effect("a fixed workflow with recorded progress inside it is never assessed n
     assert.equal("diagnostic" in finished ? finished.diagnostic?.code : finished.status, "sequence_order", "the underway lane still holds what follows");
   } finally {yield* fixture.close;}
 }));
+
+it.effect("an operative's scope exclusions reduce the accepted plan in one agreed revision, keeping completed history", () => Effect.gen(function* () {
+  const fixture = yield* incidentFixture;
+  try {
+    assert.equal((yield* statusEdit(fixture, "started", [["change", "underway"], ["scope-and-authority", "completed"], ["gather-evidence", "completed"]],
+      {status: "underway"})).result.status, "applied");
+    const before = yield* current(fixture);
+    // the operative says design, data rollout and recurrence prevention are outside this task: one smaller revision omits all three
+    const reasons = {"design-approach": "Only local documentation is refreshed; no design decision is involved.",
+      "data-and-rollout": "No stored data or rollout is involved.", "prevent-recurrence": "No defect was exposed."} as const;
+    const definitions = fixture.definitionReader.current;
+    const draft = canonicalizeProposalDraft({requirements: [], plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "change", reason: "The task changes repository content.",
+      omit: Object.entries(reasons).map(([member, reason]) => ({member, reason}))}]}}, proposalContextFromDefinitions(definitions), "reduced");
+    assert.ok(draft.ok, JSON.stringify(draft));
+    if (!draft.ok) return;
+    const reduced: WorkflowProposalInfo = {status: "proposed", message: "A smaller revised proposal.", workspaceRoot: definitions.workspaceRoot, revision: definitions.revision,
+      globalRevision: definitions.globalRevision ?? null, ...draft.workflow};
+    yield* replaceCurrentProposal(fixture, "proposal-change-reduced", definitions, reduced);
+    const task = (yield* fixture.supervisors.task(fixture.mainThreadId))!;
+    yield* fixture.supervisors.saveTask({...task, agreementSourceHash: fixture.sourceBinding.sourceHash, agreement: {status: "agreed", message: "Accepted.",
+      proposalId: "proposal-change-reduced", agreedAt: 1, evidence: {kind: "supervisor_message", messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow: reduced}});
+    const omitted = Object.keys(reasons).map(definitionId => planEntities(before.plan).find(node => node.definitionId === definitionId)!);
+    const applied = yield* write(fixture, {operationId: "reduce-accepted", note: "Apply the agreed smaller plan.",
+      omit: omitted.map(node => ({nodeId: node.nodeId, reason: reasons[node.definitionId as keyof typeof reasons]}))});
+    assert.equal(applied.result.status, "applied", JSON.stringify(applied.result));
+    const after = yield* current(fixture);
+    assert.deepEqual(changeOf(after.plan).omissions.map(item => [item.id, item.reason]), Object.entries(reasons));
+    assert.deepEqual(planEntities(after.plan).filter(node => node.status !== "planned").map(node => [node.nodeId, node.status]),
+      planEntities(before.plan).filter(node => node.status !== "planned").map(node => [node.nodeId, node.status]), "completed and underway work keeps its identity and status");
+    assert.equal(planEntities(after.plan).some(node => omitted.some(item => item.nodeId === node.nodeId)), false);
+    // implementation now follows the gathered evidence directly
+    assert.equal((yield* statusEdit(fixture, "implementing", [["implement-in-scope", "underway"]])).result.status, "applied");
+  } finally {yield* fixture.close;}
+}));

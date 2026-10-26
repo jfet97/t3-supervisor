@@ -101,15 +101,20 @@ following.
 On an authorized outcome, negotiate the applicable workflow promptly. Inspect both conversations and Task for the
 actual proposal and acceptance; a ready binding alone does not establish agreement.
 Guidance is asynchronous and T3 provides no pre-first-tool barrier. Trivial exchanges
-should stay quiet. Report repeated introductions, redundant steering or large repeated
-messages as defects rather than accepting them as necessary supervision.
+should stay quiet, and quick routine work needs no plan: Task shows No plan needed and
+no proposal or acceptance follows. A plan holds only what the task needs; catalog
+entries that do not serve it are absent, not listed as not applicable. Report repeated
+introductions, redundant steering, plans padded with irrelevant phases or large
+repeated messages as defects rather than accepting them as necessary supervision.
 
 All prior work can count when the Supervisor has adequate actual evidence, including
 implementation, verification, review and documentation. Initial duties start planned,
 then receive a separate evidence-backed assessment in plan order. Statuses record formal
 progress: a later sequence member stays planned until the earlier ones are completed,
-and early drafts or diagnostic runs are observations on it. A member that does not
-apply is shown as not applicable through a negotiated omission, never as completed.
+and early drafts or diagnostic runs are observations on it. A member of a selected
+workflow that does not apply is shown as not applicable through a negotiated omission,
+never as completed; the operative asks for a smaller plan instead of accepting
+unnecessary commitments.
 An idle main with unfinished agreed work stays out of standby unless the latest check-in
 records a current wait for the requester or another party. Partial work states the remaining
 obligations instead of restarting the duty. Agreement never proves execution, and a

@@ -315,10 +315,20 @@ the lifetime of a conversation. Children can contribute to parent steps, includi
 overlapping contributions and expansion of several parent steps into a child plan.
 Delegation does not remove the parent's requirements or automatically complete it.
 
-Applicability is expressed in descriptions and assessed semantically. A genuinely
-not-applicable item remains visible with the reason; an actually applicable
-requirement cannot be silently waived. In a flexible workflow it becomes a negotiated
-omission, shown as not applicable with its reason; it is never recorded as completed.
+The catalog is a menu, not a checklist. A plan holds only the commitments the task
+needs: a step or workflow that does not serve it stays out of the plan, with no
+not-applicable note, even when nothing in the catalog applies, and quick routine work
+needs no plan at all. A workflow is referenced when its composition as a whole fits;
+when only some of its steps do, the plan uses those steps directly. There is no member
+count rule.
+
+Applicability is expressed in descriptions and assessed semantically. A required item
+that does not apply is accounted for once with its reason, and an actually applicable
+requirement cannot be silently waived. Inside a selected flexible workflow, a member
+that does not apply becomes a negotiated omission, shown as not applicable with its
+reason; inside a selected fixed workflow it stays planned with a not-applicable
+assessment. Neither is recorded as completed. When the operative says agreed
+commitments are unnecessary, the Supervisor promptly proposes a smaller plan.
 A step whose description makes it conditional, such as prevention after a defect, is
 decided when the work reaches it. A manual workflow choice is not a waiver.
 Unclear applicability and broken definitions remain explicit outstanding issues.

@@ -156,7 +156,10 @@ the product Guide for the reference contract.
 
 Separate `required: true`, fixed structure and `default_workflow`. Account for
 requirements once per main task, including nested reuse. Genuine inapplicability needs a
-reason; unavailable resources are gaps. In a flexible workflow it becomes a negotiated
+reason; unavailable resources are gaps. The catalog is a menu, not a checklist: the
+Supervisor selects only what a task needs, possibly nothing, so say in each workflow's
+description which work it fits and which it does not. Never instruct it to include
+every phase and mark the irrelevant ones not applicable. In a flexible workflow it becomes a negotiated
 omission shown as not applicable; fixed members are never omitted. Say in a conditional
 step's description that applicability is decided when the work reaches it. Use
 `sequence:` for phases whose recorded progress follows each other and `parallel:` where

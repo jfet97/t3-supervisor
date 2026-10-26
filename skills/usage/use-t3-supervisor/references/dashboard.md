@@ -144,7 +144,9 @@ execution states.
 Statuses on the Task plan record formal progress, not permission to act. A sequence
 member is shown underway or completed only after the earlier applicable members are
 completed or Not applicable; early or diagnostic work appears in its records while it stays Planned.
-A member omitted from a flexible workflow appears under "Not applicable in this plan"
+A task whose quick routine work needs no plan shows "No plan needed" and never waits for
+acceptance. Catalog entries that were never selected do not appear. A member omitted from
+a selected flexible workflow appears under "Not applicable in this plan"
 with its reason; a fixed member assessed not applicable stays in place labelled "Not
 applicable", and so does everything inside it. When Supervision says the main is idle with unfinished agreed work and no
 current wait, the Supervisor stays out of standby without check-ins; new activity or a

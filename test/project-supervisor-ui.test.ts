@@ -631,6 +631,14 @@ it("unavailable proposals and tasks without a recorded plan preserve uncertainty
   assert.match(noWorkflowHtml, /No workflow proposal was recorded for this task/);
   assert.match(legacyHtml, /No workflow proposal was recorded for this task/);
   assert.doesNotMatch(legacyHtml, /Project definition review/);
+
+  // quick routine work judged to need no plan reads as settled, never as a plan being agreed or awaiting acceptance
+  assert.equal(snapshot.tasks[0]!.agreement, undefined, "the task has no earlier accepted plan");
+  const notNeededHtml = renderTaskView({...snapshot.tasks[0]!, supervision: "not_needed", workflow: null, reason: "A quick routine sync the agent completes and checks itself."});
+  assert.match(notNeededHtml, /No plan needed/);
+  assert.match(notNeededHtml, /judged this quick task to need no plan, so it proceeds without a proposal or acceptance/);
+  assert.match(notNeededHtml, /A quick routine sync the agent completes and checks itself\./);
+  assert.doesNotMatch(notNeededHtml, /Agreeing a plan|Plan unavailable|Acceptance has not been recorded|No workflow proposal was recorded/);
 });
 
 it("workflow proposal status and message remain visible across every contract state", () => {

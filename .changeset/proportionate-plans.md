@@ -1,0 +1,5 @@
+---
+"@jfet97/t3-supervisor": patch
+---
+
+Supervisor plans are now proportionate to the work. Before reading the step and workflow catalog, the Supervisor decides whether a plan helps at all: quick routine work, such as bringing a checkout up to date or rerunning a documented refresh, proceeds with no plan, proposal, acceptance or Supervisor message, and Task shows No plan needed instead of a plan that is unavailable or awaiting acceptance. Otherwise a plan holds only what the task needs: catalog entries that do not serve it are left out entirely rather than listed as not applicable, a workflow is referenced only when its composition fits, its useful steps can be reused directly, and task-local steps are added only where they help. The first proposal can already leave out members of a flexible workflow, with a reason for each. Required steps and workflows are still assessed against their own described applicability. When the operative says agreed commitments are unnecessary, it is asked to request a smaller plan instead of accepting, and the Supervisor publishes one promptly while completed work stays recorded.
