@@ -1,4 +1,4 @@
-import { localThreadToolRules, redact } from "./supervisor-workflow.js";
+import { completelyQuotedEarlierMessageIds, localThreadToolRules, redact } from "./supervisor-workflow.js";
 import { emptyConversation } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
@@ -1502,8 +1502,14 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
         const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
         const build = (attemptId: string) => {
-          const requesterMessages = requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal).slice(-12).map(item => ({...item,
-            text: redact(source.messages.find(message => message.id === item.messageId)?.text ?? "").slice(0, 1600)}));
+          // each exact source body is quoted once: a requester message the envelope already carries as the request text or as an earlier
+          // request keeps its identity and requester relationship and names where its body is
+          const quoted = new Map<string, "text" | "earlierMessages">([[preparing.sourceMessageId, "text"],
+            ...[...completelyQuotedEarlierMessageIds(earlierMessages)].map(id => [id, "earlierMessages"] as const)]);
+          const requesterMessages = requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal).slice(-12).map(item => {
+            const quotedIn = quoted.get(item.messageId);
+            return quotedIn ? {...item, quoted: quotedIn} : {...item, text: redact(source.messages.find(message => message.id === item.messageId)?.text ?? "").slice(0, 1600)};
+          });
           const operativeMessages = source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
             (source.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= preparing.sourceOrdinal &&
             (source.runs.find(run => run.id === item.runId)?.ordinal ?? -1) > (contextFloor ?? Infinity)).slice(-6)

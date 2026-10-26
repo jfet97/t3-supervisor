@@ -397,6 +397,13 @@ export const workflowMutationLimits: WorkflowMutationLimits = {
   maxDocumentBytes: 524_288, // serialized JSON UTF-8 byte limit
 };
 
+/**
+ * The deepest JSON nesting of a valid plan held under one record key: its root group is one level down, each of at most maxPlanDepth
+ * further group levels adds at most three (a group, its nodes array and the branch or workflow node holding the next group), and the
+ * deepest node detail, an omission's source fields, lies six levels below its group.
+ */
+export const storedPlanJsonDepth = 1 + 3 * workflowMutationLimits.maxPlanDepth + 6;
+
 // stored shapes as the types above describe them; bounds, identities and cross-field rules stay with the store validators that run after decode
 const mutableArray = <S extends Schema.Top>(item: S) => Schema.mutable(Schema.Array(item));
 const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",

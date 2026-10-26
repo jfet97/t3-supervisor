@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import type { TaskRecord } from "../../src/project-supervisor-store.js";
 import type { Projection } from "../../src/types.js";
-import { workflowToolNames } from "../../src/workflow-write-evidence.js";
+import { workflowToolNames, type WorkflowEvidenceTool } from "../../src/workflow-write-evidence.js";
 
 // a Supervisor root's typed interpretation submission as the native graph records it: one executed dynamic_tool item of the
 // supervision_interpretation_submit tool (direct or through MCPX) in the run of the task's persisted request message, with its item
@@ -48,6 +48,8 @@ export type SubmissionItemOptions = {
   runId?: string;
   // the native input when it differs from the submitted arguments
   input?: Record<string, unknown>;
+  // another workflow tool than the interpretation submission, such as the operative's supervision_plan read
+  tool?: WorkflowEvidenceTool;
 };
 
 /** Installs one native submission item in the root's projection and returns its item ID; the run itself is left as it is. */
@@ -61,8 +63,9 @@ export const installSubmission = (root: Projection, task: TaskRecord, args: Reco
   const status = options.status ?? "completed";
   const native = options.input ?? args;
   const wrapper = options.wrapper ?? "direct";
-  const toolName = wrapper === "mcpx" ? workflowToolNames.mcpxCall[1] : workflowToolNames.interpretation.direct[1];
-  const input = wrapper === "mcpx" ? {name: workflowToolNames.interpretation.mcpxTarget, arguments: native} : native;
+  const names = workflowToolNames[options.tool ?? "interpretation"];
+  const toolName = wrapper === "mcpx" ? workflowToolNames.mcpxCall[1] : names.direct[1];
+  const input = wrapper === "mcpx" ? {name: names.mcpxTarget, arguments: native} : native;
   const nodes = Array.isArray(root.nodes) ? root.nodes as Array<Record<string, unknown>> : [];
   root.nodes = nodes;
   nodes.push({id: nodeId, kind: "dynamic_tool", threadId: root.thread.id, runId: run.id, rootNodeId: run.rootNodeId, parentNodeId: run.rootNodeId,

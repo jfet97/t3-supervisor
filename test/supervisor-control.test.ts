@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { TestClock } from "effect/testing";
-import { workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { workflowProposalText } from "../src/supervisor-conversation.js";
 import type { SupervisorBaseline, SupervisionFolderPresence } from "../src/project-supervisor-store.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import { T3TransportError } from "../src/t3.js";
@@ -478,7 +478,7 @@ it.effect("Scratch workflow introductions point to shared definitions and omit a
     workflowProposalId: "proposal-1",
     definitionSnapshot,
   } as TaskRecord;
-  const text = workflowIntroductionText(task);
+  const text = workflowProposalText(task);
   assert.match(text, /This checkout uses shared definitions only/);
   assert.match(text, /\/server-home\/\.t3-supervisor\/project\.yaml/);
   assert.match(text, /\/server-home\/\.t3-supervisor\/steps\/global-check\.md/);

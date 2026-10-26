@@ -370,6 +370,8 @@ export interface WriteControllerOptions {
   readonly native: WorkflowNativeAccessShape;
   // the Stop a verified supervision_stop is handed to; without it the controller has no Start/Stop control
   readonly stop?: ((input: SupervisionStopInput, evidence: unknown) => Effect.Effect<SupervisionStopResult, unknown>) | undefined;
+  // the production conversation that answers context views and the operative's own proposal read
+  readonly conversation?: SupervisorConversation["Service"] | undefined;
 }
 
 /**
@@ -387,6 +389,7 @@ export const writeController = Effect.fnUntraced(function* (options: WriteContro
   } as unknown as SupervisionControl["Service"];
   return yield* WorkflowWriteController.make({withoutTeam: true, maxEvidenceWaitMs: 0}).pipe(
     (effect) => control ? Effect.provideService(effect, SupervisionControl, control) : effect,
+    (effect) => options.conversation ? Effect.provideService(effect, SupervisorConversation, options.conversation) : effect,
     Effect.provideService(SupervisionGate, gate),
     Effect.provideService(WorkflowNativeAccess, options.native),
     Effect.provide(context),

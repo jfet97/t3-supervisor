@@ -7,7 +7,7 @@ import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} 
 import {canonicalizeProposalDraft, proposalContextFromDefinitions} from "../src/supervisor-workflow.js";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
-import {renderPlan, workflowIntroductionText} from "../src/supervisor-conversation.js";
+import {renderPlan, workflowIntroductionText, workflowProposalText} from "../src/supervisor-conversation.js";
 import {planNodeAtPointer, withOmissions} from "../src/workflow-plan-tree.js";
 import {progressWorkflow} from "../src/workflow-progress.js";
 import {notApplicableNodeIds} from "../src/workflow-state-store.js";
@@ -290,13 +290,23 @@ it.effect("dependency review is linked child work during implementation while th
   } finally {yield* fixture.close;}
 }));
 
-it.effect("introductions list each pointer once, collapse nested expansions and send only a delta for an unchanged plan", () => Effect.gen(function* () {
+it.effect("the operative gets a short pinned notice, reads the complete proposal on demand, and a scope-only revision says only that", () => Effect.gen(function* () {
   const fixture = yield* incidentFixture;
   try {
     const task = (yield* fixture.supervisors.task(fixture.mainThreadId))!;
-    const full = workflowIntroductionText(task);
+    // the notice names the exact read; the complete proposal it returns carries the plan, its contracts' locations and the acceptance record
+    const notice = workflowIntroductionText(task);
+    const full = workflowProposalText(task);
+    assert.ok(notice.includes(`supervision_plan and exactly ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
+    assert.match(notice, /Definitions start at [^\n]*\.t3-supervisor\/project\.yaml\./u);
+    assert.doesNotMatch(notice, /Plan outline|workflow-acceptance|branch-selection|Required references/u, "the notice pastes no plan, protocol or record");
+    assert.ok(notice.length * 4 < full.length, `notice ${notice.length} characters against the ${full.length}-character proposal it points to`);
+    assert.match(full, /```workflow-acceptance\n/u);
     assert.doesNotMatch(full, /^\s+Reference: /mu, "definition pointers are not repeated under every member");
-    assert.equal(full.match(/AGENTS\.md/gu)?.length, 1, "each distinct pointer appears once");
+    // the operative starts at the project.yaml index and reads each member's file, which carries its own references and skills
+    assert.equal(full.match(/AGENTS\.md|wiki\/how-we-build\.md/gu), null, "no definition's supporting pointer is copied into the introduction");
+    assert.match(full, /\.t3-supervisor\/project\.yaml; read the full steps\/<id>\.md and workflows\/<id>\.yaml files it lists that apply\./u);
+    assert.match(full, /Each member's contract, references and skills are in its definition file; read the ones that apply, progressively\./u);
     assert.match(full, /Single review \[workflow:single-review; fixed; members in its definition\]/u);
     assert.match(full, /- branch \[branch:[^\]]+\] if: The frozen artifact is a contained, low-risk change\./u, "the operative still sees the branch it decides");
     const outline = full.slice(full.indexOf("Plan outline"), full.indexOf("\nBranches:"));
@@ -311,13 +321,15 @@ it.effect("introductions list each pointer once, collapse nested expansions and 
     assert.match(delta, /^Project Supervisor — revised proposal proposal-change-limits\nThe authorized scope changed; the agreed workflow plan is unchanged from proposal proposal-change/u);
     assert.match(workflowIntroductionText(sameScope), /^Project Supervisor — revised proposal proposal-change-limits\nThe agreed workflow plan is unchanged/u,
       "a revision without a scope change does not claim one");
-    assert.match(delta, /```workflow-acceptance\n\{"taskId":"[^"]+","proposalId":"proposal-change-limits","digest":"[0-9a-f]{64}"\}\n```/u);
-    assert.doesNotMatch(delta, /Plan outline|branch-selection/u);
-    // whole messages count, fixed protocol prose included: the two notices of a scope-only change stay far below two full introductions
-    assert.ok(delta.length < 1_200 && delta.length * 4 < full.length, `delta ${delta.length} characters against ${full.length}`);
-    assert.ok(full.length + delta.length < 6_000, `both notices take ${full.length + delta.length} characters`);
+    assert.match(delta, /Read its new acceptance record and any updated notes with the t3-supervisor-workflows tool supervision_plan and exactly \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
+    assert.match(workflowProposalText(revised), /```workflow-acceptance\n\{"taskId":"[^"]+","proposalId":"proposal-change-limits","digest":"[0-9a-f]{64}"\}\n```/u);
+    assert.doesNotMatch(delta, /Plan outline|branch-selection|workflow-acceptance/u);
+    // whole messages count, fixed protocol prose included: both notices together stay below one complete proposal
+    assert.ok(notice.length + delta.length < full.length, `notices ${notice.length} + ${delta.length} characters against ${full.length}`);
     const changedPlan = {...revised, agreement: {...revised.agreement, workflow: {...earlier, plan: sequencePlan([localStep("Other plan", "A different plan.")])}}};
-    assert.match(workflowIntroductionText(changedPlan), /Plan outline/u, "a changed plan is introduced in full");
+    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — revised proposal proposal-change-limits\nYour Supervisor revised the workflow you agreed as proposal proposal-change; agree this revision/u,
+      "a changed plan gets the proposal notice naming the agreed proposal it replaces");
+    assert.match(workflowIntroductionText(changedPlan), /Read the complete proposal \(limits, required references, the plan with its omissions and branches, and the exact acceptance record\)/u);
   } finally {yield* fixture.close;}
 }));
 

@@ -67,7 +67,7 @@ it.live("workflow MCP exposes read, write and the scoped stop tool and serves st
     $defs?: Record<string, unknown>;
     properties?: Record<string, WorkflowJsonSchema>;
   }}>}};
-  assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_interpretation_submit"]);
+  assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_plan", "supervision_interpretation_submit"]);
   const writeSchema = listBody.result?.tools?.find(tool => tool.name === "workflow_write")?.inputSchema;
   assert.deepEqual(writeSchema?.properties?.input?.required, ["operationId", "workflowId", "expectedRevision", "note"]);
   assert.ok(writeSchema?.$defs?.group, "recursive plan definitions are attached to the write schema root");

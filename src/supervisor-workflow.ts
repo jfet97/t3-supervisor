@@ -210,9 +210,6 @@ const workflowPlanTemplatePath = (referenceTemplatePath: string | null, workflow
   ? `${referenceTemplatePath}/workflow:${encodeURIComponent(workflowId)}/root`
   : workflowTemplatePath(workflowId);
 
-/** Exact expanded templates with source paths, for workflows whose nested plans or omissions a draft must name. */
-export const workflowTemplatesFor = (context: ProposalContext, workflowIds: ReadonlySet<string>): unknown[] =>
-  buildPromptTemplateCatalog(context).workflowTemplates.filter(item => record(item) && typeof item.definitionId === "string" && workflowIds.has(item.definitionId));
 const buildPromptTemplateCatalog = (context: ProposalContext, taskText = ""): PromptTemplateCatalog => {
   const byId = workflowById(context);
   const normalizedTask = taskText.toLocaleLowerCase("en-US");
@@ -429,7 +426,7 @@ Whether this task warrants supervision: it is "needed" when a shared plan genuin
 
 export const readerWorkflowInstruction = `${localThreadToolRules}\n${conversationInterpretationInstructions}\n${workflowInstruction}`
   .replace("Use no tool except the one interpretation submission named below; do not browse, read files, run terminal commands, delegate, contact the operational agent, or ask questions.",
-    "Use no tool except t3-supervisor-workflows workflow_read with the reader coordinates in the envelope and the one interpretation submission the request names (each may be listed with a namespace prefix such as t3-supervisor-workflows__workflow_read or mcp__t3-supervisor-workflows__workflow_read; when one is not listed, call it with the native MCPX tool mcpx_call_tool, found with mcpx_search_tools and mcpx_get_tool_schema): view definitions without definitionIds returns the manifest; with definitionIds it returns the complete definitions you select. Use reader coordinates with view definitions and put the exact IDs you need in definitionIds; through an MCPX call tool, use name t3-supervisor-workflows__workflow_read with that object itself as arguments. Only for a task that needs supervision, read the complete definitions you need before assessing applicability. If you cannot invoke workflow_read, that says nothing about the project's definitions: keep the affected requirements unknown with that reason. The one exception to this tool limit: if a genuine human writes directly in this conversation asking to stop supervising this chat, freshly read your own thread with the local t3-code server's t3_thread_read and call t3-supervisor-workflows supervision_stop citing that latest message with a fresh operationId, as your standing instructions describe. Do not browse, read files, run commands, delegate, contact the operational agent, or ask questions.")
+    "Use no tool except t3-supervisor-workflows workflow_read with the reader coordinates in the envelope and the one interpretation submission the request names (each may be listed with a namespace prefix such as t3-supervisor-workflows__workflow_read or mcp__t3-supervisor-workflows__workflow_read; when one is not listed, call it with the native MCPX tool mcpx_call_tool, found with mcpx_search_tools and mcpx_get_tool_schema): view definitions without definitionIds returns the project.yaml index; with definitionIds it returns each complete definition you select once, naming the steps and workflows it references by ID for further reads. Use reader coordinates with view definitions and put the exact IDs you need in definitionIds; through an MCPX call tool, use name t3-supervisor-workflows__workflow_read with that object itself as arguments. Only for a task that needs supervision, read the complete definitions you need before assessing applicability. If you cannot invoke workflow_read, that says nothing about the project's definitions: keep the affected requirements unknown with that reason. The one exception to this tool limit: if a genuine human writes directly in this conversation asking to stop supervising this chat, freshly read your own thread with the local t3-code server's t3_thread_read and call t3-supervisor-workflows supervision_stop citing that latest message with a fresh operationId, as your standing instructions describe. Do not browse, read files, run commands, delegate, contact the operational agent, or ask questions.")
 ;
 
 export type WorkflowRequestOptions = {
@@ -454,6 +451,11 @@ const boundedEarlierMessages = (messages: WorkflowRequestOptions["earlierMessage
     budget -= excerpt.length;
     return [{messageId: item.messageId, text: excerpt}];
   }).reverse();
+};
+/** The earlier requests whose complete body an interpretation request quotes within that budget. */
+export const completelyQuotedEarlierMessageIds = (messages: WorkflowRequestOptions["earlierMessages"]): Set<string> => {
+  const full = new Map((messages ?? []).map(item => [item.messageId, redact(item.text)] as const));
+  return new Set(boundedEarlierMessages(messages).filter(item => full.get(item.messageId) === item.text).map(item => item.messageId));
 };
 /** The members of a definition in order; a member inside a branch names the condition and path it belongs to, never an unconditional member. */
 export const manifestMembers = (nodes: readonly DefinitionNode[], within = ""): string[] => nodes.flatMap(node => "step" in node

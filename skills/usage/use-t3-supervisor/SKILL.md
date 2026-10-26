@@ -87,7 +87,9 @@ current workflow and native descendants. Plans preserve nested structure, stable
 occurrence IDs and provenance. Child contributions may overlap; child completion
 does not complete a parent step automatically. Required inclusion can be recursive.
 Matching complete native proposal/acceptance records establish agreement, not actual
-execution. Keep incomplete requirements and source issues visible.
+execution. Keep incomplete requirements and source issues visible. The operative gets a
+short notice and reads its complete current proposal, with the plan and the exact
+acceptance record, through `supervision_plan`, which answers only for its own current task.
 
 “Following the conversation” means the enabled Supervisor has considered the current
 dialogue and is keeping a quiet understanding and draft duties. Discussion can include
@@ -135,7 +137,7 @@ When work reaches a plan branch, the operative working on that workflow decides 
 path applies from the actual context and records it in its own reply with an exact
 top-level `branch-selection` record holding one JSON line, for example
 `{"taskId":"proposal-1","nodeId":"0b7c9a52-5f3e-4c1a-9d2e-6a1f2b3c4d5e","revision":1,"path":"then","reason":"The diff touches one module."}`.
-Use the task ID and branch node ID from the introduction or Supervisor guidance, `then`
+Use the task ID and branch node ID from the proposal read with `supervision_plan` or from Supervisor guidance, `then`
 when the condition holds and `else` when it does not, and the next revision for a changed
 decision. A child records decisions for its own workflow only. No Supervisor approval is
 needed; a selection is a decision, not evidence that the path's work was done.

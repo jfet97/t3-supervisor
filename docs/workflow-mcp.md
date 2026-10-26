@@ -239,12 +239,16 @@ With `view`, `workflow_read` returns bounded context for the verified binding in
 workflow documents:
 
 - `context`: the current task, its revision pins, objective, earlier unresolved request
-  IDs, proposal identity and digest, agreement and diagnostics. For a stopped chat it
+  IDs, proposal identity and digest, agreement, requirement states and diagnostics,
+  with the definition read's identity but not the index. For a stopped chat it
   returns supervision=stopped even without a current task or enabled project.
-- `definitions`: a manifest of each indexed definition's id, name, summary and
-  members, or with `definitionIds` the complete selected definitions and the exact
-  templates of selected workflows. A summary is not the definition's policy text.
-  Add `includeSources` for raw definition files when diagnosing invalid definitions.
+- `definitions`: the `project.yaml` index once, one row per entry with its id,
+  summary, path, required flag, non-project provenance, name and a workflow's members
+  by ID; a required entry whose file is missing keeps its row. With `definitionIds`
+  it returns each requested definition once, complete, with its authored composition
+  (inline local steps and branches included); a referenced step or workflow is read
+  by its own ID. A summary is not the definition's policy text. Add
+  `includeSources` for raw definition files when diagnosing invalid definitions.
 - `instructions`: the full standing Supervisor instructions and their version.
 - `interpretation`: only the task interpretation instructions; the opening carries
   source text, the minimal output contract and reader coordinates, without a catalog.
@@ -255,6 +259,20 @@ workflow documents:
   reference, nesting, status, branch reach and visible omissions, plus pending
   decisions, without descriptions, accepted snapshots or history. Use it to reconcile
   statuses; the document read remains available for descriptions and history.
+
+`supervision_plan` is the operative main's read of its own current proposal. Its arguments
+are `callerThreadId`, `taskId` and `proposalId`, copied from the Supervisor notice. The
+service verifies the caller's own executed native tool call with exactly these arguments
+in its own main run, then returns the complete current proposal: objective and authorized
+scope, limits, required references, the plan with its omissions and branches, the branch
+protocol and the exact acceptance record. It answers only for the caller's own interpreted
+task under the ready Supervisor generation that interpreted it, while the task's request is
+unchanged and fully considered and supervision of that chat is enabled and not stopped, for
+exactly the current proposal whose acceptance record is still the one recorded with its
+candidate, before or after its agreement. A notice names only an already recorded
+proposal, so `pending` means only that the caller's own call is not visible yet. Any other
+call, such as a forged, foreign, outdated or obsolete one, gets one refusal that names
+nothing; the read writes nothing and grants no Supervisor, helper or write authority.
 
 `supervision_stop` durably stops supervision of one chat on a genuine human request.
 Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and

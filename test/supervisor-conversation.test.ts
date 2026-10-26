@@ -7,13 +7,16 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Clock, Effect, Exit, FileSystem } from "effect";
+import { Clock, Effect, Exit, FileSystem, Schema } from "effect";
 import { TestClock } from "effect/testing";
+import { canonicalJson, canonicalStoredJson } from "../src/canonical-json.js";
+import { storedPlanJsonDepth, workflowMutationLimits } from "../src/workflow-state-contract.js";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { WorkflowPlanGroupSchema, WorkflowProposal } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
-import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { prepareWorkflowRequest, proportionatePlanRule, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, ReviewOutcomeKind, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
@@ -750,7 +753,7 @@ const installTaskDefinitions = Effect.fnUntraced(function* (fixture: Fixture, sn
   return task;
 });
 
-const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture) {
+const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture, omit?: ReadonlyArray<{member: string; reason: string}>) {
   const snapshot = nestedCatalogDefinitions();
   const current = (yield* fixture.projectStore.task(fixture.task.threadId))!;
   const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, sourceText, snapshot);
@@ -758,11 +761,14 @@ const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture) {
   const raw = {requirements: [{kind: "step", id: "scope", applies: true, reason: "Define the task."},
     {kind: "workflow", id: "review", applies: true, reason: "Review substantive changes."}],
   plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "scope", reason: "Start with scope."},
-    {kind: "workflow", definitionId: "change", reason: "Complete the requested change."}]}};
+    {kind: "workflow", definitionId: "change", reason: "Complete the requested change.", ...(omit ? {omit} : {})}]}};
   const plan = validateWorkflowPlan(raw, prepared.context);
   assert.ok(plan);
-  const task = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
-  assert.equal(interpretationPlanDigest(task.workflow), interpretationPlanDigest(plan), "the submission decodes to the validated plan");
+  const submitted = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
+  // the recorded submission payload is schema-decoded before it becomes the task's workflow, and intake digests that decoded plan
+  const workflow = Schema.decodeUnknownSync(WorkflowProposal)(submitted.workflow);
+  const evidence = submitted.interpretationEvidence;
+  const task: TaskRecord = {...submitted, workflow, ...(evidence ? {interpretationEvidence: {...evidence, planDigest: interpretationPlanDigest(workflow)}} : {})};
   yield* fixture.projectStore.saveTask(task);
   fixture.setDefinitions(snapshot);
   return task;
@@ -792,10 +798,14 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   yield* fixture.run();
   const introduction = (yield* fixture.conversation.requests.introduction(task.id))!;
   assert.equal(introduction.state, "sent");
-  assert.ok(introduction.text.length < 12_000, `the operative receives an outline and an acceptance record: ${introduction.text.length}`);
+  // the operative receives a short notice with the exact read of its complete proposal, which carries the outline and acceptance record
+  const proposalText = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
+  assert.ok(introduction.text.length < proposalText.length, `a ${introduction.text.length}-character notice points to the ${proposalText.length}-character proposal`);
   assert.equal(introduction.text.split("END_correctness").length - 1, 0);
   assert.match(introduction.text, /^Project Supervisor — proposal [^\n]+\nAgree a proportionate workflow with your Supervisor for the requester-authorized outcome/u);
-  assert.ok(introduction.text.includes(workflowFence("workflow-acceptance", acceptance)));
+  assert.ok(introduction.text.includes(JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: acceptance.proposalId})));
+  assert.doesNotMatch(introduction.text, /Plan outline|workflow-acceptance/u);
+  assert.ok(workflowProposalText((yield* fixture.projectStore.task(task.threadId))!).includes(workflowFence("workflow-acceptance", acceptance)));
   const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
   const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
   appendMessageToRun(fixture.operative, operativeRun, {id: "nested-catalog-acceptance", role: "assistant",
@@ -804,6 +814,140 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   yield* observeAgreement(fixture, clock.now + 30_000);
   assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
   assert.equal((yield* fixture.workflows.get(projectId, operativeThreadId))?.sourceBinding?.proposalId, task.id);
+}));
+
+// the stored task is decoded by its schema, so an omission's fields arrive in schema order; the proposal must still go out and be agreed
+const preventOmission = [{member: "prevent", reason: "No defect or correction exposed a gap."}];
+it.effect("an initial interpretation that omits a flexible member is introduced and agreed like any other proposal", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
+  const task = yield* installNestedCatalog(fixture, preventOmission);
+  const stored = (yield* fixture.projectStore.task(task.threadId))!;
+  const change = stored.workflow!.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change");
+  assert.deepEqual(change?.kind === "workflow" ? change.omissions.map(item => [item.id, item.reason]) : null, [["prevent", "No defect or correction exposed a gap."]]);
+
+  const callsBefore = fixture.calls.length;
+  yield* fixture.run();
+  const pending = yield* fixture.conversation.requests.introduction(task.id);
+  assert.notEqual(pending?.state, "blocked", pending?.error ?? "");
+  assert.deepEqual(fixture.calls.slice(callsBefore).map(call => call.payload.threadId), [operativeThreadId], "one native send: the introduction");
+  const acceptance = preparedAcceptanceRecord((yield* fixture.projectStore.task(task.threadId))!);
+  assert.ok(acceptance);
+  assert.equal((yield* fixture.conversation.requests.agreementCandidate(task.id, task.id))?.planHash, acceptance.digest);
+  yield* fixture.run();
+  const introduction = (yield* fixture.conversation.requests.introduction(task.id))!;
+  assert.equal(introduction.state, "sent");
+  const proposal = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
+  assert.match(proposal, /not applicable: Check prevent — No defect or correction exposed a gap\./u);
+  assert.ok(proposal.includes(workflowFence("workflow-acceptance", acceptance)));
+  assert.ok(introduction.text.includes(`"proposalId":${JSON.stringify(acceptance.proposalId)}`), "the notice pins the proposal the operative reads");
+  const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
+  const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
+  appendMessageToRun(fixture.operative, operativeRun, {id: "omission-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
+  completeRun(fixture.operative, operativeRun, "Accepted the current workflow.", clock.now);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
+  const live = (yield* fixture.workflows.get(projectId, operativeThreadId))!;
+  assert.equal(live.sourceBinding?.proposalId, task.id);
+  const liveChange = live.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change");
+  assert.deepEqual(liveChange?.kind === "workflow" ? liveChange.omissions.map(item => item.id) : null, ["prevent"], "the agreed omission reaches the live plan");
+}));
+
+it.effect("a revised proposal that omits a flexible member from the agreed plan is noticed once it is durable, read on delivery and agreed", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
+  const task = yield* installNestedCatalog(fixture);
+  yield* fixture.run();
+  yield* fixture.run();
+  const first = (yield* fixture.conversation.requests.introduction(task.id))!;
+  const firstAcceptance = preparedAcceptanceRecord((yield* fixture.projectStore.task(task.threadId))!)!;
+  const firstRun = fixture.operative.runs.find(run => run.id === fixture.operative.messages.find(message => message.id === first.messageId)!.runId)!;
+  appendMessageToRun(fixture.operative, firstRun, {id: "first-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", firstAcceptance), now: yield* clock.advance(1)});
+  completeRun(fixture.operative, firstRun, "Accepted the current workflow.", clock.now);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
+
+  // the operative excludes a member; the Supervisor publishes one smaller compact revision that omits it
+  const agreed = (yield* fixture.projectStore.task(task.threadId))!;
+  const revisionId = "revision-omit-prevent";
+  appendAssistantTurn(fixture.supervisor, "revised-omission", workflowFence("workflow-proposal", {taskId: agreed.id, taskRevision: taskScopeRevision(agreed),
+    proposalId: revisionId, revision: agreed.workflow!.revision, draft: {requirements: [{kind: "step", id: "scope", applies: true, reason: "Define the task."},
+      {kind: "workflow", id: "review", applies: true, reason: "Review substantive changes."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "scope", reason: "Start with scope."},
+      {kind: "workflow", definitionId: "change", reason: "Complete the requested change.", omit: preventOmission}]}}}), yield* clock.advance(1));
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  const revised = (yield* fixture.projectStore.task(task.threadId))!;
+  assert.equal(revised.workflowProposalId, revisionId);
+  assert.deepEqual([revised.agreement?.status, revised.agreement?.proposalId], ["agreed", task.id], "the agreed plan holds until the revision is accepted");
+  const acceptance = preparedAcceptanceRecord(revised)!;
+  assert.equal((yield* fixture.conversation.requests.agreementCandidate(task.id, revisionId))?.planHash, acceptance.digest,
+    "the presented record names the candidate's digest");
+  // the service sends the notice once the revision is durable, and a read on its delivery returns exactly that proposal and record
+  const callsBefore = fixture.calls.length;
+  const noticesSince = () => fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId);
+  yield* fixture.run();
+  assert.equal(noticesSince().length, 1, "one notice for the revision");
+  assert.match(String(noticesSince()[0]!.payload.text), new RegExp(`^Project Supervisor — revised proposal ${revisionId}\n[^\n]*agreed as proposal ${task.id};`, "u"));
+  assert.notEqual(noticesSince()[0]!.payload.messageId, first.messageId, "the revision's notice has its own identity");
+  const read = yield* fixture.conversation.operativeProposal({callerThreadId: operativeThreadId, projectId, taskId: task.id, proposalId: revisionId, caller: fixture.operative});
+  assert.equal(read.status, "ok", JSON.stringify(read));
+  assert.ok(read.status === "ok" && read.proposal.includes(workflowFence("workflow-acceptance", acceptance)) &&
+    /not applicable: Check prevent — No defect or correction exposed a gap\./u.test(read.proposal), "the read holds the omission and the exact record");
+  yield* fixture.run();
+  yield* fixture.run();
+  const notice = (yield* fixture.conversation.requests.introduction(task.id))!;
+  assert.deepEqual([notice.state, notice.proposalId, noticesSince().length], ["sent", revisionId, 1], "delivered once, never repeated");
+  // the operative copies the record it read into its reply after the notice
+  const noticeRun = fixture.operative.runs.find(run => run.id === fixture.operative.messages.find(message => message.id === notice.messageId)!.runId)!;
+  appendMessageToRun(fixture.operative, noticeRun, {id: "revision-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
+  completeRun(fixture.operative, noticeRun, "Accepted the revised workflow.", clock.now);
+  yield* observeAgreement(fixture, clock.now + 90_000);
+  const settled = (yield* fixture.projectStore.task(task.threadId))!;
+  assert.deepEqual([settled.agreement?.status, settled.agreement?.proposalId], ["agreed", revisionId]);
+}));
+
+// a plan at the stored validation's nesting bound: a branch in each group down to the deepest group level, which holds a workflow
+// with an omission, the deepest node detail
+it("the stored plan identity covers a plan nested to the validated bound and still sees any changed value", () => {
+  const source = {origin: "project", path: ".t3-supervisor/workflows/change.yaml", sourceId: "change"};
+  const group = (level: number, reason: string): unknown => ({kind: "sequence", templatePath: null, nodes: level < workflowMutationLimits.maxPlanDepth
+    ? [{kind: "branch", nodeId: `branch-${level}`, templatePath: null, condition: `Level ${level} applies.`, reason, then: group(level + 1, reason), else: null}]
+    : [{kind: "workflow", nodeId: "change", definitionId: "change", templatePath: null, name: "Change", description: "Change behavior.", fixed: false, source,
+      resolution: "resolved", reason, status: "planned", contributorThreadIds: [], plan: null,
+      omissions: [{templatePath: "workflows/change/0", kind: "step", id: "prevent", name: "Check prevent", source, reason: "No gap."}]}]});
+  const value = (reason: string) => ({definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [],
+    plan: Schema.decodeUnknownSync(WorkflowPlanGroupSchema)(group(0, reason))});
+  const reversed = (item: unknown): unknown => Array.isArray(item) ? item.map(reversed) : item && typeof item === "object"
+    ? Object.fromEntries(Object.entries(item).reverse().map(([key, entry]) => [key, reversed(entry)])) : item;
+  const depth = (item: unknown): number => item && typeof item === "object" ? 1 + Math.max(0, ...Object.values(item).map(depth)) : 0;
+  const plan = value("Needed.");
+  assert.equal(depth(plan), storedPlanJsonDepth, "the bound derived from the plan limits is exactly this plan's depth");
+  assert.throws(() => canonicalJson(plan), /json_depth/u, "request arguments keep their own bound");
+  assert.equal(canonicalStoredJson(reversed(plan), storedPlanJsonDepth), canonicalStoredJson(plan, storedPlanJsonDepth), "the same values in another key order are the same plan");
+  assert.notEqual(canonicalStoredJson(value("Needed later."), storedPlanJsonDepth), canonicalStoredJson(plan, storedPlanJsonDepth), "a changed value is a changed plan");
+  assert.throws(() => canonicalStoredJson({nested: plan}, storedPlanJsonDepth), /json_depth/u, "and nothing deeper than a valid plan is accepted");
+});
+
+it.effect("a stored initial plan that no longer matches its validated form is never introduced, even when its evidence digest agrees", () => Effect.gen(function* () {
+  for (const variant of ["identity", "digest"] as const) {
+    const clock = yield* pinnedClock(baseTime);
+    const fixture = yield* makeFixture(clock, {operativeActive: false});
+    const task = yield* installNestedCatalog(fixture, preventOmission);
+    // an omission reason the validator normalizes differs in value from what it stores; the identity variant also re-pins the evidence
+    // to the altered plan, so only the plan identity can refuse it
+    const workflow = structuredClone(task.workflow!);
+    const change = workflow.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change")!;
+    if (change.kind === "workflow") change.omissions = change.omissions.map(item => ({...item, reason: `  ${item.reason}  `}));
+    const evidence = task.interpretationEvidence!;
+    const tampered: TaskRecord = {...task, workflow, ...(variant === "identity" ? {interpretationEvidence: {...evidence, planDigest: interpretationPlanDigest(workflow)!}} : {})};
+    yield* fixture.projectStore.saveTask(tampered);
+    const callsBefore = fixture.calls.length;
+    yield* fixture.run();
+    yield* fixture.run();
+    assert.equal(fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId).length, 0, `${variant}: nothing reaches the operative`);
+    assert.equal(yield* fixture.conversation.requests.agreementCandidate(task.id, task.id), null, `${variant}: no acceptance candidate`);
+    assert.equal((yield* fixture.conversation.requests.introduction(task.id))?.state, "blocked", variant);
+  }
 }));
 
 it.effect("invalid oversized definitions keep provisional initialization compact while the reader serves every source completely", () => Effect.gen(function* () {
@@ -1222,7 +1366,12 @@ it.effect("workflow editing guidance tells authors to start live steps planned a
   assert.match(role, /never present it as a requester instruction/u);
   assert.match(role, /restate the unfinished task and its next authorized action/u);
   assert.match(role, /Never repeat an acceptance request in the check-in that delivered the proposal or while the operative turn that received it is still running/u);
-  assert.match(role, /When only the scope or limits changed and the plan is unchanged, say so in one sentence instead of repeating the outline/u);
+  // the service sends each notice once the proposal is recorded; the Supervisor never sends an earlier notice of its own
+  assert.match(role, /Publishing is the delivery: once your completed answer is recorded, the service sends the operative main a short notice naming the proposal/u);
+  assert.match(role, /reads the complete proposal, with each node's and omission's reason and its exact acceptance record, a workflow-acceptance fence holding exactly \{"taskId","proposalId","digest"\}, with the t3-supervisor-workflows tool supervision_plan/u);
+  assert.match(role, /Send no notice, outline or record of your own before that/u);
+  assert.match(role, /once that answer is recorded, the service sends the operative main a short notice naming it, which it reads in full with supervision_plan, so send no notice of your own/u);
+  assert.doesNotMatch(role, /send the operative main a short notice/u);
   assert.match(role, /"omit":\[\{"member":/u);
   assert.doesNotMatch(role, /may proceed together|infer dependency scheduling|promptly reconcile EVERY duty|keep parent and child assessments separate/u);
   assert.match(role, /separate later apply with status_changed evidence and exact activity references/u);
@@ -2698,7 +2847,7 @@ it.effect("invalid and incomplete definitions still introduce finite provisional
     assert.equal(introduction?.state, "sent");
     assert.match(introduction?.text ?? "", /provisional/u);
     assert.match(introduction?.text ?? "", /fresh definition read is unavailable[\s\S]*cached incomplete or invalid material that may be stale/u);
-    assert.match(introduction?.text ?? "", /unknown.*Do not treat an empty list as no requirements|test-plan.*unknown/u);
+    assert.match(workflowProposalText((yield* fixture.projectStore.task(provisionalTask.threadId))!), /unknown.*Do not treat an empty list as no requirements|test-plan.*unknown/u);
 
     const record = workflowRecord(provisionalTask, provisionalTask.id, plan);
     appendAssistantTurn(fixture.supervisor, `provisional-proposal-${index}`, workflowFence("workflow-proposal", record), clock.now + 2);
@@ -2772,7 +2921,7 @@ it.effect("an applicable required reference omitted from the initial plan still 
   assert.equal(yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null, "no initialization turn");
   const introduction = yield* fixture.conversation.requests.introduction(task.id);
   assert.equal(introduction?.state, "accepted");
-  assert.match(introduction?.text ?? "", /test-plan.*unresolved/u);
+  assert.match(workflowProposalText((yield* fixture.projectStore.task(task.threadId))!), /test-plan.*unresolved/u);
   assert.equal(yield* fixture.conversation.requests.agreementCandidate(task.id, task.id), null);
 }));
 
@@ -2810,7 +2959,9 @@ it.effect("a restarted source run still gets its introduction in two startup cyc
   assert.equal(deliveredIntroduction.nodeId, operativeActiveRun.rootNodeId);
   assert.equal(nodesOf(fixture.operative).find(node => node.id === operativeActiveRun.rootNodeId)?.kind, "root_turn");
   const acceptanceText = workflowFence("workflow-acceptance", preparedAcceptanceRecord((yield* fixture.projectStore.task(fixture.task.threadId))!));
-  assert.ok(introduction.text.includes(acceptanceText), "the operative receives the exact acceptance record of the interpreted proposal");
+  assert.ok(workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!).includes(acceptanceText),
+    "the operative reads the exact acceptance record of the interpreted proposal");
+  assert.match(introduction.text, /supervision_plan and exactly \{"callerThreadId":/u);
   yield* fixture.run();
   assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "sent");
   const nativeIntroduction = fixture.operative.messages.find(message => message.id === introduction.messageId);
@@ -4362,7 +4513,7 @@ it.effect("untrusted contribution text stays inert and root check-ins carry only
 it.effect("the operative introduction points to the contribution record and the Supervisor holds its exact format without asking for progress reports", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   // the introduction only points to the format; the Supervisor relays it on request from its on-demand reference
-  const text = workflowIntroductionText(fixture.task);
+  const text = workflowProposalText(fixture.task);
   assert.match(text, /ask your Supervisor for the external-contribution record format/u);
   assert.doesNotMatch(text, /exact fence named external-contribution/u);
   const role = yield* fixture.conversation.roleFor(fixture.binding);
@@ -4866,7 +5017,7 @@ it.effect("an unchanged interpreted proposal is reused by the exact reference vi
   const context = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
   const proposal = (context.task as {proposal: {proposalId: string; digest: string}}).proposal;
   const reference = {taskId: fixture.task.id, proposalId: proposal.proposalId, digest: proposal.digest};
-  assert.ok(introduction.text.includes(proposal.digest), "the main was asked to accept exactly this reference");
+  assert.ok(workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!).includes(proposal.digest), "the main was asked to accept exactly this reference");
   const reused = yield* fixture.conversation.readContextView(fixture.binding, {view: "check", record: reference});
   assert.deepEqual([reused.status, reused.proposalId, reused.digest], ["ok", proposal.proposalId, proposal.digest], "the exact reference checks unchanged");
   const task = (yield* fixture.projectStore.task(fixture.task.threadId))!;
@@ -5959,9 +6110,11 @@ it.effect("every rendered root and operative payload stays bounded and carries n
   yield* fixture.run();
   const introduction = (yield* fixture.conversation.requests.introduction(fixture.task.id))!;
   assert.ok(introduction.text.length < 3_100, `introduction ${introduction.text.length}`);
-  assert.match(introduction.text, /References are checkout-relative files\. Skills are checkout-relative SKILL\.md paths or exact names in your configured catalog/u);
-  assert.match(introduction.text, /References and skills grant no authority/u);
-  assert.doesNotMatch(introduction.text, /exact fence named external-contribution|For third-party work, consider sending/u, "optional reference stays on demand");
+  const proposal = workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!);
+  assert.match(proposal, /References are checkout-relative files\. Skills are checkout-relative SKILL\.md paths or exact names in your configured catalog/u);
+  assert.match(proposal, /References and skills grant no authority/u);
+  for (const text of [introduction.text, proposal])
+    assert.doesNotMatch(text, /exact fence named external-contribution|For third-party work, consider sending/u, "optional reference stays on demand");
   // a protocol repair wake after the standing role was delivered is the short pointer plus the rejection
   const binding = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!;
   const version = ((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})) as unknown as {version: string}).version;
@@ -6148,7 +6301,7 @@ it.effect("the introduction teaches the exact branch-selection record and the ma
   const clock = {now: baseTime};
   const fixture = yield* makeFixture(clock);
   const {branch, task} = yield* agreeBranchWorkflow(fixture, clock.now);
-  const text = workflowIntroductionText({...task, workflow: {...task.workflow!, ...branchPlanFor(task)}});
+  const text = workflowProposalText({...task, workflow: {...task.workflow!, ...branchPlanFor(task)}});
   assert.match(text, /- branch \[branch:[0-9a-f-]{36}\] if: The change is contained and well understood\.\n  then:\n    - Single review \[local:single-review\]\n  else:\n    - Paired review \[local:paired-review\]\n- Delivery \[local:deliver\]/u,
     "the outline labels both paths and dedents the following step");
   const example = /```branch-selection\n(.+)\n```/u.exec(text);

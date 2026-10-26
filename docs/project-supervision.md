@@ -91,9 +91,10 @@ The Supervisor interprets the latest genuine request together with earlier unres
 requests in the same main, such as an issue link that did not yet establish an
 objective; a bootstrap, setup or recovery instruction is treated as a step toward
 that request, not its replacement. With the workflow MCP available, interpretation
-receives a short manifest of each indexed definition's id, name, summary and
-members, and reads complete definitions on demand through `workflow_read` with
-`definitionIds`, so full descriptions are not pushed into the prompt. A summary
+receives the `project.yaml` index once (each entry's id, name, summary, required
+flag and members by ID) and reads only the complete definitions it selects through
+`workflow_read` with `definitionIds`, each once, so full descriptions and expanded
+plans are not pushed into the prompt. A summary
 is navigation, not policy. The operative introduction says that
 `.t3-supervisor/project.yaml` is the index and to read the listed full files
 it needs. The index is not a whitelist of task plans; negotiated local steps
@@ -190,16 +191,23 @@ agent, schedules a task or proves successful execution.
 Startup is compact. The initialization turn only confirms the service-prepared
 proposal by echoing its exact reference `{taskId, proposalId, digest}`; definitions
 stay available through `workflow_read`. The introduction outline names each member once;
-nested workflows without a branch are one line, and the references and skills of the
-plan's definitions are listed once because each definition file carries its own. A
-revised proposal for a changed scope whose plan, definitions and requirements are
-unchanged is sent as a short delta with the objective, limits and new acceptance
-record. The Supervisor does not repeat an acceptance request while the operative turn
-that received the proposal can still answer it. The operative introduction says that `.t3-supervisor/project.yaml` is the
-index and to read the listed full files it needs. It opens with the
-obligation to agree a workflow for the authorized outcome promptly (earlier work may
-already exist; the Supervisor cannot block tools), then an outline
-and the exact acceptance record. Wakes carry the full standing instructions once per
+nested workflows without a branch are one line. It points to the `project.yaml` index
+instead of copying the references and skills of the plan's definitions, because each
+definition file carries its own. Every notice points to a proposal the service has
+already recorded: the first one once the interpretation is recorded, and a revision the
+Supervisor publishes in its completed answer once that answer is recorded as the
+proposal's candidate. The service delivers each notice once, under its own message
+identity, and the Supervisor sends no notice of its own. A revised proposal for a
+changed scope whose plan, definitions and requirements are unchanged is noticed as such
+with its new acceptance record; a revision of an agreed plan names the agreed proposal it
+replaces, and its read shows each member, omission and reason. The Supervisor does not
+repeat an acceptance request while the operative turn that received the proposal can
+still answer it. The operative receives a short notice: the obligation to agree a workflow for the
+authorized outcome promptly (earlier work may already exist; the Supervisor cannot block
+tools), the objective, the `.t3-supervisor/project.yaml` entry point and the exact
+`supervision_plan` call that returns its complete current proposal with the outline and
+the acceptance record. It reads that proposal on demand, also after agreement, and asks
+its Supervisor for the outline only when it cannot call the tool. Wakes carry the full standing instructions once per
 version and afterwards a compact core with their version; full instructions, task
 context, definitions and dry-run checks are pulled on demand. Each wake row has one
 activity list and per-task context with revision pins, proposal identity and digest,
