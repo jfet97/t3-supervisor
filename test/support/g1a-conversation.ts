@@ -26,7 +26,7 @@ import { makeThreadPolicyStore, ThreadPolicyStore, type ThreadPolicyStoreError }
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import {
-  WorkflowNativeAccess, WorkflowWriteController, type SupervisionStartResult, type SupervisionStopInput, type SupervisionStopResult,
+  WorkflowNativeAccess, WorkflowWriteController, type SupervisionStartInput, type SupervisionStartResult, type SupervisionStopInput, type SupervisionStopResult,
   type WorkflowNativeAccessShape,
 } from "../../src/workflow-write-controller.js";
 import { installSubmission, submissionDetail, type SubmissionItemOptions } from "./interpretation-submit.js";
@@ -368,8 +368,10 @@ export interface WriteControllerOptions {
   readonly stores: ConversationStores;
   readonly workflows: WorkflowStateStore["Service"];
   readonly native: WorkflowNativeAccessShape;
-  // the Stop a verified supervision_stop is handed to; without it the controller has no Start/Stop control
+  // the Stop a verified supervision_stop is handed to; without it and `start` the controller has no Start/Stop control
   readonly stop?: ((input: SupervisionStopInput, evidence: unknown) => Effect.Effect<SupervisionStopResult, unknown>) | undefined;
+  // the Start a verified supervision_start is handed to; without it a Start is unavailable
+  readonly start?: ((input: SupervisionStartInput, evidence: {runId: string}) => Effect.Effect<SupervisionStartResult, unknown>) | undefined;
   // the production conversation that answers context views and the operative's own proposal read
   readonly conversation?: SupervisorConversation["Service"] | undefined;
 }
@@ -382,10 +384,12 @@ export const writeController = Effect.fnUntraced(function* (options: WriteContro
   const scope = new WriteScope(options.stores);
   const context = Context.add(options.stores.context, WorkflowStateStore, options.workflows).pipe(Context.add(SupervisionScopeService, scope));
   const gate = yield* makeSupervisionGate(scope).pipe(Effect.provide(context));
-  const stop = options.stop;
-  const control = stop && {
-    startSupervision: () => Effect.succeed<SupervisionStartResult>({status: "unavailable", reason: "supervision_start_unavailable"}),
-    stopSupervision: (input: SupervisionStopInput, evidence: unknown) => Effect.orDie(stop(input, evidence)),
+  const {stop, start} = options;
+  const control = (stop || start) && {
+    startSupervision: (input: SupervisionStartInput, evidence: {runId: string}) => start ? Effect.orDie(start(input, evidence))
+      : Effect.succeed<SupervisionStartResult>({status: "unavailable", reason: "supervision_start_unavailable"}),
+    stopSupervision: (input: SupervisionStopInput, evidence: unknown) => stop ? Effect.orDie(stop(input, evidence))
+      : Effect.succeed<SupervisionStopResult>({status: "unavailable", reason: "supervision_stop_unavailable"}),
   } as unknown as SupervisionControl["Service"];
   return yield* WorkflowWriteController.make({withoutTeam: true, maxEvidenceWaitMs: 0}).pipe(
     (effect) => control ? Effect.provideService(effect, SupervisionControl, control) : effect,

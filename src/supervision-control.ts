@@ -5,7 +5,7 @@ import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
 import { SupervisorIds } from "./ids.js";
-import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type SupervisionStartRecord } from "./project-supervisor-store.js";
+import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type SupervisionResume, type SupervisionStartRecord } from "./project-supervisor-store.js";
 import { ScopeLocks } from "./scope-locks.js";
 import { Store, type StoreError } from "./store.js";
 import { SupervisionGate, SupervisionScopeService } from "./supervision-gate.js";
@@ -35,6 +35,10 @@ const saveFailure = (cause: unknown): ThreadPolicySaveFailed => cause instanceof
 
 // an evidence read ended by the caller's cancel, as the aborted baseline read rejected
 class EvidenceReadCancelled extends Data.TaggedError("EvidenceReadCancelled") {}
+
+// the latest genuine human message of a thread, by the ordinal of its run
+const latestHumanMessage = (projection: Projection) => projection.messages.filter(item => genuineUserMessage(projection, item.id))
+  .sort((a, b) => (projection.runs.find(run => run.id === a.runId)?.ordinal ?? -1) - (projection.runs.find(run => run.id === b.runId)?.ordinal ?? -1)).at(-1);
 
 // the outcome of one chat-policy write
 export type ChatPolicyWrite = {status: "saved"; changed: boolean} | {status: "conflict" | "unavailable" | "full"};
@@ -120,14 +124,14 @@ const makeSupervisionControl = Effect.gen(function* () {
   // records the stop and a single operative notice, and fences unsent check-ins without cancelling operative work.
   // a stop supersedes any earlier keep-active choice for the owned Supervisor, so its settlement is not vetoed by an older intent.
   // its writes are one transaction, or join the caller's
-  const applyChatStop = (threadId: string, stop: NonNullable<BindingRecord["supervisionStop"]> | null) => transaction(Effect.gen(function* () {
+  const applyChatStop = (threadId: string, stop: NonNullable<BindingRecord["supervisionStop"]> | null, resume: SupervisionResume | null = null) => transaction(Effect.gen(function* () {
     const start = yield* store.start(threadId);
     if (stop && start?.status === "pending" && stop.stoppedAt >= start.intentAt)
       yield* store.saveStart({...start, status: "rejected", reason: "Superseded by a later Stop."});
     const bindings = (yield* store.bindings()).filter(item => item.mainThreadId === threadId);
     if (!bindings.length) yield* store.saveUnboundStop(threadId, stop);
     for (const binding of bindings) {
-      yield* store.setSupervisionStop(binding, stop);
+      yield* store.setSupervisionStop(binding, stop, resume);
       const notice = binding.stopNotice;
       const enabledAt = yield* store.chatEnabledAt(threadId);
       if (stop && (!notice || notice.enabledAt !== enabledAt && ["sent", "blocked", "superseded"].includes(notice.state)))
@@ -153,6 +157,9 @@ const makeSupervisionControl = Effect.gen(function* () {
   const evaluateStart = (threadId: string, operationId: string, route: "agent" | "ui", userMessageId: string | null, runId: string | null,
     cancel: Deferred.Deferred<void> | undefined, decided: (result: SupervisionStartResult) => void) => Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, StoreError | T3TransportError | EvidenceReadCancelled | SupervisionStoreError> {
     if (!threadId || threadId.length > 512 || !operationId || operationId.length > 512 || /[\s\x00-\x1f\x7f]/u.test(operationId)) return {status: "invalid", reason: "invalid_start_arguments"};
+    // a bound Supervisor's own call resumes its stopped main; it never starts supervision of another chat
+    const bound = route === "agent" && userMessageId && runId ? yield* store.bindingForSupervisor(threadId) : null;
+    if (bound) return yield* evaluateResume(bound, operationId, userMessageId!, runId!, cancel, decided);
     const catalog = yield* source.catalog();
     // the scope, mode and earlier Start reads before the evidence read are one snapshot
     const checked = yield* transaction(Effect.gen(function* (): Effect.fn.Return<{done: SupervisionStartResult} | {thread: ThreadInfo & {projectId: string}; mode: Effect.Success<ReturnType<typeof store.noProjectControl>>; master: SupervisionControlInfo; requestHash: string; previous: SupervisionStartRecord | null}, SupervisionStoreError> {
@@ -187,8 +194,7 @@ const makeSupervisionControl = Effect.gen(function* () {
         if (!conversationOriginAllowed(main.thread, policy)) return {status: "denied", reason: "conversation_origin_excluded"};
         if (agentCreatedOrigin(main.thread) && !launchingAgent(main, policy.owned)) return {status: "denied", reason: "conversation_origin_unverified"};
         let message = userMessageId ? genuineUserMessage(main, userMessageId) : null;
-        const latestHuman = main.messages.filter(item => genuineUserMessage(main, item.id))
-          .sort((a,b) => (main.runs.find(run => run.id === a.runId)?.ordinal ?? -1) - (main.runs.find(run => run.id === b.runId)?.ordinal ?? -1)).at(-1);
+        const latestHuman = latestHumanMessage(main);
         if (route === "agent" && (!message || message.runId !== runId || latestHuman?.id !== message.id)) return {status: "denied", reason: "start_call_not_in_genuine_human_turn"};
         if (route === "ui") message = latestHuman && main.runs.some(run => run.id === latestHuman.runId && ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)) ? latestHuman : null;
         if (message && message.text.length > 24_000) return {status: "denied", reason: "start_source_too_large"};
@@ -221,11 +227,74 @@ const makeSupervisionControl = Effect.gen(function* () {
       return result;
     }));
   });
+  /**
+   * A genuine human's fresh, direct request in the bound Supervisor conversation to resume its stopped main: the dashboard Enable's
+   * policy write and bookkeeping for that one chat, recorded as a resume so its retained task is handled at once rather than resting
+   * until the main's next human request. The binding, task, history and every other chat and control stay as they are; the verified
+   * call must answer the cited message, the latest human message of its conversation, written after the Stop and the latest Enable.
+   */
+  const evaluateResume = (binding: BindingRecord, operationId: string, userMessageId: string, runId: string, cancel: Deferred.Deferred<void> | undefined,
+    decided: (result: SupervisionStartResult) => void) => Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, StoreError | T3TransportError | EvidenceReadCancelled | SupervisionStoreError> {
+    const mainThreadId = binding.mainThreadId;
+    if (binding.state !== "ready") return {status: "denied", reason: "supervisor_binding_not_ready"};
+    const catalog = yield* source.catalog();
+    yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
+    const main = catalog.threads.find(item => item.id === mainThreadId);
+    if (!main || main.projectId !== binding.projectId || main.archivedAt || main.deletedAt) return {status: "denied", reason: "main_conversation_unavailable"};
+    const root = yield* projection(binding.threadId, cancel);
+    // from the last await, the rechecks, the policy write and its bookkeeping run as one admission section, as the dashboard Enable
+    const result = yield* gate.admit(() => transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, SupervisionStoreError> {
+      const current = yield* store.bindingForSupervisor(binding.threadId);
+      if (!current || current.mainThreadId !== mainThreadId || current.generation !== binding.generation || current.state !== "ready")
+        return {status: "denied", reason: "scope_changed"};
+      if (!(yield* scope.supervisionStopped(mainThreadId))) return {status: "denied", reason: "chat_not_stopped"};
+      // only the Stop is lifted: the master, project and No Project controls must already supervise this chat
+      if (!(yield* scope.scopeEnabled(binding.projectId, mainThreadId, "reconcile"))) return {status: "denied", reason: "project_or_master_disabled"};
+      // the calling Supervisor judges that the human asked to resume; the service verifies provenance, freshness and ordering
+      const message = genuineUserMessage(root, userMessageId);
+      if (!message || message.runId !== runId || latestHumanMessage(root)?.id !== message.id) return {status: "denied", reason: "resume_call_not_in_genuine_human_turn"};
+      if (message.text.length > 24_000) return {status: "denied", reason: "resume_source_too_large"};
+      const resumedAt = timestampMs(message.createdAt);
+      const stop = yield* store.chatStop(mainThreadId);
+      if (!stop) return {status: "denied", reason: "stop_not_recorded"};
+      if (resumedAt === null || stop.stoppedAt >= resumedAt || ((yield* store.chatEnabledAt(mainThreadId)) ?? -1) >= resumedAt)
+        return {status: "denied", reason: "superseded_by_later_stop_or_enable"};
+      const written = yield* writeChatPolicy(mainThreadId, false);
+      if (written.status !== "saved") return {status: "unavailable", reason: `thread_policy_${written.status}`, retryable: written.status === "conflict"};
+      if (yield* scope.supervisionStopped(mainThreadId)) return {status: "denied", reason: "stopped_by_configuration"};
+      yield* store.recordChatEnable(mainThreadId, resumedAt);
+      yield* applyChatStop(mainThreadId, null, {callerThreadId: binding.threadId, userMessageId, operationId, resumedAt});
+      const task = yield* store.task(mainThreadId);
+      return {status: "active", reason: task?.supervisorThreadId === binding.threadId
+        ? `Resumed supervision of main chat ${mainThreadId} with its retained task ${task.id}; its binding, task and history are unchanged. No other chat, project or master control changed.`
+        : `Resumed supervision of main chat ${mainThreadId}; it has no retained task, so its next genuine request starts one. No other chat, project or master control changed.`};
+    })));
+    decided(result);
+    return result;
+  });
+  // a recorded receipt is returned only while its effect is still the latest control of its chat; after a later Stop, Enable or
+  // Start it claims nothing current and does nothing
+  const receiptCurrent = (threadId: string, operationId: string) => Effect.gen(function* () {
+    const bound = yield* store.bindingForSupervisor(threadId);
+    if (bound) {
+      const resume = (yield* store.binding(bound.projectId, bound.mainThreadId))?.supervisionResume;
+      return resume?.operationId === operationId && resume.callerThreadId === threadId && !(yield* scope.supervisionStopped(bound.mainThreadId)) &&
+        ((yield* store.chatEnabledAt(bound.mainThreadId)) ?? -1) <= resume.resumedAt;
+    }
+    const start = yield* store.start(threadId);
+    return start?.operationId === operationId && ((yield* store.chatStop(threadId))?.stoppedAt ?? -1) < start.intentAt &&
+      ((yield* store.chatEnabledAt(threadId)) ?? -1) <= start.intentAt && !(yield* scope.supervisionStopped(threadId));
+  });
   const requestStart = (threadId: string, operationId: string, route: "agent" | "ui", userMessageId: string | null, runId: string | null,
     cancel?: Deferred.Deferred<void>) => Effect.gen(function* () {
     const requestHash = fingerprint({threadId, operationId, route, userMessageId});
     const prior = yield* store.startOperation(threadId, operationId);
-    if (prior) return prior.requestHash === requestHash ? {status: prior.status, reason: prior.reason} : {status: "denied", reason: "operation_id_conflict"} as SupervisionStartResult;
+    if (prior) {
+      if (prior.requestHash !== requestHash) return {status: "denied", reason: "operation_id_conflict"} as SupervisionStartResult;
+      if ((prior.status === "active" || prior.status === "pending") && !(yield* receiptCurrent(threadId, operationId)))
+        return {status: "denied", reason: "superseded_by_later_control"} as SupervisionStartResult;
+      return {status: prior.status, reason: prior.reason} as SupervisionStartResult;
+    }
     if (!threadId || threadId.length > 512 || !operationId || operationId.length > 512) return {status: "invalid", reason: "invalid_start_arguments"} as SupervisionStartResult;
     // the durable preparation claim and the installation of its owner are one masked step; only the evaluation (its catalog and
     // evidence reads and its wait for the admission section) is interruptible, so an interruption that arrives with the claim

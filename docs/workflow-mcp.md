@@ -249,12 +249,16 @@ workflow documents:
   (inline local steps and branches included); a referenced step or workflow is read
   by its own ID. A summary is not the definition's policy text. Add
   `includeSources` for raw definition files when diagnosing invalid definitions.
-- `instructions`: the full standing Supervisor instructions and their version.
+- `instructions`: the full, self-contained Supervisor reference and its version, once,
+  without a second copy of the compact core that wakes carry.
 - `interpretation`: only the task interpretation instructions; the opening carries
   source text, the minimal output contract and reader coordinates, without a catalog.
 - `check`: a dry run of one compact `workflow-proposal` record, returning the outline,
-  formal state, digest and acceptance record, or the first failing code, path and
-  expected shape. It publishes nothing.
+  formal state, digest and `published`, or the first failing code, path and expected
+  shape. It writes nothing and never returns acceptance coordinates. `published` is true
+  only when this exact proposal is the task's current recorded candidate; until then a
+  formal draft also gets `publish`, the exact block to put in the Supervisor's completed
+  final answer, which is the only way to publish it.
 - `status`: each current workflow's occurrences with nodeId, kind, name, definition
   reference, nesting, status, branch reach and visible omissions, plus pending
   decisions, without descriptions, accepted snapshots or history. Use it to reconcile
@@ -304,6 +308,17 @@ interpretation/definitions but cannot write, guide, recruit or contact the agent
 A positive source- and epoch-bound verdict commits the task and permission together.
 Use the same operationId on retries; pending is not activation. No extra Stop
 judge is added. Read authority remains the existing same-user model, not a sandbox.
+A bound Supervisor calls the same tool from its own conversation to resume its stopped
+main. The cited message must be the latest genuine human message of that conversation,
+in the run of the verified call, written after the Stop and the latest Enable. The
+master, project and No Project controls must already supervise the chat; only its Stop
+is lifted, as by the dashboard Enable, and the binding, task and history are kept.
+Unlike that Enable, the resumed pair handles its retained task at once instead of
+waiting for the main's next human request; nothing is sent to the operative for it.
+A retry returns its receipt only while that resume is still the chat's latest control;
+after a later Stop or Enable it reports `superseded_by_later_control` and changes
+nothing. A stopped view `context` names this call for conversations with older
+instructions.
 
 `supervision_stop` stays callable while project supervision is disabled. The stop is the
 instance thread policy the dashboard's per-chat control also edits; only a human can
