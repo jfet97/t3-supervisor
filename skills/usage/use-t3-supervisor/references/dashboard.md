@@ -141,6 +141,16 @@ means an operative's latest selection record was not recorded; a child's carries
 its thread in the detail. Definitions shows the same branch structure without
 execution states.
 
+Statuses on the Task plan record formal progress, not permission to act. A sequence
+member is shown underway or completed only after the earlier applicable members are
+completed or Not applicable; early or diagnostic work appears in its records while it stays Planned.
+A member omitted from a flexible workflow appears under "Not applicable in this plan"
+with its reason; a fixed member assessed not applicable stays in place labelled "Not
+applicable", and so does everything inside it. When Supervision says the main is idle with unfinished agreed work and no
+current wait, the Supervisor stays out of standby without check-ins; new activity or a
+message in the main resumes its reviews, or supervision can be stopped. A recorded wait
+appears with the last confirmed review.
+
 Native idle/no-AppRun mirrors are not child completion. The Supervisor observes
 normal actions/results and supplies the assessment without requiring constant agent
 reports. Its links explain the judgment, not independent proof of semantic success.

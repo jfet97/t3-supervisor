@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
-import { effectiveBranchSelections, planBranches, planEntities } from "./workflow-plan-tree.js";
+import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, planBranches, planEntities } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
   type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
@@ -11,7 +11,7 @@ const NullableText = Schema.NullOr(Schema.String);
 
 export const WorkflowProgressObservationSchema = Schema.Struct({
   id: Schema.String,
-  kind: Schema.Literals(["status_changed", "note", "observation"]),
+  kind: Schema.Literals(["status_changed", "note", "observation", "not_applicable"]),
   recordedAt: Schema.Number,
   targetNodeId: NullableText,
   targetNodeName: NullableText,
@@ -109,6 +109,8 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   branchSelections: Schema.optionalKey(Schema.Array(WorkflowProgressBranchSelectionSchema)),
   branchEvents: Schema.optionalKey(Schema.Array(WorkflowProgressBranchEventSchema)),
   completions: Schema.optionalKey(Schema.Array(WorkflowProgressCompletionSchema)),
+  /** Occurrences settled by a current not-applicable assessment, including everything inside an assessed workflow. */
+  notApplicable: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -194,7 +196,7 @@ export const scopePage = (scope: ProjectSupervisorScopeSnapshot, threadIds: read
   return {...scope, threads: scope.threads.filter(thread => wanted.has(thread.threadId))};
 };
 
-const observationKinds = new Set<WorkflowStateEvidence["kind"]>(["status_changed", "note", "observation"]);
+const observationKinds = new Set<WorkflowStateEvidence["kind"]>(["status_changed", "note", "observation", "not_applicable"]);
 
 type ParentNodeReference = {
   parentWorkflowId: string;
@@ -267,7 +269,9 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   observations: document.evidence.filter(item => observationKinds.has(item.kind))
     .sort((left, right) => right.recordedAt - left.recordedAt).slice(0, 20).map(item => ({
       id: item.id,
-      kind: item.kind as "status_changed" | "note" | "observation",
+      // a not-applicable assessment from an earlier task scope stays as history, not as a current disposition
+      kind: item.kind === "not_applicable" && item.scopeRevision !== document.sourceBinding?.sourceHash ? "note"
+        : item.kind as "status_changed" | "note" | "observation" | "not_applicable",
       recordedAt: item.recordedAt,
       targetNodeId: item.targetNodeId,
       targetNodeName: item.targetNodeName,
@@ -283,4 +287,6 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   branchSelections: progressBranchSelections(document),
   branchEvents: progressBranchEvents(document),
   completions: progressCompletions(document),
+  notApplicable: [...notApplicableSubtrees(document.plan, effectiveBranchSelections(document.plan, document.branchSelections ?? []),
+    notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))],
 });

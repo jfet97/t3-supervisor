@@ -25,7 +25,7 @@ import type {
 import { canonicalJson } from "./canonical-json.js";
 import { record } from "./supervisor-native.js";
 import {workflowMutationLimits} from "./workflow-state-contract.js";
-import {branchPathGroups, definitionNodeChildren, planChildGroups, planNodes, unconditionallyIncludes} from "./workflow-plan-tree.js";
+import {branchPathGroups, definitionNodeChildren, isPlanEntity, isPlanGroup, planChildGroups, planNodes, unconditionallyIncludes, withOmissions} from "./workflow-plan-tree.js";
 
 const maxTextLength = 2000;
 const maxPlanTextLength = workflowMutationLimits.maxPlanTextLength;
@@ -75,7 +75,11 @@ export type WorkflowRequest = {requestText: string; context: ProposalContext | n
 export type WorkflowApplyDiagnostic = {
   code: "local_step_definition_id_required" | "local_step_local_id_required" | "local_step_name_required" |
     "local_step_description_required" | "local_step_template_path_not_allowed" | "new_node_must_start_planned" |
-    "missing_status_changed_evidence" | "branch_condition_invalid" | "branch_decision_pending" | DefinitionReferenceProblemCode;
+    "missing_status_changed_evidence" | "branch_condition_invalid" | "branch_decision_pending" | "evidence_entry_invalid" |
+    "evidence_reference_invalid" | "status_edit_invalid" | "status_edit_unknown_node" | "status_unchanged" | "omission_invalid" |
+    "omission_not_allowed" | "omission_not_negotiated" | "plan_edit_conflict" | "sequence_order" | "nested_status_inconsistent" |
+    "completion_unfinished" | "not_applicable_invalid" |
+    DefinitionReferenceProblemCode;
   path: string;
   expected: string;
 };
@@ -707,7 +711,8 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
       reason: redact(value.reason.trim()), status: execution.status, contributorThreadIds: execution.contributorThreadIds};
   }
   if (value.kind !== "workflow") throw new Error("unsupported_workflow_node_kind");
-  if (!exactFields(value, ["kind", "definitionId", "reason"], ["nodeId", "templatePath", "name", "description", "references", "skills", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan"]))
+  if (!exactFields(value, ["kind", "definitionId", "reason"], ["nodeId", "templatePath", "name", "description", "references", "skills", "fixed", "source", "resolution", "status", "contributorThreadIds", "omissions", "plan",
+    ...(options.strict ? [] : ["omit"])]))
     throw new Error("invalid_workflow_reference_fields");
   if (!validText(value.reason, maxReasonLength) || !validText(value.definitionId, maxDefinitionIdLength)) throw new Error("invalid_workflow_reference");
   if (sourceExpected && sourceExpected.kind !== "workflow") throw new Error("template_member_kind_changed");
@@ -752,7 +757,15 @@ const canonicalSourceNode = (value: unknown, context: ProposalContext, options: 
   let plan = sourceExpected?.kind === "workflow" && sourceExpected.plan ? sourceExpected.plan : base.plan;
   if (value.plan !== undefined && value.plan !== null)
     plan = normalizeGroup(value.plan, context, options, new Set([...stack, definitionId]), depth + 1, base.plan, definition, undefined, `${nodePath}/plan`);
-  const omissions = normalizeOmissions(value.omissions ?? [], context, definition, base.plan, plan, options, options.strict);
+  let omissionsValue: unknown = value.omissions ?? [];
+  // the compact draft form names omitted members; the service derives their provenance from the expanded occurrence
+  if (value.omit !== undefined) {
+    if (value.plan !== undefined && value.plan !== null || value.omissions !== undefined) throw new Error("omit_with_explicit_plan");
+    const omitted = compactOmissions(value.omit, definition, plan, nodePath);
+    plan = omitted.plan;
+    omissionsValue = omitted.omissions;
+  }
+  const omissions = normalizeOmissions(omissionsValue, context, definition, base.plan, plan, options, options.strict);
   const resolution = base.resolution === "partial" ? "partial" : plan.nodes.length === 0 ? "unresolved" : planResolution(plan);
   const execution = canonicalExecution(value, stateExpected?.kind === "workflow" ? stateExpected : sourceExpected?.kind === "workflow" ? sourceExpected : undefined, options);
   const result: WorkflowPlanWorkflowInfo = {kind: "workflow", nodeId: id, definitionId, templatePath, name, description, ...definitionGuidanceFields(definition), fixed: definition.fixed, source,
@@ -934,6 +947,30 @@ const normalizeGroup = (value: unknown, context: ProposalContext, options: Canon
     options.issues.push(issue(owner.path ?? owner.id, "fixed_workflow_changed", `Fixed workflow ${owner.id} lost an original member, description, order, or parallel relationship.`));
   if (options.strict && (value.kind !== result.kind || !canonicalJsonEqual(value.nodes, result.nodes))) throw new Error("noncanonical_plan_group");
   return result;
+};
+
+// the members a workflow itself declares, in plan order: its steps and nested workflow references outside other workflows' expansions
+const ownMembers = (group: WorkflowPlanGroupInfo): Array<WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo> => group.nodes.flatMap(node =>
+  isPlanGroup(node) ? ownMembers(node) : node.kind === "branch" ? branchPathGroups(node).flatMap(path => ownMembers(path.group)) : isPlanEntity(node) ? [node] : []);
+
+const compactOmissions = (value: unknown, owner: DefinitionWorkflowInfo, plan: WorkflowPlanGroupInfo, nodePath: string) => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxExpandedNodes) throw withPlanPath(new Error("invalid_compact_omission"), `${nodePath}/omit`);
+  if (owner.fixed) throw withPlanPath(new Error("omission_owner_fixed"), `${nodePath}/omit`);
+  const members = ownMembers(plan);
+  const edits = value.map((item, index) => {
+    const path = `${nodePath}/omit/${index}`;
+    if (!record(item) || !exactFields(item, ["member", "reason"]) || !validText(item.member, maxDefinitionIdLength) || !validText(item.reason, maxReasonLength))
+      throw withPlanPath(new Error("invalid_compact_omission"), path);
+    const matches = members.filter(node => node.nodeId === item.member || (node.kind === "step" ? node.definitionId ?? node.localId : node.definitionId) === item.member);
+    if (matches.length !== 1) throw withPlanPath(new Error(matches.length ? "omission_member_ambiguous" : "omission_member_unknown"), `${path}/member`);
+    return {nodeId: matches[0]!.nodeId, reason: redact(item.reason.trim())};
+  });
+  const holder = {kind: "workflow", nodeId: "compact-omission-owner", definitionId: owner.id, templatePath: null, name: owner.name, description: owner.description,
+    fixed: false, source: null, resolution: "resolved", reason: "Compact omission owner.", status: "planned", contributorThreadIds: [], omissions: [], plan} as WorkflowPlanWorkflowInfo;
+  const result = withOmissions({kind: "sequence", templatePath: null, nodes: [holder]}, edits);
+  if ("problem" in result) throw withPlanPath(new Error(`omission_${result.problem}`), `${nodePath}/omit/${result.index}`);
+  const updated = result.plan.nodes[0] as WorkflowPlanWorkflowInfo;
+  return {plan: updated.plan!, omissions: updated.omissions};
 };
 
 const normalizeOmissions = (value: unknown, context: ProposalContext, owner: DefinitionWorkflowInfo, base: WorkflowPlanGroupInfo,
@@ -1274,6 +1311,14 @@ const draftExpectations: Record<string, string> = {
   template_branch_condition_changed: "keep a definition branch's condition unchanged",
   template_branch_paths_changed: "keep a definition branch's then and else paths as defined",
   empty_branch_path: "each branch path contains at least one node",
+  invalid_compact_omission: "omit is a nonempty array of {member, reason}: a member's definitionId, localId or nodeId and a task-specific reason",
+  omit_with_explicit_plan: "use omit without plan or omissions on the same workflow reference",
+  omission_owner_fixed: "fixed workflows keep every member; omit only members of a flexible workflow",
+  omission_member_unknown: "the definitionId, localId or nodeId of a member this workflow itself declares",
+  omission_member_ambiguous: "a member that appears once in this workflow; name a repeated member by its nodeId",
+  omission_not_flexible_member: "a member this flexible workflow itself declares",
+  omission_started: "a member with no recorded progress",
+  omission_empties_group: "leave at least one member in the workflow and in each branch path",
 };
 export type ProposalDraftResult =
   | {ok: true; workflow: WorkflowPlanValue}
@@ -1500,11 +1545,29 @@ export const workflowRecordDiagnostic = (value: unknown, context: ProposalContex
   return workflow ? null : diagnostic.code ?? "invalid";
 };
 
+// a workflow occurrence's structural identity: its definition, template position and ordinal among occurrences at that position. A later
+// agreed proposal is canonicalized with its own node IDs, so its fixed occurrences are found in the live plan by this identity
+const workflowOccurrenceKeys = (plan: WorkflowPlanGroupInfo): Map<string, WorkflowPlanNodeInfo> => {
+  const seen = new Map<string, number>();
+  const result = new Map<string, WorkflowPlanNodeInfo>();
+  for (const node of allNodes(plan)) {
+    if (node.kind !== "workflow") continue;
+    const position = JSON.stringify([node.definitionId, node.templatePath]);
+    const ordinal = seen.get(position) ?? 0;
+    seen.set(position, ordinal + 1);
+    result.set(`${position}#${ordinal}`, node);
+  }
+  return result;
+};
+
 export const fixedOccurrencesPreserved = (baseline: WorkflowPlanGroupInfo, candidate: WorkflowPlanGroupInfo): boolean => {
   const current = allNodes(candidate);
+  const byIdentity = workflowOccurrenceKeys(candidate);
+  const baselineKeys = new Map([...workflowOccurrenceKeys(baseline)].map(([key, node]) => [node, key] as const));
   const required = allNodes(baseline).filter((node): node is WorkflowPlanWorkflowInfo => node.kind === "workflow" && node.fixed === true);
   for (const template of required) {
-    const actual = current.find(node => (node.kind === "step" || node.kind === "workflow") && node.nodeId === template.nodeId);
+    const actual = current.find(node => (node.kind === "step" || node.kind === "workflow") && node.nodeId === template.nodeId) ??
+      byIdentity.get(baselineKeys.get(template) ?? "");
     if (actual?.kind !== "workflow" || actual.definitionId !== template.definitionId || actual.fixed !== true ||
       actual.name !== template.name || actual.description !== template.description || !sameDefinitionGuidance(actual, template) || !canonicalJsonEqual(actual.source, template.source) ||
       template.plan === null || actual.plan === null || !fixedWorkflowPreserved(template.plan, actual.plan)) return false;

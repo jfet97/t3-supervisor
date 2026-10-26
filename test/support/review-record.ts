@@ -23,6 +23,8 @@ export interface ReviewRecordOptions {
   readonly status?: "completed" | "running";
   // another run of the root than the review's own
   readonly runId?: string;
+  // an explicit wait; the raw value is passed through so invalid shapes can be exercised
+  readonly wait?: unknown;
 }
 
 let calls = 0;
@@ -35,7 +37,8 @@ export const recordReview = (controller: WorkflowWriteController["Service"], roo
   const args = {action: "record_review", supervisorThreadId: request.supervisorThreadId, bindingGeneration: request.reviewPins?.bindingGeneration ?? 0,
     operationId: options.operationId ?? `record-review:${request.id}`, requestId: request.id, outcome,
     ...(options.reason !== undefined ? {reason: options.reason} : {}),
-    ...(options.applyOperationIds !== undefined ? {applyOperationIds: [...options.applyOperationIds]} : {})};
+    ...(options.applyOperationIds !== undefined ? {applyOperationIds: [...options.applyOperationIds]} : {}),
+    ...(options.wait !== undefined ? {wait: options.wait} : {})};
   const callId = `record-review-call-${++calls}`;
   const nodeId = `${callId}-node`;
   const nodes = (root.nodes ??= []) as Array<Record<string, unknown>>;

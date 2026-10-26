@@ -276,7 +276,7 @@ export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
       <p><code>workflow:</code> accepts only a reusable workflow ID. Workflow definitions cannot be declared inline. A reference includes its contents in the plan; it does not start an agent or require delegation by itself.</p>
       <Example label="A delivery workflow with a reusable reviewer" value={compositionExample}/>
       <Example label="Nested parallel lanes inside a sequence" value={reviewerExample}/>
-      <p>A sequence communicates intended semantic order. Members of a parallel group may overlap and have no declared order; parallel does not require simultaneous execution or create child agents.</p>
+      <p>A sequence communicates intended semantic order, and recorded progress follows it: a later member is shown underway or completed only after the earlier ones are completed or Not applicable, in fixed workflows too. Early or diagnostic work, such as a draft pull request during implementation, is recorded as an observation on the later member, which stays Planned. Members of a parallel group may overlap and have no declared order; parallel does not require simultaneous execution or create child agents. These statuses never stop an agent from working.</p>
       <p>A workflow can also choose between coarse alternatives with a <GuideLink topic="branches">branch</GuideLink>.</p>
     </Topic>
 
@@ -313,14 +313,14 @@ skills:
       <p>The optional <code>default_workflow</code> names an indexed workflow as a starting suggestion. The index is authoritative for reusable files, not an exhaustive whitelist of possible task plans: negotiate local steps, new combinations and revisions as the task evolves, preserving required and fixed commitments.</p>
       <p>The editor lists workflows and steps separately. Change summaries and required flags, or add an unlisted file explicitly, then Save and reload to verify the index. Invalid or missing rows remain visible. Removing an entry does not delete its file, and leaving a reusable file unlisted is an error. Global entries remain separate and read-only.</p>
       <p>Required items must be accounted for in the plan. Inclusion is recursive: if the required reviewer workflow contains the required E2E step, that step is already accounted for. The plan adds missing requirements where they fit instead of blindly appending them. A manual workflow choice does not waive a requirement.</p>
-      <p>Applicability is described in the step or workflow description. A genuinely not-applicable item remains visible with its reason; an applicable requirement cannot be silently waived. Unclear applicability and broken references remain explicit open issues.</p>
+      <p>Applicability is described in the step or workflow description. A genuinely not-applicable item remains visible with its reason: in a flexible workflow the agreed plan omits it, and Task lists it under Not applicable in this plan. It is never shown as completed. An applicable requirement cannot be silently waived. Unclear applicability and broken references remain explicit open issues.</p>
     </Topic>
 
     <Topic id="guide-fixed-title" title="What fixed protects">
       <p><code>fixed: true</code> preserves the workflow's original members, descriptions, references, skills and requirements, their relative order, its declared parallel relationships and its branches with their conditions and paths, including nested commitments. Supporting work can be added around that fragment, between its original members or inside a branch path. Fixed does not limit which path the agent selects.</p>
       <p>For example, the original <code>implementation → deployment</code> sequence may become <code>implementation → e2e-testing → deployment</code>.</p>
       <Example label="Required support work can be inserted between fixed members" value={fixedInsertionExample}/>
-      <p>A genuinely not-applicable original member remains visible with its reason in the plan. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>
+      <p>Fixed members are never omitted: one that does not apply stays visible, labelled Not applicable with its reason for the current task, and is never shown as completed; it does not hold up the steps after it. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>
     </Topic>
 
     <Topic id="guide-delegation-title" title="Delegating a whole workflow to reviewers">

@@ -121,8 +121,9 @@ Choose required review from the project's risks and requested outcomes; substant
 changes and consequential plans commonly justify it. Do not impose it universally by
 copying this example. Where required, record applicability for the current main task. An
 explicit request for assessment is applicable even if the artifact is small. Genuine
-inapplicability is requirement accounting, not a fabricated reviewer execution or a new
-execution status. A selected fixed commitment stays visible with its reason.
+inapplicability is requirement accounting or a negotiated omission from a flexible workflow,
+not a fabricated reviewer execution or a new execution status. A fixed commitment is never
+omitted; it stays visible and planned with a typed not-applicable assessment for the current task.
 
 ## Coarse branches
 

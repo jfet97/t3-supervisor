@@ -10,7 +10,7 @@ import {fingerprint} from "./guidance-store.js";
 import {SupervisorIds} from "./ids.js";
 import {ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
-import {branchIdentityKeys, effectiveBranchSelections, planBranches, planEntities, pendingBranchDecisions, planReach, type PlanEntityInfo} from "./workflow-plan-tree.js";
+import {branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceFacts, pendingDecisionsOutside, planBranches, planEntities, planReach, unsettledOccurrences, type PlanEntityInfo} from "./workflow-plan-tree.js";
 import {
   branchSelectionLimits,
   branchSelectionPaths,
@@ -51,7 +51,7 @@ import {
   type WorkflowStateRequirement,
   type WorkflowStateSourceBinding,
 } from "./workflow-state-contract.js";
-import {AgreementEvidence, type WorkflowAgreementInfo, type WorkflowPlanBranchInfo, type WorkflowPlanGroupInfo, type WorkflowPlanNodeInfo, type WorkflowProposalInfo, type WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
+import {AgreementEvidence, type WorkflowAgreementInfo, type WorkflowPlanBranchInfo, type WorkflowPlanGroupInfo, type WorkflowPlanNodeInfo, type WorkflowPlanWorkflowInfo, type WorkflowProposalInfo, type WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 import {branchConditionText} from "./project-definitions-contract.js";
 import type {ProposalContext, WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 
@@ -130,6 +130,9 @@ const validPlanReason = (value: unknown, allowEmpty = false): value is string =>
   typeof value === "string" && value.length <= workflowMutationLimits.maxPlanReasonLength && (allowEmpty || value.trim().length > 0);
 const validId = (value: unknown, limit = workflowMutationLimits.maxOperationIdLength): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= limit;
+// evidence cites opaque native identities, which have their own bound rather than the operation-ID one
+const nativeReferenceFields = ["sourceThreadId", "sourceRunId", "sourceMessageId", "sourceItemId"] as const;
+const validNativeReference = (value: unknown): value is string => validId(value, workflowMutationLimits.maxNativeReferenceLength);
 const validNodeId = (value: unknown): value is string => typeof value === "string" && opaqueId.test(value);
 const json = (value: unknown): string => JSON.stringify(value);
 const documentFits = (serialized: string): boolean => Buffer.byteLength(serialized, "utf8") <= workflowMutationLimits.maxDocumentBytes;
@@ -214,8 +217,8 @@ const validContributionAssessment = (value: unknown): boolean => value === null 
 
 const validContributions = (value: unknown): value is ExternalContribution[] => Array.isArray(value) &&
   value.length <= externalContributionLimits.maxContributions && new Set(value.map(item => isRecord(item) ? item.contributionId : null)).size === value.length &&
-  value.every(item => isRecord(item) && validContributionContent(item) && validId(item.sourceThreadId) && validId(item.sourceRunId) &&
-    validId(item.sourceMessageId) && Number.isFinite(item.recordedAt) && validContributionAssessment(item.assessment));
+  value.every(item => isRecord(item) && validContributionContent(item) && validNativeReference(item.sourceThreadId) && validNativeReference(item.sourceRunId) &&
+    validNativeReference(item.sourceMessageId) && Number.isFinite(item.recordedAt) && validContributionAssessment(item.assessment));
 
 const validEvidenceContribution = (value: unknown): boolean => value === undefined || isRecord(value) &&
   validContributionId(value.contributionId) && validContributionRevision(value.revision) &&
@@ -224,7 +227,7 @@ const validEvidenceContribution = (value: unknown): boolean => value === undefin
 
 const validContributionImport = (value: unknown): value is ExternalContributionImport => isRecord(value) &&
   exactRecordKeys(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"]) &&
-  validContributionContent(value) && validId(value.sourceThreadId) && validId(value.sourceRunId) && validId(value.sourceMessageId);
+  validContributionContent(value) && validNativeReference(value.sourceThreadId) && validNativeReference(value.sourceRunId) && validNativeReference(value.sourceMessageId);
 
 const validContributionAssessmentInput = (value: unknown): value is WorkflowContributionAssessmentInput => isRecord(value) &&
   validId(value.operationId) && validId(value.workflowId) && Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 &&
@@ -381,13 +384,13 @@ const validApplyPlan = (value: unknown): boolean => {
 
 const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowStateEvidenceInput[] =>
   evidence === undefined || Array.isArray(evidence) && evidence.length <= workflowMutationLimits.maxEvidencePerApply && evidence.every(item => item !== null &&
-    typeof item === "object" && ["status_changed", "note", "observation"].includes((item as Record<string, unknown>).kind as string) &&
+    typeof item === "object" && ["status_changed", "note", "observation", "not_applicable"].includes((item as Record<string, unknown>).kind as string) &&
     validText((item as Record<string, unknown>).note) &&
     ((item as Record<string, unknown>).targetNodeId === undefined || (item as Record<string, unknown>).targetNodeId === null || validNodeId((item as Record<string, unknown>).targetNodeId)) &&
-    ((item as Record<string, unknown>).sourceThreadId === undefined || (item as Record<string, unknown>).sourceThreadId === null || validId((item as Record<string, unknown>).sourceThreadId)) &&
-    ((item as Record<string, unknown>).sourceRunId === undefined || (item as Record<string, unknown>).sourceRunId === null || validId((item as Record<string, unknown>).sourceRunId)) &&
-    ((item as Record<string, unknown>).sourceMessageId === undefined || (item as Record<string, unknown>).sourceMessageId === null || validId((item as Record<string, unknown>).sourceMessageId)) &&
-    ((item as Record<string, unknown>).sourceItemId === undefined || (item as Record<string, unknown>).sourceItemId === null || validId((item as Record<string, unknown>).sourceItemId)));
+    nativeReferenceFields.every(field => {
+      const reference = (item as Record<string, unknown>)[field];
+      return reference === undefined || reference === null || validNativeReference(reference);
+    }));
 
 export const workflowPlanEntities = collectPlanEntities;
 
@@ -490,7 +493,7 @@ const validBranchSelections = (value: unknown): value is BranchSelection[] => Ar
   value.every(item => isRecord(item) && validNodeId(item.nodeId) && validBranchRevision(item.revision) && typeof item.path === "string" &&
     branchPathSet.has(item.path) && validBranchReason(item.reason) && branchConditionText(item.condition) === item.condition && validText(item.branchKey) &&
     (item.state === "current" && item.invalidatedAt === null || item.state === "invalidated" && Number.isFinite(item.invalidatedAt)) &&
-    validId(item.sourceThreadId) && validId(item.sourceRunId) && validId(item.sourceMessageId) && Number.isFinite(item.recordedAt));
+    validNativeReference(item.sourceThreadId) && validNativeReference(item.sourceRunId) && validNativeReference(item.sourceMessageId) && Number.isFinite(item.recordedAt));
 
 const validEvidenceBranch = (value: unknown): boolean => value === undefined || isRecord(value) && validBranchRevision(value.revision) &&
   typeof value.path === "string" && branchPathSet.has(value.path) && typeof value.changed === "boolean" &&
@@ -553,20 +556,140 @@ const invalidatedSelections = (selections: readonly BranchSelection[], nextPlan:
 
 const branchDecisionPendingExpected = "record the operative's selection for each reached branch before assessing this as completed.";
 // completing the workflow, or a workflow occurrence, while a decision it reaches is still pending would claim unchosen work as done
+// a decision inside a workflow recorded not applicable is settled with it
 const pendingDecisionProblem = (current: WorkflowStateDocument, input: WorkflowApplyInput, nextPlan: WorkflowStatePlan,
-  selections: readonly BranchSelection[]): WorkflowApplyDiagnostic | null => {
+  selections: readonly BranchSelection[], notApplicable: ReadonlySet<string>): WorkflowApplyDiagnostic | null => {
   const selected = effectiveBranchSelections(nextPlan, selections);
   if (input.status === "completed" && current.status !== "completed") {
-    const pending = pendingBranchDecisions(nextPlan, selected)[0];
+    const pending = pendingDecisionsOutside(nextPlan, selected, notApplicable)[0];
     if (pending) return {code: "branch_decision_pending", path: planStatusPointer(nextPlan, pending) ?? "/status", expected: branchDecisionPendingExpected};
   }
   const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status]));
   for (const {node, reach} of planReach(nextPlan, selected)) {
     if (node.kind !== "workflow" || node.status !== "completed" || previous.get(node.nodeId) === "completed" || reach === "not_selected") continue;
-    const pending = pendingBranchDecisions(node.plan, selected)[0];
+    const pending = pendingDecisionsOutside(node.plan, selected, notApplicable, node.fixed === true)[0];
     if (pending) return {code: "branch_decision_pending", path: planStatusPointer(nextPlan, node) ?? "/plan", expected: branchDecisionPendingExpected};
   }
   return null;
+};
+
+const statusUnchangedExpected = "record status_changed only for a status that changes in this apply; record supporting evidence as an observation.";
+const sequenceOrderExpected = "in this sequence, record a member as underway or completed only after every earlier applicable member is completed " +
+  "or, for a fixed member, recorded not applicable; " +
+  "record early, preparatory or diagnostic work as an observation on the later member and keep it planned.";
+const undecidedPathExpected = "record the operative's selection for this branch before recording progress on one of its paths.";
+const nestedStatusExpected = "enter a workflow or the task together with the member that is actually underway, and enter a member only inside an entered workflow and task.";
+const completionExpected = "complete every applicable member first; omit a not-applicable flexible member through an agreed proposal, " +
+  "and record a not-applicable fixed member with not_applicable evidence while it stays planned.";
+const notApplicableExpected = "record not_applicable only for a planned member of a fixed workflow that stays planned; omit a flexible member through an agreed proposal.";
+
+type ProgressReach = ReturnType<typeof planReach>[number]["reach"];
+const applicableReach = (reach: ProgressReach): boolean => reach === "unconditional" || reach === "selected";
+const asGroup = (node: WorkflowPlanNodeInfo): WorkflowPlanGroupInfo => isPlanGroup(node) ? node : {kind: "sequence", templatePath: null, nodes: [node]};
+
+export {notApplicableNodeIds} from "./workflow-plan-tree.js";
+import {notApplicableNodeIds} from "./workflow-plan-tree.js";
+
+/**
+ * Recorded progress must stay coherent; operative work is never gated. A status_changed assertion must change a status, except the
+ * retained-progress reassessment a changed scope requires, and not_applicable only marks a planned fixed member. In any sequence a member
+ * may first be entered only after every earlier applicable member is settled; parallel members, undecided or
+ * not-selected paths and rework or review rounds inside an already entered member are unaffected. A workflow, or the task, is entered
+ * together with an applicable member and completed only when every applicable member is settled; a member is entered only inside an
+ * entered workflow and task. Settled means completed, or a planned fixed member recorded not applicable, so fixed members that do not
+ * apply never block what follows. Completing a workflow never completes its members.
+ */
+const recordedProgressProblem = (current: WorkflowStateDocument, input: WorkflowApplyInput, nextPlan: WorkflowStatePlan,
+  selections: readonly BranchSelection[], scopeReassessment: boolean, notApplicable: ReadonlySet<string>): WorkflowApplyDiagnostic | null => {
+  const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
+  const next = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node] as const));
+  const selected = effectiveBranchSelections(nextPlan, selections);
+  const facts = new Map(occurrenceFacts(nextPlan, selected).map(fact => [fact.node.nodeId, fact] as const));
+  for (const [index, item] of (input.evidence ?? []).entries()) {
+    const nodeId = item.targetNodeId ?? null;
+    const node = nodeId === null ? null : next.get(nodeId);
+    if (item.kind === "not_applicable") {
+      if (!node || !facts.get(node.nodeId)?.fixedMember || node.status !== "planned" || previous.get(node.nodeId) !== "planned")
+        return {code: "not_applicable_invalid", path: `/evidence/${index}`, expected: notApplicableExpected};
+      continue;
+    }
+    if (item.kind !== "status_changed") continue;
+    const unchanged = nodeId === null ? current.status === input.status && !scopeReassessment
+      : node !== undefined && node !== null && previous.get(nodeId) === node.status && !(scopeReassessment && node.status !== "planned");
+    if (unchanged) return {code: "status_unchanged", path: `/evidence/${index}`, expected: statusUnchangedExpected};
+  }
+  if (!nextPlan) return null;
+  const reached = new Map(planReach(nextPlan, selected).map(({node, reach}) => [node, reach] as const));
+  const enteredNow = (node: PlanEntity): boolean => node.status !== "planned" && previous.get(node.nodeId) === "planned";
+  const applicable = (node: WorkflowPlanNodeInfo, fixedOwner: boolean) =>
+    occurrenceFacts(asGroup(node), selected, fixedOwner).filter(fact => applicableReach(fact.reach)).map(fact => fact.node);
+  const settled = (node: WorkflowPlanNodeInfo, fixedOwner: boolean): boolean =>
+    pendingDecisionsOutside(asGroup(node), selected, notApplicable, fixedOwner).length === 0 &&
+    unsettledOccurrences(asGroup(node), selected, notApplicable, fixedOwner).length === 0;
+  const visit = (group: WorkflowPlanGroupInfo, fixedOwner: boolean): WorkflowApplyDiagnostic | null => {
+    let earlierUnsettled = false;
+    for (const node of group.nodes) {
+      const reach = reached.get(node) ?? "unconditional";
+      if (!applicableReach(reach) && !isPlanGroup(node)) continue;
+      if (group.kind === "sequence" && earlierUnsettled &&
+        !applicable(node, fixedOwner).some(item => (previous.get(item.nodeId) ?? "planned") !== "planned")) {
+        const entering = applicable(node, fixedOwner).find(enteredNow);
+        if (entering) return {code: "sequence_order", path: planStatusPointer(nextPlan, entering) ?? "/plan", expected: sequenceOrderExpected};
+      }
+      if (group.kind === "sequence" && applicableReach(reach) && !settled(node, fixedOwner)) earlierUnsettled = true;
+      const nested = isPlanGroup(node) ? visit(node, fixedOwner)
+        : node.kind === "branch" ? branchPathGroups(node).map(({group: path}) => visit(path, fixedOwner)).find(Boolean) ?? null
+        : node.kind === "workflow" && node.plan ? visit(node.plan, node.fixed === true) : null;
+      if (nested) return nested;
+    }
+    return null;
+  };
+  const order = visit(nextPlan, false);
+  if (order) return order;
+  // a workflow or the task enters with an applicable member, when it opens with a decision still pending, or when nothing in it is
+  // left unsettled; it completes only when every applicable member is settled
+  const opensWithPendingDecision = (group: WorkflowPlanGroupInfo): boolean => (group.kind === "sequence" ? group.nodes.slice(0, 1) : group.nodes)
+    .some(node => isPlanGroup(node) ? opensWithPendingDecision(node) : node.kind === "branch" && !selected.has(node.nodeId));
+  const containerEntered = (members: WorkflowPlanGroupInfo | null, fixedOwner: boolean): boolean => !members || members.nodes.length === 0 ||
+    applicable(members, fixedOwner).some(item => item.status !== "planned") || opensWithPendingDecision(members) ||
+    unsettledOccurrences(members, selected, notApplicable, fixedOwner).length === 0;
+  const completionProblem = (members: WorkflowPlanGroupInfo | null, fixedOwner: boolean, fallback: string): WorkflowApplyDiagnostic | null => {
+    const open = unsettledOccurrences(members, selected, notApplicable, fixedOwner)[0];
+    return open ? {code: "completion_unfinished", path: planStatusPointer(nextPlan, open) ?? fallback, expected: completionExpected} : null;
+  };
+  if (current.status === "planned" && input.status !== "planned" && !containerEntered(nextPlan, false))
+    return {code: "nested_status_inconsistent", path: "/status", expected: nestedStatusExpected};
+  if (input.status === "completed" && current.status !== "completed") {
+    const problem = completionProblem(nextPlan, false, "/status");
+    if (problem) return problem;
+  }
+  const walk = (group: WorkflowPlanGroupInfo, ancestors: readonly WorkflowPlanWorkflowInfo[]): WorkflowApplyDiagnostic | null => {
+    for (const node of group.nodes) {
+      if (isPlanEntity(node) && reached.get(node) === "undecided" && enteredNow(node))
+        return {code: "branch_decision_pending", path: planStatusPointer(nextPlan, node) ?? "/plan", expected: undecidedPathExpected};
+      if (isPlanEntity(node) && applicableReach(reached.get(node) ?? "unconditional")) {
+        if (enteredNow(node)) {
+          if (input.status === "planned") return {code: "nested_status_inconsistent", path: "/status", expected: nestedStatusExpected};
+          const planned = ancestors.find(item => item.status === "planned");
+          if (planned) return {code: "nested_status_inconsistent", path: planStatusPointer(nextPlan, planned) ?? "/plan", expected: nestedStatusExpected};
+          if (node.kind === "workflow" && !containerEntered(node.plan, node.fixed === true))
+            return {code: "nested_status_inconsistent", path: planStatusPointer(nextPlan, node) ?? "/plan", expected: nestedStatusExpected};
+        }
+        if (node.kind === "workflow" && node.status === "completed" && previous.get(node.nodeId) !== "completed") {
+          const problem = completionProblem(node.plan, node.fixed === true, "/plan");
+          if (problem) return problem;
+        }
+      }
+      const children = isPlanGroup(node) ? [node] : node.kind === "branch" ? branchPathGroups(node).map(item => item.group)
+        : node.kind === "workflow" && node.plan ? [node.plan] : [];
+      for (const child of children) {
+        const found = walk(child, node.kind === "workflow" ? [...ancestors, node] : ancestors);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return walk(nextPlan, []);
 };
 
 const validApplyInput = (value: unknown): boolean => isRecord(value) &&
@@ -582,7 +705,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   validRequirements(value.requirements) && validIssues(value.issues) && validPlan(value.plan) &&
   (value.currentAgreementKey === null || validText(value.currentAgreementKey)) && Array.isArray(value.acceptedAgreements) &&
   value.acceptedAgreements.length <= workflowMutationLimits.maxAcceptedAgreements && value.acceptedAgreements.every(item => isRecord(item) &&
-    validText(item.key) && validId(item.taskId) && validId(item.sourceThreadId) && validId(item.sourceRunId) && validId(item.sourceMessageId) &&
+    validText(item.key) && validId(item.taskId) && validNativeReference(item.sourceThreadId) && validNativeReference(item.sourceRunId) && validNativeReference(item.sourceMessageId) &&
     validText(item.sourceHash) && validText(item.objective) && validText(item.planHash) && isRecord(item.sourceBinding) && validSourceBinding(item.sourceBinding) &&
     validRequirements(item.requirements) && validIssues(item.issues) && validPlan(item.plan) && item.plan !== null &&
     isRecord(item.agreement) && item.agreement.status === "agreed" && validId(item.agreement.proposalId) &&
@@ -590,15 +713,16 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   (value.contributions === undefined || validContributions(value.contributions)) &&
   (value.branchSelections === undefined || validBranchSelections(value.branchSelections)) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
-    validId(item.id) && validId(item.operationId) && ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
+    validId(item.id) && validId(item.operationId) && ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation", "not_applicable",
       "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed"].includes(String(item.kind)) &&
     validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
-    (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validId(item.sourceThreadId)) &&
-    (item.sourceRunId === null || validId(item.sourceRunId)) && (item.sourceMessageId === null || validId(item.sourceMessageId)) &&
-    (item.sourceItemId === undefined || item.sourceItemId === null || validId(item.sourceItemId)) &&
-    (item.agreementKey === null || validText(item.agreementKey)) && validText(item.note)) &&
+    (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
+    (item.sourceRunId === null || validNativeReference(item.sourceRunId)) && (item.sourceMessageId === null || validNativeReference(item.sourceMessageId)) &&
+    (item.sourceItemId === undefined || item.sourceItemId === null || validNativeReference(item.sourceItemId)) &&
+    (item.agreementKey === null || validText(item.agreementKey)) && validText(item.note) &&
+    (item.scopeRevision === undefined || validText(item.scopeRevision))) &&
   Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt);
 
 export type WorkflowStateStoreReason = "workflow_revision_conflict" | "workflow_store_unavailable" | "workflow_row_invalid";
@@ -717,7 +841,7 @@ const workflowStatusEvidenceProblem = (current: WorkflowStateDocument, input: Wo
 
 const isAgreementEvidence = Schema.is(AgreementEvidence);
 const validWorkflowAgreementImport = (source: WorkflowAgreementImport): boolean => {
-  if (!isRecord(source) || !validId(source.taskId) || !validId(source.sourceThreadId) || !validId(source.sourceRunId) || !validId(source.sourceMessageId) ||
+  if (!isRecord(source) || !validId(source.taskId) || !validNativeReference(source.sourceThreadId) || !validNativeReference(source.sourceRunId) || !validNativeReference(source.sourceMessageId) ||
     !validText(source.sourceHash) || !validText(source.objective) || !isRecord(source.agreement) || source.agreement.status !== "agreed" ||
     !validId(source.agreement.proposalId) || !isAgreementEvidence(source.agreement.evidence) || !validText(source.agreement.agentMessageId) ||
     !Number.isFinite(source.agreement.agreedAt) || !isRecord(source.agreement.workflow) || source.agreement.workflow.status !== "proposed") return false;
@@ -919,8 +1043,12 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       ...(evidenceProblem === "generic" ? {} : {diagnostic: evidenceProblem})} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const nextPlan = normalized.plan;
     const branchState = invalidatedSelections(current.branchSelections, nextPlan, at);
-    const decisionProblem = pendingDecisionProblem(current, validatedInput, nextPlan, branchState.selections);
+    const notApplicable = notApplicableNodeIds(current.evidence, validatedInput.sourceBinding?.sourceHash ?? null, validatedInput.evidence ?? []);
+    const decisionProblem = pendingDecisionProblem(current, validatedInput, nextPlan, branchState.selections, notApplicable);
     if (decisionProblem) return {status: "invalid", operationId: input.operationId, reason: decisionProblem.code, diagnostic: decisionProblem} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const scopeReassessment = current.sourceBinding?.taskId === validation.expectedTaskId && current.sourceBinding.sourceHash !== validation.expectedSourceHash;
+    const progressProblem = recordedProgressProblem(current, validatedInput, nextPlan, branchState.selections, scopeReassessment, notApplicable);
+    if (progressProblem) return {status: "invalid", operationId: input.operationId, reason: progressProblem.code, diagnostic: progressProblem} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const evidenceInputs = validatedInput.evidence ?? [];
     // retained progress is never reset on scope refinement. Carrying it into this scope needs a fresh, explicit assessment
     // of the same occurrence with actual activity references; similarly named old completion is not new-scope completion.
@@ -944,7 +1072,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         statusTo: next?.status ?? (nodeId === null ? validatedInput.status : null),
         sourceThreadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
         sourceRunId: item.sourceRunId ?? null,
-        sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note}));
+        sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note,
+        ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
       if (!nextNodes.has(node.nodeId)) evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "node_removed", now: at,
@@ -1154,7 +1283,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
    */
   const recordBranchSelection = (owner: WorkflowOwner, input: BranchSelectionImport, now?: number) => write(Effect.gen(function* () {
     if (!isRecord(input) || !validNodeId(input.nodeId) || !validBranchRevision(input.revision) || !branchPathSet.has(input.path) || !validBranchReason(input.reason) ||
-      !validId(input.sourceThreadId) || !validId(input.sourceRunId) || !validId(input.sourceMessageId) ||
+      !validNativeReference(input.sourceThreadId) || !validNativeReference(input.sourceRunId) || !validNativeReference(input.sourceMessageId) ||
       !(input.sourceCreatedAt === null || Number.isFinite(input.sourceCreatedAt)))
       return {status: "rejected", code: "branch_record_invalid"} satisfies BranchSelectionImportResult as BranchSelectionImportResult;
     const at = yield* nowOr(now);

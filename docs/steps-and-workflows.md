@@ -111,7 +111,14 @@ sequence:
 
 Parallel means members may overlap, with no declared order between them. It does
 not demand simultaneous wall-clock execution or automatically create subagents.
-Sequence expresses the intended semantic order, not an execution scheduler.
+Sequence expresses the intended semantic order, not an execution scheduler. Recorded
+progress follows it: a sequence member is recorded underway or completed only after
+every earlier applicable member is completed or, as a fixed member, assessed not
+applicable. This holds inside fixed workflows too. Early, preparatory or diagnostic work for
+a later member, such as a draft pull request or a failing test during implementation,
+is an observation on that member, which stays planned. This constrains recorded
+statuses only; the operative's commands, dependency reviews and diagnosis are never
+gated, and rework or review rounds inside an entered member are normal.
 
 ## Branches
 
@@ -234,8 +241,13 @@ plan cannot remove or weaken an inner fixed fragment.
 For example, a fixed implementation followed by deployment may gain required E2E
 testing between them. The original members and their relative order remain.
 This protection includes the original commitments of nested workflow references.
-A member assessed not applicable stays visible with its reason rather than being
-removed. Fixed does not imply mandatory project-wide inclusion.
+Fixed members are never omitted. A fixed member that does not apply to a task stays
+visible and planned; the Supervisor records a typed not-applicable assessment with its
+reason for the current task scope and raises it in dialogue, never as completed work.
+Task shows it as Not applicable. That assessment settles the member, including every
+member inside a fixed workflow that does not apply, so it never blocks the members after
+it or the completion of its workflow; a later scope needs a fresh assessment. Fixed does
+not imply mandatory project-wide inclusion.
 
 ## Definition index
 
@@ -305,7 +317,10 @@ Delegation does not remove the parent's requirements or automatically complete i
 
 Applicability is expressed in descriptions and assessed semantically. A genuinely
 not-applicable item remains visible with the reason; an actually applicable
-requirement cannot be silently waived. A manual workflow choice is not a waiver.
+requirement cannot be silently waived. In a flexible workflow it becomes a negotiated
+omission, shown as not applicable with its reason; it is never recorded as completed.
+A step whose description makes it conditional, such as prevention after a defect, is
+decided when the work reaches it. A manual workflow choice is not a waiver.
 Unclear applicability and broken definitions remain explicit outstanding issues.
 
 ## Giving an entire workflow to reviewers
@@ -360,11 +375,14 @@ ID; repeated references do not merge contributions or evidence. Template revisio
 agreement history and provenance remain explicit. Changed files
 are reviewed rather than silently changing the meaning of an existing agreement.
 
-Initial live nodes start planned. The Supervisor then promptly reconciles every
-duty against adequate actual evidence, including implementation, tests, review,
+Initial live nodes start planned. The Supervisor then reconciles the plan in order
+against adequate actual evidence, including implementation, tests, review,
 documentation and research performed before the proposal or agreement. A separate
-assessment can complete a fully satisfied duty or mark partial work underway with
-the specific remaining obligations in its evidence note. It preserves the occurrence
+assessment completes the fully satisfied members, marks the first unfinished one
+underway with its specific remaining obligations in its evidence note, and keeps later
+members planned with observations. A workflow and the task are entered together with
+the member that is actually underway, so nested occurrences never stay planned behind
+them. It preserves the occurrence
 and valid progress, without percentages or rerunning a whole duty. Acceptance,
 unverified reports and a command having run do not prove execution. Native actor,
 write, fixed/required and reference/skill checks still apply. Retaining progress

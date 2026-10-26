@@ -197,7 +197,7 @@ export type WorkflowStateEvidence = {
   id: string;
   operationId: string;
   kind: "draft_created" | "lineage_linked" | "agreement_imported" | "plan_updated" | "status_changed" | "node_removed" | "note" | "observation" |
-    "contribution_recorded" | "contribution_assessed" | "branch_selected" | "branch_selection_invalidated" | "branch_changed";
+    "not_applicable" | "contribution_recorded" | "contribution_assessed" | "branch_selected" | "branch_selection_invalidated" | "branch_changed";
   recordedAt: number;
   actorSupervisorThreadId: string;
   targetNodeId: string | null;
@@ -210,6 +210,8 @@ export type WorkflowStateEvidence = {
   sourceItemId?: string | null;
   agreementKey: string | null;
   note: string;
+  /** present only on not_applicable evidence: the task scope it assessed; a later scope needs a fresh assessment */
+  scopeRevision?: string;
   // present only on contribution evidence; the summary and references stay on the current contribution entry
   contribution?: {contributionId: string; revision: number; state: ExternalContributionState | null; decision: ExternalContributionDecision | null};
   // present only on selection evidence: the revision, its path and the condition it answered; changed is whether it replaced a different
@@ -218,7 +220,8 @@ export type WorkflowStateEvidence = {
 };
 
 export type WorkflowStateEvidenceInput = {
-  kind: "status_changed" | "note" | "observation";
+  /** not_applicable records that a planned member of a fixed workflow does not apply to this task; it changes no status. */
+  kind: "status_changed" | "note" | "observation" | "not_applicable";
   note: string;
   targetNodeId?: string | null;
   sourceThreadId?: string | null;
@@ -374,6 +377,8 @@ export type WorkflowMutationLimits = {
   maxPlanTextLength: number;
   maxPlanReasonLength: number;
   maxOperationIdLength: number;
+  /** Opaque native thread, run, message and item references cited by evidence; T3 identities can exceed operation IDs. */
+  maxNativeReferenceLength: number;
   maxDocumentBytes: number;
 };
 
@@ -388,13 +393,14 @@ export const workflowMutationLimits: WorkflowMutationLimits = {
   maxPlanTextLength: 8000,
   maxPlanReasonLength: 1000,
   maxOperationIdLength: 200,
+  maxNativeReferenceLength: 1024,
   maxDocumentBytes: 524_288, // serialized JSON UTF-8 byte limit
 };
 
 // stored shapes as the types above describe them; bounds, identities and cross-field rules stay with the store validators that run after decode
 const mutableArray = <S extends Schema.Top>(item: S) => Schema.mutable(Schema.Array(item));
 const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
-  "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed"] as const;
+  "not_applicable", "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed"] as const;
 
 export const BranchSelectionSchema = Schema.Struct({
   nodeId: Schema.String,
@@ -477,6 +483,7 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   sourceItemId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   agreementKey: Schema.NullOr(Schema.String),
   note: Schema.String,
+  scopeRevision: Schema.optionalKey(Schema.String),
   contribution: Schema.optionalKey(Schema.Struct({
     contributionId: Schema.String,
     revision: Schema.Number,

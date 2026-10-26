@@ -159,7 +159,8 @@ it("expansion keeps branch identity, template paths, labelled outlines and the f
   const outline = renderPlan(plan.plan).join("\n");
   assert.match(outline, new RegExp(`  - branch \\[branch:${branch.nodeId}\\] if: The change is contained and well understood\\.\\n    then:\\n      - focused-review`, "u"));
   assert.match(outline, /    else:\n      parallel:\n        - independent-review \[step:independent-review\]\n        - Second opinion/u);
-  assert.match(outline, /        - independent-review \[step:independent-review\]\n      - iterate \[step:iterate\]\n  - deliver \[step:deliver\]/u, "deliver is dedented to follow the whole branch");
+  assert.match(outline, /        - Second opinion \[workflow:second-opinion; flexible; members in its definition\]\n      - iterate \[step:iterate\]\n  - deliver \[step:deliver\]/u,
+    "a nested workflow without a branch is one line, and deliver is dedented to follow the whole branch");
   const selected = renderPlan(plan.plan, "", new Map([[branch.nodeId, "then"]])).join("\n");
   assert.match(selected, /then path selected\n    then:\n/u);
   assert.match(selected, /    else: \(not selected\)/u);
@@ -273,6 +274,24 @@ const withLocalBranch = (plan: WorkflowPlanGroupInfo, change: (branch: WorkflowP
     return next ? [next] : [];
   })});
 const selections = (document: WorkflowStateDocument) => document.branchSelections.map(item => [item.revision, item.path, item.state]);
+// the plan with every applicable occurrence, or only the chosen ones, recorded completed, with the status evidence each change needs
+const completeApplicable = (document: WorkflowStateDocument, chosen: (nodeId: string) => boolean = () => true) => {
+  const reach = new Map(planReach(document.plan, documentBranchSelections(document)).map(({node, reach}) => [node, reach] as const));
+  const evidence: NonNullable<WorkflowApplyInput["evidence"]> = [];
+  const group = (value: WorkflowPlanGroupInfo): WorkflowPlanGroupInfo => ({...value, nodes: value.nodes.map(visit)});
+  const visit = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
+    if (node.kind === "sequence" || node.kind === "parallel") return group(node);
+    if (node.kind === "branch") return {...node, then: group(node.then), else: node.else ? group(node.else) : null};
+    return entity(node as Extract<WorkflowPlanNodeInfo, {kind: "step" | "workflow"}>);
+  };
+  const entity = (node: Extract<WorkflowPlanNodeInfo, {kind: "step" | "workflow"}>): WorkflowPlanNodeInfo => {
+    const done = (reach.get(node) === "unconditional" || reach.get(node) === "selected") && chosen(node.nodeId) && node.status !== "completed";
+    if (done) evidence.push({kind: "status_changed", targetNodeId: node.nodeId, note: `${node.name} is complete.`});
+    const status = done ? "completed" as const : node.status;
+    return node.kind === "workflow" ? {...node, status, plan: node.plan ? group(node.plan) : null} : {...node, status};
+  };
+  return {plan: group(document.plan!), evidence};
+};
 
 it.live("selections import under revision fences, and an invalidated selection stays pending on rescan until a later next revision", () => Effect.gen(function* () {
   const {main, apply, select} = yield* storeFixture;
@@ -349,8 +368,11 @@ it.live("a selection belongs to its author's own workflow: a child cannot select
 it.live("a pending reached decision blocks a completed assessment, and a changed decision makes completion need reassessment without losing evidence", () => Effect.gen(function* () {
   const {main, apply, select} = yield* storeFixture;
   let document = yield* main();
-  const complete = (current: WorkflowStateDocument, operationId: string, at: number) => apply(current, current.plan, operationId, at,
-    {status: "completed", evidence: [{kind: "status_changed", note: "Every agreed duty is complete.", targetNodeId: null}]});
+  const complete = (current: WorkflowStateDocument, operationId: string, at: number) => {
+    const done = completeApplicable(current);
+    return apply(current, done.plan, operationId, at,
+      {status: "completed", evidence: [{kind: "status_changed", note: "Every agreed duty is complete.", targetNodeId: null}, ...done.evidence]});
+  };
   const pending = yield* complete(document, "complete-early", 1000);
   assert.equal(pending.status, "invalid");
   assert.equal(pending.status === "invalid" ? pending.reason : null, "branch_decision_pending");
@@ -441,8 +463,11 @@ it.live("a nested completion older than the retained observations still dates ag
   const review = document.plan!.nodes[1] as Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>;
   assert.equal((yield* select(reviewBranch(document).nodeId, 1, "then", 1100, 1100)).status, "applied");
   document = yield* main();
-  const reviewDone = {...document.plan!, nodes: document.plan!.nodes.map(node => node.kind === "workflow" && node.nodeId === review.nodeId ? {...node, status: "completed" as const} : node)};
-  assert.equal((yield* apply(document, reviewDone, "complete-review", 1200, {evidence: [{kind: "status_changed", note: "Reviewed.", targetNodeId: review.nodeId}]})).status, "applied");
+  // the earlier step and the review with its selected path are recorded completed together
+  const reviewed = new Set([(document.plan!.nodes[0] as {nodeId: string}).nodeId, review.nodeId, ...planEntities(review.plan).map(node => node.nodeId)]);
+  const reviewDone = completeApplicable(document, nodeId => reviewed.has(nodeId));
+  assert.equal((yield* apply(document, reviewDone.plan, "complete-review", 1200, {status: "underway",
+    evidence: [{kind: "status_changed", note: "Reviewed.", targetNodeId: null}, ...reviewDone.evidence]})).status, "applied");
   document = yield* main();
   assert.equal((yield* apply(document, document.plan, "later-notes", 1300, {evidence: Array.from({length: 20}, (_, index) =>
     ({kind: "note" as const, note: `Later note ${index + 1}.`, targetNodeId: null}))})).status, "applied");

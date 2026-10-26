@@ -1,15 +1,16 @@
-import { conversationMayContact } from "./supervision-conversation.js";
+import { conversationMayContact, taskScopeRevision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
 import { fingerprint } from "./guidance-store.js";
 import { NativeOperateRpc, record, SupervisorRpcError } from "./supervisor-native.js";
 import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
-import { ProjectSupervisorStore, type BindingRecord } from "./project-supervisor-store.js";
+import { ProjectSupervisorStore, type BindingRecord, type TaskRecord } from "./project-supervisor-store.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
-import { introductionOutcomeUnknown, SupervisorConversationStore } from "./supervisor-conversation-store.js";
+import { introductionOutcomeUnknown, SupervisorConversationStore, type ConversationRequest } from "./supervisor-conversation-store.js";
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
-import { WorkflowStateStore } from "./workflow-state-store.js";
+import { documentBranchSelections, notApplicableNodeIds, WorkflowStateStore } from "./workflow-state-store.js";
+import { unsettledOccurrences } from "./workflow-plan-tree.js";
 import { T3Client, T3TransportError } from "./t3.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope, type SupervisorScopeResolution } from "./supervisor-scope.js";
@@ -179,8 +180,29 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
     const latest = main ? [...main.runs].filter(run => !(run.status === "cancelled" && !run.startedAt))
       .sort((left, right) => right.ordinal - left.ordinal)[0] : undefined;
     if (!main || !latest || latest.status !== "completed") return "main_run_not_completed";
-    return projectionNeedsAttention(main, source ?? main.thread) ? "main_busy" : null;
+    if (projectionNeedsAttention(main, source ?? main.thread)) return "main_busy";
+    return (yield* unfinishedAgreedWork(binding, current, owned, Date.parse(latest.completedAt ?? ""))) ? "unfinished_agreed_work" : null;
   });
+
+  // an idle main whose agreed workflow is unfinished parks only on an explicit current wait: the latest check-in's confirmed wait naming
+  // who acts next and what resumes the work, recorded for the current task after the main's last completed run. Attention, a stale wait or the operative's own unfinished action keeps it out of standby; a
+  // completion status counts only when every applicable member is settled. Following, stopped and closed scopes keep their own rules,
+  // and nothing here contacts a model
+  const unfinishedAgreedWork = (binding: BindingRecord, task: TaskRecord | null, owned: ReadonlyArray<ConversationRequest>, mainFinishedAt: number) =>
+    Effect.gen(function* () {
+      if (!workflows || !task || task.supervisorThreadId !== binding.threadId || task.status !== "inferred" || task.agreement?.status !== "agreed" ||
+        !conversationMayContact(task)) return false;
+      const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
+      if (!document) return false;
+      const unsettled = unsettledOccurrences(document.plan, documentBranchSelections(document),
+        notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null));
+      if (document.status === "completed" && unsettled.length === 0) return false;
+      // an open external result can coexist with the operative's own unfinished work, so only an explicit wait acknowledges the blocker
+      const latest = owned.filter(request => request.kind === "review" && request.reviewPins).at(-1);
+      const outcome = latest?.reviewOutcome;
+      const pinned = latest?.reviewPins?.tasks.some(pin => pin.taskId === task.id && pin.taskRevision === taskScopeRevision(task)) ?? false;
+      return !(outcome?.state === "confirmed" && outcome.wait && pinned && Number.isFinite(mainFinishedAt) && outcome.recordedAt >= mainFinishedAt);
+    });
 
   const scopeFor = (binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[]): SupervisorScopeResolution | null => {
     if (!main || main.thread.deletedAt) return null;

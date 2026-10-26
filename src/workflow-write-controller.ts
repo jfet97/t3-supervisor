@@ -14,10 +14,11 @@ import { SupervisionGate, SupervisionScopeService, type GateGuard } from "./supe
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
 import { reviewOutcomes, SupervisorConversationStore, type ConversationRequest, type ReviewOutcomeKind } from "./supervisor-conversation-store.js";
+import { reviewWaitOwners, type ReviewWaitInfo } from "./project-supervisor-contract.js";
 import { StoreError } from "./store.js";
 import { NativeRpc, NativeShell, record, type SupervisorRpcError } from "./supervisor-native.js";
 import { T3Client, type T3TransportError } from "./t3.js";
-import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, documentBranchSelections, WorkflowStateStore, type WorkflowApplyValidationContext} from "./workflow-state-store.js";
+import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, documentBranchSelections, notApplicableNodeIds, WorkflowStateStore, type WorkflowApplyValidationContext} from "./workflow-state-store.js";
 import {
   externalContributionDecisions,
   externalContributionLimits,
@@ -26,6 +27,7 @@ import {
   type ExternalContributionDecision,
   type WorkflowApplyInput,
   type WorkflowControllerLineage,
+  type WorkflowExecutionStatus,
   type WorkflowStateEvidenceInput,
   type WorkflowEnsureResult,
   type WorkflowMutationResult,
@@ -69,7 +71,7 @@ import { InterpretationWake } from "./interpretation-wake.js";
 import { logEvent, type LogFields } from "./logging.js";
 import {branchConditionMaxLength, definitionSnapshotIndexed, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import {pendingBranchDecisions, planEntities} from "./workflow-plan-tree.js";
+import {pendingBranchDecisions, planEntities, planNodeAtPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
 
 // the native item read returned no item record
 export class WorkflowNativeItemUnavailable extends Data.TaggedError("WorkflowNativeItemUnavailable") {}
@@ -126,9 +128,13 @@ export type WorkflowLocator = {
   assignmentEpoch?: number;
 };
 
+/** One explicit status edit of an existing step or workflow occurrence, merged into the current plan under the same revision CAS. */
+export type WorkflowStatusEdit = {nodeId: string; status: WorkflowExecutionStatus};
+/** A negotiated omission of an existing flexible-workflow member; the service derives its template provenance. */
+export type WorkflowOmissionEdit = {nodeId: string; reason: string};
 export type WorkflowApplyPatch = Pick<WorkflowApplyInput, "operationId" | "workflowId" | "expectedRevision" | "note"> &
   Partial<Pick<WorkflowApplyInput, "status" | "objective" | "sourceBinding" | "requirements" | "issues" | "plan">> &
-  {evidence?: WorkflowStateEvidenceInput[]};
+  {statuses?: WorkflowStatusEdit[]; omit?: WorkflowOmissionEdit[]; evidence?: WorkflowStateEvidenceInput[]};
 
 export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "ensure_main"; operationId: string; note: string}
@@ -136,12 +142,16 @@ export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "apply"; input: WorkflowApplyPatch}
   | {action: "assess_contribution"; operationId: string; workflowId: string; expectedRevision: number; contributionId: string;
     resultRevision: number; decision: ExternalContributionDecision; note: string}
-  | {action: "record_review"; operationId: string; requestId: string; outcome: ReviewOutcomeKind; reason?: string; applyOperationIds?: string[]}
+  | {action: "record_review"; operationId: string; requestId: string; outcome: ReviewOutcomeKind; reason?: string; applyOperationIds?: string[]; wait?: ReviewWaitInfo}
 );
 
 export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check";
 export type SupervisorContextViewInput = {view: SupervisorContextViewName; definitionIds?: string[]; includeSources?: boolean; record?: unknown};
 export type SupervisorContextViewResult = {status: string; view: SupervisorContextViewName; [key: string]: unknown};
+/** The compact current status of each workflow in the verified scope, for reconciling statuses without full documents. */
+export type WorkflowStatusViewResult = {status: "ok"; view: "status"; mainTaskAgreementStatus: "agreed" | "stale" | null; statusNote: string;
+  workflowOffset: number; workflowHasMore: boolean; workflows: Array<{workflowId: string; threadId: string; parentWorkflowId: string | null;
+    revision: number; status: WorkflowExecutionStatus; occurrences: PlanStatusOutlineRow[]; pendingBranchDecisions: string[]}>};
 export type SupervisionStartInput = {callerThreadId: string; userMessageId: string; operationId: string};
 export type SupervisionStartResult = {status: "pending" | "active" | "rejected" | "denied" | "invalid" | "unavailable"; reason: string; retryable?: boolean};
 export type SupervisionStopInput = {callerThreadId: string; targetThreadId: string; userMessageId: string; operationId: string};
@@ -149,7 +159,7 @@ export type SupervisionStopResult =
   | {status: "stopped"; targetThreadId: string; route: "direct" | "relay" | "chat"; alreadyStopped: boolean}
   | {status: "denied" | "invalid" | "unavailable" | "pending"; reason: string; retryable?: boolean};
 export type WorkflowReadPayload = WorkflowLocator & {
-  view?: SupervisorContextViewName;
+  view?: SupervisorContextViewName | "status";
   definitionIds?: string[];
   includeSources?: boolean;
   record?: unknown;
@@ -330,6 +340,11 @@ const hasExactKeys = (value: Record<string, unknown>, required: readonly string[
 const isStatus = (value: unknown): value is typeof workflowExecutionStatuses[number] =>
   typeof value === "string" && workflowExecutionStatuses.includes(value as typeof workflowExecutionStatuses[number]);
 const isNullableId = (value: unknown): boolean => value === undefined || value === null || isId(value);
+const nativeReferenceFields = ["sourceThreadId", "sourceRunId", "sourceMessageId", "sourceItemId"] as const;
+const isNullableNativeReference = (value: unknown): boolean =>
+  value === undefined || value === null || isId(value, workflowMutationLimits.maxNativeReferenceLength);
+// explicit occurrence status edits and omissions per apply; the plan node bound still applies to the merged plan
+const maxStatusEditsPerApply = 100;
 const planNodeIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const maxDefinitionTextLength = 8000;
 const maxPlanReasonLength = 1000;
@@ -447,12 +462,30 @@ const referenceDiagnostic = (plan: unknown): WorkflowApplyDiagnostic | null => {
   return visit(plan, "/input/plan", 0);
 };
 
+const omissionProblemExpected: Record<OmissionEditProblem, string> = {
+  unknown: "the nodeId of an existing step or workflow occurrence in the current plan",
+  not_flexible_member: "a member declared by a flexible workflow; fixed workflows, added support work and top-level nodes are not omitted",
+  started: "a member with no recorded progress; started or completed work stays recorded",
+  empties_group: "an omission that leaves at least one member in its workflow and branch path",
+};
+
+// a store pointer into the plan of an apply without a plan, mapped to the status edit that set that occurrence's status
+const statusEditPointer = (plan: WorkflowApplyInput["plan"], path: string, edits: readonly WorkflowStatusEdit[]): string => {
+  if (path === "/status") return "/input/status";
+  if (path.startsWith("/evidence/")) return `/input${path}`;
+  const node = planNodeAtPointer(plan, path);
+  const index = node && "nodeId" in node ? edits.findIndex(edit => edit.nodeId === node.nodeId) : -1;
+  // an occurrence the caller did not edit, such as an open member or a planned ancestor, is located in the current document
+  return index >= 0 ? `/input/statuses/${index}/status` : node ? `/current${path}` : "/input/statuses";
+};
+
 // the store points into the canonical plan, which keeps submitted groups index-for-index. A workflow
 // node submitted without its own plan is expanded by the service, so a pointer inside that expansion
 // maps to the nearest submitted ancestor, as does a status the caller omitted and the service inherited.
 // paths use the same /input base as the other apply diagnostics.
 export const submittedApplyPointer = (submittedPlan: unknown, path: string): string => {
   if (path === "/status") return "/input/status";
+  if (path.startsWith("/evidence/")) return `/input${path}`;
   const segments = path.split("/").slice(1);
   const status = segments.at(-1) === "status";
   if (segments[0] !== "plan" || !isRecord(submittedPlan)) return "/input";
@@ -469,9 +502,76 @@ export const submittedApplyPointer = (submittedPlan: unknown, path: string): str
   return status && Object.hasOwn(node, "status") ? `${pointer}/status` : pointer;
 };
 
+const evidenceReferenceExpected = `an exact opaque native ID string of 1 to ${workflowMutationLimits.maxNativeReferenceLength} characters, or null`;
+
+// the first rejected evidence field, located by numeric position and field name only; submitted values are never echoed
+const evidenceDiagnostic = (evidence: unknown): WorkflowApplyDiagnostic | null => {
+  if (evidence === undefined) return null;
+  if (!Array.isArray(evidence) || evidence.length > workflowMutationLimits.maxEvidencePerApply)
+    return {code: "evidence_entry_invalid", path: "/input/evidence", expected: `an array of at most ${workflowMutationLimits.maxEvidencePerApply} evidence entries`};
+  for (const [index, item] of evidence.entries()) {
+    const path = `/input/evidence/${index}`;
+    if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", ...nativeReferenceFields]))
+      return {code: "evidence_entry_invalid", path, expected: "exactly kind and note, with optional targetNodeId, sourceThreadId, sourceRunId, sourceMessageId and sourceItemId"};
+    if (!["status_changed", "note", "observation", "not_applicable"].includes(String(item.kind)))
+      return {code: "evidence_entry_invalid", path: `${path}/kind`, expected: "status_changed, note, observation or not_applicable"};
+    if (!isText(item.note, workflowMutationLimits.maxTextLength))
+      return {code: "evidence_entry_invalid", path: `${path}/note`, expected: `a nonempty note of at most ${workflowMutationLimits.maxTextLength} characters`};
+    if (!isNullableId(item.targetNodeId))
+      return {code: "evidence_entry_invalid", path: `${path}/targetNodeId`, expected: "an existing occurrence nodeId, or null for the workflow itself"};
+    const field = nativeReferenceFields.find(key => !isNullableNativeReference(item[key]));
+    if (field) return {code: "evidence_reference_invalid", path: `${path}/${field}`, expected: evidenceReferenceExpected};
+  }
+  return null;
+};
+
+const statusEditsExpected = `at most ${maxStatusEditsPerApply} entries of exactly {nodeId, status}, each naming a distinct existing step or workflow occurrence`;
+// explicit occurrence status edits: bounded, distinct and shape-checked here; existence is checked against the current document
+const statusEditsDiagnostic = (value: unknown): WorkflowApplyDiagnostic | null => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxStatusEditsPerApply)
+    return {code: "status_edit_invalid", path: "/input/statuses", expected: statusEditsExpected};
+  const seen = new Set<string>();
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item) || !hasExactKeys(item, ["nodeId", "status"]) || typeof item.nodeId !== "string" || !planNodeIdPattern.test(item.nodeId) || !isStatus(item.status))
+      return {code: "status_edit_invalid", path: `/input/statuses/${index}`, expected: statusEditsExpected};
+    if (seen.has(item.nodeId)) return {code: "status_edit_invalid", path: `/input/statuses/${index}/nodeId`, expected: statusEditsExpected};
+    seen.add(item.nodeId);
+  }
+  return null;
+};
+
+const omissionEditsExpected = `at most ${maxStatusEditsPerApply} entries of exactly {nodeId, reason}, each naming a distinct existing member of a flexible workflow`;
+const omissionEditsDiagnostic = (value: unknown): WorkflowApplyDiagnostic | null => {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maxStatusEditsPerApply)
+    return {code: "omission_invalid", path: "/input/omit", expected: omissionEditsExpected};
+  const seen = new Set<string>();
+  for (const [index, item] of value.entries()) {
+    if (!isRecord(item) || !hasExactKeys(item, ["nodeId", "reason"]) || typeof item.nodeId !== "string" || !planNodeIdPattern.test(item.nodeId) ||
+      !isText(item.reason, maxPlanReasonLength) || seen.has(item.nodeId))
+      return {code: "omission_invalid", path: `/input/omit/${index}`, expected: omissionEditsExpected};
+    seen.add(item.nodeId);
+  }
+  return null;
+};
+
+// a submitted plan replaces the whole structure, while statuses and omit edit the current one: combining them is ambiguous
+const conflictingEditsDiagnostic = (value: Record<string, unknown>): WorkflowApplyDiagnostic | null =>
+  value.plan !== undefined && (value.statuses !== undefined || value.omit !== undefined)
+    ? {code: "plan_edit_conflict", path: value.statuses !== undefined ? "/input/statuses" : "/input/omit",
+      expected: "either a complete plan, or statuses/omit edits of the current plan, not both"}
+    : null;
+
+const applyInputDiagnostic = (value: unknown): WorkflowApplyDiagnostic | null => {
+  if (!isRecord(value)) return null;
+  return conflictingEditsDiagnostic(value) ?? evidenceDiagnostic(value.evidence) ??
+    (value.statuses !== undefined ? statusEditsDiagnostic(value.statuses) : null) ??
+    (value.omit !== undefined ? omissionEditsDiagnostic(value.omit) : null) ??
+    (value.plan !== undefined && value.plan !== null ? referenceDiagnostic(value.plan) : null);
+};
+
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (!isRecord(value) || !hasExactKeys(value,
-    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "evidence"])) return null;
+    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "statuses", "omit", "evidence"])) return null;
   if (!isId(value.operationId) || !isId(value.workflowId) || !Number.isSafeInteger(value.expectedRevision) ||
     (value.expectedRevision as number) < 1 || value.status !== undefined && !isStatus(value.status) ||
     value.objective !== undefined && !(value.objective === null || isText(value.objective, workflowMutationLimits.maxTextLength)) ||
@@ -479,17 +579,10 @@ const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
     value.sourceBinding !== undefined && !validSourceBindingInput(value.sourceBinding) ||
     value.requirements !== undefined && !validRequirementInput(value.requirements) ||
     value.issues !== undefined && !validIssueInput(value.issues) ||
-    value.plan !== undefined && value.plan !== null && !validPlanRequest(value.plan)) return null;
-  if (value.evidence !== undefined) {
-    if (!Array.isArray(value.evidence) || value.evidence.length > workflowMutationLimits.maxEvidencePerApply) return null;
-    for (const item of value.evidence) {
-      if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", "sourceThreadId", "sourceRunId", "sourceMessageId", "sourceItemId"]) ||
-        !["status_changed", "note", "observation"].includes(String(item.kind)) ||
-        !isText(item.note, workflowMutationLimits.maxTextLength) ||
-        !isNullableId(item.targetNodeId) || !isNullableId(item.sourceThreadId) || !isNullableId(item.sourceRunId) ||
-        !isNullableId(item.sourceMessageId) || !isNullableId(item.sourceItemId)) return null;
-    }
-  }
+    value.plan !== undefined && value.plan !== null && !validPlanRequest(value.plan) ||
+    conflictingEditsDiagnostic(value) || evidenceDiagnostic(value.evidence) ||
+    value.statuses !== undefined && statusEditsDiagnostic(value.statuses) ||
+    value.omit !== undefined && omissionEditsDiagnostic(value.omit)) return null;
   return value as WorkflowApplyPatch;
 };
 
@@ -530,20 +623,24 @@ const parseWritePayload = (value: unknown): ParsedInput => {
     const validApplies = applyIds === undefined || Array.isArray(applyIds) && applyIds.length >= 1 && applyIds.length <= reviewLimits.maxApplies &&
       applyIds.every(id => isId(id)) && new Set(applyIds).size === applyIds.length;
     // a reason is required where the outcome needs one; applies are cited by progress_updated and only by it
-    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "requestId", "outcome"], [...authorityKeys, "reason", "applyOperationIds"]) ||
+    const wait = value.wait;
+    const validWait = wait === undefined || isRecord(wait) && hasExactKeys(wait, ["waitingOn", "resumesWhen"]) &&
+      reviewWaitOwners.includes(wait.waitingOn as typeof reviewWaitOwners[number]) && isText(wait.resumesWhen, reviewLimits.maxWaitTriggerLength);
+    if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "requestId", "outcome"], [...authorityKeys, "reason", "applyOperationIds", "wait"]) || !validWait ||
       !isId(value.operationId) || !isId(value.requestId) || outcome === undefined || !validApplies ||
       value.reason !== undefined && !isText(value.reason, reviewLimits.maxReasonLength) ||
       (outcome === "needs_attention" || outcome === "insufficient_evidence") && value.reason === undefined ||
       (outcome === "progress_updated") !== (applyIds !== undefined))
       return {ok: false, reason: "invalid_record_review", ...(isId(value.operationId) ? {operationId: value.operationId} : {})};
     return {ok: true, value: {...locator, action: "record_review", operationId: value.operationId, requestId: value.requestId, outcome,
-      ...(typeof value.reason === "string" ? {reason: value.reason} : {}), ...(applyIds !== undefined ? {applyOperationIds: applyIds as string[]} : {})}};
+      ...(typeof value.reason === "string" ? {reason: value.reason} : {}), ...(applyIds !== undefined ? {applyOperationIds: applyIds as string[]} : {}),
+      ...(isRecord(wait) ? {wait: {waitingOn: wait.waitingOn as typeof reviewWaitOwners[number], resumesWhen: wait.resumesWhen as string}} : {})}};
   }
   if (value.action === "apply") {
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"], authorityKeys))
       return {ok: false, reason: "invalid_apply"};
     const input = parseApplyInput(value.input);
-    const diagnostic = !input && isRecord(value.input) ? referenceDiagnostic(value.input.plan) : null;
+    const diagnostic = input ? null : applyInputDiagnostic(value.input);
     return input ? {ok: true, value: {...locator, action: "apply", input}} : {ok: false,
       reason: "invalid_apply_input", ...(isRecord(value.input) && isId(value.input.operationId) ? {operationId: value.input.operationId} : {}),
       ...(diagnostic ? {diagnostic} : {})};
@@ -555,6 +652,12 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
   if (!isRecord(value) || !hasExactKeys(value, ["supervisorThreadId", "bindingGeneration"],
     ["view", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
+  // the compact status view pages the same workflows as a document read
+  if (value.view === "status") {
+    const documents = parseReadPayload(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "view")));
+    return documents.ok && ["lineageOffset", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined)
+      ? {ok: true, value: {...documents.value, view: "status"}} : {ok: false, reason: "invalid_read_arguments"};
+  }
   if (value.view !== undefined) {
     if (!locator || !["context", "definitions", "instructions", "interpretation", "check"].includes(String(value.view)) ||
       value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(id => isId(id))) ||
@@ -580,6 +683,12 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
   }};
 };
 
+const workflowStatusViewNote = "Statuses record formal progress: in a sequence a member is entered only after the earlier applicable members are " +
+  "completed, and a workflow is entered with the member that is actually underway. Edit statuses with apply statuses and status_changed " +
+  "evidence per changed nodeId; record early, preparatory or diagnostic work as an observation. A not-applicable member is never completed: " +
+  "a member a flexible workflow declares is omitted through an agreed proposal and apply omit, and a planned fixed member gets not_applicable " +
+  "evidence. Read the full document only for descriptions or history.";
+
 const currentNativeScope = (threads: readonly ThreadInfo[], owner: WorkflowOwner, ownedThreadIds: ReadonlySet<string>): NativeScope | null => {
   const resolution = resolveSupervisorScope(threads, owner.projectId, owner.mainThreadId, ownedThreadIds);
   return resolution.complete && resolution.main && resolution.liveIds.has(owner.mainThreadId)
@@ -601,7 +710,7 @@ const isSuccessfulResult = (result: WorkflowWriteResult): boolean =>
   result.status === "created" || result.status === "applied" || result.status === "exists" || result.status === "recorded";
 
 /** Bounds of record_review: the applies a progress outcome cites and its reason. */
-export const reviewLimits = {maxApplies: 20, maxReasonLength: 1_000} as const;
+export const reviewLimits = {maxApplies: 20, maxReasonLength: 1_000, maxWaitTriggerLength: 300} as const;
 
 const operationIdOf = (value: WorkflowWritePayload): string =>
   value.action === "apply" ? value.input.operationId : value.operationId;
@@ -621,6 +730,8 @@ const locatorProperties = {
   bindingGeneration: {type: "integer", minimum: 1, maximum: maxBindingGeneration},
 };
 const nullableTextSchema = (maxLength: number): Record<string, unknown> => ({anyOf: [{type: "string", maxLength}, {type: "null"}]});
+const nativeReferenceSchema = {type: "string", minLength: 1, maxLength: workflowMutationLimits.maxNativeReferenceLength,
+  description: "An exact opaque native T3 ID copied verbatim."};
 const workflowPlanDefinitions = {
   group: {
     type: "object", additionalProperties: false, required: ["kind", "nodes"], properties: {
@@ -703,16 +814,26 @@ const applyInputSchema = {
       },
     }},
     plan: workflowPlanSchema,
+    statuses: {type: "array", minItems: 1, maxItems: maxStatusEditsPerApply,
+      description: "Explicit status edits of existing step or workflow occurrences, applied to the current plan; each changed status needs status_changed evidence for its nodeId. Do not combine with plan.",
+      items: {type: "object", additionalProperties: false, required: ["nodeId", "status"], properties: {
+        nodeId: idSchema(64), status: {type: "string", enum: workflowExecutionStatuses},
+      }}},
+    omit: {type: "array", minItems: 1, maxItems: maxStatusEditsPerApply,
+      description: "Agreed omissions of existing, unstarted flexible-workflow members that the operative's accepted current proposal omits; the service derives their provenance and keeps them visible as not applicable. Do not combine with plan.",
+      items: {type: "object", additionalProperties: false, required: ["nodeId", "reason"], properties: {
+        nodeId: idSchema(64), reason: textSchema(maxPlanReasonLength),
+      }}},
     note: textSchema(workflowMutationLimits.maxTextLength),
     evidence: {type: "array", maxItems: workflowMutationLimits.maxEvidencePerApply, items: {
       type: "object", additionalProperties: false, required: ["kind", "note"], properties: {
-        kind: {type: "string", enum: ["status_changed", "note", "observation"]},
+        kind: {type: "string", enum: ["status_changed", "note", "observation", "not_applicable"]},
         note: textSchema(workflowMutationLimits.maxTextLength),
         targetNodeId: {anyOf: [idSchema(), {type: "null"}]},
-        sourceThreadId: {anyOf: [idSchema(), {type: "null"}]},
-        sourceRunId: {anyOf: [idSchema(), {type: "null"}]},
-        sourceMessageId: {anyOf: [idSchema(), {type: "null"}]},
-        sourceItemId: {anyOf: [idSchema(), {type: "null"}]},
+        sourceThreadId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
+        sourceRunId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
+        sourceMessageId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
+        sourceItemId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
       },
     }},
   },
@@ -804,8 +925,8 @@ export const workflowReadToolDefinition = {
       workflowOffset: {type: "integer", minimum: 0, maximum: 10_000},
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
-      view: {type: "string", enum: ["context", "definitions", "instructions", "interpretation", "check"],
-        description: "Omit for workflow documents. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: a manifest, or exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
+      view: {type: "string", enum: ["status", "context", "definitions", "instructions", "interpretation", "check"],
+        description: "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: a manifest, or exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
       includeSources: {type: "boolean", description: "With view definitions: also return raw definition source files, for diagnosing invalid or incomplete definitions."},
       record: {type: "object", description: "With view check: the exact compact workflow-proposal record to validate."},
@@ -837,6 +958,9 @@ export const workflowWriteToolDefinition = {
       outcome: {type: "string", enum: reviewOutcomes},
       reason: textSchema(reviewLimits.maxReasonLength),
       applyOperationIds: {type: "array", minItems: 1, maxItems: reviewLimits.maxApplies, uniqueItems: true, items: idSchema()},
+      wait: {type: "object", additionalProperties: false, required: ["waitingOn", "resumesWhen"],
+        description: "With record_review: an explicit current wait when the main has stopped with agreed work unfinished: who must act (requester or external, never the operative's own unfinished action) and what resumes the work.",
+        properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength)}},
     },
     oneOf: [
       {properties: {action: {const: "ensure_main"}}, required: ["operationId", "note"]},
@@ -879,7 +1003,7 @@ const withToolDeadline = <A, E>(cancel: WorkflowCallCancel | undefined, body: (c
 
 export interface WorkflowWriteControllerShape {
   readonly read: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult, SupervisionStoreError>;
-  readonly readTool: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult | SupervisorContextViewResult, SupervisionStoreError>;
+  readonly readTool: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowReadResult | SupervisorContextViewResult | WorkflowStatusViewResult, SupervisionStoreError>;
   readonly write: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowWriteResult, SupervisionStoreError>;
   /** Native Start reserves nothing until the exact own-thread tool call is verified. */
   readonly startSupervision: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<SupervisionStartResult, SupervisionStoreError>;
@@ -1228,7 +1352,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (payload.outcome === "no_change" && written.changed) return denied("review_no_change_after_edit");
     yield* conversationRequests.saveRequest({...request, reviewOutcome: {outcome: payload.outcome, reason: payload.reason ?? null, applies,
       itemId: evidence.itemId, runId: evidence.runId, ordinal: evidence.ordinal, operationId: payload.operationId, recordedAt: now,
-      state: "recorded", problem: null}});
+      state: "recorded", problem: null, ...(payload.wait ? {wait: payload.wait} : {})}});
     return {status: "recorded", operationId: payload.operationId, requestId: request.id, outcome: payload.outcome};
   });
 
@@ -1306,6 +1430,22 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       sourceHash: validation.expectedSourceHash,
     };
     const effectiveSourceBinding = payload.input.sourceBinding ?? sourceBinding;
+    // statuses and omit edit the current CAS document's plan; the merged plan then takes the ordinary canonical and store path
+    let editedPlan = current.plan;
+    if (payload.input.omit) {
+      const omitted = editedPlan ? withOmissions(editedPlan, payload.input.omit) : {index: 0, problem: "unknown" as const};
+      if ("problem" in omitted) return {status: "invalid", operationId: payload.input.operationId, reason: "invalid_plan_edit",
+        diagnostic: {code: omitted.problem === "unknown" ? "omission_invalid" : "omission_not_allowed", path: `/input/omit/${omitted.index}`,
+          expected: omissionProblemExpected[omitted.problem]}};
+      editedPlan = omitted.plan;
+    }
+    if (payload.input.statuses) {
+      const edited = editedPlan ? withOccurrenceStatuses(editedPlan, payload.input.statuses) : {unknownIndex: 0};
+      if ("unknownIndex" in edited) return {status: "invalid", operationId: payload.input.operationId, reason: "invalid_plan_edit",
+        diagnostic: {code: "status_edit_unknown_node", path: `/input/statuses/${edited.unknownIndex}/nodeId`,
+          expected: "the nodeId of an existing step or workflow occurrence in the current plan"}};
+      editedPlan = edited.plan;
+    }
     const applyInput: WorkflowApplyInput = {
       operationId: internalOperationId,
       workflowId: payload.input.workflowId,
@@ -1316,7 +1456,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       sourceBinding: effectiveSourceBinding,
       requirements: payload.input.requirements ?? (current.threadId === owner.mainThreadId ? [...original.requirements] : []),
       issues: payload.input.issues ?? [...original.issues],
-      plan: payload.input.plan === undefined ? current.plan : payload.input.plan,
+      plan: payload.input.plan === undefined ? editedPlan : payload.input.plan,
       note: payload.input.note,
       ...(payload.input.evidence !== undefined ? {evidence: validatedEvidence ?? payload.input.evidence} : {}),
     };
@@ -1338,6 +1478,18 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (!canonical) return {status: "invalid", operationId: applyInput.operationId, reason: "pinned_definition_context_mismatch",
       ...(canonicalDiagnostic.value ? {diagnostic: canonicalDiagnostic.value} : {})};
     const normalizedInput: WorkflowApplyInput = {...applyInput, plan: canonical.plan, requirements: [...canonical.requirements], issues: [...canonical.issues]};
+    // a new not-applicable omission of the main workflow must first be agreed: the operative accepted the current proposal, which
+    // records the same omission for the same occurrence
+    if (current.threadId === owner.mainThreadId) {
+      const before = planOmissionKeys(current.plan);
+      const agreement = validation.acceptedTaskAgreement;
+      const negotiated = agreement?.status === "agreed" && agreement.proposalId === validation.expectedProposalId &&
+        validation.acceptedTaskAgreementSourceHash === validation.expectedSourceHash ? planOmissionKeys(agreement.workflow.plan) : new Set<string>();
+      if ([...planOmissionKeys(canonical.plan)].some(key => !before.has(key) && !negotiated.has(key)))
+        return {status: "invalid", operationId: payload.input.operationId, reason: "invalid_plan_edit",
+          diagnostic: {code: "omission_not_negotiated", path: payload.input.omit ? "/input/omit" : "/input/plan",
+            expected: "publish a revised proposal that omits this member with its reason, then apply the omission once the operative accepted that proposal"}};
+    }
     const previousNodes = new Map(planEntities(current.plan).map(node => [node.nodeId, new Set(node.contributorThreadIds)] as const));
     const nextNodes = planEntities(normalizedInput.plan);
     for (const node of nextNodes) {
@@ -1352,7 +1504,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     }
     const result = yield* workflows.apply(owner, normalizedInput, validation, now);
     if (result.status === "invalid" && result.diagnostic)
-      return {...result, diagnostic: {...result.diagnostic, path: submittedApplyPointer(payload.input.plan, result.diagnostic.path)}, operationId: payload.input.operationId};
+      return {...result, diagnostic: {...result.diagnostic, path: payload.input.plan === undefined
+        ? statusEditPointer(normalizedInput.plan, result.diagnostic.path, payload.input.statuses ?? [])
+        : submittedApplyPointer(payload.input.plan, result.diagnostic.path)}, operationId: payload.input.operationId};
     return {...result, operationId: payload.input.operationId};
   }));
 
@@ -1696,13 +1850,24 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   });
 
   /** The MCP workflow_read entry: bounded context views for the verified binding, or the workflow documents. */
-  const readTool = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult | SupervisorContextViewResult, SupervisionStoreError> {
+  const readTool = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult | SupervisorContextViewResult | WorkflowStatusViewResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
     const parsed = parseReadPayload(input);
     if (!parsed.ok) return {status: "invalid", reason: parsed.reason};
     if (!parsed.value.view) return yield* read(input, cancel);
+    if (parsed.value.view === "status") {
+      const documents = yield* read(Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "view")), cancel);
+      if (documents.status !== "ok") return documents;
+      return {status: "ok", view: "status", mainTaskAgreementStatus: documents.mainTaskAgreementStatus,
+        statusNote: workflowStatusViewNote, workflowOffset: documents.workflowOffset, workflowHasMore: documents.workflowHasMore,
+        workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => ({workflowId: document.workflowId, threadId: document.threadId,
+          parentWorkflowId: document.parentWorkflowId, revision: document.revision, status: document.status,
+          occurrences: planStatusOutline(document.plan, documentBranchSelections(document), notApplicableSubtrees(document.plan, documentBranchSelections(document),
+            notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))),
+          pendingBranchDecisions: pending.map(item => item.nodeId)}))};
+    }
     const binding = yield* resolveBinding(parsed.value, false, parsed.value.view === "context" ? "status" : "read");
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};

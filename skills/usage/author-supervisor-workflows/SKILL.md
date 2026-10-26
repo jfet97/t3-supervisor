@@ -156,7 +156,12 @@ the product Guide for the reference contract.
 
 Separate `required: true`, fixed structure and `default_workflow`. Account for
 requirements once per main task, including nested reuse. Genuine inapplicability needs a
-reason; unavailable resources are gaps. Do not invent schema fields or a second
+reason; unavailable resources are gaps. In a flexible workflow it becomes a negotiated
+omission shown as not applicable; fixed members are never omitted. Say in a conditional
+step's description that applicability is decided when the work reaches it. Use
+`sequence:` for phases whose recorded progress follows each other and `parallel:` where
+overlap is intended; obligations a later phase starts early, such as a draft pull
+request, are evidence for it, not its start. Do not invent schema fields or a second
 required list.
 
 Let an iterative workflow's description own repetition and completion; callers reference
