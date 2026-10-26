@@ -61,8 +61,11 @@ behavior needs a corresponding change to this policy; a hard-coded test of the
 current release number would invalidate the equivalence on which skipping rests.
 Package and container smoke checks exercise the actual new version end to end.
 
-**Prepare version** explicitly dispatches CI with `validation: auto`. A manual
-**Check Supervisor** dispatch defaults to `validation: full`; choose `auto` only
+**Prepare version** uses the configured [GitHub App](../RELEASING.md#version-bot-authentication)
+for branch pushes and PR creation/updates. Its normal pull-request event starts CI
+automatically; no duplicate dispatch or workflow approval is needed. Same-repository
+version PRs request the bounded release proof above. A manual **Check Supervisor**
+dispatch defaults to `validation: full`; choose `auto` only
 when requesting the same bounded release proof. That input cannot fast-track
 ordinary branches or changes that fail eligibility. The job summary links the full
 baseline run and records the version change. The first PR implementing this policy
