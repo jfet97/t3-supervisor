@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.8
+
+### Patch Changes
+
+- 6b9c8dc: Workflow progress now stays honest and cheaper to maintain. A plan's nested steps are updated together with their workflow and the task, later sequence steps are not marked started while earlier ones are open, a workflow or task is completed only when its applicable steps are, and early drafts or diagnostic runs are kept as evidence on the later step instead of advancing it. A step that does not apply is never shown as completed: a flexible workflow's step is omitted through a plan the operative accepted, and a fixed workflow's step, or a whole workflow inside it, is labelled Not applicable for the current task and holds up nothing after it. The Supervisor can update several statuses in one small edit and read a compact status view instead of resending and rereading the whole plan, and long native activity IDs no longer reject an edit. Introductions list each supporting reference once, and a scope-only change sends a short update with the new acceptance record. When the main chat is idle with unfinished agreed work, the Supervisor stays out of standby unless its last review recorded a current wait for the requester or another party.
+
 ## 0.0.7
 
 ### Patch Changes
