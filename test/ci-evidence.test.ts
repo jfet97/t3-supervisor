@@ -131,8 +131,6 @@ it.effect("the actual scope adapter preserves default full dispatch and selects 
     assert.equal(outputs.needed, expected);
   }
   assert.equal(workflow.on.workflow_dispatch.inputs.validation.default, "full");
-  const version = parse(readFileSync(new URL("../.github/workflows/version.yml", import.meta.url), "utf8"));
-  assert.match(version.jobs.version.steps.at(-1).with.script, /validation: 'auto'/u);
 }));
 
 it.live("the actual aggregate shell rejects missing proof, skipped static, failed suites and unknown modes", () => Effect.sync(() => {

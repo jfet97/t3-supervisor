@@ -14,14 +14,30 @@ changeset. Every Effect package remains exactly pinned independently of app vers
 
 With `RELEASE_VERSIONING_ENABLED=true`, **Prepare version** collects the notes in
 a `changeset-release/main` PR, bumps `package.json`, updates `CHANGELOG.md` and
-consumes the notes. It explicitly dispatches required CI on that branch. The
-version PR is reviewed and merged manually; the workflow never enables auto-merge.
-Its automatic CI dispatch requests the narrow [release metadata fast track](docs/ci.md#release-metadata-fast-track):
+consumes the notes. Its GitHub App token lets the normal pull-request event start
+required CI automatically, without a separate workflow approval or duplicate dispatch.
+The version PR is reviewed and merged manually; the workflow never enables auto-merge.
+The version PR requests the narrow [release metadata fast track](docs/ci.md#release-metadata-fast-track):
 a generated version/changelog/consumed-note change may reuse directly verified
 full validation of its parent on main. Static checks, build, package and container
 smoke checks still run on the new version, and the required aggregate `check`
 always runs. Any other change or uncertain evidence selects all four main shards
 and the harness too. Manual **Check Supervisor** dispatches default to full checks.
+
+### Version bot authentication
+
+Install a private GitHub App on this repository with **Contents: Read and write**
+and **Pull requests: Read and write**. Webhooks and user authorization are not needed.
+Set the repository Actions variable `RELEASE_APP_CLIENT_ID` to its Client ID and
+the Actions secret `RELEASE_APP_PRIVATE_KEY` to the entire generated PEM private key.
+
+**Prepare version** runs only on main and creates a short-lived installation token
+scoped to this repository and those two permissions. The same token authenticates
+checkout, branch pushes and PR creation/updates; the action revokes it when the job
+ends. Its built-in `GITHUB_TOKEN` needs only read access to contents. Missing App
+configuration fails version preparation rather than reverting to approval-required
+bot runs. This App does not approve or merge PRs, and registry publication retains
+its separate credentials, environment and approval gates.
 
 ## Channels
 

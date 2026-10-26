@@ -10,9 +10,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
-  actions: write
+  contents: read
 
 jobs:
   version:
@@ -20,9 +18,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Create release token
+        uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
       - uses: ./.github/actions/setup-dependencies
       - uses: changesets/action@v1
         id: changesets
@@ -32,19 +39,18 @@ jobs:
           commit: Prepare next release
           createGithubReleases: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Run required CI on the version branch
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Describe version pull request
         if: ${{ steps.changesets.outputs.pullRequestNumber != '' }}
         uses: actions/github-script@v8
         env:
           PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
         with:
+          github-token: ${{ steps.app-token.outputs.token }}
           script: |
-            // dispatch explicitly because token-created PR workflows may require approval
             const { data: pr } = await github.rest.pulls.get({ ...context.repo, pull_number: Number(process.env.PR_NUMBER) });
             const { data: manifest } = await github.rest.repos.getContent({ ...context.repo, path: 'package.json', ref: pr.head.sha });
             const { version } = JSON.parse(Buffer.from(manifest.content, 'base64').toString('utf8'));
             if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error('invalid version PR manifest');
             const body = `## Why\n\nMake the accumulated changes available as a stable release.\n\n## What\n\nRelease ${version}. See the [release notes](https://github.com/${context.repo.owner}/${context.repo.repo}/blob/${pr.head.sha}/CHANGELOG.md).\n\n## How\n\nUpdate the application version and collect the pending notes in the changelog.\n\n## Remarks\n\nMerging approves stable publication after successful main CI, when publishing is enabled. Running services are upgraded separately.`;
             await github.rest.pulls.update({ ...context.repo, pull_number: pr.number, title: `Release ${version}`, body });
-            await github.rest.actions.createWorkflowDispatch({ ...context.repo, workflow_id: 'check.yml', ref: pr.head.ref, inputs: { validation: 'auto' } });
