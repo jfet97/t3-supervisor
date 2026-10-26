@@ -1,5 +1,13 @@
 # T3 Supervisor
 
+## 0.0.11
+
+### Patch Changes
+
+- ed2ebed: A Supervisor can no longer mistake a checked plan for a published one. The workflow check used to return acceptance coordinates for a proposal that was never published, so an agent could accept a plan the service had not recorded and agreement silently failed. The check now writes nothing, says whether that exact proposal is published, and until it is returns the exact block the Supervisor must put in its final answer, the only way to publish. The Supervisor's standing instructions state this rule briefly on every turn, later turns no longer suggest the full instructions were already read, and an attempt to change the agreed plan through a workflow edit is answered with the same next step. Acceptance checks are unchanged. The Supervisor is also told concretely to read the conversation from the item references it is given, in small pieces and forward from its last read, instead of rereading whole conversations in large pages, and to send the agent only brief, specific changes or questions rather than copies of plans, definitions or notices the service already delivers. Its full instructions no longer contain a second copy of the short version.
+
+  A stopped chat can also be resumed by asking its Supervisor directly in the Supervisor conversation. The Supervisor cites your latest message, only that chat's Stop is lifted, master and project switches stay as they are, and the same Supervisor continues the current task immediately without waiting for a new request in the chat. Requests written before the Stop, relayed text and older messages are refused, and retrying an old request after a newer Stop changes nothing. Supervisors started before this update learn the new action from the stopped view. The dashboard's Enable keeps its existing behavior of supervising the chat's next request.
+
 ## 0.0.10
 
 ### Patch Changes
