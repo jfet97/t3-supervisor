@@ -38,11 +38,17 @@ const catalogNames = ["Design the approach", "Data and rollout plan", "Implement
 const authorized = (outcome: string) => ({draft: {objective: outcome, constraints: [], questions: [], findings: [], duties: []}, intent: "authorize", outcome,
   limits: [], sourceMessageIds: [sourceMessageId], antecedentMessageIds: [], scope: "changed"});
 // one requested outcome, interpreted through the real submission and supervisor cycle
-const interpret = (request: string, outcome: string, fields: Record<string, unknown>) => Effect.gen(function* () {
+const interpret = (request: string, outcome: string, fields: Record<string, unknown>, options: {contactable?: boolean} = {}) => Effect.gen(function* () {
   const fixture = yield* makeWorkflowFixture(catalog());
   fixture.projections.get(sourceThreadId)!.messages[0]!.text = request;
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.cycle;
+  if (options.contactable) {
+    // both conversations use native modes that permit Supervisor contact, and the operative has no pending owner question
+    for (const projection of [fixture.projections.get(sourceThreadId)!, fixture.projections.get((yield* fixture.binding())!.threadId)!])
+      Object.assign(projection.thread, {runtimeMode: "full-access", interactionMode: "default"});
+    (fixture.projections.get(sourceThreadId)! as {runtimeRequests?: unknown[]}).runtimeRequests = [];
+  }
   const pending = (yield* fixture.task())!;
   yield* submitAndComplete(fixture, supervisor, pending, {objective: outcome, sourceMessageIds: [sourceMessageId], conversation: authorized(outcome), ...fields});
   yield* supervisor.cycle;
@@ -144,4 +150,16 @@ it.effect("a first proposal can leave members of a flexible workflow out, and an
       plan: {kind: "sequence", nodes: [{...omitted, omit: [{member: "rollout", reason: "Not involved."}]}]}}}));
   assert.equal(rejected.status, "invalid", JSON.stringify(rejected));
   assert.match(JSON.stringify(rejected), /"code":"workflow_omission_invalid","path":"\/workflow\/plan\/nodes\/0\/omit\/0\/member"/u);
+}));
+
+it.effect("a first proposal omitting a flexible member goes out to the operative in the cycle its real submission completes", () => Effect.gen(function* () {
+  const {fixture, task} = yield* interpret("Fix the export retry bug.", "Fix the export retry bug", {reason: "A behavior change.", supervision: "needed",
+    workflow: {requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The fix must be verified."}],
+      plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "change", reason: "An in-place behavior fix.",
+        omit: [{member: "data-and-rollout", reason: "No stored data or rollout is involved."}]}]}}}, {contactable: true});
+  assert.deepEqual([task.status, task.workflow?.status], ["inferred", "proposed"]);
+  const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
+  assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}:${task.sourceHash.slice(0, 20)}`,
+    "the recorded interpretation confirms the omitted-member proposal, so it is not held back");
+  assert.match(String(introduction?.payload.text), /not applicable: Data and rollout plan — No stored data or rollout is involved\./u);
 }));

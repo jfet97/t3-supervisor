@@ -7,10 +7,11 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Clock, Effect, Exit, FileSystem } from "effect";
+import { Clock, Effect, Exit, FileSystem, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
+import { WorkflowProposal } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
@@ -750,7 +751,7 @@ const installTaskDefinitions = Effect.fnUntraced(function* (fixture: Fixture, sn
   return task;
 });
 
-const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture) {
+const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture, omit?: ReadonlyArray<{member: string; reason: string}>) {
   const snapshot = nestedCatalogDefinitions();
   const current = (yield* fixture.projectStore.task(fixture.task.threadId))!;
   const prepared = prepareWorkflowRequest(current.threadId, current.sourceMessageId, sourceText, snapshot);
@@ -758,11 +759,12 @@ const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture) {
   const raw = {requirements: [{kind: "step", id: "scope", applies: true, reason: "Define the task."},
     {kind: "workflow", id: "review", applies: true, reason: "Review substantive changes."}],
   plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "scope", reason: "Start with scope."},
-    {kind: "workflow", definitionId: "change", reason: "Complete the requested change."}]}};
+    {kind: "workflow", definitionId: "change", reason: "Complete the requested change.", ...(omit ? {omit} : {})}]}};
   const plan = validateWorkflowPlan(raw, prepared.context);
   assert.ok(plan);
-  const task = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
-  assert.equal(interpretationPlanDigest(task.workflow), interpretationPlanDigest(plan), "the submission decodes to the validated plan");
+  const submitted = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
+  // the recorded submission payload is schema-decoded before it becomes the task's workflow, as the production finalization does
+  const task: TaskRecord = {...submitted, workflow: Schema.decodeUnknownSync(WorkflowProposal)(submitted.workflow)};
   yield* fixture.projectStore.saveTask(task);
   fixture.setDefinitions(snapshot);
   return task;
@@ -804,6 +806,63 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   yield* observeAgreement(fixture, clock.now + 30_000);
   assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
   assert.equal((yield* fixture.workflows.get(projectId, operativeThreadId))?.sourceBinding?.proposalId, task.id);
+}));
+
+// the stored task is decoded by its schema, so an omission's fields arrive in schema order; the proposal must still go out and be agreed
+const preventOmission = [{member: "prevent", reason: "No defect or correction exposed a gap."}];
+it.effect("an initial interpretation that omits a flexible member is introduced and agreed like any other proposal", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
+  const task = yield* installNestedCatalog(fixture, preventOmission);
+  const stored = (yield* fixture.projectStore.task(task.threadId))!;
+  const change = stored.workflow!.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change");
+  assert.deepEqual(change?.kind === "workflow" ? change.omissions.map(item => [item.id, item.reason]) : null, [["prevent", "No defect or correction exposed a gap."]]);
+
+  const callsBefore = fixture.calls.length;
+  yield* fixture.run();
+  const pending = yield* fixture.conversation.requests.introduction(task.id);
+  assert.notEqual(pending?.state, "blocked", pending?.error ?? "");
+  assert.deepEqual(fixture.calls.slice(callsBefore).map(call => call.payload.threadId), [operativeThreadId], "one native send: the introduction");
+  const acceptance = preparedAcceptanceRecord((yield* fixture.projectStore.task(task.threadId))!);
+  assert.ok(acceptance);
+  assert.equal((yield* fixture.conversation.requests.agreementCandidate(task.id, task.id))?.planHash, acceptance.digest);
+  yield* fixture.run();
+  const introduction = (yield* fixture.conversation.requests.introduction(task.id))!;
+  assert.equal(introduction.state, "sent");
+  assert.match(introduction.text, /not applicable: Check prevent — No defect or correction exposed a gap\./u);
+  assert.ok(introduction.text.includes(workflowFence("workflow-acceptance", acceptance)));
+  const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
+  const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
+  appendMessageToRun(fixture.operative, operativeRun, {id: "omission-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
+  completeRun(fixture.operative, operativeRun, "Accepted the current workflow.", clock.now);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
+  const live = (yield* fixture.workflows.get(projectId, operativeThreadId))!;
+  assert.equal(live.sourceBinding?.proposalId, task.id);
+  const liveChange = live.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change");
+  assert.deepEqual(liveChange?.kind === "workflow" ? liveChange.omissions.map(item => item.id) : null, ["prevent"], "the agreed omission reaches the live plan");
+}));
+
+it.effect("a stored initial plan that no longer matches its validated form is never introduced, even when its evidence digest agrees", () => Effect.gen(function* () {
+  for (const variant of ["identity", "digest"] as const) {
+    const clock = yield* pinnedClock(baseTime);
+    const fixture = yield* makeFixture(clock, {operativeActive: false});
+    const task = yield* installNestedCatalog(fixture, preventOmission);
+    // an omission reason the validator normalizes differs in value from what it stores; the identity variant also re-pins the evidence
+    // to the altered plan, so only the plan identity can refuse it
+    const workflow = structuredClone(task.workflow!);
+    const change = workflow.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change")!;
+    if (change.kind === "workflow") change.omissions = change.omissions.map(item => ({...item, reason: `  ${item.reason}  `}));
+    const evidence = task.interpretationEvidence!;
+    const tampered: TaskRecord = {...task, workflow, ...(variant === "identity" ? {interpretationEvidence: {...evidence, planDigest: interpretationPlanDigest(workflow)!}} : {})};
+    yield* fixture.projectStore.saveTask(tampered);
+    const callsBefore = fixture.calls.length;
+    yield* fixture.run();
+    yield* fixture.run();
+    assert.equal(fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId).length, 0, `${variant}: nothing reaches the operative`);
+    assert.equal(yield* fixture.conversation.requests.agreementCandidate(task.id, task.id), null, `${variant}: no acceptance candidate`);
+    assert.equal((yield* fixture.conversation.requests.introduction(task.id))?.state, "blocked", variant);
+  }
 }));
 
 it.effect("invalid oversized definitions keep provisional initialization compact while the reader serves every source completely", () => Effect.gen(function* () {
