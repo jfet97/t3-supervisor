@@ -170,7 +170,10 @@ operative corrected anything.
 
 ## Stopping supervision of one chat
 
-- Use the selected chat's Stop supervision button in its Supervision view; Enable supervision resumes it.
+- Use the selected chat's Stop supervision button in its Supervision view; Enable supervision resumes it with the
+  chat's next request.
+- To resume at once, ask the stopped Supervisor in its own conversation; it calls `supervision_start` with your
+  message and continues the same task. The master and project switches stay as they are.
 - In the Supervisor conversation, ask it to stop; it calls `supervision_stop` itself.
 - In the supervised chat, ask the assistant to tell its Supervisor; the Supervisor cites your original message.
 - From another chat in the same T3 environment, name the exact chat ID in your request; that chat's assistant calls

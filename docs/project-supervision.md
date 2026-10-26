@@ -207,9 +207,11 @@ authorized outcome promptly (earlier work may already exist; the Supervisor cann
 tools), the objective, the `.t3-supervisor/project.yaml` entry point and the exact
 `supervision_plan` call that returns its complete current proposal with the outline and
 the acceptance record. It reads that proposal on demand, also after agreement, and asks
-its Supervisor for the outline only when it cannot call the tool. Wakes carry the full standing instructions once per
-version and afterwards a compact core with their version; full instructions, task
-context, definitions and dry-run checks are pulled on demand. Each wake row has one
+its Supervisor for the outline only when it cannot call the tool. Wakes carry the compact standing core once per
+version and afterwards a short pointer to it; the full reference, task context,
+definitions and dry-run checks are pulled on demand. The core names how to read native
+evidence from the supplied item references, small and forward from the last read, and
+limits messages to the operative to brief deltas or questions with source references. Each wake row has one
 activity list and per-task context with revision pins, proposal identity and digest,
 agreement and repair state. Oversized requests stop before delivery with a visible
 reason in the conversation's Task view; pending activity and uncertain delivery identities remain
@@ -260,7 +262,11 @@ revisions the author observed; a draft authored against another revision is reje
 with the current value, never rebound. The service derives workspace, names,
 descriptions, sources and template paths from the trusted context and canonicalizes
 deterministically, so `workflow_read` view `check` returns the same digest before
-publication. A proposal ID is immutable: different content under the same ID is a
+publication. Check writes nothing and gives no acceptance coordinates: a proposal is
+published only as its block in the Supervisor's completed final answer, which check
+returns until that exact proposal is the current recorded candidate, and only a
+published proposal can be accepted. A `workflow_write` apply that changes the main plan
+without an accepted proposal is refused with that same next step. A proposal ID is immutable: different content under the same ID is a
 conflict. An unchanged proposal is reused by its exact `{taskId, proposalId, digest}`
 from view `context`, never rebuilt (a rebuilt draft gets different node IDs); only a
 changed plan gets a fresh proposal ID. `objective` restates the task from cited genuine user message IDs and
@@ -456,6 +462,11 @@ can be retried explicitly. Notice wording never asks the operative to resume wor
 Historical exclusions are not backfilled. A crash between the separate policy save and
 notice reservation can leave a stopped chat without a notice; Stop remains effective.
 Notice delivery also runs while supervision is disabled and does not hold settlement.
+A genuine human may ask the stopped Supervisor directly, in its own conversation, to
+resume. It cites that latest message in `supervision_start`; the service lifts only
+that chat's Stop, within the unchanged master and project controls, and the same
+binding hands its retained task back at once. A dashboard Enable instead supervises
+the main's next human request.
 The owned Supervisor settles promptly on the next idle cycle, without the ordinary
 60-second quiet window, once every accepted delivery, the
 interpretation request included, has a confirmed native outcome; reconciliation of those

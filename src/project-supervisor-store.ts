@@ -30,7 +30,11 @@ export type SupervisorStopNotice = {messageId: string; commandId: string; stoppe
   state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "unconfirmed" | "superseded";
   text: string; visibilityMisses?: number; nextObserveAt?: number;
   dispatchMode?: {type: "steer_active"; targetRunId: string} | {type: "queue_after_active"}; rejectedAttempts?: Array<{messageId: string; commandId: string}>; error?: string | null};
-export type BindingRecord = SupervisorBinding & {stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number}};
+export type BindingRecord = SupervisorBinding & {stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number};
+  /** The direct human resume that lifted the latest Stop from this Supervisor's own conversation; any later Stop or Enable replaces it. */
+  supervisionResume?: SupervisionResume};
+/** A genuine human's direct request in the bound Supervisor conversation to resume its stopped main, as its verified supervision_start cited it. */
+export type SupervisionResume = {callerThreadId: string; userMessageId: string; operationId: string; resumedAt: number};
 /** One immutable notice body and native identity for an explicit Stop period; the identities come from SupervisorIds. */
 export const prepareStopNotice = (ids: SupervisorIds["Service"], binding: Pick<BindingRecord, "threadId">, stoppedAt: number, enabledAt: number | null): Effect.Effect<SupervisorStopNotice> =>
   Effect.map(Effect.all([ids.uuid, ids.uuid]), ([messageUuid, commandUuid]) => ({
@@ -148,7 +152,8 @@ export interface ProjectSupervisorStoreShape {
   readonly bindings: () => StoreEffect<BindingRecord[]>;
   readonly reserve: (projectId: string, mainThreadId: string, title: string, selection: SupervisorModelSelection, watermark: number, now: number) => StoreEffect<BindingRecord>;
   readonly setBinding: (value: BindingRecord) => StoreEffect<void>;
-  readonly setSupervisionStop: (binding: BindingRecord, stop: SupervisionStop | null) => StoreEffect<void>;
+  /** Records a Stop, or lifts it by an Enable or, with `resume`, by a direct human resume; any later Stop or Enable clears an earlier resume. */
+  readonly setSupervisionStop: (binding: BindingRecord, stop: SupervisionStop | null, resume?: SupervisionResume | null) => StoreEffect<void>;
   readonly setStopNotice: (binding: BindingRecord, expectedMessageId: string | null, notice: SupervisorStopNotice) => StoreEffect<void>;
   readonly replaceMissingBinding: (binding: BindingRecord, selection: SupervisorModelSelection) => StoreEffect<BindingRecord>;
   readonly task: (threadId: string) => StoreEffect<TaskRecord | null>;
@@ -361,7 +366,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   const setBindingOf = Effect.fnUntraced(function* (value: BindingRecord) {
     const current = yield* bindingOf(value.projectId, value.mainThreadId);
     const next = {...value};
-    for (const key of ["stopNotice", "supervisionStop"] as const) {
+    for (const key of ["stopNotice", "supervisionStop", "supervisionResume"] as const) {
       if (current?.[key] !== undefined) Object.assign(next, {[key]: current[key]});
       else delete next[key];
     }
@@ -615,12 +620,14 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return value;
   }));
   const setBinding = (value: BindingRecord) => write(setBindingOf(value));
-  const setSupervisionStop = (value: BindingRecord, stop: SupervisionStop | null) => run(Effect.gen(function* () {
+  const setSupervisionStop = (value: BindingRecord, stop: SupervisionStop | null, resume: SupervisionResume | null = null) => run(Effect.gen(function* () {
     const previous = yield* bindingOf(value.projectId, value.mainThreadId);
     yield* stop
-      ? sql`UPDATE supervisor_main_bindings SET document=json_set(json_remove(document,'$.manualKeepActive','$.stopObservedAt'),'$.supervisionStop',json(${JSON.stringify(stop)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`
-      : sql`UPDATE supervisor_main_bindings SET document=json_remove(document,'$.supervisionStop','$.stopObservedAt') WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`;
-    yield* invalidate(projectKeys(value.projectId, value.mainThreadId), previous?.supervisionStop ?? null, stop);
+      ? sql`UPDATE supervisor_main_bindings SET document=json_set(json_remove(document,'$.manualKeepActive','$.stopObservedAt','$.supervisionResume'),'$.supervisionStop',json(${JSON.stringify(stop)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`
+      : resume
+        ? sql`UPDATE supervisor_main_bindings SET document=json_set(json_remove(document,'$.supervisionStop','$.stopObservedAt'),'$.supervisionResume',json(${JSON.stringify(resume)})) WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`
+        : sql`UPDATE supervisor_main_bindings SET document=json_remove(document,'$.supervisionStop','$.stopObservedAt','$.supervisionResume') WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`;
+    yield* invalidate(projectKeys(value.projectId, value.mainThreadId), [previous?.supervisionStop ?? null, previous?.supervisionResume ?? null], [stop, resume]);
   }));
   // the notice CAS on the stored messageId; `IS` makes an expected null match only an absent notice
   const setStopNotice = (value: BindingRecord, expectedMessageId: string | null, notice: SupervisorStopNotice) => run(Effect.gen(function* () {

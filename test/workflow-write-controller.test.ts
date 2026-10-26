@@ -6,7 +6,7 @@ import {fingerprint} from "../src/guidance-store.js";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
 import type {WorkflowAgreementImport} from "../src/workflow-state-contract.js";
-import {submittedApplyPointer, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch} from "../src/workflow-write-controller.js";
+import {changedPlanNext, submittedApplyPointer, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch} from "../src/workflow-write-controller.js";
 import {workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes} from "../src/workflow-write-evidence.js";
 import type {WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js";
 import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
@@ -771,7 +771,7 @@ it.effect("an unchanged-source accepted fixed workflow survives when the mutable
       ]), note: "Attempt to remove an accepted fixed occurrence on the unchanged source."});
     installEvidence(fixture, apply);
     assert.deepEqual(yield* fixture.controller.write(apply), {
-      status: "invalid", operationId: "accepted-fixed-omit", reason: "pinned_definition_context_mismatch",
+      status: "invalid", operationId: "accepted-fixed-omit", reason: "pinned_definition_context_mismatch", next: changedPlanNext,
     });
     const retained = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
     assert.equal(retained.revision, diverged.revision);
@@ -838,7 +838,7 @@ it.effect("a same-source accepted TaskRecord plan is protected when live agreeme
       ]), note: "Try to remove a same-source accepted fixed workflow before it has a live import."});
     installEvidence(fixture, removeAccepted);
     assert.deepEqual(yield* fixture.controller.write(removeAccepted), {
-      status: "invalid", operationId: "task-record-fixed-drop-same-source", reason: "pinned_definition_context_mismatch",
+      status: "invalid", operationId: "task-record-fixed-drop-same-source", reason: "pinned_definition_context_mismatch", next: changedPlanNext,
     });
 
     const editedSourceHash = fingerprint("The task request changed after its accepted agreement.");
@@ -898,7 +898,7 @@ it.effect("same task and definition pin preserve added fixed workflows across pr
       note: "Try to drop a fixed occurrence under a new proposal ID for the same task and source pin."});
     installEvidence(fixture, omitFixed);
     assert.deepEqual(yield* fixture.controller.write(omitFixed), {
-      status: "invalid", operationId: "fixed-pin-drop-same-source", reason: "pinned_definition_context_mismatch",
+      status: "invalid", operationId: "fixed-pin-drop-same-source", reason: "pinned_definition_context_mismatch", next: changedPlanNext,
     });
     const retained = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
     assert.equal(retained.revision, afterFirst.revision);
@@ -967,7 +967,7 @@ it.effect("a changed scope retains the same task's fixed commitments", () => Eff
       note: "Use the fresh task interpretation after the operative source message changed."});
     installEvidence(fixture, editedSourcePlan);
     const replaced = yield* fixture.controller.write(editedSourcePlan);
-    assert.deepEqual(replaced, {status: "invalid", operationId: "source-pin-replace-edited-task", reason: "pinned_definition_context_mismatch"});
+    assert.deepEqual(replaced, {status: "invalid", operationId: "source-pin-replace-edited-task", reason: "pinned_definition_context_mismatch", next: changedPlanNext});
     const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
     assert.equal(current.revision, committed.revision);
     assert.ok(planEntities(current.plan).some(node => node.nodeId === oldFixedNode.nodeId));
