@@ -152,12 +152,16 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
   const live = mode === "live";
   const current = live ? selections?.find(item => item.nodeId === node.nodeId && item.current) : undefined;
   const earlier = live && !current ? selections?.find(item => item.nodeId === node.nodeId) : undefined;
-  const pending = live && !current && reach !== "not_selected" && reach !== "undecided" && !notApplicable?.has(node.nodeId);
+  // inside an occurrence currently recorded not applicable nothing waits for a decision; a recorded selection and its history stay visible
+  const assessed = live && notApplicable?.has(node.nodeId) === true;
+  const pending = live && !current && reach !== "not_selected" && reach !== "undecided" && !assessed;
   const decision = !live ? mode === "proposed" ? "Proposed alternatives" : "Agreed alternatives"
+    : assessed ? current ? `${pathLabel[current.path]} selected · not applicable` : "Not applicable"
     : reach === "not_selected" ? "In a path not selected" : current ? `${pathLabel[current.path]} selected` : reach === "undecided" ? "Waits for an earlier decision"
     : earlier ? "Decision pending again" : "Decision pending";
   const pathState = (path: BranchPath): PlanReach => !live ? "unconditional" : reach === "not_selected" ? "not_selected" : !current ? "undecided" : current.path === path ? "selected" : "not_selected";
-  const pathText: Record<PlanReach, string | null> = {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
+  const pathText: Record<PlanReach, string | null> = assessed ? {unconditional: null, selected: "Not applicable", undecided: "Not applicable", not_selected: "Not applicable"}
+    : {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
   const childProps = {mode, notes, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
     ...(notApplicable ? {notApplicable} : {})};
   // the condition, the decision and its short reason stay primary; provenance, history and the plan note are inspectable details
@@ -180,7 +184,7 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
       const group = path === "then" ? node.then : node.else;
       const state = pathState(path);
       return <section key={path} className={`branch-path path-${state}`} aria-label={`${pathLabel[path]}, ${pathCondition[path]}${pathText[state] ? `: ${pathText[state]!.toLowerCase()}` : ""}`}>
-        <p className="branch-path-label">{pathLabel[path]} <span>{pathCondition[path]}</span>{pathText[state] && <span className={`pill ${state === "selected" ? "blue" : state === "undecided" ? "amber" : ""}`}>{pathText[state]}</span>}</p>
+        <p className="branch-path-label">{pathLabel[path]} <span>{pathCondition[path]}</span>{pathText[state] && <span className={`pill ${assessed ? "" : state === "selected" ? "blue" : state === "undecided" ? "amber" : ""}`}>{pathText[state]}</span>}</p>
         {group ? <PlanJourney node={group} {...childProps} reach={deeper(reach, state)}/> : <p className="small">No else path: if the condition does not hold, work continues with the next item.</p>}
       </section>;
     })}</div>
@@ -201,11 +205,12 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
     </div>;
   }
   if (node.kind === "branch") return <BranchJourney node={node} {...passed}/>;
-  const alternative = live && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
+  // the current not-applicable set takes precedence over the alternative labels of the paths inside an assessed occurrence
+  const assessedNotApplicable = live && node.status === "planned" && notApplicable?.has(node.nodeId) === true;
+  const alternative = live && !assessedNotApplicable && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
   // the completion time comes from the whole record; the retained observations can no longer hold an older completion
   const reassess = live && reach !== "not_selected" && node.kind === "workflow" ? completionReassessment(node, selections ?? [], completions?.get(node.nodeId), notApplicable) : null;
   const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : reassess ? "needs_attention" : node.status;
-  const assessedNotApplicable = live && !alternative && node.status === "planned" && notApplicable?.has(node.nodeId) === true;
   const label = !live ? modeLabels[mode] : alternative ? reach === "not_selected" ? "Not selected" : "Awaiting decision"
     : reassess ? "Completed earlier · needs reassessment" : reach === "not_selected" ? `${states[node.status]} · path not selected`
     : assessedNotApplicable ? "Not applicable" : states[node.status];

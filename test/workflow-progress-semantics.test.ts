@@ -451,6 +451,12 @@ it.effect("fixed sequences keep their order, and a fixed workflow that does not 
     assert.match(html, /Review<small>Workflow<\/small><\/span><span class="step-state">Not applicable/u);
     assert.match(html, /Account for findings[\s\S]*?<span class="step-state">Not applicable/u);
     assert.doesNotMatch(html, /needs reassessment/u, "Release's completion stands although the assessed Review never decided its branch");
+    assert.doesNotMatch(html, /Decision pending|Awaiting decision/u, "nothing inside an assessed Review is waiting for a decision");
+    assert.match(html, /Single review<small>Workflow<\/small><\/span><span class="step-state">Not applicable/u, "a member on an undecided path inside it is not applicable");
+    // outside an assessed occurrence an undecided branch keeps its usual labels
+    const undecidedHtml = renderToStaticMarkup(createElement(PlanJourney, {node: document.plan!, mode: "live", selections: progress.branchSelections}));
+    assert.match(undecidedHtml, /Decision pending/u);
+    assert.match(undecidedHtml, /Awaiting decision/u);
     assert.equal(progress.assessment?.reassessment ?? null, null, "the task's completion stands as current");
     const statusView = yield* fixture.controller.readTool({...locator(fixture), view: "status"});
     assert.match(JSON.stringify(statusView), /"pendingBranchDecisions":\[\]/u, "the Supervisor is not asked for a decision inside an assessed workflow");
