@@ -4,12 +4,12 @@ import { mainRunNodeReader, hasUnansweredHuman, nativeUserMessageVisible, operat
 import { isCurrentMainGraphRun, SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type ReviewOutcomeRecord, type ReviewPins, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { NativeOperateRpc, NativeRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
-import { fixedOccurrencesPreserved, localThreadToolRules, proportionatePlanRule, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, workflowTemplatesFor, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
+import { fixedOccurrencesPreserved, localThreadToolRules, proportionatePlanRule, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest, sameDefinitionContents } from "./supervisor-definition-review.js";
 import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type ProtocolAnchor, type TaskRecord } from "./project-supervisor-store.js";
 import { projectRequesterPolicy, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
-import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
+import type { EffectiveCatalogEntry, ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import { ProjectDefinitions } from "./project-definitions.js";
 import type { SupervisorContextViewInput, SupervisorContextViewResult } from "./workflow-write-controller.js";
 import type { SupervisorMonitoringReview, SupervisorMonitoringStatus, WorkflowAgreementInfo, WorkflowProposalInfo, WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
@@ -22,7 +22,7 @@ import { branchSelectionImportDecision, contributionImportDecision, documentBran
 import { branchSelectionDiagnosticCodes, branchSelectionLimits, externalContributionDiagnosticCodes, externalContributionLimits, type BranchSelectionDiagnosticCode,
   type ExternalContributionDiagnosticCode, type WorkflowOwner, type WorkflowStateDocument } from "./workflow-state-contract.js";
 import { branchPathGroups, currentPendingDecisions, planBranches, planNodes, type BranchPath } from "./workflow-plan-tree.js";
-import { canonicalJson } from "./canonical-json.js";
+import { canonicalJson, canonicalStoredJson } from "./canonical-json.js";
 import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorIds } from "./ids.js";
 import { admitSend, SupervisionGate, SupervisionScopeService, type GateGuard, type SendPreparation } from "./supervision-gate.js";
@@ -201,7 +201,7 @@ Workflow chat records (compact protocol; the only authoring form):
 - Proposal: one top-level fenced workflow-proposal JSON record in your own completed final answer: {"taskId","taskRevision","proposalId","revision","draft":{"requirements":[{"kind":"step"|"workflow","id","applies":true|false|"unknown","reason"}],"plan":{"kind":"sequence"|"parallel","nodes":[...]}}} plus optional "objective":{"text","sourceMessageIds":[...]}. Copy taskRevision and revision exactly from the latest envelope or workflow_read view context; the service rejects a draft authored against another task or definition revision and never rebinds it.
 - Draft nodes: {"kind":"step","definitionId","reason"}; {"kind":"workflow","definitionId","reason"} (the service expands that workflow's members and fixed composition; do not write them); a workflow reference may add "omit":[{"member":"<definitionId, localId or nodeId of a member it declares>","reason":"..."}] for members of a flexible workflow that do not apply to this task (never a fixed workflow; the service keeps them visible as not applicable); a local step {"kind":"step","definitionId":null,"localId","name","description","reason"}; {"kind":"sequence"|"parallel","nodes":[...]}; or a branch {"kind":"branch","condition":"The change is contained and well understood","reason":"Review depth depends on the change's scope","then":{"kind":"sequence","nodes":[{"kind":"workflow","definitionId":"light-review","reason":"One independent review fits a contained change"}]},"else":{"kind":"sequence","nodes":[{"kind":"workflow","definitionId":"heavy-review","reason":"Broad or risky changes need iterative review"}]}} whose else is optional. Keep an existing occurrence's nodeId when revising and omit nodeId for new ones. Never write workspaceRoot, definition names, descriptions, sources or templatePath; the service derives them from the trusted definitions. Assess every configured required reference once in requirements.
 - Before publishing, call workflow_read with view "check" and the record. It returns the outline, formal, digest and the acceptance record, or the first failing code, path and expected shape; fix and check again.
-- Then send the operative main the outline and the exact acceptance record it must return in its own completed reply if it agrees: a workflow-acceptance fence holding exactly {"taskId","proposalId","digest"}. When only the scope or limits changed and the plan is unchanged, say so in one sentence instead of repeating the outline. Never request acceptance of a provisional proposal (unknown or unresolved requirements); clarify applicability first. Never repeat an acceptance request in the check-in that delivered the proposal or while the operative turn that received it is still running: agreement is recorded when its record arrives, and one concise reminder at a later check-in suffices if a finished turn omitted it.
+- Then send the operative main the outline and the exact acceptance record it must return in its own completed reply if it agrees: a workflow-acceptance fence holding exactly {"taskId","proposalId","digest"}. When only the scope or limits changed and the plan is unchanged, say so in one sentence instead of repeating the outline; when it already accepted an earlier plan, name only the members added, removed or omitted against that plan, with reasons, instead of the whole outline. Never request acceptance of a provisional proposal (unknown or unresolved requirements); clarify applicability first. Never repeat an acceptance request in the check-in that delivered the proposal or while the operative turn that received it is still running: agreement is recorded when its record arrives, and one concise reminder at a later check-in suffices if a finished turn omitted it.
 - objective restates the task objective; cite only genuine user message IDs in sourceMessageIds.
 - When an envelope reports protocolRepair, repair that proposal in this turn. After three failed attempts, stop retrying and tell the operative once that agreement is blocked, naming the code.
 - Agreement exists only when workflow_read reports mainTaskAgreementStatus agreed and the main workflow sourceBinding.proposalId equals the proposal.`;
@@ -223,6 +223,9 @@ External contributions (main workflow only): the operative main may report that 
 
 const sharedSource = (source: {origin: string | null; path: string | null} | null | undefined): string =>
   source?.origin === "global" && source.path ? ` (shared: ${redact(source.path)})` : "";
+// whether a stored plan is exactly its validated form: decoding may reorder an object's keys, but every value, array position, identifier
+// and provenance must match
+const sameWorkflowValue = (left: WorkflowPlanValue, right: WorkflowPlanValue): boolean => canonicalStoredJson(left) === canonicalStoredJson(right);
 const workflowValue = (workflow: WorkflowProposalInfo): WorkflowPlanValue => ({
   definitionsStatus: workflow.definitionsStatus,
   definitionsComplete: workflow.definitionsComplete,
@@ -363,16 +366,6 @@ export const renderPlan = (group: WorkflowPlanValue["plan"], indent = "", select
 };
 
 // every distinct supporting pointer of the plan's definitions once, in plan order; task-local steps keep theirs in the outline
-const definitionPointers = (plan: WorkflowPlanValue["plan"]): string => {
-  const references = new Set<string>();
-  const skills = new Set<string>();
-  for (const node of planNodes(plan ?? null)) {
-    if (!(node.kind === "workflow" || node.kind === "step" && node.definitionId)) continue;
-    for (const reference of node.references ?? []) references.add(redact(reference));
-    for (const skill of node.skills ?? []) skills.add(redact(skill));
-  }
-  return [references.size ? `References: ${[...references].join(", ")}` : "", skills.size ? `Skills: ${[...skills].join(", ")}` : ""].filter(Boolean).join("\n");
-};
 
 // the plan's structure without occurrence identities, which differ between proposals of the same structure
 const planStructure = (plan: WorkflowPlanValue["plan"]): string => canonicalJson(JSON.parse(JSON.stringify(plan ?? null,
@@ -411,7 +404,7 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
   const scope = snapshot?.globalOnly ? "This checkout uses shared definitions only." : `Checkout definitions are indexed in ${workflow.workspaceRoot}/.t3-supervisor/project.yaml; read the full steps/<id>.md and workflows/<id>.yaml files it lists that apply.`;
   const sharedConfigPaths = snapshot?.sources.filter(source => source.origin === "global" && source.path.endsWith("/project.yaml"))
     .map(source => redact(source.path)) ?? [];
-  const sourceText = snapshot?.sources.length ? `${snapshot.sources.length} definition source files were loaded.${sharedConfigPaths.length ? ` Shared configuration: ${sharedConfigPaths.join(", ")}.` : ""}` : "No readable definition source files are available.";
+  const sourceText = snapshot?.sources.length ? sharedConfigPaths.length ? `Shared configuration: ${sharedConfigPaths.join(", ")}.` : "" : "No readable definition source files are available.";
   // shared definitions live outside the checkout, so their file is named where the operative reads requirements and the outline
   const requirementLines = workflow.requirements.map(item => `- ${item.kind}:${redact(item.id)}${sharedSource(item.source)} — ${item.state}: ${redact(item.reason)}`).join("\n");
   const requirements = workflow.requirementsKnown
@@ -442,8 +435,7 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
     const scopeChanged = (task.agreementSourceHash ?? null) !== null && task.agreementSourceHash !== taskScopeRevision(task);
     return `Project Supervisor — revised proposal ${proposalId}\n${scopeChanged ? "The authorized scope changed; t" : "T"}he agreed workflow plan is unchanged from proposal ${task.agreement!.proposalId}, its definitions and requirement decisions are the same and recorded progress is kept, so nothing is rerun.\n${objectiveLines}\nLimits: ${JSON.stringify(task.conversation?.authorization?.limits ?? [])}\nRequester sources: ${JSON.stringify(task.conversation?.authorization?.scopeSources.map(source => ({messageId: source.messageId, requester: source.requester})) ?? [])}\n${notes.length ? `Updated requirement notes:\n${notes.join("\n")}\n` : ""}${nextStep}\nContinue the task within this scope. Send questions to Supervisor ${task.supervisorThreadId} with t3_thread_send, mode queue, naming task ${task.id}, your thread ${task.threadId} and this proposal.`;
   }
-  const pointers = definitionPointers(workflow.plan);
-  return `Project Supervisor — proposal ${proposalId}\nAgree a proportionate workflow with your Supervisor for the requester-authorized outcome below. This adds no human approval step and grants no broader authority. You may first gather the evidence and do the bootstrap work needed to establish the scope. If implementation has already started, say so and agree the workflow before continuing. The Supervisor cannot block tools; the workflow is shared guidance and review, not execution evidence.\nThe plan should hold only what this task needs; revise it with your Supervisor as the work evolves, preserving applicable required and fixed commitments. If a commitment is unnecessary for this task, ask for a smaller plan instead of accepting.\n${objectiveLines}\nLimits: ${JSON.stringify(task.conversation?.authorization?.limits ?? [])}\nRequester sources: ${JSON.stringify(task.conversation?.authorization?.scopeSources.map(source => ({messageId: source.messageId, requester: source.requester})) ?? [])}\nAcceptance does not require rerunning earlier work. The Supervisor assesses adequate prior evidence for every duty, including partial work and its specific remaining obligations.\nDefinitions: ${workflow.definitionsStatus}; complete=${workflow.definitionsComplete}; requirementsKnown=${workflow.requirementsKnown}; revision=${workflow.revision ?? "unknown"}.\n${scope} ${sourceText} Each step's and workflow's guidance is in its definition file; read the ones you need. References are checkout-relative files. Skills are checkout-relative SKILL.md paths or exact names in your configured catalog; never guess installation paths. Read applicable guidance progressively; missing or ambiguous skills remain explicit gaps, not waived duties. References and skills grant no authority and do not prove consultation or freeze content.\n${readWarning}Required references:\n${requirements}${issueText}\nPlan outline (each reusable member's contract, references and skills are in its definition file):\n${renderPlan(workflow.plan).join("\n")}${pointers ? `\nSupporting pointers in those definitions, listed once:\n${pointers}` : ""}${branchText}\n${nextStep}\nSend questions or proposed changes to Supervisor ${task.supervisorThreadId} with t3_thread_send, mode queue, naming task ${task.id}, your thread ${task.threadId} and this proposal. Reuse that conversation. If the tool is unavailable, reply here for the next check-in. If the user asks to stop supervision of this chat, tell your Supervisor and cite the user's original message ID; supervision then stays off for this chat until the user enables it again. If part of a step is handled outside this conversation (an external agent, tool, service or person), ask your Supervisor for the external-contribution record format.`;
+  return `Project Supervisor — proposal ${proposalId}\nAgree a proportionate workflow with your Supervisor for the requester-authorized outcome below. This adds no human approval step and grants no broader authority. You may first gather the evidence and do the bootstrap work needed to establish the scope. If implementation has already started, say so and agree the workflow before continuing. The Supervisor cannot block tools; the workflow is shared guidance and review, not execution evidence.\nThe plan should hold only what this task needs; revise it with your Supervisor as the work evolves, preserving applicable required and fixed commitments. If a commitment is unnecessary for this task, ask for a smaller plan instead of accepting.\n${objectiveLines}\nLimits: ${JSON.stringify(task.conversation?.authorization?.limits ?? [])}\nRequester sources: ${JSON.stringify(task.conversation?.authorization?.scopeSources.map(source => ({messageId: source.messageId, requester: source.requester})) ?? [])}\nAcceptance does not require rerunning earlier work. The Supervisor assesses adequate prior evidence for every duty, including partial work and its specific remaining obligations.\nDefinitions: ${workflow.definitionsStatus}; complete=${workflow.definitionsComplete}; requirementsKnown=${workflow.requirementsKnown}; revision=${workflow.revision ?? "unknown"}.\n${scope}${sourceText ? ` ${sourceText}` : ""} Each member's contract, references and skills are in its definition file; read the ones that apply, progressively. References are checkout-relative files. Skills are checkout-relative SKILL.md paths or exact names in your configured catalog; never guess installation paths, and a missing skill stays an explicit gap. References and skills grant no authority.\n${readWarning}Required references:\n${requirements}${issueText}\nPlan outline:\n${renderPlan(workflow.plan).join("\n")}${branchText}\n${nextStep}\nSend questions or proposed changes to Supervisor ${task.supervisorThreadId} with t3_thread_send, mode queue, naming task ${task.id}, your thread ${task.threadId} and this proposal. Reuse that conversation. If the tool is unavailable, reply here for the next check-in. If the user asks to stop supervision of this chat, tell your Supervisor and cite the user's original message ID; supervision then stays off for this chat until the user enables it again. If part of a step is handled outside this conversation (an external agent, tool, service or person), ask your Supervisor for the external-contribution record format.`;
 };
 
 type TeamPolicy = {maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number};
@@ -611,8 +603,9 @@ const makeSupervisorConversation = Effect.gen(function* () {
     const task = yield* store.task(binding.mainThreadId);
     if (!task || task.supervisorThreadId !== binding.threadId) return {status: "unavailable", view, reason: "no_current_task"};
     const snapshot = task.definitionSnapshot ?? null;
+    // the read's identity and diagnostics; the project.yaml index itself is served once, by the manifest
     const definitionState = snapshot ? {workspaceRoot: snapshot.workspaceRoot, revision: snapshot.revision, globalRevision: snapshot.globalRevision ?? null,
-      definitionsStatus: snapshot.status, complete: snapshot.complete, config: snapshot.config,
+      definitionsStatus: snapshot.status, complete: snapshot.complete,
       issues: snapshot.issues.map(item => ({path: redact(item.path), code: item.code, message: redact(item.message)}))} : null;
     if (view === "context") return {status: "ok", view, supervision: "enabled", task: {...(yield* taskContextSummary(task)), status: task.status, sourceMessageId: task.sourceMessageId,
       contextMessageIds: task.contextMessageIds ?? []}, definitions: definitionState,
@@ -623,16 +616,29 @@ const makeSupervisorConversation = Effect.gen(function* () {
       if (!Array.isArray(snapshot.config.workflows) || !Array.isArray(snapshot.config.steps)) return {status: "unavailable", view, reason: "definitions_refresh_required"};
       const sources = input.includeSources ? snapshot.sources.map(source => ({path: redact(source.path), origin: source.origin ?? "project", content: redact(source.content)})) : undefined;
       const selected = input.definitionIds ? new Set(input.definitionIds) : null;
-      if (!selected) return {status: "ok", view, ...definitionState,
-        steps: snapshot.steps.map(step => ({id: step.id, name: redact(step.name), summary: redact(step.summary), ...(step.path ? {path: redact(step.path)} : {})})),
-        workflows: snapshot.workflows.map(workflow => ({id: workflow.id, name: redact(workflow.name), fixed: workflow.fixed, summary: redact(workflow.summary),
-          members: manifestMembers(workflow.sequence ?? workflow.parallel ?? [])})),
-        note: "Summaries come from the project.yaml index and only guide what to read; request complete definitions with definitionIds before relying on their guidance.", ...(sources ? {sources} : {})};
+      // the manifest is the index: one row per indexed entry, including a required row whose file is missing, with its definition's
+      // name and composition by member ID; complete contracts are read on demand by exact ID
+      if (!selected) {
+        const row = (entry: EffectiveCatalogEntry) => ({id: entry.id, summary: redact(entry.summary), path: redact(entry.path), ...(entry.required ? {required: true} : {}),
+          ...(entry.origin !== "project" || entry.sourceId !== entry.id ? {origin: entry.origin, sourceId: entry.sourceId} : {})});
+        return {status: "ok", view, ...definitionState, ...(snapshot.config.default_workflow ? {defaultWorkflow: snapshot.config.default_workflow} : {}),
+          steps: snapshot.config.steps.map(entry => {
+            const step = snapshot.steps.find(item => item.id === entry.id);
+            return {...row(entry), ...(step ? {name: redact(step.name)} : {missing: true})};
+          }),
+          workflows: snapshot.config.workflows.map(entry => {
+            const workflow = snapshot.workflows.find(item => item.id === entry.id);
+            return {...row(entry), ...(workflow ? {name: redact(workflow.name), fixed: workflow.fixed, members: manifestMembers(workflow.sequence ?? workflow.parallel ?? [])} : {missing: true})};
+          }),
+          note: "This is the project.yaml index: summaries only guide what to read. Request the complete definitions you need with definitionIds before relying on their guidance; a workflow's members name their own IDs.",
+          ...(sources ? {sources} : {})};
+      }
+      // each requested definition once, complete, with its authored composition: inline local steps and branch contracts stay in it,
+      // and a referenced workflow or step is read by its own ID when needed
       const steps = snapshot.steps.filter(step => selected.has(step.id)).map(step => ({...step, name: redact(step.name), description: redact(step.description)}));
       const selectedWorkflows = snapshot.workflows.filter(workflow => selected.has(workflow.id)).map(workflow => ({...workflow, name: redact(workflow.name), description: redact(workflow.description)}));
       const found = new Set([...steps.map(step => step.id), ...selectedWorkflows.map(workflow => workflow.id)]);
-      const templates = task.definitionContext ? workflowTemplatesFor(task.definitionContext, new Set(selectedWorkflows.map(workflow => workflow.id))) : [];
-      return {status: "ok", view, ...definitionState, steps, workflows: selectedWorkflows, workflowTemplates: templates, missing: [...selected].filter(id => !found.has(String(id))),
+      return {status: "ok", view, ...definitionState, steps, workflows: selectedWorkflows, missing: [...selected].filter(id => !found.has(String(id))),
         ...(sources ? {sources} : {})};
     }
     const context = task.definitionContext;
@@ -2564,7 +2570,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (!context || !task.workflow || !evidence || supervisor.thread.id !== task.supervisorThreadId) return null;
       const expectedWorkflow = workflowValue(task.workflow);
       const initialPlan = validateWorkflowRecord(expectedWorkflow, context);
-      if (!initialPlan || JSON.stringify(initialPlan) !== JSON.stringify(expectedWorkflow) || prepared.workspaceRoot !== context.workspaceRoot || prepared.revision !== context.revision) return null;
+      if (!initialPlan || !sameWorkflowValue(initialPlan, expectedWorkflow) || prepared.workspaceRoot !== context.workspaceRoot || prepared.revision !== context.revision) return null;
       const state = taskEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details});
       if (state !== "current") return state === "unknown" ? "unknown" : null;
       if (!formalPlanReady(task.workflow) || context.status !== "ready" || !context.complete || !context.revision) return "provisional";
@@ -2603,7 +2609,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (!context) return null;
       const expectedWorkflow = workflowValue(workflowValueOf);
       const initialPlan = validateWorkflowRecord(expectedWorkflow, context);
-      if (!initialPlan || JSON.stringify(initialPlan) !== JSON.stringify(expectedWorkflow)) return null;
+      if (!initialPlan || !sameWorkflowValue(initialPlan, expectedWorkflow)) return null;
       const proposalId = task.workflowProposalId ?? task.id;
       const prepared = preparedProposal(task, proposalId);
       if (!prepared || prepared.workspaceRoot !== context.workspaceRoot || prepared.revision !== context.revision) return null;

@@ -239,12 +239,16 @@ With `view`, `workflow_read` returns bounded context for the verified binding in
 workflow documents:
 
 - `context`: the current task, its revision pins, objective, earlier unresolved request
-  IDs, proposal identity and digest, agreement and diagnostics. For a stopped chat it
+  IDs, proposal identity and digest, agreement, requirement states and diagnostics,
+  with the definition read's identity but not the index. For a stopped chat it
   returns supervision=stopped even without a current task or enabled project.
-- `definitions`: a manifest of each indexed definition's id, name, summary and
-  members, or with `definitionIds` the complete selected definitions and the exact
-  templates of selected workflows. A summary is not the definition's policy text.
-  Add `includeSources` for raw definition files when diagnosing invalid definitions.
+- `definitions`: the `project.yaml` index once, one row per entry with its id,
+  summary, path, required flag, non-project provenance, name and a workflow's members
+  by ID; a required entry whose file is missing keeps its row. With `definitionIds`
+  it returns each requested definition once, complete, with its authored composition
+  (inline local steps and branches included); a referenced step or workflow is read
+  by its own ID. A summary is not the definition's policy text. Add
+  `includeSources` for raw definition files when diagnosing invalid definitions.
 - `instructions`: the full standing Supervisor instructions and their version.
 - `interpretation`: only the task interpretation instructions; the opening carries
   source text, the minimal output contract and reader coordinates, without a catalog.

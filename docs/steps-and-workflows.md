@@ -294,9 +294,9 @@ required one remains an unresolved requirement. Either issue makes the
 collection invalid, and plans stay provisional until it is fixed. Negotiated
 plans may still add task-local steps. Supervisor and the supervised agent start
 at `project.yaml`, then read each listed full definition that applies. The
-introduction says so. The manifest shows each indexed definition's id, name,
-summary and members; `workflow_read` with `definitionIds` returns the full
-definition.
+introduction says so. The index view shows each entry's id, name, summary,
+required flag and members by ID; `workflow_read` with `definitionIds` returns each
+selected full definition once.
 
 The main agent and Supervisor negotiate the actual plan for the current task.
 The plan must account for each required item. Inclusion inside a referenced

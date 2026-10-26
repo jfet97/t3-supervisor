@@ -911,7 +911,7 @@ export const supervisionInterpretationSubmitToolDefinition = {
           required: ["kind", "id", "applies", "reason"], properties: {kind: {enum: ["step", "workflow"]}, id: interpretationText(interpretationLimits.maxDefinitionIdLength),
             applies: {anyOf: [{type: "boolean"}, {const: "unknown"}]}, reason: interpretationText(interpretationLimits.maxReasonLength)}}},
         plan: {$ref: "#/$defs/group"}}}, {type: "null"}]},
-      startRequested: {type: "boolean"},
+      startRequested: {type: "boolean", description: "Only when this request's SUBMISSION block asks for the Start verdict; otherwise omit it, and a submission carrying it is invalid."},
     },
   },
 } as const;
@@ -919,8 +919,8 @@ export const supervisionInterpretationSubmitToolDefinition = {
 export const workflowReadToolDefinition = {
   name: "workflow_read",
   description: "Read bounded semantic workflow records for this current Supervisor binding and a fresh main-thread descendant summary, including retained archived descendants and incompatible older records. Writes accept only strong native item references authorized by the existing evidence verifier. currentAgreementKey only marks content matching a retained snapshot; it does not prove current acceptance, execution, or definition validity. The main workflow's contributions list main-reported external work with its untrusted summary and references and the root's current assessment; none of it proves execution or completes a step.",
+  // the read input names no plan, so it advertises none of the plan schema
   inputSchema: {
-    $defs: workflowPlanDefinitions,
     type: "object",
     additionalProperties: false,
     required: ["supervisorThreadId", "bindingGeneration"],
@@ -931,7 +931,7 @@ export const workflowReadToolDefinition = {
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
       view: {type: "string", enum: ["status", "context", "definitions", "instructions", "interpretation", "check"],
-        description: "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: a manifest, or exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
+        description: "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: the project.yaml index, or the exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
       includeSources: {type: "boolean", description: "With view definitions: also return raw definition source files, for diagnosing invalid or incomplete definitions."},
       record: {type: "object", description: "With view check: the exact compact workflow-proposal record to validate."},

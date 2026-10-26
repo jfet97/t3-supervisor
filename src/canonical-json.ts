@@ -18,3 +18,9 @@ const normalizeJson = (value: unknown, depth = 0): unknown => {
 };
 
 export const canonicalJson = (value: unknown): string => JSON.stringify(normalizeJson(value));
+
+/**
+ * The canonical JSON of plain data as it is stored: what a JSON round trip drops is dropped first, then keys are sorted, so a schema
+ * decode that reorders an object's keys never changes it while every value, array position and identifier still does.
+ */
+export const canonicalStoredJson = (value: unknown): string => canonicalJson(JSON.parse(JSON.stringify(value) ?? "null"));

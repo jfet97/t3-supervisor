@@ -91,9 +91,10 @@ The Supervisor interprets the latest genuine request together with earlier unres
 requests in the same main, such as an issue link that did not yet establish an
 objective; a bootstrap, setup or recovery instruction is treated as a step toward
 that request, not its replacement. With the workflow MCP available, interpretation
-receives a short manifest of each indexed definition's id, name, summary and
-members, and reads complete definitions on demand through `workflow_read` with
-`definitionIds`, so full descriptions are not pushed into the prompt. A summary
+receives the `project.yaml` index once (each entry's id, name, summary, required
+flag and members by ID) and reads only the complete definitions it selects through
+`workflow_read` with `definitionIds`, each once, so full descriptions and expanded
+plans are not pushed into the prompt. A summary
 is navigation, not policy. The operative introduction says that
 `.t3-supervisor/project.yaml` is the index and to read the listed full files
 it needs. The index is not a whitelist of task plans; negotiated local steps
@@ -190,10 +191,12 @@ agent, schedules a task or proves successful execution.
 Startup is compact. The initialization turn only confirms the service-prepared
 proposal by echoing its exact reference `{taskId, proposalId, digest}`; definitions
 stay available through `workflow_read`. The introduction outline names each member once;
-nested workflows without a branch are one line, and the references and skills of the
-plan's definitions are listed once because each definition file carries its own. A
-revised proposal for a changed scope whose plan, definitions and requirements are
-unchanged is sent as a short delta with the objective, limits and new acceptance
+nested workflows without a branch are one line. It points to the `project.yaml` index
+instead of copying the references and skills of the plan's definitions, because each
+definition file carries its own. A revised proposal for a changed scope whose plan,
+definitions and requirements are unchanged is sent as a short delta with the objective,
+limits and new acceptance record; a revision of a plan the operative already accepted
+names only the members added, removed or omitted, with reasons, and the new acceptance
 record. The Supervisor does not repeat an acceptance request while the operative turn
 that received the proposal can still answer it. The operative introduction says that `.t3-supervisor/project.yaml` is the
 index and to read the listed full files it needs. It opens with the

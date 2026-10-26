@@ -296,7 +296,10 @@ it.effect("introductions list each pointer once, collapse nested expansions and 
     const task = (yield* fixture.supervisors.task(fixture.mainThreadId))!;
     const full = workflowIntroductionText(task);
     assert.doesNotMatch(full, /^\s+Reference: /mu, "definition pointers are not repeated under every member");
-    assert.equal(full.match(/AGENTS\.md/gu)?.length, 1, "each distinct pointer appears once");
+    // the operative starts at the project.yaml index and reads each member's file, which carries its own references and skills
+    assert.equal(full.match(/AGENTS\.md|wiki\/how-we-build\.md/gu), null, "no definition's supporting pointer is copied into the introduction");
+    assert.match(full, /\.t3-supervisor\/project\.yaml; read the full steps\/<id>\.md and workflows\/<id>\.yaml files it lists that apply\./u);
+    assert.match(full, /Each member's contract, references and skills are in its definition file; read the ones that apply, progressively\./u);
     assert.match(full, /Single review \[workflow:single-review; fixed; members in its definition\]/u);
     assert.match(full, /- branch \[branch:[^\]]+\] if: The frozen artifact is a contained, low-risk change\./u, "the operative still sees the branch it decides");
     const outline = full.slice(full.indexOf("Plan outline"), full.indexOf("\nBranches:"));

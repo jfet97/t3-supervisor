@@ -763,8 +763,10 @@ const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture, omit
   const plan = validateWorkflowPlan(raw, prepared.context);
   assert.ok(plan);
   const submitted = yield* setInterpretationSubmission(fixture.supervisor, {...current, definitionContext: prepared.context, definitionSnapshot: snapshot}, raw);
-  // the recorded submission payload is schema-decoded before it becomes the task's workflow, as the production finalization does
-  const task: TaskRecord = {...submitted, workflow: Schema.decodeUnknownSync(WorkflowProposal)(submitted.workflow)};
+  // the recorded submission payload is schema-decoded before it becomes the task's workflow, and intake digests that decoded plan
+  const workflow = Schema.decodeUnknownSync(WorkflowProposal)(submitted.workflow);
+  const evidence = submitted.interpretationEvidence;
+  const task: TaskRecord = {...submitted, workflow, ...(evidence ? {interpretationEvidence: {...evidence, planDigest: interpretationPlanDigest(workflow)}} : {})};
   yield* fixture.projectStore.saveTask(task);
   fixture.setDefinitions(snapshot);
   return task;
@@ -841,6 +843,41 @@ it.effect("an initial interpretation that omits a flexible member is introduced 
   assert.equal(live.sourceBinding?.proposalId, task.id);
   const liveChange = live.plan!.nodes.find(node => node.kind === "workflow" && node.definitionId === "change");
   assert.deepEqual(liveChange?.kind === "workflow" ? liveChange.omissions.map(item => item.id) : null, ["prevent"], "the agreed omission reaches the live plan");
+}));
+
+it.effect("a revised proposal that omits a flexible member from the agreed plan is agreed with the record its introduction carries", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
+  const task = yield* installNestedCatalog(fixture);
+  yield* fixture.run();
+  yield* fixture.run();
+  const first = (yield* fixture.conversation.requests.introduction(task.id))!;
+  const firstAcceptance = preparedAcceptanceRecord((yield* fixture.projectStore.task(task.threadId))!)!;
+  const firstRun = fixture.operative.runs.find(run => run.id === fixture.operative.messages.find(message => message.id === first.messageId)!.runId)!;
+  appendMessageToRun(fixture.operative, firstRun, {id: "first-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", firstAcceptance), now: yield* clock.advance(1)});
+  completeRun(fixture.operative, firstRun, "Accepted the current workflow.", clock.now);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
+
+  // the operative excludes a member; the Supervisor publishes one smaller compact revision that omits it
+  const agreed = (yield* fixture.projectStore.task(task.threadId))!;
+  const revisionId = "revision-omit-prevent";
+  appendAssistantTurn(fixture.supervisor, "revised-omission", workflowFence("workflow-proposal", {taskId: agreed.id, taskRevision: taskScopeRevision(agreed),
+    proposalId: revisionId, revision: agreed.workflow!.revision, draft: {requirements: [{kind: "step", id: "scope", applies: true, reason: "Define the task."},
+      {kind: "workflow", id: "review", applies: true, reason: "Review substantive changes."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "scope", reason: "Start with scope."},
+      {kind: "workflow", definitionId: "change", reason: "Complete the requested change.", omit: preventOmission}]}}}), yield* clock.advance(1));
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  const revised = (yield* fixture.projectStore.task(task.threadId))!;
+  assert.equal(revised.workflowProposalId, revisionId);
+  // the operative copies the acceptance record the service presents for the revision
+  const acceptance = preparedAcceptanceRecord(revised)!;
+  assert.equal((yield* fixture.conversation.requests.agreementCandidate(task.id, revisionId))?.planHash, acceptance.digest,
+    "the presented record names the candidate's digest");
+  appendMessageToRun(fixture.operative, firstRun, {id: "revision-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
+  yield* observeAgreement(fixture, clock.now + 90_000);
+  const settled = (yield* fixture.projectStore.task(task.threadId))!;
+  assert.deepEqual([settled.agreement?.status, settled.agreement?.proposalId], ["agreed", revisionId]);
 }));
 
 it.effect("a stored initial plan that no longer matches its validated form is never introduced, even when its evidence digest agrees", () => Effect.gen(function* () {

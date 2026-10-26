@@ -7,6 +7,7 @@ import type {SqlError} from "effect/sql";
 import {GuidanceDb, untracedSql} from "./db.js";
 import {type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, snapshotRead, type StoredRowScan, type SupervisionStoreError} from "./guidance-sql.js";
 import {fingerprint} from "./guidance-store.js";
+import {canonicalStoredJson} from "./canonical-json.js";
 import {SupervisorIds} from "./ids.js";
 import {ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
@@ -404,9 +405,10 @@ const staticPlan = (plan: WorkflowStatePlan): unknown => {
   })};
 };
 
+// compared only within this process, between the live plan and an accepted or edited one: key order from a decoded record never matters
 const workflowPlanSignature = (objective: string | null, sourceBinding: WorkflowStateSourceBinding | null,
   requirements: readonly WorkflowStateRequirement[], issues: readonly WorkflowStateIssue[], plan: WorkflowStatePlan): string =>
-  fingerprint({objective, sourceBinding, requirements, issues, plan: staticPlan(plan)});
+  fingerprint(canonicalStoredJson({objective, sourceBinding, requirements, issues, plan: staticPlan(plan)}));
 
 const sourceBindingOf = (workflow: WorkflowAgreementInfo["workflow"], taskId: string, proposalId: string, sourceHash: string): WorkflowStateSourceBinding => ({
   workspaceRoot: workflow.workspaceRoot ?? "",

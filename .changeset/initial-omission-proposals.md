@@ -1,0 +1,5 @@
+---
+"@jfet97/t3-supervisor": patch
+---
+
+A first proposal that leaves out a member of a flexible workflow now reaches the agent and can be agreed. Before, the Supervisor recorded it correctly but the service withheld it with "The interpreted proposal could not be confirmed from the Supervisor's recorded interpretation; the draft was not sent", because a stored copy listed the omission's fields in a different order. The check now compares the plan's actual values, so any real change to the plan is still refused. The Supervisor also receives much less repeated material: the definitions index is sent once instead of alongside a second copy, selected definitions arrive once each without the index or pre-expanded nested plans, the context view no longer repeats the index, the definitions reader no longer advertises a plan schema it never uses, and an interpretation request quotes each of the requester's messages once. The agent's proposal is shorter as well: it points to the project.yaml index instead of copying every definition's references and skills, and a revision of a plan the agent already accepted names only what changed.
