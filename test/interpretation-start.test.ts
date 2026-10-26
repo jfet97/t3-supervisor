@@ -14,6 +14,34 @@ import { planFields, startInterpretationFixture, type InterpretationFixture } fr
 
 const startText = "Have Supervisor follow this task: add a CSV export.";
 
+it.live("an identical pending Start after an older Stop keeps its receipt without lifting the Stop early", () => Effect.gen(function* () {
+  const f = yield* startInterpretationFixture({noProject: true});
+  const policy = yield* f.core.policy.get();
+  assert.equal((yield* f.core.control.setChatPolicy(f.mainThreadId, false, policy.generation)).status, "saved");
+  f.addRequest("fresh-start-after-stop", startText);
+  const main = f.main();
+  const message = main.messages.find(item => item.id === "fresh-start-after-stop")!;
+  const stop = (yield* f.core.store.chatStop(f.mainThreadId))!;
+  message.createdAt = new Date(stop.stoppedAt + 10).toISOString();
+  const run = main.runs.find(item => item.id === message.runId)!;
+  const args = {callerThreadId: f.mainThreadId, userMessageId: message.id, operationId: "new-start-after-old-stop"};
+  const nodeId = "retry-start-node";
+  (main.nodes as Array<Record<string, unknown>>).push({id: nodeId, kind: "dynamic_tool", threadId: f.mainThreadId, runId: run.id,
+    rootNodeId: run.rootNodeId, parentNodeId: run.rootNodeId, providerThreadId: run.providerThreadId, status: "completed"});
+  const item = {id: "retry-start-item", type: "dynamic_tool", threadId: f.mainThreadId, runId: run.id, nodeId,
+    providerThreadId: run.providerThreadId, parentItemId: null, ordinal: 1, status: "completed",
+    toolName: workflowToolNames.start.direct[1], input: args};
+  main.turnItems = [item];
+  f.native.details.set(item.id, {...item, nativeItemRef: {driver: "codex", nativeId: "native-retry-start-item", strength: "strong"}, toolNonExecutionKind: null});
+  const first = yield* mcpCall(f.endpoint, "supervision_start", args);
+  assert.equal((first.value as {status: string}).status, "pending", JSON.stringify(first.value));
+  const savedPolicy = yield* f.core.policy.get();
+  const second = yield* mcpCall(f.endpoint, "supervision_start", args);
+  assert.deepEqual(second.value, first.value);
+  assert.deepEqual(yield* f.core.policy.get(), savedPolicy, "a retry does not activate the pending Start");
+  assert.deepEqual(yield* f.core.store.chatStop(f.mainThreadId), stop);
+}), {timeout: 60_000});
+
 // a no project main whose genuine request asked for supervision through its own native supervision_start call, interpreted once
 const pendingStart = Effect.gen(function* () {
   const f = yield* startInterpretationFixture({noProject: true});

@@ -274,7 +274,7 @@ const makeSupervisionControl = Effect.gen(function* () {
   });
   // a recorded receipt is returned only while its effect is still the latest control of its chat; after a later Stop, Enable or
   // Start it claims nothing current and does nothing
-  const receiptCurrent = (threadId: string, operationId: string) => Effect.gen(function* () {
+  const receiptCurrent = (threadId: string, operationId: string, pending: boolean) => Effect.gen(function* () {
     const bound = yield* store.bindingForSupervisor(threadId);
     if (bound) {
       const resume = (yield* store.binding(bound.projectId, bound.mainThreadId))?.supervisionResume;
@@ -283,7 +283,7 @@ const makeSupervisionControl = Effect.gen(function* () {
     }
     const start = yield* store.start(threadId);
     return start?.operationId === operationId && ((yield* store.chatStop(threadId))?.stoppedAt ?? -1) < start.intentAt &&
-      ((yield* store.chatEnabledAt(threadId)) ?? -1) <= start.intentAt && !(yield* scope.supervisionStopped(threadId));
+      ((yield* store.chatEnabledAt(threadId)) ?? -1) <= start.intentAt && (pending || !(yield* scope.supervisionStopped(threadId)));
   });
   const requestStart = (threadId: string, operationId: string, route: "agent" | "ui", userMessageId: string | null, runId: string | null,
     cancel?: Deferred.Deferred<void>) => Effect.gen(function* () {
@@ -291,7 +291,8 @@ const makeSupervisionControl = Effect.gen(function* () {
     const prior = yield* store.startOperation(threadId, operationId);
     if (prior) {
       if (prior.requestHash !== requestHash) return {status: "denied", reason: "operation_id_conflict"} as SupervisionStartResult;
-      if ((prior.status === "active" || prior.status === "pending") && !(yield* receiptCurrent(threadId, operationId)))
+      // preparation is unresolved; a pending Start keeps an older Stop until its interpretation accepts it
+      if (!prior.preparing && (prior.status === "active" || prior.status === "pending") && !(yield* receiptCurrent(threadId, operationId, prior.status === "pending")))
         return {status: "denied", reason: "superseded_by_later_control"} as SupervisionStartResult;
       return {status: prior.status, reason: prior.reason} as SupervisionStartResult;
     }
