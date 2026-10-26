@@ -76,10 +76,14 @@ export function liveProgress(plan: WorkflowPlanGroupInfo | null, selected: Reado
 
 export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) => Boolean(acceptedAgreement(task) && !pendingProposal(task));
 
+// quick routine work needs no plan: nothing is proposed or awaits acceptance, unless an earlier plan was accepted
+const noPlanNeeded = (task: TaskInterpretationInfo | undefined) => task?.supervision === "not_needed" && !task.agreement;
+
 /** The one-line agreement state for the task band. */
 export const alignmentLabel = (task: TaskInterpretationInfo | undefined) => hasCurrentAgreement(task) ? "Plan accepted"
   : acceptedAgreement(task) ? "Update awaiting acceptance"
   : task?.agreement?.status === "stale" ? "Acceptance needs review"
+  : noPlanNeeded(task) ? "No plan needed"
   : task?.workflow?.status === "proposed" ? "Awaiting acceptance"
   : task?.workflow ? "Plan being prepared" : "No plan yet";
 
@@ -270,17 +274,21 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
   const historical = Boolean(task && ["expired", "not_supervised"].includes(task.status));
   const proposal = pending ?? task?.workflow ?? task?.agreement?.workflow;
   const update = Boolean(accepted && pending);
-  const supervisorLine = task?.engagement?.mode === "following" ? "Understanding and draft duties retained" : !proposal ? "No plan recorded yet" : update ? proposal.status === "pending" ? "Preparing an updated plan" : "Proposed an updated plan" : proposalProgress[proposal.status];
+  const unneeded = noPlanNeeded(task);
+  const supervisorLine = task?.engagement?.mode === "following" ? "Understanding and draft duties retained" : unneeded ? "No plan needed for this task"
+    : !proposal ? "No plan recorded yet" : update ? proposal.status === "pending" ? "Preparing an updated plan" : "Proposed an updated plan" : proposalProgress[proposal.status];
   // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance
-  const proposalMessage = proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
+  const proposalMessage = unneeded ? task?.reason ?? null : proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
   const agentLine = historical && task?.agreement ? "Earlier acceptance retained"
     : current ? "Accepted this plan"
     : update ? "Earlier plan accepted; update awaiting acceptance"
     : stale ? "Earlier acceptance is out of date"
+    : unneeded ? "Continues without a plan or acceptance"
     : "Acceptance has not been recorded";
   const agreement = task?.agreement;
   const agreedAt = agreement ? formatTime(agreement.agreedAt) : null;
-  const shown = accepted?.workflow ?? proposal;
+  // a task that needs no plan has no plan provenance to inspect
+  const shown = unneeded ? undefined : accepted?.workflow ?? proposal;
   return <section className={`task-alignment ${current ? "is-agreed" : ""}`} aria-labelledby="task-alignment-title">
     <h3 id="task-alignment-title">Agent and Supervisor</h3>
     <ol className="alignment-exchange" role="list">

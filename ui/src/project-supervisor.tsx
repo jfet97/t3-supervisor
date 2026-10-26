@@ -576,7 +576,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const mainThread = view.threadById.get(threadId);
   const assessmentState = currentAssessment ? `Assessed ${formatProgressTime(currentAssessment.updatedAt)}` : progress?.error ? "Assessment unavailable"
     : progress?.loading ? "Reading assessment…" : !view.complete ? "Assessment coverage incomplete" : mainWorkflow ? "Retained workflow; not linked to this task" : "No current workflow record";
-  const fallback = task?.engagement?.mode === "following" ? "Task scope remains open" : task?.status === "not_supervised" ? "Supervision not needed" : record.kind === "agreed" ? "Plan accepted · work not yet assessed"
+  const fallback = task?.engagement?.mode === "following" ? "Task scope remains open" : task?.status === "not_supervised" ? "Supervision not needed"
+    : task?.supervision === "not_needed" && !task.agreement ? "No plan needed" : record.kind === "agreed" ? "Plan accepted · work not yet assessed"
     : task?.agreement?.status === "stale" ? "Plan needs acceptance again" : task?.workflow ? "Agreeing a plan"
     : task?.status === "waiting" || task?.status === "queued" || task?.status === "dispatching" ? "Reading the request"
     : progress?.loading ? "Reading assessment…" : "No assessment recorded";
@@ -611,7 +612,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           <span className="small muted">{record.kind === "live" && !currentAssessment ? "Earlier scope assessments retained" : record.kind === "live" ? `${steps.filter(step => step.status === "completed").length} of ${steps.length} applicable steps assessed complete${live?.pending.length ? ` · ${live.pending.length} branch decision${live.pending.length === 1 ? "" : "s"} pending` : ""}` : record.kind === "agreed" ? "Not yet assessed" : record.kind === "proposed" ? "Awaiting acceptance" : ""}</span>
         </div>
         {record.kind === "none"
-          ? <p className="muted">{task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
+          ? <p className="muted">{task?.supervision === "not_needed" && !task.agreement ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
+            : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
             completions: completionTimes(record.workflow), notApplicable} : {})}/>}
       </section>
