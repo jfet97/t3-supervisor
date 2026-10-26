@@ -40,6 +40,10 @@ export const workflowToolNames = {
     direct: ["t3-supervisor-workflows.supervision_start", "mcp__t3-supervisor-workflows__supervision_start"],
     mcpxTarget: "t3-supervisor-workflows__supervision_start",
   },
+  plan: {
+    direct: ["t3-supervisor-workflows.supervision_plan", "mcp__t3-supervisor-workflows__supervision_plan"],
+    mcpxTarget: "t3-supervisor-workflows__supervision_plan",
+  },
   interpretation: {
     direct: ["t3-supervisor-workflows.supervision_interpretation_submit", "mcp__t3-supervisor-workflows__supervision_interpretation_submit"],
     mcpxTarget: "t3-supervisor-workflows__supervision_interpretation_submit",
@@ -47,7 +51,7 @@ export const workflowToolNames = {
   mcpxCall: ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"],
 } as const;
 
-export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop" | "start" | "interpretation";
+export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop" | "start" | "plan" | "interpretation";
 
 export type WorkflowEvidenceMatch = {
   itemId: string;

@@ -1,7 +1,7 @@
 import {canonicalJson} from "../src/canonical-json.js";
 import type {WorkflowWriteResult} from "../src/workflow-write-controller.js";
 import {workflowAgreementPlanHash} from "../src/supervisor-workflow-agreement.js";
-import {workflowIntroductionText} from "../src/supervisor-conversation.js";
+import { workflowProposalText } from "../src/supervisor-conversation.js";
 import {applyArgs, ensureArgs, installEvidence, locator, makeFixture as makeWriteFixture, planEntities, proposalForDefinitions, replaceCurrentProposal, sequencePlan} from "./support/wwc-fixture.js";
 import {openWwcStores, sqlGet} from "./support/wwc-stores.js";
 import assert from "node:assert/strict";
@@ -320,7 +320,7 @@ it.effect("short contracts deliver all reference kinds through native-verified w
   assert.equal((JSON.parse(String(proof?.native_evidence)) as {nativeInputCanonical: string}).nativeInputCanonical, canonicalJson(args),
     "the proof retains every exact structured reference, not decoded replacements");
   const task = (yield* f.supervisors.task(f.mainThreadId))!;
-  const introduction = workflowIntroductionText(task);
+  const introduction = workflowProposalText(task);
   for (const label of ["Reference: docs/testing.md", "Skill: .claude/skills/project-testing/SKILL.md", "Skill: effect-v4-development", "Skill: plugin:review"])
     assert(introduction.includes(label), "the operative receives each pointer, including exact namespaces");
   assert(introduction.includes("missing or ambiguous skills remain explicit gaps"));

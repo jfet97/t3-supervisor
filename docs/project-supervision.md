@@ -198,11 +198,12 @@ definitions and requirements are unchanged is sent as a short delta with the obj
 limits and new acceptance record; a revision of a plan the operative already accepted
 names only the members added, removed or omitted, with reasons, and the new acceptance
 record. The Supervisor does not repeat an acceptance request while the operative turn
-that received the proposal can still answer it. The operative introduction says that `.t3-supervisor/project.yaml` is the
-index and to read the listed full files it needs. It opens with the
-obligation to agree a workflow for the authorized outcome promptly (earlier work may
-already exist; the Supervisor cannot block tools), then an outline
-and the exact acceptance record. Wakes carry the full standing instructions once per
+that received the proposal can still answer it. The operative receives a short notice: the obligation to agree a workflow for the
+authorized outcome promptly (earlier work may already exist; the Supervisor cannot block
+tools), the objective, the `.t3-supervisor/project.yaml` entry point and the exact
+`supervision_plan` call that returns its complete current proposal with the outline and
+the acceptance record. It reads that proposal on demand, also after agreement, and asks
+its Supervisor for the outline only when it cannot call the tool. Wakes carry the full standing instructions once per
 version and afterwards a compact core with their version; full instructions, task
 context, definitions and dry-run checks are pulled on demand. Each wake row has one
 activity list and per-task context with revision pins, proposal identity and digest,

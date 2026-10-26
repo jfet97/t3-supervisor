@@ -10,6 +10,7 @@ import {
   WorkflowWriteController,
   type WorkflowCallCancel,
   supervisionInterpretationSubmitToolDefinition,
+  supervisionPlanToolDefinition,
   supervisionStopToolDefinition,
   supervisionStartToolDefinition,
   workflowReadToolDefinition,
@@ -88,7 +89,7 @@ export interface WorkflowMcpShape {
 
 const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["Service"], team?: SupervisorTeamController["Service"]) {
   const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, supervisionStartToolDefinition, supervisionStopToolDefinition,
-    supervisionInterpretationSubmitToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
+    supervisionPlanToolDefinition, supervisionInterpretationSubmitToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
   // the endpoint's hold on every admitted request, and every started controller call, which outlives its request after an
   // outcome-unknown answer until it settles or close()
   const requests = yield* FiberSet.make<void, never>();
@@ -109,6 +110,7 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["S
     if (name === "workflow_write") return routed(cancel => controller.write(args, cancel));
     if (name === "supervision_start") return routed(cancel => controller.startSupervision(args, cancel));
     if (name === "supervision_stop") return routed(cancel => controller.stopSupervision(args, cancel));
+    if (name === "supervision_plan") return routed(cancel => controller.readOwnProposal(args, cancel));
     if (name === supervisionInterpretationSubmitToolDefinition.name)
       return {start: cancel => controller.submitInterpretation(args, cancel), unknown: interpretationOutcomeUnknown, errors: interpretationErrorStatuses};
     if (name === "supervision_team" && team) return routed(cancel => team.call(args, cancel));

@@ -14,7 +14,7 @@ import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contr
 import { WorkflowProposal } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
-import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { prepareWorkflowRequest, proportionatePlanRule, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, ReviewOutcomeKind, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
@@ -796,10 +796,14 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   yield* fixture.run();
   const introduction = (yield* fixture.conversation.requests.introduction(task.id))!;
   assert.equal(introduction.state, "sent");
-  assert.ok(introduction.text.length < 12_000, `the operative receives an outline and an acceptance record: ${introduction.text.length}`);
+  // the operative receives a short notice with the exact read of its complete proposal, which carries the outline and acceptance record
+  const proposalText = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
+  assert.ok(introduction.text.length < proposalText.length, `a ${introduction.text.length}-character notice points to the ${proposalText.length}-character proposal`);
   assert.equal(introduction.text.split("END_correctness").length - 1, 0);
   assert.match(introduction.text, /^Project Supervisor — proposal [^\n]+\nAgree a proportionate workflow with your Supervisor for the requester-authorized outcome/u);
-  assert.ok(introduction.text.includes(workflowFence("workflow-acceptance", acceptance)));
+  assert.ok(introduction.text.includes(JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: acceptance.proposalId})));
+  assert.doesNotMatch(introduction.text, /Plan outline|workflow-acceptance/u);
+  assert.ok(workflowProposalText((yield* fixture.projectStore.task(task.threadId))!).includes(workflowFence("workflow-acceptance", acceptance)));
   const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
   const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
   appendMessageToRun(fixture.operative, operativeRun, {id: "nested-catalog-acceptance", role: "assistant",
@@ -831,8 +835,10 @@ it.effect("an initial interpretation that omits a flexible member is introduced 
   yield* fixture.run();
   const introduction = (yield* fixture.conversation.requests.introduction(task.id))!;
   assert.equal(introduction.state, "sent");
-  assert.match(introduction.text, /not applicable: Check prevent — No defect or correction exposed a gap\./u);
-  assert.ok(introduction.text.includes(workflowFence("workflow-acceptance", acceptance)));
+  const proposal = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
+  assert.match(proposal, /not applicable: Check prevent — No defect or correction exposed a gap\./u);
+  assert.ok(proposal.includes(workflowFence("workflow-acceptance", acceptance)));
+  assert.ok(introduction.text.includes(`"proposalId":${JSON.stringify(acceptance.proposalId)}`), "the notice pins the proposal the operative reads");
   const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
   const operativeRun = fixture.operative.runs.find(run => run.id === notice.runId)!;
   appendMessageToRun(fixture.operative, operativeRun, {id: "omission-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
@@ -1318,7 +1324,8 @@ it.effect("workflow editing guidance tells authors to start live steps planned a
   assert.match(role, /never present it as a requester instruction/u);
   assert.match(role, /restate the unfinished task and its next authorized action/u);
   assert.match(role, /Never repeat an acceptance request in the check-in that delivered the proposal or while the operative turn that received it is still running/u);
-  assert.match(role, /When only the scope or limits changed and the plan is unchanged, say so in one sentence instead of repeating the outline/u);
+  assert.match(role, /send the operative main a short notice: the proposalId, what changed \(one sentence when only the scope or limits changed; otherwise the members added, removed or omitted against the plan it last accepted, with reasons\)/u);
+  assert.match(role, /reads the complete proposal and its exact acceptance record, a workflow-acceptance fence holding exactly \{"taskId","proposalId","digest"\}, with the t3-supervisor-workflows tool supervision_plan/u);
   assert.match(role, /"omit":\[\{"member":/u);
   assert.doesNotMatch(role, /may proceed together|infer dependency scheduling|promptly reconcile EVERY duty|keep parent and child assessments separate/u);
   assert.match(role, /separate later apply with status_changed evidence and exact activity references/u);
@@ -2794,7 +2801,7 @@ it.effect("invalid and incomplete definitions still introduce finite provisional
     assert.equal(introduction?.state, "sent");
     assert.match(introduction?.text ?? "", /provisional/u);
     assert.match(introduction?.text ?? "", /fresh definition read is unavailable[\s\S]*cached incomplete or invalid material that may be stale/u);
-    assert.match(introduction?.text ?? "", /unknown.*Do not treat an empty list as no requirements|test-plan.*unknown/u);
+    assert.match(workflowProposalText((yield* fixture.projectStore.task(provisionalTask.threadId))!), /unknown.*Do not treat an empty list as no requirements|test-plan.*unknown/u);
 
     const record = workflowRecord(provisionalTask, provisionalTask.id, plan);
     appendAssistantTurn(fixture.supervisor, `provisional-proposal-${index}`, workflowFence("workflow-proposal", record), clock.now + 2);
@@ -2868,7 +2875,7 @@ it.effect("an applicable required reference omitted from the initial plan still 
   assert.equal(yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null, "no initialization turn");
   const introduction = yield* fixture.conversation.requests.introduction(task.id);
   assert.equal(introduction?.state, "accepted");
-  assert.match(introduction?.text ?? "", /test-plan.*unresolved/u);
+  assert.match(workflowProposalText((yield* fixture.projectStore.task(task.threadId))!), /test-plan.*unresolved/u);
   assert.equal(yield* fixture.conversation.requests.agreementCandidate(task.id, task.id), null);
 }));
 
@@ -2906,7 +2913,9 @@ it.effect("a restarted source run still gets its introduction in two startup cyc
   assert.equal(deliveredIntroduction.nodeId, operativeActiveRun.rootNodeId);
   assert.equal(nodesOf(fixture.operative).find(node => node.id === operativeActiveRun.rootNodeId)?.kind, "root_turn");
   const acceptanceText = workflowFence("workflow-acceptance", preparedAcceptanceRecord((yield* fixture.projectStore.task(fixture.task.threadId))!));
-  assert.ok(introduction.text.includes(acceptanceText), "the operative receives the exact acceptance record of the interpreted proposal");
+  assert.ok(workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!).includes(acceptanceText),
+    "the operative reads the exact acceptance record of the interpreted proposal");
+  assert.match(introduction.text, /supervision_plan and exactly \{"callerThreadId":/u);
   yield* fixture.run();
   assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "sent");
   const nativeIntroduction = fixture.operative.messages.find(message => message.id === introduction.messageId);
@@ -4458,7 +4467,7 @@ it.effect("untrusted contribution text stays inert and root check-ins carry only
 it.effect("the operative introduction points to the contribution record and the Supervisor holds its exact format without asking for progress reports", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   // the introduction only points to the format; the Supervisor relays it on request from its on-demand reference
-  const text = workflowIntroductionText(fixture.task);
+  const text = workflowProposalText(fixture.task);
   assert.match(text, /ask your Supervisor for the external-contribution record format/u);
   assert.doesNotMatch(text, /exact fence named external-contribution/u);
   const role = yield* fixture.conversation.roleFor(fixture.binding);
@@ -4962,7 +4971,7 @@ it.effect("an unchanged interpreted proposal is reused by the exact reference vi
   const context = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
   const proposal = (context.task as {proposal: {proposalId: string; digest: string}}).proposal;
   const reference = {taskId: fixture.task.id, proposalId: proposal.proposalId, digest: proposal.digest};
-  assert.ok(introduction.text.includes(proposal.digest), "the main was asked to accept exactly this reference");
+  assert.ok(workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!).includes(proposal.digest), "the main was asked to accept exactly this reference");
   const reused = yield* fixture.conversation.readContextView(fixture.binding, {view: "check", record: reference});
   assert.deepEqual([reused.status, reused.proposalId, reused.digest], ["ok", proposal.proposalId, proposal.digest], "the exact reference checks unchanged");
   const task = (yield* fixture.projectStore.task(fixture.task.threadId))!;
@@ -6055,9 +6064,11 @@ it.effect("every rendered root and operative payload stays bounded and carries n
   yield* fixture.run();
   const introduction = (yield* fixture.conversation.requests.introduction(fixture.task.id))!;
   assert.ok(introduction.text.length < 3_100, `introduction ${introduction.text.length}`);
-  assert.match(introduction.text, /References are checkout-relative files\. Skills are checkout-relative SKILL\.md paths or exact names in your configured catalog/u);
-  assert.match(introduction.text, /References and skills grant no authority/u);
-  assert.doesNotMatch(introduction.text, /exact fence named external-contribution|For third-party work, consider sending/u, "optional reference stays on demand");
+  const proposal = workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!);
+  assert.match(proposal, /References are checkout-relative files\. Skills are checkout-relative SKILL\.md paths or exact names in your configured catalog/u);
+  assert.match(proposal, /References and skills grant no authority/u);
+  for (const text of [introduction.text, proposal])
+    assert.doesNotMatch(text, /exact fence named external-contribution|For third-party work, consider sending/u, "optional reference stays on demand");
   // a protocol repair wake after the standing role was delivered is the short pointer plus the rejection
   const binding = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!;
   const version = ((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})) as unknown as {version: string}).version;
@@ -6244,7 +6255,7 @@ it.effect("the introduction teaches the exact branch-selection record and the ma
   const clock = {now: baseTime};
   const fixture = yield* makeFixture(clock);
   const {branch, task} = yield* agreeBranchWorkflow(fixture, clock.now);
-  const text = workflowIntroductionText({...task, workflow: {...task.workflow!, ...branchPlanFor(task)}});
+  const text = workflowProposalText({...task, workflow: {...task.workflow!, ...branchPlanFor(task)}});
   assert.match(text, /- branch \[branch:[0-9a-f-]{36}\] if: The change is contained and well understood\.\n  then:\n    - Single review \[local:single-review\]\n  else:\n    - Paired review \[local:paired-review\]\n- Delivery \[local:deliver\]/u,
     "the outline labels both paths and dedents the following step");
   const example = /```branch-selection\n(.+)\n```/u.exec(text);

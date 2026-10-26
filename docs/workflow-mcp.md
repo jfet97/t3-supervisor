@@ -260,6 +260,17 @@ workflow documents:
   decisions, without descriptions, accepted snapshots or history. Use it to reconcile
   statuses; the document read remains available for descriptions and history.
 
+`supervision_plan` is the operative main's read of its own current proposal. Its arguments
+are `callerThreadId`, `taskId` and `proposalId`, copied from the Supervisor notice. The
+service verifies the caller's own executed native tool call with exactly these arguments
+in its own main run, then returns the complete current proposal: objective and authorized
+scope, limits, required references, the plan with its omissions and branches, the branch
+protocol and the exact acceptance record. It answers only for the caller's own interpreted
+task under its ready Supervisor, for exactly the current proposal, before or after its
+agreement, while supervision of that chat is enabled and not stopped. Any other call, such
+as a forged, foreign or outdated one, gets one refusal that names nothing; the read writes
+nothing and grants no Supervisor, helper or write authority.
+
 `supervision_stop` durably stops supervision of one chat on a genuine human request.
 Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and
 `operationId`. The service verifies the caller's own executed native tool call with

@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { workflowIntroductionText } from "../src/supervisor-conversation.js";
+import { workflowProposalText } from "../src/supervisor-conversation.js";
 import { conversationMayContact } from "../src/supervision-conversation-contract.js";
 import { prepareWorkflowRequest, proportionatePlanRule, readerWorkflowInstruction } from "../src/supervisor-workflow.js";
 import { planEntities } from "../src/workflow-plan-tree.js";
@@ -101,7 +101,7 @@ it.effect("a proportionate plan reuses individual steps and adds local ones whil
   assert.equal(task.workflow?.status, "proposed");
   assert.deepEqual(planEntities(task.workflow!.plan).map(node => node.definitionId), [null, "update-docs"]);
   assert.deepEqual(task.workflow?.requirements.map(item => [item.id, item.state]), [["test-plan", "not_applicable"]]);
-  const introduction = workflowIntroductionText(task);
+  const introduction = workflowProposalText(task);
   assert.match(introduction, /Check the setup steps/u);
   assert.match(introduction, /Update documentation/u);
   for (const name of catalogNames) assert.equal(introduction.includes(name), false, `${name} is absent, not listed as not applicable`);
@@ -161,5 +161,7 @@ it.effect("a first proposal omitting a flexible member goes out to the operative
   const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
   assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}:${task.sourceHash.slice(0, 20)}`,
     "the recorded interpretation confirms the omitted-member proposal, so it is not held back");
-  assert.match(String(introduction?.payload.text), /not applicable: Data and rollout plan — No stored data or rollout is involved\./u);
+  assert.ok(String(introduction?.payload.text).includes(JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})),
+    "the notice pins the operative's read of this proposal");
+  assert.match(workflowProposalText(task), /not applicable: Data and rollout plan — No stored data or rollout is involved\./u);
 }));
