@@ -84,7 +84,7 @@ const reviewStateLabels = {recorded: "recorded, awaiting confirmation", unconfir
 // evidence that the operative acted on it
 const ReviewOutcomes = ({review}: {readonly review: SupervisorMonitoringReview}) => <div className="stack">
   <p><strong>Last confirmed review:</strong> {review.lastConfirmed
-    ? `${reviewOutcomeLabels[review.lastConfirmed.outcome]} (${formatMonitoringTime(review.lastConfirmed.at)})${review.lastConfirmed.reason ? `: ${review.lastConfirmed.reason}` : ""}`
+    ? `${reviewOutcomeLabels[review.lastConfirmed.outcome]} (${formatMonitoringTime(review.lastConfirmed.at)})${review.lastConfirmed.reason ? `: ${review.lastConfirmed.reason}` : ""}${review.lastConfirmed.wait ? `. Waiting on ${review.lastConfirmed.wait.waitingOn === "requester" ? "the requester" : "another party"} until ${review.lastConfirmed.wait.resumesWhen}` : ""}`
     : "None yet"}</p>
   {review.current && <p><strong>Current review:</strong> {review.current.outcome ? reviewOutcomeLabels[review.current.outcome] : "No outcome"}, {reviewStateLabels[review.current.state]}
     {review.current.reason ? `: ${review.current.reason}` : ""}{review.current.problem && review.current.state !== "recorded" ? ` (${review.current.problem})` : ""}</p>}
@@ -508,6 +508,8 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
   </EntityDetails>;
 }
 
+// an idle main whose agreed workflow is unfinished, with no recorded blocker or wait: the Supervisor stays out of standby without polling
+const unfinishedWorkStandby = "The main chat is idle, but its agreed workflow is unfinished and no current wait for the requester or another party is recorded. The Supervisor stays out of standby without new check-ins; new activity or a message in the main chat resumes its reviews, or you can stop supervision.";
 const settlementText = {pending: "Parking this idle Supervisor is pending.", uncertain: "It is not confirmed whether this idle Supervisor was parked.", settled: "This idle Supervisor is parked.", superseded: "The earlier parking request no longer applies."} as const;
 
 export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
@@ -531,7 +533,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
           {workflow?.objective && <p>{workflow.objective}</p>}
           {workflow?.parentNodeReferences.length ? <p className="small">Contributes to parent steps: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</p> : null}
-          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)}/>}
+          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)}/>}
           {workflow && <BranchDecisionHistory workflow={workflow}/>}
           {workflow && <SupervisorRecords workflow={workflow}/>}
           <p className="small">Lifecycle: {lifecycle.label}{thread.lifecycleDetail ? ` · T3 detail: ${thread.lifecycleDetail}` : ""}</p>
@@ -562,7 +564,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const pending = pendingProposal(task);
   const changes = accepted && pending ? pending.plan ? planChanges(accepted.workflow.plan, pending.plan) : [] : null;
   // a live plan counts only the steps that currently apply; a pending decision is current work and its paths are not outstanding steps
-  const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow)) : null;
+  const notApplicable = record.kind === "live" ? new Set(record.workflow.notApplicable ?? []) : undefined;
+  const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow), notApplicable) : null;
   const steps = live?.steps ?? (record.kind === "none" ? [] : planSteps(record.plan));
   const current = live ? [...steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name),
     ...live.pending.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
@@ -610,7 +613,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
         {record.kind === "none"
           ? <p className="muted">{task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
-            completions: completionTimes(record.workflow)} : {})}/>}
+            completions: completionTimes(record.workflow), notApplicable} : {})}/>}
       </section>
       <aside className="workflow-context">
         <TaskAlignment task={task} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>
@@ -629,7 +632,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
       {retained.map(workflow => <EntityDetails title={<>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
         <p className="notice">Retained workflow record. It is not linked to the current task.</p>
-        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)}/>}
+        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)}/>}
         <SupervisorRecords workflow={workflow}/></EntityDetails>)}
       {(view.latest?.incompatibleWorkflows.length ?? 0) > 0 && <p className="notice" role="status">Some retained workflow records use an incompatible format and remain read-only: {view.latest!.incompatibleWorkflows.map(item => item.workflowId).join(", ")}.</p>}
     </div></EntityDetails>
@@ -768,7 +771,7 @@ export function ProjectSupervisorView({
         <h3>Supervisor health</h3>
         {snapshot.binding && <span className={`pill ${snapshot.binding.state === "ready" ? "green" : "amber"}`}>{{creating: "Creating conversation", ready: "Ready", uncertain: "Outcome uncertain", rejected: "Access rejected", missing: "Conversation deleted"}[snapshot.binding.state]}</span>}
       </div>
-      <p className="supervision-health">{snapshot.monitoringStatus?.state === "unavailable" || snapshot.monitoringStatus?.state === "uncertain" ? snapshot.monitoringStatus.message : snapshot.binding?.state === "ready" ? snapshot.monitoringStatus?.state === "busy" ? "Supervisor is reviewing recent activity." : "Supervisor is ready and waiting for new activity." : "Supervisor is not ready. Review its connection and recovery options."}</p>
+      <p className="supervision-health">{snapshot.monitoringStatus?.state === "unavailable" || snapshot.monitoringStatus?.state === "uncertain" ? snapshot.monitoringStatus.message : snapshot.binding?.state === "ready" ? snapshot.monitoringStatus?.state === "busy" ? "Supervisor is reviewing recent activity." : snapshot.binding.settlementBlockedBy === "unfinished_agreed_work" && !snapshot.binding.settlementState ? unfinishedWorkStandby : "Supervisor is ready and waiting for new activity." : "Supervisor is not ready. Review its connection and recovery options."}</p>
       {snapshot.binding?.state === "missing"
         ? <p>Deleted Supervisor conversation: <code>{snapshot.binding.threadId}</code></p>
         : snapshot.binding
@@ -776,7 +779,7 @@ export function ProjectSupervisorView({
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
       <HelpDisclosure title="About Supervisor health and controls"><p>A <GuideLink topic="supervisor-conversation">bound Supervisor conversation</GuideLink> is assigned to this main chat. Its readiness is separate from task progress. <GuideLink topic="monitoring">Monitoring and check-ins</GuideLink> explain when reviews are due; <GuideLink topic="stop-vs-exclusion">Stop, disable and exclude</GuideLink> act at different scopes.</p></HelpDisclosure><EntityDetails title={<>Conversation and model details</>} ><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
       {snapshot.binding?.settlementState && <p>{settlementText[snapshot.binding.settlementState]} Resumed work uses this same conversation.</p>}
-      {snapshot.binding?.settlementBlockedBy && !snapshot.binding.settlementState && <p className="muted">Parking this idle Supervisor is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
+      {snapshot.binding?.settlementBlockedBy && snapshot.binding.settlementBlockedBy !== "unfinished_agreed_work" && !snapshot.binding.settlementState && <p className="muted">Parking this idle Supervisor is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
       {snapshot.binding?.keptActive && <p>This Supervisor stays active because you chose to keep its conversation active.</p>}
       <p className="muted">Supervisor work runs in the project root. Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions.</p>
       <p><strong>Project default for new Supervisors:</strong> {formatModel(snapshot, snapshot.settings.modelSelection)}</p>

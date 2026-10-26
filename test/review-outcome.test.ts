@@ -3,7 +3,7 @@ import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import type { ConversationRequest, ReviewOutcomeKind } from "../src/supervisor-conversation-store.js";
 import { sqlGet } from "./support/wwc-stores.js";
-import { applyArgs, ensureArgs, installEvidence, localStep, locator, makeFixture, openWrite, sequencePlan, thread, type WwcFixture } from "./support/wwc-fixture.js";
+import { applyArgs, ensureArgs, installEvidence, localStep, locator, makeFixture, openWrite, planEntities, sequencePlan, thread, type WwcFixture } from "./support/wwc-fixture.js";
 
 // workflow_write record_review through the production controller and its native proof: the root records the outcome of its own
 // pending monitoring review, bound to its native call; progress cites apply edits of that same run; no outcome sends anything
@@ -99,12 +99,17 @@ it.effect("progress_updated cites only apply edits of the same run, and no_chang
     assert.equal((yield* fixture.controller.write(plan)).status, "applied");
 
     const request = yield* pendingReview(fixture);
-    // this review's run marks the completed operative work: the plan no longer stays planned
+    // this review's run marks the completed operative work: the task is entered together with the step the operative finished
+    const step = planEntities((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!.plan)[0]!;
     const progress = yield* applyArgs(fixture, {operationId: "review-progress", workflowId: created.workflowId, expectedRevision: 2, status: "underway",
-      evidence: [{kind: "status_changed", note: "The operative finished the exporter change.", sourceThreadId: fixture.mainThreadId}], note: "Record the progress."});
+      statuses: [{nodeId: step.nodeId, status: "completed"}],
+      evidence: [{kind: "status_changed", note: "The operative's work on the task is underway.", sourceThreadId: fixture.mainThreadId},
+        {kind: "status_changed", targetNodeId: step.nodeId, note: "The operative finished the exporter change.", sourceThreadId: fixture.mainThreadId}],
+      note: "Record the progress."});
     installEvidence(fixture, progress);
     assert.equal((yield* fixture.controller.write(progress)).status, "applied");
-    assert.equal((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))?.status, "underway");
+    const progressed = yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId);
+    assert.deepEqual([progressed?.status, planEntities(progressed?.plan ?? null)[0]?.status], ["underway", "completed"]);
 
     const noChange = recordArgs(fixture, request.id, "no_change", "review-claims-no-change");
     installEvidence(fixture, noChange);

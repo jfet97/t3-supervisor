@@ -325,10 +325,15 @@ export const DefinitionReview = Schema.Struct({
 export type DefinitionReviewInfo = typeof DefinitionReview.Type;
 /** The four results a root monitoring review records; none sends anything by itself. */
 export const reviewOutcomes = ["progress_updated", "no_change", "needs_attention", "insufficient_evidence"] as const;
+/** Who must act before an unfinished agreed workflow continues; the operative's own unfinished action is never a wait. */
+export const reviewWaitOwners = ["requester", "external"] as const;
+export const ReviewWait = Schema.Struct({waitingOn: Schema.Literals(reviewWaitOwners), resumesWhen: Schema.String});
+export type ReviewWaitInfo = typeof ReviewWait.Type;
 const ReviewOutcomeKind = Schema.Literals(reviewOutcomes);
 /** The last confirmed review outcome and the current one not (yet) confirmed: recorded, unconfirmed, or missing. */
 export const MonitoringReview = Schema.Struct({
-  lastConfirmed: Schema.NullOr(Schema.Struct({outcome: ReviewOutcomeKind, reason: Schema.NullOr(Schema.String), at: Schema.Number})),
+  lastConfirmed: Schema.NullOr(Schema.Struct({outcome: ReviewOutcomeKind, reason: Schema.NullOr(Schema.String), at: Schema.Number,
+    wait: Schema.optionalKey(ReviewWait)})),
   current: Schema.NullOr(Schema.Struct({
     state: Schema.Literals(["recorded", "unconfirmed", "missing"]),
     outcome: Schema.NullOr(ReviewOutcomeKind),

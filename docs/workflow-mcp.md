@@ -29,7 +29,10 @@ plan of definition IDs, local steps and groups. The service binds it to the obse
 task source and definition revisions, derives workspace, names, descriptions, sources
 and template paths from the trusted definitions, and canonicalizes it with
 deterministic node IDs. A changed plan needs a fresh proposal ID; reusing an ID for
-different content is rejected.
+different content is rejected. A workflow reference in a draft may carry
+`omit: [{member, reason}]`, naming members of a flexible workflow by definitionId,
+localId or nodeId; the service derives their template provenance and keeps them visible
+as not applicable. Fixed workflows reject omissions.
 
 The operative main assistant records agreement only in its own completed message
 after the introduction, with a `workflow-acceptance` fence of exactly
@@ -248,6 +251,10 @@ workflow documents:
 - `check`: a dry run of one compact `workflow-proposal` record, returning the outline,
   formal state, digest and acceptance record, or the first failing code, path and
   expected shape. It publishes nothing.
+- `status`: each current workflow's occurrences with nodeId, kind, name, definition
+  reference, nesting, status, branch reach and visible omissions, plus pending
+  decisions, without descriptions, accepted snapshots or history. Use it to reconcile
+  statuses; the document read remains available for descriptions and history.
 
 `supervision_stop` durably stops supervision of one chat on a genuine human request.
 Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and
@@ -323,7 +330,10 @@ at their first and their final authority check.
   the run that created or changed a workflow (`review_no_change_after_edit`). A later call of the same run replaces the outcome
   until the check-in completes. It sends nothing: messaging the operative is a separate
   decision, and neither the record nor delivered guidance shows that the operative
-  corrected anything.
+  corrected anything. An optional `wait: {waitingOn, resumesWhen}` records an explicit
+  current wait when the main has stopped with agreed work unfinished: `requester` or
+  `external` must act (never the operative's own unfinished action) and `resumesWhen`
+  names what continues the work.
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
 During initialization the root publishes the supplied initial record unchanged and
@@ -353,9 +363,40 @@ Old prototype documents remain explicitly incompatible and are not migrated or
 silently reinterpreted; their historical rows and unrelated service state remain.
 
 Apply requires `operationId`, `workflowId`, `expectedRevision` and `note`. Status,
-objective, requirements, plan and evidence are optional; omitted plan fields are preserved
+objective, requirements, plan, statuses, omit and evidence are optional; omitted plan fields are preserved
 from the current document inside the revision-checked transaction. This permits a
-status or objective change without resending an entire plan. A supplied plan replaces the nested plan, retaining stable occurrence identities.
+status or objective change without resending an entire plan. `statuses` lists up to
+100 `{nodeId, status}` edits of existing occurrences, merged into the current plan
+atomically under the same revision check; each changed status still needs its own
+`status_changed` evidence. `omit` lists up to 100 `{nodeId, reason}` omissions of
+unstarted members declared by flexible workflows; the main workflow accepts one only when
+the operative has accepted the current proposal and it omits the same member of the same
+occurrence. Members with recorded progress, fixed members and an omission that would
+empty a workflow or branch path, directly or through a nested group, are refused.
+Neither may be combined with `plan` (`plan_edit_conflict`). Evidence of kind
+`not_applicable` records that a planned member of a fixed workflow, with no recorded
+progress inside it, does not apply to the current task scope; it changes no status, is refused for any other target
+(`not_applicable_invalid`) and stops counting after a later status change or scope
+change. Assessing a fixed workflow member settles that whole occurrence: its own
+members and any branch decisions inside it need no further record, and neither pending
+decision lists nor completion reassessment ask for those decisions.
+
+Recorded progress is checked, never operative work. A `status_changed` record must
+change its target's status (`status_unchanged`), except the retained-progress
+reassessment a changed scope requires. In any sequence, fixed or flexible, a member
+may first be entered only after every earlier applicable member is settled
+(`sequence_order`); parallel members, undecided or not-selected paths and rework or
+review rounds inside an already entered member are unaffected. A workflow, or the task
+itself, is entered together with an applicable member unless it opens with a pending
+decision or has nothing left to settle, and a member is entered only inside an entered
+workflow and task (`nested_status_inconsistent`). A workflow or the task is completed only
+when every applicable member is settled (`completion_unfinished`): completed, or a planned
+fixed member with a current `not_applicable` record. A member on a path whose decision is
+still pending cannot be entered (`branch_decision_pending`). Completing a workflow never
+completes its members. The order check and these rules count a settled member as done,
+so a fixed member that does not apply never blocks what follows. A diagnostic names the
+occurrence at fault: an edit's own `/input/statuses/N/status`, or `/current/...` for an
+unedited occurrence of the current plan, such as an open member or a planned ancestor. A supplied plan replaces the nested plan, retaining stable occurrence identities.
 A supplied requirement list replaces its accounting; reusable provenance, fixed
 commitments and current-task policy are revalidated. Status changes still require explicit status-change evidence.
 A new live node whose status is not "planned" is rejected with reason and diagnostic
@@ -381,7 +422,10 @@ reserve the operation ID. Unverified callers, raw request-shape failures and
 unrecognized policy or pin failures retain their existing results.
 
 An evidence entry may include optional `sourceThreadId`, `sourceRunId`,
-`sourceMessageId` and `sourceItemId` references. If a reference is supplied without
+`sourceMessageId` and `sourceItemId` references. They are exact opaque native IDs of
+up to 1,024 characters, separate from the 200-character operation-ID bound; a rejected
+evidence field returns `evidence_reference_invalid` or `evidence_entry_invalid` with its
+position and field name, never its value. If a reference is supplied without
 `sourceThreadId`, the controller uses the target workflow's thread. That thread must
 be the owner's main or a verified native descendant in the fresh scope. Run and
 message references must carry that exact thread identity in its current projection;

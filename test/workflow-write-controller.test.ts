@@ -1183,11 +1183,9 @@ it.effect("workflow read exposes bounded live lineage and every shared parent-st
       operationId: "association-child-expansion",
       workflowId: childWorkflow.workflowId,
       expectedRevision: childWorkflow.revision,
-      status: "underway",
       objective: "Break output inspection into child tasks.",
       plan: sequencePlan([localStep("Check columns", "Validate the output headers.", [childA.id])]),
       note: "Expand the child subflow independently.",
-      evidence: [{kind: "status_changed", note: "The child subflow started."}],
     };
     const childArgs = yield* applyArgs(fixture, childInput);
     installEvidence(fixture, childArgs);
@@ -1276,9 +1274,12 @@ it.effect("archived descendants stay owned for reads and semantic edits but cann
     assert.deepEqual(mainStep((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))?.plan ?? null)?.contributorThreadIds, [archivedChild.id]);
 
     const archivedWorkflow = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId, archivedChild.id))!;
+    const retainedStep = mainStep(archivedWorkflow.plan)!;
     const archivedUpdate = yield* applyArgs(fixture, {operationId: "archive-child-objective", workflowId: archivedWorkflow.workflowId,
       expectedRevision: archivedWorkflow.revision, status: "underway", objective: "Edit the retained child workflow.",
-      evidence: [{kind: "status_changed", note: "Resume the retained plan status."}], note: "Change child semantics after archive."});
+      statuses: [{nodeId: retainedStep.nodeId, status: "underway"}],
+      evidence: [{kind: "status_changed", note: "Resume the retained plan status."},
+        {kind: "status_changed", targetNodeId: retainedStep.nodeId, note: "The retained step resumed."}], note: "Change child semantics after archive."});
     installEvidence(fixture, archivedUpdate);
     assert.equal((yield* fixture.controller.write(archivedUpdate)).status, "applied");
     assert.equal((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId, archivedChild.id))?.objective,
@@ -1370,13 +1371,16 @@ it.effect("partial status edits retain contributors whose child is no longer in 
     child.deletedAt = "2026-10-14T21:05:00.000Z";
     fixture.threads.splice(fixture.threads.indexOf(child), 1);
     const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const step = mainStep(current.plan)!;
     const partial = yield* applyArgs(fixture, {operationId: "deleted-contributor-status", workflowId: current.workflowId,
-      expectedRevision: current.revision, status: "underway", evidence: [{kind: "status_changed", note: "The parent work started."}],
-      note: "Change parent status without removing the deleted child association."});
+      expectedRevision: current.revision, status: "underway", statuses: [{nodeId: step.nodeId, status: "underway"}],
+      evidence: [{kind: "status_changed", note: "The parent work started."}, {kind: "status_changed", targetNodeId: step.nodeId, note: "Its review step started."}],
+      note: "Change statuses without resending the plan or removing the deleted child association."});
     installEvidence(fixture, partial);
     assert.equal((yield* fixture.controller.write(partial)).status, "applied");
     const updated = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
     assert.equal(updated.status, "underway");
+    assert.equal(mainStep(updated.plan)?.status, "underway");
     assert.deepEqual(mainStep(updated.plan)?.contributorThreadIds, [child.id]);
   } finally {yield* fixture.close;}
 }));
@@ -1445,10 +1449,10 @@ it.effect("an exact successful apply replay precedes new activity-reference targ
     if (created.status !== "created") return;
 
     const apply = yield* applyArgs(fixture, {operationId: "reference-replay-apply", workflowId: created.workflowId,
-      expectedRevision: created.revision, status: "underway", objective: "Track the current task.",
+      expectedRevision: created.revision, status: "planned", objective: "Track the current task.",
       plan: sequencePlan([localStep("Inspect the result", "Review the task output before completion.")]),
-      note: "Apply a traceable status change.",
-      evidence: [{kind: "status_changed", note: "The Supervisor assessed the current activity.", sourceThreadId: fixture.mainThreadId}]});
+      note: "Apply a traceable observation.",
+      evidence: [{kind: "observation", note: "The Supervisor assessed the current activity.", sourceThreadId: fixture.mainThreadId}]});
     installEvidence(fixture, apply);
     const applied = yield* fixture.controller.write(apply);
     assert.equal(applied.status, "applied", JSON.stringify(applied));
@@ -1505,6 +1509,80 @@ it.effect("activity references must resolve exactly and agree on their native ru
       status: "invalid", operationId: "source-run-mismatch", reason: "activity_reference_item_run_mismatch",
     });
     assert.equal((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))?.revision, latest.revision);
+  } finally {yield* fixture.close;}
+}));
+
+// native identities shaped like a T3 async user answer: a 241-character message ID and its 285-character turn item ID
+const asyncAnswerMessageId = "async-answer:runtime-request:provider:codex:provider-turn:provider-turn%3Aprovider%3Acodex%3Anative-turn%3A0a1b2c3d-4e5f-7a6b-8c9d-0e1f2a3b4c5d:native-request:async%3Acall_0123456789abcdef0123456789abcdef:11111111-2222-4333-8444-555555555555";
+const asyncAnswerItemId = "turn-item:message:async-answer%3Aruntime-request%3Aprovider%3Acodex%3Aprovider-turn%3Aprovider-turn%253Aprovider%253Acodex%253Anative-turn%253A0a1b2c3d-4e5f-7a6b-8c9d-0e1f2a3b4c5d%3Anative-request%3Aasync%253Acall_0123456789abcdef0123456789abcdef%3A11111111-2222-4333-8444-555555555555";
+
+it.live("long native evidence IDs are accepted verbatim through the MCP endpoint while over-bound and foreign references stay rejected", () => Effect.gen(function* () {
+  assert.equal(asyncAnswerMessageId.length, 241);
+  assert.equal(asyncAnswerItemId.length, 285);
+  const fixture = yield* makeFixture();
+  try {
+    const create = ensureArgs(fixture, "long-reference-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = yield* fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const answerRun = "run:thread:main:ordinal:1";
+    const requester = fixture.projections.get(fixture.mainThreadId)!;
+    requester.runs.push({id: answerRun, ordinal: 2, status: "completed", requestedAt: "2026-10-14T10:00:00.000Z", startedAt: "2026-10-14T10:00:00.000Z",
+      completedAt: "2026-10-14T10:01:00.000Z", rootNodeId: null, threadId: fixture.mainThreadId});
+    requester.messages.push({id: asyncAnswerMessageId, runId: answerRun, nodeId: null, role: "user", text: "Use the first option.",
+      streaming: false, createdAt: "2026-10-14T10:00:30.000Z", updatedAt: "2026-10-14T10:00:30.000Z", threadId: fixture.mainThreadId});
+    fixture.details.set(asyncAnswerItemId, {id: asyncAnswerItemId, type: "user_message", threadId: fixture.mainThreadId, runId: answerRun, status: "completed"});
+
+    const server = createServer();
+    yield* Layer.build(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
+      Layer.provide(workflowMcpLayer(fixture.controller)),
+      Layer.provide(NodeHttpServer.layer(() => server, {port: 0, host: "127.0.0.1"})),
+    ));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const callWrite = (args: unknown) => Effect.gen(function* () {
+      const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${address.port}/mcp/workflows`, {method: "POST",
+        headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"},
+        body: JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_write", arguments: args}})}));
+      const body = (yield* Effect.promise(() => response.json())) as {result?: {content?: Array<{text?: string}>}};
+      return JSON.parse(body.result?.content?.[0]?.text ?? "null") as Record<string, unknown>;
+    });
+
+    const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const accepted = yield* applyArgs(fixture, {operationId: "long-reference-apply", workflowId: created.workflowId,
+      expectedRevision: current.revision, status: "planned", objective: "Cite the requester's async answer.",
+      plan: sequencePlan([localStep("Gather evidence", "Establish the requested grouping.", [fixture.mainThreadId])]),
+      note: "The requester's answer establishes the grouping.", evidence: [{kind: "observation", note: "The requester chose an option.",
+        sourceThreadId: fixture.mainThreadId, sourceRunId: answerRun, sourceMessageId: asyncAnswerMessageId, sourceItemId: asyncAnswerItemId}]});
+    installEvidence(fixture, accepted);
+    const applied = yield* callWrite(accepted);
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    const stored = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const observation = stored.evidence.find(item => item.kind === "observation");
+    assert.equal(observation?.sourceMessageId, asyncAnswerMessageId, "the message ID is stored verbatim");
+    assert.equal(observation?.sourceItemId, asyncAnswerItemId, "the item ID is stored verbatim");
+    assert.equal((yield* fixture.workflows.getByIdForOwner(fixture.owner, created.workflowId)).status, "found", "the stored document stays valid");
+
+    // an over-bound reference is refused before any native read, at its exact field, without echoing the value
+    const overBound = `${asyncAnswerItemId}${"x".repeat(1025 - asyncAnswerItemId.length)}`;
+    const tooLong = yield* applyArgs(fixture, {operationId: "long-reference-over-bound", workflowId: created.workflowId,
+      expectedRevision: stored.revision, note: "Reject an over-bound reference.",
+      evidence: [{kind: "observation", note: "Fine."}, {kind: "observation", note: "Too long.", sourceItemId: overBound}]});
+    installEvidence(fixture, tooLong);
+    const refused = yield* callWrite(tooLong);
+    assert.deepEqual(refused, {status: "invalid", operationId: "long-reference-over-bound", reason: "invalid_apply_input",
+      diagnostic: {code: "evidence_reference_invalid", path: "/input/evidence/1/sourceItemId",
+        expected: "an exact opaque native ID string of 1 to 1024 characters, or null"}});
+    assert.doesNotMatch(JSON.stringify(refused), /xxxx/u);
+
+    // the larger bound does not widen scope: a long reference into a foreign thread is still denied
+    const foreign = yield* applyArgs(fixture, {operationId: "long-reference-foreign", workflowId: created.workflowId,
+      expectedRevision: stored.revision, note: "Reject a foreign long reference.",
+      evidence: [{kind: "observation", note: "Foreign.", sourceThreadId: "foreign-thread", sourceMessageId: asyncAnswerMessageId}]});
+    installEvidence(fixture, foreign);
+    assert.deepEqual(yield* callWrite(foreign), {status: "denied", operationId: "long-reference-foreign", reason: "activity_reference_outside_current_scope"});
+    assert.equal((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))?.revision, stored.revision);
   } finally {yield* fixture.close;}
 }));
 
@@ -2401,8 +2479,9 @@ it.effect("workflow_write tool output reports new_node_must_start_planned with t
       operationId: "planned-first-start",
       workflowId: stored.workflowId,
       expectedRevision: stored.revision,
+      status: "underway",
       plan: sequencePlan([{...node!, status: "underway"}]),
-      evidence: [{kind: "status_changed", targetNodeId: node?.nodeId, note: "The inserted step started."}],
+      evidence: [{kind: "status_changed", note: "The task started."}, {kind: "status_changed", targetNodeId: node?.nodeId, note: "The inserted step started."}],
       note: "Record the later status change.",
     });
     installEvidence(fixture, running);
@@ -2564,9 +2643,10 @@ it.effect("a main contribution import and Supervisor writes race only through re
     installEvidence(f, retryAssess);
     assert.equal((yield* f.controller.write(retryAssess)).status, "applied");
     const assessed = (yield* f.workflows.get(f.projectId, f.mainThreadId))!;
-    const retryApply = yield* applyArgs(f, {operationId: "start-retry", workflowId, expectedRevision: assessed.revision, status: "planned",
+    const retryApply = yield* applyArgs(f, {operationId: "start-retry", workflowId, expectedRevision: assessed.revision, status: "underway",
       plan: {...fresh.plan!, nodes: fresh.plan!.nodes.map(item => ({...item, status: "underway"}))} as WorkflowPlanGroupInfo,
-      evidence: [{kind: "status_changed", targetNodeId: node.nodeId, note: "The external review started."}], note: "Start the review step."});
+      evidence: [{kind: "status_changed", note: "The task started."}, {kind: "status_changed", targetNodeId: node.nodeId, note: "The external review started."}],
+      note: "Start the review step."});
     installEvidence(f, retryApply);
     assert.equal((yield* f.controller.write(retryApply)).status, "applied");
     const edited = (yield* f.workflows.get(f.projectId, f.mainThreadId))!;

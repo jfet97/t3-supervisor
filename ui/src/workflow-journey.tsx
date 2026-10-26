@@ -34,14 +34,14 @@ export function planSteps(node: WorkflowPlanNodeInfo | null): Array<Extract<Work
 export type CompletionReassessment = "pending" | "changed" | "undated";
 
 /**
- * Why a workflow occurrence's recorded completion no longer stands as current, or null when it does: a decision it reaches is pending,
- * a selection inside it was recorded or invalidated after the completion record, or no completion time is available to show that the
- * completion followed the decisions inside it. The recorded status itself stays as history.
+ * Why a workflow occurrence's recorded completion no longer stands as current, or null when it does: a decision it reaches is pending
+ * outside what is currently not applicable, a selection inside it was recorded or invalidated after the completion record, or no
+ * completion time is available to show that the completion followed the decisions inside it. The recorded status itself stays as history.
  */
 export function completionReassessment(node: Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>, selections: readonly WorkflowProgressBranchSelection[],
-  completedAt: number | null | undefined): CompletionReassessment | null {
+  completedAt: number | null | undefined, notApplicable: ReadonlySet<string> = new Set()): CompletionReassessment | null {
   if (node.status !== "completed" || !node.plan) return null;
-  if (pendingBranchDecisions(node.plan, currentBranchPaths({branchSelections: [...selections]})).length > 0) return "pending";
+  if (pendingBranchDecisions(node.plan, currentBranchPaths({branchSelections: [...selections]})).some(branch => !notApplicable.has(branch.nodeId))) return "pending";
   const inside = new Set(planBranches(node.plan).map(branch => branch.nodeId));
   const decisions = selections.filter(item => inside.has(item.nodeId));
   if (!decisions.length) return null;
@@ -65,11 +65,13 @@ export const currentBranchPaths = (workflow: Pick<WorkflowProgressWorkflow, "bra
 
 /**
  * What currently applies in a live plan: the steps outside every branch or in selected paths, and the reached decisions still pending.
- * Steps in an undecided or not-selected path are alternatives, not outstanding work, and a pending decision is work of its own.
+ * Steps in an undecided or not-selected path are alternatives, not outstanding work, and a pending decision is work of its own. Whatever a
+ * current not-applicable assessment settles is neither an applicable step nor a pending decision.
  */
-export function liveProgress(plan: WorkflowPlanGroupInfo | null, selected: ReadonlyMap<string, BranchPath>) {
-  const steps = planReach(plan, selected).flatMap(({node, reach}) => node.kind === "step" && (reach === "unconditional" || reach === "selected") ? [node] : []);
-  return {steps, pending: pendingBranchDecisions(plan, selected)};
+export function liveProgress(plan: WorkflowPlanGroupInfo | null, selected: ReadonlyMap<string, BranchPath>, notApplicable: ReadonlySet<string> = new Set()) {
+  const steps = planReach(plan, selected).flatMap(({node, reach}) => node.kind === "step" && (reach === "unconditional" || reach === "selected") &&
+    !notApplicable.has(node.nodeId) ? [node] : []);
+  return {steps, pending: pendingBranchDecisions(plan, selected).filter(branch => !notApplicable.has(branch.nodeId))};
 }
 
 export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) => Boolean(acceptedAgreement(task) && !pendingProposal(task));
@@ -88,17 +90,23 @@ const hasActiveNode = (node: WorkflowPlanNodeInfo, selected: ReadonlyMap<string,
 
 const noNotes: StepNotes = {agreed: null, proposed: null, records: null, changed: new Set()};
 
+// a planned member of a fixed workflow whose latest status record says it does not apply to this task
+const notApplicableRecord = (records: readonly WorkflowProgressObservation[] | undefined) => {
+  const latest = [...records ?? []].reverse().find(item => item.kind === "status_changed" || item.kind === "not_applicable");
+  return latest?.kind === "not_applicable" ? latest : null;
+};
+
 /** The step's records: the status record that explains its current state, then any other notes about it. */
 function StepRecords({status, records}: {status: keyof typeof states; records: readonly WorkflowProgressObservation[] | undefined}) {
-  const current = status === "planned" ? null : statusRecord(records, status);
+  const current = status === "planned" ? notApplicableRecord(records) : statusRecord(records, status);
   const others = (records ?? []).filter(item => item !== current).reverse();
   return <>
     {current
       ? <div className="step-assessment"><strong>Supervisor assessment</strong><p>{current.note}</p>
-        <p className="small muted">Recorded {current.statusFrom ? `${recordStates[current.statusFrom]} → ` : ""}{recordStates[status]} · {formatTime(current.recordedAt)}</p></div>
+        <p className="small muted">{current.kind === "not_applicable" ? "Recorded not applicable" : <>Recorded {current.statusFrom ? `${recordStates[current.statusFrom]} → ` : ""}{recordStates[status]}</>} · {formatTime(current.recordedAt)}</p></div>
       : status !== "planned" && <p className="small muted">No status record for this step was read.</p>}
     {others.length > 0 && <EntityDetails title={<>Earlier step records ({others.length})</>} className="step-history"><ol className="stack">{others.map(item => <li key={item.id}>
-      <p>{item.note}</p><p className="small muted">{item.kind === "status_changed" ? `Status ${item.statusFrom ? recordStates[item.statusFrom] : "new"} → ${item.statusTo ? recordStates[item.statusTo] : "removed"}` : "Note"} · {formatTime(item.recordedAt)}</p>
+      <p>{item.note}</p><p className="small muted">{item.kind === "status_changed" ? `Status ${item.statusFrom ? recordStates[item.statusFrom] : "new"} → ${item.statusTo ? recordStates[item.statusTo] : "removed"}` : item.kind === "not_applicable" ? "Not applicable" : "Note"} · {formatTime(item.recordedAt)}</p>
     </li>)}</ol></EntityDetails>}
   </>;
 }
@@ -128,6 +136,8 @@ type JourneyProps = {
   reach?: PlanReach;
   /** The completion time of each completed workflow occurrence in this same live workflow; a missing time cannot show a completion current. */
   completions?: ReadonlyMap<string, number | null> | undefined;
+  /** Occurrences of this live workflow settled by a current not-applicable assessment, with everything inside an assessed workflow. */
+  notApplicable?: ReadonlySet<string> | undefined;
 };
 
 const pathLabel = {then: "Then path", else: "Else path"} as const;
@@ -138,17 +148,22 @@ const deeper = (outer: PlanReach, inner: PlanReach): PlanReach => {
 };
 
 /** A branch shows its condition, both labelled paths and, on a live workflow, the operative's decision; the next item follows it. */
-function BranchJourney({node, mode, notes, contributions, selections, completions, reach}: JourneyProps & {node: Extract<WorkflowPlanNodeInfo, {kind: "branch"}>; mode: JourneyMode; notes: StepNotes; reach: PlanReach}) {
+function BranchJourney({node, mode, notes, contributions, selections, completions, notApplicable, reach}: JourneyProps & {node: Extract<WorkflowPlanNodeInfo, {kind: "branch"}>; mode: JourneyMode; notes: StepNotes; reach: PlanReach}) {
   const live = mode === "live";
   const current = live ? selections?.find(item => item.nodeId === node.nodeId && item.current) : undefined;
   const earlier = live && !current ? selections?.find(item => item.nodeId === node.nodeId) : undefined;
-  const pending = live && !current && reach !== "not_selected" && reach !== "undecided";
+  // inside an occurrence currently recorded not applicable nothing waits for a decision; a recorded selection and its history stay visible
+  const assessed = live && notApplicable?.has(node.nodeId) === true;
+  const pending = live && !current && reach !== "not_selected" && reach !== "undecided" && !assessed;
   const decision = !live ? mode === "proposed" ? "Proposed alternatives" : "Agreed alternatives"
+    : assessed ? current ? `${pathLabel[current.path]} selected · not applicable` : "Not applicable"
     : reach === "not_selected" ? "In a path not selected" : current ? `${pathLabel[current.path]} selected` : reach === "undecided" ? "Waits for an earlier decision"
     : earlier ? "Decision pending again" : "Decision pending";
   const pathState = (path: BranchPath): PlanReach => !live ? "unconditional" : reach === "not_selected" ? "not_selected" : !current ? "undecided" : current.path === path ? "selected" : "not_selected";
-  const pathText: Record<PlanReach, string | null> = {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
-  const childProps = {mode, notes, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {})};
+  const pathText: Record<PlanReach, string | null> = assessed ? {unconditional: null, selected: "Not applicable", undecided: "Not applicable", not_selected: "Not applicable"}
+    : {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
+  const childProps = {mode, notes, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
+    ...(notApplicable ? {notApplicable} : {})};
   // the condition, the decision and its short reason stay primary; provenance, history and the plan note are inspectable details
   return <div className={`journey-branch${pending ? " decision-pending" : ""}`} role="group" aria-label={`Branch: if ${node.condition}`}>
     <div className="branch-head">
@@ -169,7 +184,7 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
       const group = path === "then" ? node.then : node.else;
       const state = pathState(path);
       return <section key={path} className={`branch-path path-${state}`} aria-label={`${pathLabel[path]}, ${pathCondition[path]}${pathText[state] ? `: ${pathText[state]!.toLowerCase()}` : ""}`}>
-        <p className="branch-path-label">{pathLabel[path]} <span>{pathCondition[path]}</span>{pathText[state] && <span className={`pill ${state === "selected" ? "blue" : state === "undecided" ? "amber" : ""}`}>{pathText[state]}</span>}</p>
+        <p className="branch-path-label">{pathLabel[path]} <span>{pathCondition[path]}</span>{pathText[state] && <span className={`pill ${assessed ? "" : state === "selected" ? "blue" : state === "undecided" ? "amber" : ""}`}>{pathText[state]}</span>}</p>
         {group ? <PlanJourney node={group} {...childProps} reach={deeper(reach, state)}/> : <p className="small">No else path: if the condition does not hold, work continues with the next item.</p>}
       </section>;
     })}</div>
@@ -177,9 +192,10 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
 }
 
 /** Preserves sequence, parallel, branch and nested workflow boundaries without deriving parent completion from children. */
-export function PlanJourney({node, mode = "proposed", notes = noNotes, contributions, selections, completions, reach = "unconditional"}: JourneyProps) {
+export function PlanJourney({node, mode = "proposed", notes = noNotes, contributions, selections, completions, notApplicable, reach = "unconditional"}: JourneyProps) {
   const live = mode === "live";
-  const passed = {mode, notes, reach, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {})};
+  const passed = {mode, notes, reach, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
+    ...(notApplicable ? {notApplicable} : {})};
   if (isPlanGroup(node)) {
     const List = node.kind === "parallel" ? "ul" : "ol";
     return <div className={`journey-group group-${node.kind}`}>
@@ -189,12 +205,15 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
     </div>;
   }
   if (node.kind === "branch") return <BranchJourney node={node} {...passed}/>;
-  const alternative = live && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
+  // the current not-applicable set takes precedence over the alternative labels of the paths inside an assessed occurrence
+  const assessedNotApplicable = live && node.status === "planned" && notApplicable?.has(node.nodeId) === true;
+  const alternative = live && !assessedNotApplicable && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
   // the completion time comes from the whole record; the retained observations can no longer hold an older completion
-  const reassess = live && reach !== "not_selected" && node.kind === "workflow" ? completionReassessment(node, selections ?? [], completions?.get(node.nodeId)) : null;
+  const reassess = live && reach !== "not_selected" && node.kind === "workflow" ? completionReassessment(node, selections ?? [], completions?.get(node.nodeId), notApplicable) : null;
   const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : reassess ? "needs_attention" : node.status;
   const label = !live ? modeLabels[mode] : alternative ? reach === "not_selected" ? "Not selected" : "Awaiting decision"
-    : reassess ? "Completed earlier · needs reassessment" : reach === "not_selected" ? `${states[node.status]} · path not selected` : states[node.status];
+    : reassess ? "Completed earlier · needs reassessment" : reach === "not_selected" ? `${states[node.status]} · path not selected`
+    : assessedNotApplicable ? "Not applicable" : states[node.status];
   const accepted = notes.agreed?.get(node.nodeId)?.node;
   const proposed = notes.proposed?.get(node.nodeId)?.node;
   const acceptedNote = accepted && accepted.reason !== node.reason ? accepted.reason : null;

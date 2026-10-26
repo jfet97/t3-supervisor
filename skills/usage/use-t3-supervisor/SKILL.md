@@ -106,7 +106,12 @@ messages as defects rather than accepting them as necessary supervision.
 
 All prior work can count when the Supervisor has adequate actual evidence, including
 implementation, verification, review and documentation. Initial duties start planned,
-then receive a separate evidence-backed assessment. Partial work states the remaining
+then receive a separate evidence-backed assessment in plan order. Statuses record formal
+progress: a later sequence member stays planned until the earlier ones are completed,
+and early drafts or diagnostic runs are observations on it. A member that does not
+apply is shown as not applicable through a negotiated omission, never as completed.
+An idle main with unfinished agreed work stays out of standby unless the latest check-in
+records a current wait for the requester or another party. Partial work states the remaining
 obligations instead of restarting the duty. Agreement never proves execution, and a
 scope expansion does not inherit an earlier completed outcome automatically.
 

@@ -10,6 +10,7 @@ import { resolveSteerableRun } from "../src/supervisor-conversation.js";
 import { SUPERVISOR_SETTLE_QUIET_MS, type SupervisorLifecycle } from "../src/supervisor-lifecycle.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { mainConversation, resolveSupervisorScope } from "../src/supervisor-scope.js";
+import { taskScopeRevision } from "../src/supervision-conversation.js";
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle, observeScopeThread } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
@@ -513,6 +514,100 @@ it.effect("known workflow needs-attention status blocks standby even when all T3
     JSON.stringify({...document, status: "needs_attention"}), 2, document.workflowId);
   yield* f.check(10);yield* f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(f.calls.length, 0);
+}));
+
+// an agreed task whose main workflow is recorded with one applicable step while the main's last run has completed
+const unfinishedStepId = "6f0f6a2e-3b1c-4d5e-8f70-112233445566";
+const unfinishedAgreedTask = (f: Effect.Success<typeof fixture>, status: "underway" | "completed" = "underway", stepStatus: "underway" | "completed" = "underway",
+  extra: Record<string, unknown> = {}) => Effect.gen(function* () {
+  const task = (yield* f.store.task("main"))!;
+  const workflow = {status: "proposed" as const, message: "Agreed.", workspaceRoot: "/workspace", revision: "definitions-1", globalRevision: null, definitionsStatus: "ready" as const,
+    definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [], plan: {kind: "sequence" as const, templatePath: null, nodes: []}};
+  yield* f.store.saveTask({...task, agreement: {status: "agreed", message: "Accepted.", proposalId: "proposal", agreedAt: 1,
+    evidence: {kind: "supervisor_message", messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow}});
+  const owner = {projectId: "p", mainThreadId: "main", supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  assert.equal((yield* guidanceTransaction(f.sql)(f.workflows.ensureMain(owner, "unfinished-main", "Agreed work", 1))).status, "created");
+  const document = (yield* f.workflows.get("p", "main"))!;
+  const plan = {kind: "sequence", templatePath: null, nodes: [{kind: "step", nodeId: unfinishedStepId, definitionId: null, localId: "implement", templatePath: null,
+    name: "Implement", description: "Implement the change.", source: null, resolution: "resolved", reason: "The task needs it.", status: stepStatus, contributorThreadIds: []}]};
+  yield* execute(f.sql, "UPDATE supervisor_workflow_state SET document=?,updated_at=? WHERE workflow_id=?",
+    JSON.stringify({...document, status, plan, ...extra}), 2, document.workflowId);
+  assert.equal((yield* f.workflows.get("p", "main"))?.status, status, "the stored document stays valid");
+});
+
+// a review request whose outcome the Supervisor recorded and the service confirmed, pinned to the current or another task revision
+const confirmedReview = (f: Effect.Success<typeof fixture>, outcome: "no_change" | "needs_attention", reason: string | null, at: number,
+  options: {wait?: {waitingOn: "requester" | "external"; resumesWhen: string}; taskRevision?: string} = {}) => Effect.gen(function* () {
+  const task = (yield* f.store.task("main"))!;
+  const request = yield* f.requests.prepare({projectId: "p", supervisorThreadId: f.binding.threadId, kind: "review", taskId: "task", text: "Review", batch: null, completionMarker: "done"}, at);
+  yield* f.requests.saveRequest({...request, state: "completed", reviewPins: {bindingGeneration: f.binding.generation,
+    tasks: [{taskId: task.id, mainThreadId: "main", taskRevision: options.taskRevision ?? taskScopeRevision(task), workflow: {state: "absent"}}]},
+  reviewOutcome: {outcome, reason, applies: [], itemId: `item-${at}`, runId: `run-${at}`, ordinal: at, operationId: `review-${at}`, recordedAt: at, state: "confirmed",
+    problem: null, ...(options.wait ? {wait: options.wait} : {})}});
+});
+const parks = (f: Effect.Success<typeof fixture>, from: number) => Effect.gen(function* () {
+  yield* f.check(from);yield* f.check(from + SUPERVISOR_SETTLE_QUIET_MS);
+  return f.calls.length;
+});
+const mainFinishedAt = (f: Effect.Success<typeof fixture>) => Date.parse(f.main.runs.at(-1)!.completedAt!);
+const externalWait = {waitingOn: "external" as const, resumesWhen: "The upstream release is published."};
+
+it.effect("unfinished agreed work stays out of standby for ordinary attention, stale or foreign waits, open results alone and a completion over open work", () => Effect.gen(function* () {
+  const attention = yield* fixture;
+  yield* unfinishedAgreedTask(attention);
+  yield* confirmedReview(attention, "needs_attention", "Implementation is unfinished and the operative must continue its owned action.", mainFinishedAt(attention) + 1);
+  assert.equal(yield* parks(attention, 10), 0, "an attention reason is not a wait");
+  assert.equal((yield* attention.store.binding("p", "main"))?.settlementBlockedBy, "unfinished_agreed_work");
+  assert.equal((yield* attention.requests.requests("p", attention.binding.threadId)).length, 1, "holding standby prepares no check-in or message");
+
+  const stale = yield* fixture;
+  yield* unfinishedAgreedTask(stale);
+  yield* confirmedReview(stale, "needs_attention", "Waiting for the release.", mainFinishedAt(stale) - 1, {wait: externalWait});
+  assert.equal(yield* parks(stale, 10), 0, "a wait recorded before the main's last run is stale");
+
+  const foreign = yield* fixture;
+  yield* unfinishedAgreedTask(foreign);
+  yield* confirmedReview(foreign, "needs_attention", "Waiting for the release.", mainFinishedAt(foreign) + 1, {wait: externalWait, taskRevision: "an-earlier-scope"});
+  assert.equal(yield* parks(foreign, 10), 0, "a wait recorded for another task revision does not count");
+
+  const superseded = yield* fixture;
+  yield* unfinishedAgreedTask(superseded);
+  yield* confirmedReview(superseded, "needs_attention", "Waiting for the release.", mainFinishedAt(superseded) + 1, {wait: externalWait});
+  yield* confirmedReview(superseded, "no_change", null, mainFinishedAt(superseded) + 2);
+  assert.equal(yield* parks(superseded, 10), 0, "a later check-in without a wait supersedes it");
+
+  const incoherent = yield* fixture;
+  yield* unfinishedAgreedTask(incoherent, "completed", "underway");
+  assert.equal(yield* parks(incoherent, 10), 0, "a completed status over an unfinished applicable step is not completion");
+
+  const staleContribution = yield* fixture;
+  yield* unfinishedAgreedTask(staleContribution, "underway", "underway", {contributions: [{contributionId: "library-review", nodeId: "e4b9739d-55f2-4c66-80ba-afdf6ec7c23f",
+    revision: 1, state: "awaiting_result", summary: "A reviewer outside the plan.", references: [], externalRef: null, sourceThreadId: "main", sourceRunId: "run",
+    sourceMessageId: "source", recordedAt: 2, assessment: null}]});
+  assert.equal(yield* parks(staleContribution, 10), 0, "a result awaited for a node outside the current plan is not a current wait");
+
+  // a pending nonblocking review of applicable work can run alongside the operative's own unfinished work
+  const nonblocking = yield* fixture;
+  yield* unfinishedAgreedTask(nonblocking, "underway", "underway", {contributions: [{contributionId: "library-review", nodeId: unfinishedStepId, revision: 1,
+    state: "awaiting_result", summary: "An external reviewer checks the frozen dependency change.", references: [], externalRef: null,
+    sourceThreadId: "main", sourceRunId: "run", sourceMessageId: "source", recordedAt: 2, assessment: null}]});
+  assert.equal(yield* parks(nonblocking, 10), 0, "an open external result alone does not acknowledge that the remaining work is blocked");
+}));
+
+it.effect("a genuine current wait, real completion and Stop keep ordinary parking", () => Effect.gen(function* () {
+  const waiting = yield* fixture;
+  yield* unfinishedAgreedTask(waiting);
+  yield* confirmedReview(waiting, "needs_attention", "The library change awaits its upstream release.", mainFinishedAt(waiting) + 1, {wait: externalWait});
+  assert.equal(yield* parks(waiting, 10), 1, "the current wait names who acts next and what resumes the work");
+
+  const done = yield* fixture;
+  yield* unfinishedAgreedTask(done, "completed", "completed");
+  assert.equal(yield* parks(done, 10), 1);
+
+  const stopped = yield* fixture;
+  yield* unfinishedAgreedTask(stopped);
+  yield* stopped.stopChat("main");
+  assert.equal(yield* parks(stopped, 10), 1, "Stop still parks the owned Supervisor");
 }));
 
 it.effect("unknown intermediate child ancestry blocks closed-main settlement", () => Effect.gen(function* () {

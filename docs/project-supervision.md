@@ -176,7 +176,13 @@ agent, schedules a task or proves successful execution.
 
 Startup is compact. The initialization turn only confirms the service-prepared
 proposal by echoing its exact reference `{taskId, proposalId, digest}`; definitions
-stay available through `workflow_read`. The operative introduction says that `.t3-supervisor/project.yaml` is the
+stay available through `workflow_read`. The introduction outline names each member once;
+nested workflows without a branch are one line, and the references and skills of the
+plan's definitions are listed once because each definition file carries its own. A
+revised proposal for a changed scope whose plan, definitions and requirements are
+unchanged is sent as a short delta with the objective, limits and new acceptance
+record. The Supervisor does not repeat an acceptance request while the operative turn
+that received the proposal can still answer it. The operative introduction says that `.t3-supervisor/project.yaml` is the
 index and to read the listed full files it needs. It opens with the
 obligation to agree a workflow for the authorized outcome promptly (earlier work may
 already exist; the Supervisor cannot block tools), then an outline
@@ -346,7 +352,11 @@ stays silent on routine progress and never invents a correction from uncertainty
 Before its marker it records exactly one outcome with `workflow_write` `record_review`
 (progress updated, no change, needs attention or insufficient evidence), decided from a
 fresh read of the relevant finished messages, results and current workflow: the change
-index is navigation, not proof, and no change is never a default. The outcome
+index is navigation, not proof, and no change is never a default. No change never
+means the task is complete: when the main has finished its turn while the agreed
+workflow is unfinished, the Supervisor records needs attention naming the current
+blocker, adding an explicit wait only when the requester or another party must act and
+saying what resumes the work. The outcome
 is confirmed only when the check-in completed with its marker, the recording call
 completed in that check-in's own run and the pins are still current (for no change,
 each main workflow unchanged; for progress, each cited edit still in place). Only a
@@ -444,7 +454,15 @@ choice made after the stop holds it. The operative main is never settled or
 interrupted because supervision stopped, and other chats keep their supervision.
 
 Quiet completion/archive/deletion can settle the owned chat once children and
-pending work are quiet. A request cancelled before it started executed nothing, so the
+pending work are quiet. An idle main whose agreed main workflow is unfinished parks only
+on an explicit current wait: the latest check-in's confirmed outcome carries a wait naming
+whether the requester or an external party must act and what resumes the work, recorded
+for the current task after the main's last completed run. Ordinary attention, a stale or
+superseded wait, a wait for another task revision or an open external result alone does
+not count, and a completed status counts only when every applicable member is settled.
+Otherwise `settlementBlockedBy` is `unfinished_agreed_work` and Supervision explains it;
+no check-in or message is sent for it. Following, stopped and closed scopes keep their
+parking rules. A request cancelled before it started executed nothing, so the
 latest executed run decides whether the main finished. The binding records the first
 gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown in Supervision.
 A not-needed or unresolved request gets no check-ins, so unreviewed activity retained from

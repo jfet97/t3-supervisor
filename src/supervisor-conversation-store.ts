@@ -6,7 +6,7 @@ import { GuidanceDb, untracedSql } from "./db.js";
 import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
-import { reviewOutcomes, WorkflowProposal, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
+import { ReviewWait, reviewOutcomes, WorkflowProposal, type ReviewWaitInfo, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { InterpretationEvidence } from "./interpretation-evidence.js";
 
 export {reviewOutcomes};
@@ -37,6 +37,8 @@ export type ReviewOutcomeRecord = {
   recordedAt: number;
   state: "recorded" | "confirmed" | "unconfirmed";
   problem: string | null;
+  /** An explicit current wait: who must act before the unfinished agreed work continues, and what resumes it. */
+  wait?: ReviewWaitInfo;
 };
 
 export type ConversationRequest = {
@@ -167,6 +169,7 @@ const ReviewOutcomeDocument = Schema.Struct({
   recordedAt: Schema.Number,
   state: Schema.Literals(["recorded", "confirmed", "unconfirmed"]),
   problem: Schema.NullOr(Schema.String),
+  wait: Schema.optionalKey(ReviewWait),
 });
 const ConversationRequestDocument = Schema.Struct({
   id: Schema.String,

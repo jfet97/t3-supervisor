@@ -1209,7 +1209,17 @@ it.effect("helper provider isolation is opt-in in root roles and uses the curren
 it.effect("workflow editing guidance tells authors to start live steps planned and read rejection diagnostics", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const role = yield* fixture.conversation.roleFor(fixture.binding);
-  assert.match(role, /New live steps start "planned"; promptly reconcile EVERY duty with actual prior evidence/u);
+  assert.match(role, /New live steps start "planned"; when a plan is first agreed, reconcile its members in order against actual prior evidence/u);
+  assert.match(role, /apply statuses, without resending the plan/u);
+  assert.match(role, /draft pull request or a failing test run during implementation, is an observation on that member, which stays planned/u);
+  assert.match(role, /A member that does not apply is never completed/u);
+  assert.match(role, /review of a separately frozen dependency or library change is supporting work of the active step/u);
+  assert.match(role, /never present it as a requester instruction/u);
+  assert.match(role, /restate the unfinished task and its next authorized action/u);
+  assert.match(role, /Never repeat an acceptance request in the check-in that delivered the proposal or while the operative turn that received it is still running/u);
+  assert.match(role, /When only the scope or limits changed and the plan is unchanged, say so in one sentence instead of repeating the outline/u);
+  assert.match(role, /"omit":\[\{"member":/u);
+  assert.doesNotMatch(role, /may proceed together|infer dependency scheduling|promptly reconcile EVERY duty|keep parent and child assessments separate/u);
   assert.match(role, /separate later apply with status_changed evidence and exact activity references/u);
   assert.match(role, /On rejection, read the reason, code, and path\./u);
 }));
@@ -4715,6 +4725,42 @@ it.effect("helper lifecycle changes never change the standing-instructions versi
   assert.equal(yield* version(), before, "a ready helper does not change the role");
   assert.deepEqual(yield* fixture.conversation.teamRuntime!.coordinatorPolicy(binding), {maxHelpersPerRoot: 5, readyHelpers: 1, registeringHelpers: 0},
     "the live counts are reported in each check-in envelope instead");
+}));
+
+it.effect("a check-in records an explicit wait naming who acts next, and never the operative's own unfinished action", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  yield* installNestedCatalog(fixture);
+  yield* appendNoticeForTask(fixture, (yield* fixture.projectStore.task(fixture.task.threadId))!, fixture.operative);
+  addCommandActivity(fixture.operative, "wait-activity", "Work", clock.now);
+  yield* fixture.conversation.observe(fixture.threadList, clock.now);
+  yield* fixture.run();
+  const request = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
+  assert.equal(request.kind, "review");
+  const operative = yield* recordOutcome(fixture, request, "needs_attention", {reason: "Implementation is unfinished.", operationId: "wait-operative",
+    wait: {waitingOn: "operative", resumesWhen: "The operative continues."}});
+  assert.deepEqual(operative, {status: "invalid", operationId: "wait-operative", reason: "invalid_record_review"});
+  const recorded = yield* recordOutcome(fixture, request, "needs_attention", {reason: "The library change awaits its upstream release.", operationId: "wait-external",
+    wait: {waitingOn: "external", resumesWhen: "The upstream release is published."}});
+  assert.equal(recorded.status, "recorded");
+  const stored = (yield* fixture.conversation.requests.requests(projectId, fixture.binding.threadId)).find(item => item.id === request.id);
+  assert.deepEqual(stored?.reviewOutcome?.wait, {waitingOn: "external", resumesWhen: "The upstream release is published."});
+}));
+
+it.effect("the instructions version covers the full reference, so a reference-only change is not silently stale", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  // both read through the same stored binding identity, so only the configuration under test differs
+  const viewOf = Effect.fnUntraced(function* (fixture: Effect.Success<ReturnType<typeof makeFixture>>) {
+    const normalized = {...fixture.binding, threadId: "supervisor-root:version-check", generation: 1};
+    yield* fixture.projectStore.setBinding(normalized);
+    return (yield* fixture.conversation.readContextView(normalized, {view: "instructions"})) as unknown as {version: string; instructions: string};
+  });
+  const shared = yield* viewOf(yield* makeFixture(clock, {teamEnabled: true}));
+  const isolated = yield* viewOf(yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"}));
+  const standing = (view: {instructions: string}) => view.instructions.split("\n\nDetailed reference:")[0];
+  assert.equal(standing(shared), standing(isolated), "the compact role is the same");
+  assert.notEqual(shared.instructions, isolated.instructions, "only the detailed reference differs");
+  assert.notEqual(shared.version, isolated.version, "the version names the full reference too");
 }));
 
 it.effect("the dashboard Stop supervision and Enable supervision control uses the same thread policy and reports conflicts", () => Effect.gen(function* () {

@@ -26,16 +26,19 @@ it.effect("initial planned duties reconcile fully and partly satisfied non-resea
     const before = (yield* f.workflows.get(f.projectId, f.mainThreadId))!;
     assert.deepEqual([mainStep(before.plan, 0)?.status, mainStep(before.plan, 1)?.status], ["planned", "planned"]);
     const first = mainStep(before.plan, 0)!, second = mainStep(before.plan, 1)!;
+    // the task is entered together with the member that is actually underway
     const assessed = yield* send(yield* applyArgs(f, {operationId: "prior-assess", workflowId: before.workflowId, expectedRevision: before.revision,
-      plan: sequencePlan([{...first, status: "completed"}, {...second, status: "underway"}]),
+      status: "underway", plan: sequencePlan([{...first, status: "completed"}, {...second, status: "underway"}]),
       note: "Reconcile actual earlier artifacts; do not rerun the implementation or the satisfied verification subset.",
-      evidence: [{kind: "status_changed", targetNodeId: first.nodeId, sourceRunId: "earlier-work", sourceMessageId: "earlier-result",
+      evidence: [{kind: "status_changed", sourceRunId: "earlier-work", sourceMessageId: "earlier-result",
+        note: "The earlier work started the task; verification is underway."},
+      {kind: "status_changed", targetNodeId: first.nodeId, sourceRunId: "earlier-work", sourceMessageId: "earlier-result",
         note: "The earlier inspected artifact satisfies the full implementation duty."},
       {kind: "status_changed", targetNodeId: second.nodeId, sourceRunId: "earlier-work", sourceMessageId: "earlier-result",
         note: "Focused behavior is verified. Remaining obligations: integration and error cases."}]}));
     assert.equal(assessed.status, "applied", JSON.stringify(assessed));
     const after = (yield* f.workflows.get(f.projectId, f.mainThreadId))!;
-    assert.deepEqual([mainStep(after.plan, 0)?.status, mainStep(after.plan, 1)?.status], ["completed", "underway"]);
+    assert.deepEqual([after.status, mainStep(after.plan, 0)?.status, mainStep(after.plan, 1)?.status], ["underway", "completed", "underway"]);
     assert.deepEqual([mainStep(after.plan, 0)?.nodeId, mainStep(after.plan, 1)?.nodeId], [first.nodeId, second.nodeId]);
     assert.equal(after.acceptedAgreements.length, 0, "credit predates initial agreement and never manufactures acceptance");
     assert.match(after.evidence.find(item => item.targetNodeId === second.nodeId && item.kind === "status_changed")!.note, /Remaining obligations: integration and error cases/u);
@@ -46,7 +49,7 @@ it.effect("initial planned duties reconcile fully and partly satisfied non-resea
     const expanded = proposalForDefinitions(f.definitionReader.current, expandedPlan);
     yield* replaceCurrentProposal(f, "expanded-proposal", f.definitionReader.current, expanded, {sourceHash: fingerprint("An expanded requested outcome")});
     const unassessed = yield* send(yield* applyArgs(f, {operationId: "expanded-carry", workflowId: after.workflowId, expectedRevision: after.revision,
-      plan: expandedPlan,
+      status: "underway", plan: expandedPlan,
       note: "The scope changed; old completion alone must not satisfy the new outcome."}));
     assert.equal(unassessed.status, "invalid");
     assert.equal("reason" in unassessed && unassessed.reason, "scope_assessment_required");
