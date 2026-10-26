@@ -242,8 +242,10 @@ const makeSupervisionControl = Effect.gen(function* () {
     const main = catalog.threads.find(item => item.id === mainThreadId);
     if (!main || main.projectId !== binding.projectId || main.archivedAt || main.deletedAt) return {status: "denied", reason: "main_conversation_unavailable"};
     const root = yield* projection(binding.threadId, cancel);
-    // from the last await, the rechecks, the policy write and its bookkeeping run as one admission section, as the dashboard Enable
-    const result = yield* gate.admit(() => transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, SupervisionStoreError> {
+    // from the last await, the rechecks, the policy write and its bookkeeping run as one admission section, as the dashboard Enable;
+    // the committed outcome is handed to the caller inside that uninterruptible section, as a Start's is, so an interruption after
+    // the commit never records it as a failed preparation
+    return yield* gate.admit(() => Effect.tap(transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, SupervisionStoreError> {
       const current = yield* store.bindingForSupervisor(binding.threadId);
       if (!current || current.mainThreadId !== mainThreadId || current.generation !== binding.generation || current.state !== "ready")
         return {status: "denied", reason: "scope_changed"};
@@ -268,9 +270,7 @@ const makeSupervisionControl = Effect.gen(function* () {
       return {status: "active", reason: task?.supervisorThreadId === binding.threadId
         ? `Resumed supervision of main chat ${mainThreadId} with its retained task ${task.id}; its binding, task and history are unchanged. No other chat, project or master control changed.`
         : `Resumed supervision of main chat ${mainThreadId}; it has no retained task, so its next genuine request starts one. No other chat, project or master control changed.`};
-    })));
-    decided(result);
-    return result;
+    })), (result) => Effect.sync(() => decided(result))));
   });
   // a recorded receipt is returned only while its effect is still the latest control of its chat; after a later Stop, Enable or
   // Start it claims nothing current and does nothing

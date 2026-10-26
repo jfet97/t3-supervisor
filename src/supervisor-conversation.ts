@@ -1215,11 +1215,11 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
     return false;
   });
   // a rejected Supervisor proposal is work: one focused, bounded repair request per new diagnostic, never an endless footnote
-  const runProtocolRepair = (binding: BindingRecord, tasks: readonly TaskRecord[]): Effect.Effect<boolean, ConversationError> => Effect.gen(function* () {
+  const runProtocolRepair = (binding: BindingRecord, tasks: readonly TaskRecord[], restCurrent: Effect.Effect<boolean, SupervisionStoreError>): Effect.Effect<boolean, ConversationError> => Effect.gen(function* () {
     const teamPolicy = yield* teamPolicyOf(binding);
     return yield* dispatchWith(binding.threadId, true, (_guard, now) => Effect.gen(function* () {
       // a check-in is created only while none is pending, as this cycle found; a pending one is only reconciled
-      if ((yield* requests.pending(binding.projectId, binding.threadId)) !== null) return {value: false, request: null};
+      if ((yield* requests.pending(binding.projectId, binding.threadId)) !== null || !(yield* restCurrent)) return {value: false, request: null};
       if (now - ((yield* requests.lastNotice(binding.threadId)) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return {value: false, request: null};
       for (const task of tasks) {
         const diagnostic = task.workflowProtocolDiagnostic;
@@ -1244,7 +1244,7 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
     }));
   });
   const runDefinitionRecovery = (binding: BindingRecord, supervisor: Projection, tasks: readonly TaskRecord[],
-    threads: readonly ThreadInfo[]): Effect.Effect<boolean, ConversationError> => Effect.gen(function* () {
+    threads: readonly ThreadInfo[], restCurrent: Effect.Effect<boolean, SupervisionStoreError>): Effect.Effect<boolean, ConversationError> => Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (now - ((yield* requests.lastNotice(binding.threadId)) ?? 0) < SUPERVISOR_MONITOR_COOLDOWN_MS) return false;
     for (const task of tasks.slice(0, 20)) {
@@ -1300,7 +1300,7 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
         }));
       }
       return yield* dispatchWith(binding.threadId, true, (guard) => Effect.gen(function* () {
-        if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId))) return {value: false, request: null};
+        if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId)) || !(yield* restCurrent)) return {value: false, request: null};
         if ((yield* requests.pending(binding.projectId, binding.threadId)) !== null) return {value: true, request: null};
         const request = yield* requests.prepare({projectId: task.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: task.id,
           text: completePrompt, batch: null, completionMarker, ...(role.roleVersion ? {roleVersion: role.roleVersion} : {})}, now);
@@ -2055,7 +2055,7 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
         const mainRead = yield* attempt(projection(binding.mainThreadId));
         if (mainRead.ok) {
           const floor = yield* store.baselineOrdinal(binding.mainThreadId, mainRead.value);
-          const enabledAt = yield* store.chatEnabledAt(binding.mainThreadId);
+          const enabledAt = yield* introductionEnableBoundary(binding.projectId, binding.mainThreadId);
           const source = mainRead.value.messages.find(message => message.id === currentConversationTask.sourceMessageId);
           if (floor !== null && (currentConversationTask.sourceOrdinal <= floor || enabledAt !== null && (timestampMs(source?.createdAt) ?? 0) <= enabledAt))
             yield* blockIntroduction(currentConversationTask.id, "Supervision was enabled again after this request; the draft was not sent and the chat's next request is interpreted afresh.");
@@ -2136,6 +2136,12 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
     const settled = nativeSettled && !resumed;
     const settledSince = settled ? nativeSettledSince : null;
     const restingSince = resumed ? null : settledSince === null ? enabledAt : enabledAt === null ? settledSince : Math.max(settledSince, enabledAt);
+    // the control state that decision used: a wake admitted later in this cycle rechecks it, so a Stop and Enable during the cycle's
+    // reads never carry an earlier resume's wake past them; the next cycle decides afresh
+    const restDecisionCurrent = Effect.gen(function* () {
+      return (yield* store.chatEnabledAt(binding.mainThreadId)) === enabledAt &&
+        ((yield* store.binding(binding.projectId, binding.mainThreadId))?.supervisionResume?.resumedAt ?? null) === resumedAt;
+    });
     let resting: boolean | undefined;
     const isResting = Effect.suspend((): Effect.Effect<boolean, SupervisionStoreError> => resting !== undefined ? Effect.succeed(resting)
       : restingSince === null ? Effect.sync(() => resting = false)
@@ -2267,10 +2273,10 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
     }
     if (inflight) {yield* reconcile(inflight, supervisor, threads);return;}
     if ((yield* requests.requests(binding.projectId, binding.threadId)).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
-    if (!settled && !(yield* isResting) && (yield* runDefinitionRecovery(binding, supervisor, tasks, threads))) return;
+    if (!settled && !(yield* isResting) && (yield* runDefinitionRecovery(binding, supervisor, tasks, threads, restDecisionCurrent))) return;
     if (busy(supervisor)) return;
     // without due activity a rejected proposal still gets one focused repair wake; a due batch carries it in its task context
-    if (!batch && !rootEvents.length) {if (!settled && !(yield* isResting)) yield* runProtocolRepair(binding, tasks);return;}
+    if (!batch && !rootEvents.length) {if (!settled && !(yield* isResting)) yield* runProtocolRepair(binding, tasks, restDecisionCurrent);return;}
     const included: Array<SupervisorMonitorThreadBatch & {proposalId: string; taskContext: Effect.Success<ReturnType<typeof taskContextSummary>>; staleRecovery: boolean;
       parentThreadId: string | null; depth: number; origin: string; lifecycle: string; lifecycleDetail: string | null; contactLimit: string;
       fallbackAncestors: Array<{threadId: string; main: boolean; eligible: boolean; contactable: boolean}>; scopeComplete: boolean;
@@ -2394,7 +2400,8 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
       }));return;
     }
     yield* dispatchWith(binding.threadId, undefined, (guard) => Effect.gen(function* () {
-      if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId)) || (yield* requests.pending(binding.projectId, binding.threadId)) !== null) return {value: undefined, request: null};
+      if (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId)) || !(yield* restDecisionCurrent) ||
+        (yield* requests.pending(binding.projectId, binding.threadId)) !== null) return {value: undefined, request: null};
       const request = yield* requests.prepare({projectId: binding.projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null, text: prompt, batch: selected, completionMarker,
         ...(review ? {id: review.id, reviewPins: review.pins} : {}),
         ...(role.roleVersion ? {roleVersion: role.roleVersion} : {}), ...(rootEvents.length ? {teamEventIds: rootEvents.map(event => event.id)} : {})}, checkInNow);
@@ -2512,6 +2519,13 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
     yield* reconcile(inflight, supervisor ?? (yield* projection(binding.threadId)), threads, true);
   });
   // the unsent check-ins and their fences are one transaction (a savepoint of the Stop section's)
+  // the chat's latest Enable as the boundary a fresh introduction must postdate, read when it is checked; a direct resume that is still
+  // that latest Enable hands the retained task back, so it sets no boundary, while a dashboard Enable or any later control does
+  const introductionEnableBoundary = (projectId: string, mainThreadId: string) => Effect.gen(function* () {
+    const enabledAt = yield* store.chatEnabledAt(mainThreadId);
+    const resumedAt = (yield* store.binding(projectId, mainThreadId))?.supervisionResume?.resumedAt ?? null;
+    return enabledAt !== null && resumedAt === enabledAt ? null : enabledAt;
+  });
   const fenceStoppedSupervision = (binding: BindingRecord): Effect.Effect<void, SupervisionStoreError> => transaction(Effect.gen(function* () {
     // only a never-dispatched check-in is positively unsent; one dispatched before keeps its identity as uncertain
     for (const request of (yield* requests.requests(binding.projectId, binding.threadId)).filter(item => item.state === "prepared"))
@@ -2918,7 +2932,7 @@ On any unsolicited wake read view context first; answer a human briefly, otherwi
         // chat's latest Enable, is never introduced after it (an unknown boundary sends nothing)
         const floor = yield* store.baselineOrdinal(task.threadId, agent);
         if (floor === null) return {_tag: "Answer", value: undefined};
-        const enabledAt = yield* store.chatEnabledAt(task.threadId);
+        const enabledAt = yield* introductionEnableBoundary(task.projectId, task.threadId);
         const source = agent.messages.find(message => message.id === task.sourceMessageId);
         if (task.sourceOrdinal <= floor || enabledAt !== null && !((timestampMs(source?.createdAt) ?? 0) > enabledAt)) {
           yield* blockIntroduction(task.id, "Supervision was enabled again after this request; the draft was not sent and the chat's next request is interpreted afresh.");return {_tag: "Answer", value: undefined};

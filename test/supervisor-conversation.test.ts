@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Clock, Effect, Exit, FileSystem, Schema } from "effect";
+import { Clock, Effect, Exit, Fiber, FileSystem, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { canonicalJson, canonicalStoredJson } from "../src/canonical-json.js";
 import { storedPlanJsonDepth, workflowMutationLimits } from "../src/workflow-state-contract.js";
@@ -5751,6 +5751,98 @@ it.effect("a resume needs the latest fresh genuine human message, lifts only a s
   assert.deepEqual(yield* resumeAs(again, "resume-after-stop"), {status: "denied", reason: "superseded_by_later_stop_or_enable"},
     "nor does a human message written before that Stop under a new operation");
   assert.equal(yield* stillStopped(), true);
+}));
+
+// regressions from the frozen-candidate review: the same stopped, resumed pair under a racing control change, a ready proposal and an interruption
+it.effect("a newer Stop and dashboard Enable during a resumed wake's evidence reads cancel its dispatch", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, service, binding} = yield* stoppedReviewedTask(clock);
+  const human = appendActualUserMessage(fixture.supervisor, "review-resume-human", "Please resume supervising this chat.", clock.now + 1);
+  const native = yield* nativeStartController(fixture, fixture.supervisor,
+    {callerThreadId: binding.threadId, userMessageId: human.id, operationId: "review-resume"}, "review-resume-call", service, human.runId!);
+  assert.equal((yield* native.start()).status, "active");
+  agentWorkAfter(fixture, clock, "review-resumed-work");
+  yield* clock.advance(61_000);
+  yield* observeAgreement(fixture, clock.now);
+  let reads = 0, crossed = false;
+  // the human stops and then enables the chat from the dashboard while the wake reads its evidence
+  const crossControl = Effect.orDie(Effect.gen(function* () {
+    assert.equal((yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false,
+      policyGeneration: (yield* fixture.threadPolicy.get()).generation})).status, "saved");
+    yield* clock.advance(1);
+    assert.equal((yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: true,
+      policyGeneration: (yield* fixture.threadPolicy.get()).generation})).status, "saved");
+    crossed = true;
+  }));
+  yield* replaceMethod(fixture.conversation, "projection", original => threadId => Effect.gen(function* () {
+    if (threadId === operativeThreadId && ++reads === 2) yield* crossControl;
+    return yield* original(threadId);
+  }));
+  const before = fixture.calls.length;
+  yield* fixture.run();
+  assert.equal(crossed, true, "control cut reached during wake evidence read");
+  assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.supervisionResume, undefined);
+  const sent = fixture.calls.slice(before).filter(call => call.payload.type === "message.dispatch");
+  assert.equal(sent.length, 0, "later dashboard Enable must rest until a new main human request");
+}));
+
+it.effect("a direct resume lets the retained ready proposal through, while a dashboard Enable still rests it", () => Effect.gen(function* () {
+  for (const control of ["resume", "dashboard"] as const) {
+    const clock = yield* pinnedClock(baseTime);
+    const fixture = yield* makeFixture(clock);
+    const service = fixture.makeProjectSupervisor();
+    const binding = fixture.binding;
+    yield* fixture.projectStore.baseline({snapshotSequence: 1, threads: []});
+    const projectControl = yield* fixture.projectStore.control(projectId);
+    if (!projectControl.effectiveEnabled) yield* fixture.projectStore.saveControl(projectId, projectControl.generation, true, {snapshotSequence: 1, threads: []});
+    // the task's proposal is ready and was never sent when the human stops the chat
+    yield* fixture.conversation.requests.saveIntroduction({taskId: fixture.task.id, projectId, threadId: operativeThreadId,
+      supervisorThreadId: binding.threadId, state: "ready", text: workflowIntroductionText(fixture.task),
+      messageId: `supervisor-notice:workflow:${fixture.task.id}`, targetRunId: null, error: null});
+    assert.equal((yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false,
+      policyGeneration: (yield* fixture.threadPolicy.get()).generation})).status, "saved");
+    yield* clock.advance(1_000);
+    if (control === "resume") {
+      const human = appendActualUserMessage(fixture.supervisor, "ready-resume-human", "Resume supervising this task.", clock.now);
+      const native = yield* nativeStartController(fixture, fixture.supervisor,
+        {callerThreadId: binding.threadId, userMessageId: human.id, operationId: "ready-resume"}, "ready-resume-call", service, human.runId!);
+      assert.equal((yield* native.start()).status, "active");
+    } else assert.equal((yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: true,
+      policyGeneration: (yield* fixture.threadPolicy.get()).generation})).status, "saved");
+    const callsBefore = fixture.calls.length;
+    yield* fixture.run();
+    const intro = yield* fixture.conversation.requests.introduction(fixture.task.id);
+    const delivered = fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId).length;
+    if (control === "resume") {
+      assert.notEqual(intro?.state, "blocked", "resume must retain the pre-Stop task");
+      assert.equal(delivered, 1, "and its ready proposal goes out");
+    } else assert.deepEqual([intro?.state, delivered], ["blocked", 0], "a dashboard Enable supervises the next request instead");
+  }
+}));
+
+it.effect("an interruption after an admitted resume commits keeps its active receipt and identical retry", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, service, binding} = yield* stoppedReviewedTask(clock);
+  const human = appendActualUserMessage(fixture.supervisor, "cut-resume-human", "Resume supervising this chat.", clock.now + 1);
+  const native = yield* nativeStartController(fixture, fixture.supervisor,
+    {callerThreadId: binding.threadId, userMessageId: human.id, operationId: "cut-resume"}, "cut-resume-call", service, human.runId!);
+  let cut = false;
+  const replacement = yield* replaceMethod(fixture.projectStore, "setSupervisionStop", original => (...args) => original(...args).pipe(Effect.tap(() => Effect.gen(function* () {
+    if (cut || !args[2]) return;
+    cut = true;
+    (yield* Effect.fiber).interruptUnsafe();
+  }))));
+  const caller = yield* Effect.forkDetach(Effect.andThen(Effect.yieldNow, native.start()));
+  const exit = yield* Fiber.await(caller);
+  yield* replacement.restore;
+  assert.equal(cut, true);
+  assert.equal(Exit.isFailure(exit), true);
+  assert.equal((yield* fixture.threadPolicy.get()).excludedThreadIds.includes(operativeThreadId), false);
+  assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.supervisionResume?.operationId, "cut-resume");
+  const receipt = yield* fixture.projectStore.startOperation(binding.threadId, "cut-resume");
+  const retry = yield* native.start();
+  assert.equal(receipt?.status, "active", "admitted resume committed");
+  assert.equal(retry.status, "active", "an identical retry returns the committed receipt");
 }));
 
 it.effect("a human message written while supervision was stopped is not a request after the Enable", () => Effect.gen(function* () {
