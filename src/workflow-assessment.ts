@@ -2,7 +2,7 @@ import { taskScopeRevision } from "./supervision-conversation-contract.js";
 import type { ConversationFacts } from "./supervision-conversation-contract.js";
 import { Schema } from "effect";
 import type { WorkflowStateDocument } from "./workflow-state-contract.js";
-import { effectiveBranchSelections, pendingBranchDecisions } from "./workflow-plan-tree.js";
+import { currentPendingDecisions } from "./workflow-plan-tree.js";
 
 export const WorkflowAssessment = Schema.Struct({
   taskId: Schema.String, sourceHash: Schema.String, status: Schema.String,
@@ -23,11 +23,11 @@ export function workflowAssessment(document: WorkflowStateDocument): WorkflowAss
     updatedAt: document.updatedAt, reassessment: completionReassessment(document, evidence?.recordedAt ?? null)};
 }
 
-// a completion assessment keeps its status and evidence, but it is not current while a reached decision is pending or after a branch
-// decision changed or was invalidated
+// a completion assessment keeps its status and evidence, but it is not current while a reached decision is pending, outside workflows
+// recorded not applicable, or after a branch decision changed or was invalidated
 const completionReassessment = (document: WorkflowStateDocument, assessedAt: number | null): string | null => {
   if (document.status !== "completed") return null;
-  const pending = pendingBranchDecisions(document.plan, effectiveBranchSelections(document.plan, document.branchSelections ?? [])).length;
+  const pending = currentPendingDecisions(document).length;
   if (pending) return `${pending === 1 ? "A branch decision is" : `${pending} branch decisions are`} pending, so this completion needs reassessment.`;
   const changed = document.evidence.some(item => (item.kind === "branch_selection_invalidated" || item.kind === "branch_selected" && item.branch?.changed === true) &&
     (assessedAt === null || item.recordedAt > assessedAt));

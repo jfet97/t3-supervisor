@@ -21,7 +21,7 @@ import { childOrigin, directParentChildLifecycle, hasDirectParentChildLifecycleE
 import { branchSelectionImportDecision, contributionImportDecision, documentBranchSelections, parseBranchSelectionRecord, parseExternalContributionRecord, workflowPlanEntities, WorkflowStateStore } from "./workflow-state-store.js";
 import { branchSelectionDiagnosticCodes, branchSelectionLimits, externalContributionDiagnosticCodes, externalContributionLimits, type BranchSelectionDiagnosticCode,
   type ExternalContributionDiagnosticCode, type WorkflowOwner, type WorkflowStateDocument } from "./workflow-state-contract.js";
-import { branchPathGroups, pendingBranchDecisions, planBranches, planNodes, type BranchPath } from "./workflow-plan-tree.js";
+import { branchPathGroups, currentPendingDecisions, planBranches, planNodes, type BranchPath } from "./workflow-plan-tree.js";
 import { canonicalJson } from "./canonical-json.js";
 import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorIds } from "./ids.js";
@@ -1622,7 +1622,7 @@ On any unsolicited wake, read view context first; if supervision is stopped, con
       if (!planBranches(document.plan).length) return [];
       const selected = documentBranchSelections(document);
       return [{threadId: document.threadId, workflowId: document.workflowId,
-        pending: pendingBranchDecisions(document.plan, selected).slice(0, 20).map(branch => ({nodeId: branch.nodeId, condition: branch.condition})),
+        pending: currentPendingDecisions(document).slice(0, 20).map(branch => ({nodeId: branch.nodeId, condition: branch.condition})),
         selected: document.branchSelections.filter(item => selected.get(item.nodeId) === item.path).slice(0, 20)
           .map(item => ({nodeId: item.nodeId, path: item.path, revision: item.revision, sourceMessageId: item.sourceMessageId}))}];
     }).slice(0, 20);

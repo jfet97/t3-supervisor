@@ -295,10 +295,14 @@ export const occurrenceFacts = (plan: WorkflowPlanGroupInfo | null, selected: Re
   return result;
 };
 
-/** The planned not-applicable occurrences that settle themselves and, for a workflow, everything inside it. */
+/** Whether an occurrence and everything inside it has no recorded progress. */
+export const wholeOccurrencePlanned = (node: PlanEntityInfo): boolean =>
+  planEntities({kind: "sequence", templatePath: null, nodes: [node]}).every(item => item.status === "planned");
+
+/** The not-applicable occurrences with no recorded progress inside them, which settle themselves and, for a workflow, everything inside it. */
 const settledByAssessment = (plan: WorkflowPlanGroupInfo | null, selected: ReadonlyMap<string, BranchPath>, notApplicable: ReadonlySet<string>,
   fixedOwner: boolean): Set<string> => new Set(occurrenceFacts(plan, selected, fixedOwner, notApplicable)
-  .filter(({node, fixedMember}) => fixedMember && node.status === "planned" && notApplicable.has(node.nodeId)).map(({node}) => node.nodeId));
+  .filter(({node, fixedMember}) => fixedMember && notApplicable.has(node.nodeId) && wholeOccurrencePlanned(node)).map(({node}) => node.nodeId));
 
 /**
  * The applicable occurrences inside a plan group that are not settled. Settled means completed, or a planned member of a fixed workflow
@@ -319,6 +323,33 @@ export const pendingDecisionsOutside = (group: WorkflowPlanGroupInfo | null, sel
   const inside = new Set(planEntities(group).filter(node => node.kind === "workflow" && assessed.has(node.nodeId))
     .flatMap(node => planBranches(node.kind === "workflow" ? node.plan : null).map(branch => branch.nodeId)));
   return pendingBranchDecisions(group, selected).filter(branch => !inside.has(branch.nodeId));
+};
+
+/** The reached decisions a workflow document still waits for: those pending outside its occurrences currently recorded not applicable. */
+export const currentPendingDecisions = (document: {plan: WorkflowPlanGroupInfo | null; branchSelections?: readonly BranchSelectionFact[] | undefined;
+  evidence: ReadonlyArray<{kind: string; targetNodeId: string | null; scopeRevision?: string}>; sourceBinding: {sourceHash: string} | null}): WorkflowPlanBranchInfo[] =>
+  pendingDecisionsOutside(document.plan, effectiveBranchSelections(document.plan, document.branchSelections ?? []),
+    notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null));
+
+/** The store pointer of an occurrence's status, or of a branch, located by nodeId, such as /plan/nodes/1/plan/nodes/0/status. */
+export const planStatusPointer = (plan: WorkflowPlanGroupInfo | null, nodeId: string): string | null => {
+  const visit = (group: WorkflowPlanGroupInfo | null, path: string): string | null => {
+    if (!group) return null;
+    for (const [index, node] of group.nodes.entries()) {
+      const nodePath = `${path}/nodes/${index}`;
+      if (isPlanGroup(node)) {
+        const found = visit(node, nodePath);
+        if (found) return found;
+        continue;
+      }
+      if (node.nodeId === nodeId) return node.kind === "branch" ? nodePath : `${nodePath}/status`;
+      const found = node.kind === "workflow" ? visit(node.plan, `${nodePath}/plan`)
+        : node.kind === "branch" ? visit(node.then, `${nodePath}/then`) ?? visit(node.else, `${nodePath}/else`) : null;
+      if (found) return found;
+    }
+    return null;
+  };
+  return visit(plan, "/plan");
 };
 
 /** Every occurrence settled by a not-applicable record: the assessed occurrences and everything inside assessed workflows. */

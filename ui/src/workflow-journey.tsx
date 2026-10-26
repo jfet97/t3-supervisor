@@ -34,14 +34,14 @@ export function planSteps(node: WorkflowPlanNodeInfo | null): Array<Extract<Work
 export type CompletionReassessment = "pending" | "changed" | "undated";
 
 /**
- * Why a workflow occurrence's recorded completion no longer stands as current, or null when it does: a decision it reaches is pending,
- * a selection inside it was recorded or invalidated after the completion record, or no completion time is available to show that the
- * completion followed the decisions inside it. The recorded status itself stays as history.
+ * Why a workflow occurrence's recorded completion no longer stands as current, or null when it does: a decision it reaches is pending
+ * outside what is currently not applicable, a selection inside it was recorded or invalidated after the completion record, or no
+ * completion time is available to show that the completion followed the decisions inside it. The recorded status itself stays as history.
  */
 export function completionReassessment(node: Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>, selections: readonly WorkflowProgressBranchSelection[],
-  completedAt: number | null | undefined): CompletionReassessment | null {
+  completedAt: number | null | undefined, notApplicable: ReadonlySet<string> = new Set()): CompletionReassessment | null {
   if (node.status !== "completed" || !node.plan) return null;
-  if (pendingBranchDecisions(node.plan, currentBranchPaths({branchSelections: [...selections]})).length > 0) return "pending";
+  if (pendingBranchDecisions(node.plan, currentBranchPaths({branchSelections: [...selections]})).some(branch => !notApplicable.has(branch.nodeId))) return "pending";
   const inside = new Set(planBranches(node.plan).map(branch => branch.nodeId));
   const decisions = selections.filter(item => inside.has(item.nodeId));
   if (!decisions.length) return null;
@@ -203,7 +203,7 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
   if (node.kind === "branch") return <BranchJourney node={node} {...passed}/>;
   const alternative = live && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
   // the completion time comes from the whole record; the retained observations can no longer hold an older completion
-  const reassess = live && reach !== "not_selected" && node.kind === "workflow" ? completionReassessment(node, selections ?? [], completions?.get(node.nodeId)) : null;
+  const reassess = live && reach !== "not_selected" && node.kind === "workflow" ? completionReassessment(node, selections ?? [], completions?.get(node.nodeId), notApplicable) : null;
   const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : reassess ? "needs_attention" : node.status;
   const assessedNotApplicable = live && !alternative && node.status === "planned" && notApplicable?.has(node.nodeId) === true;
   const label = !live ? modeLabels[mode] : alternative ? reach === "not_selected" ? "Not selected" : "Awaiting decision"

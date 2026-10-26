@@ -71,7 +71,7 @@ import { InterpretationWake } from "./interpretation-wake.js";
 import { logEvent, type LogFields } from "./logging.js";
 import {branchConditionMaxLength, definitionSnapshotIndexed, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import {pendingBranchDecisions, planEntities, planNodeAtPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
+import {currentPendingDecisions, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
 
 // the native item read returned no item record
 export class WorkflowNativeItemUnavailable extends Data.TaggedError("WorkflowNativeItemUnavailable") {}
@@ -469,14 +469,17 @@ const omissionProblemExpected: Record<OmissionEditProblem, string> = {
   empties_group: "an omission that leaves at least one member in its workflow and branch path",
 };
 
-// a store pointer into the plan of an apply without a plan, mapped to the status edit that set that occurrence's status
-const statusEditPointer = (plan: WorkflowApplyInput["plan"], path: string, edits: readonly WorkflowStatusEdit[]): string => {
+// a store pointer into the edited plan of an apply without a plan, mapped to the status edit that set that occurrence's status
+const statusEditPointer = (plan: WorkflowApplyInput["plan"], currentPlan: WorkflowApplyInput["plan"], path: string, edits: readonly WorkflowStatusEdit[]): string => {
   if (path === "/status") return "/input/status";
   if (path.startsWith("/evidence/")) return `/input${path}`;
   const node = planNodeAtPointer(plan, path);
-  const index = node && "nodeId" in node ? edits.findIndex(edit => edit.nodeId === node.nodeId) : -1;
-  // an occurrence the caller did not edit, such as an open member or a planned ancestor, is located in the current document
-  return index >= 0 ? `/input/statuses/${index}/status` : node ? `/current${path}` : "/input/statuses";
+  if (!node || !("nodeId" in node)) return "/input/statuses";
+  const index = edits.findIndex(edit => edit.nodeId === node.nodeId);
+  // an occurrence the caller did not edit, such as an open member or a planned ancestor, is located by identity in the current
+  // document, whose indices differ from the edited plan's after an omission
+  const located = planStatusPointer(currentPlan, node.nodeId);
+  return index >= 0 ? `/input/statuses/${index}/status` : located ? `/current${located}` : "/input/statuses";
 };
 
 // the store points into the canonical plan, which keeps submitted groups index-for-index. A workflow
@@ -1505,7 +1508,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const result = yield* workflows.apply(owner, normalizedInput, validation, now);
     if (result.status === "invalid" && result.diagnostic)
       return {...result, diagnostic: {...result.diagnostic, path: payload.input.plan === undefined
-        ? statusEditPointer(normalizedInput.plan, result.diagnostic.path, payload.input.statuses ?? [])
+        ? statusEditPointer(normalizedInput.plan, current.plan, result.diagnostic.path, payload.input.statuses ?? [])
         : submittedApplyPointer(payload.input.plan, result.diagnostic.path)}, operationId: payload.input.operationId};
     return {...result, operationId: payload.input.operationId};
   }));
@@ -1813,7 +1816,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       const all = rows.documents;
       const page = all.slice(workflowOffset, workflowOffset + limit);
       const withReferences = yield* Effect.forEach(page, (document) => Effect.map(parentNodeReferences(owner, nativeScope, document),
-        (parentNodeReferences) => ({document, parentNodeReferences, pendingBranchDecisions: pendingBranchDecisions(document.plan, documentBranchSelections(document))
+        (parentNodeReferences) => ({document, parentNodeReferences, pendingBranchDecisions: currentPendingDecisions(document)
           .map(branch => ({nodeId: branch.nodeId, condition: branch.condition}))})));
       const task = yield* supervisors.task(owner.mainThreadId);
       const coverage = team ? yield* Effect.forEach(requestedLineage, (thread) => Effect.gen(function* () {

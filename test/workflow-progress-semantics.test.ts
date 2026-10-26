@@ -185,6 +185,21 @@ it.effect("a not-applicable flexible member is omitted only after negotiation an
     assert.deepEqual("diagnostic" in started.result ? [started.result.diagnostic?.code, started.result.diagnostic?.path] : null, ["omission_not_allowed", "/input/omit/0"],
       "recorded progress is never omitted");
 
+    // an open member named by a rejected apply that also omits an earlier sibling is located in the current document
+    const reviewBranch = ((yield* occurrence(fixture, "review")) as Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>).plan!.nodes[0]!;
+    assert.equal((yield* fixture.workflows.recordBranchSelection(fixture.owner, {nodeId: (reviewBranch as {nodeId: string}).nodeId, revision: 1, path: "then",
+      reason: "Contained change.", sourceThreadId: fixture.mainThreadId, sourceRunId: "main-run", sourceMessageId: "main-selection",
+      sourceCreatedAt: Date.parse("2100-01-01T00:00:00Z")})).status, "applied");
+    const changeNode = yield* occurrence(fixture, "change");
+    const combined = (yield* write(fixture, {operationId: "omit-and-complete", note: "Omit prevention and complete the change.",
+      omit: [{nodeId: prevent.nodeId, reason: "Ordinary feature work; no defect or correction exposed a gap."}],
+      statuses: [{nodeId: implementing.nodeId, status: "completed"}, {nodeId: changeNode.nodeId, status: "completed"}],
+      evidence: [implementing, changeNode].map(node => ({kind: "status_changed" as const, targetNodeId: node.nodeId, note: "Done."}))})).result;
+    const culprit = "diagnostic" in combined ? combined.diagnostic?.path ?? "" : "";
+    assert.equal("diagnostic" in combined ? combined.diagnostic?.code : combined.status, "completion_unfinished");
+    assert.equal((planNodeAtPointer((yield* current(fixture)).plan, culprit.replace(/^\/current/u, "")) as {nodeId?: string} | null)?.nodeId,
+      (yield* occurrence(fixture, "verify-behavior")).nodeId, `${culprit} names the open Verify behavior in the current plan`);
+
     const before = yield* current(fixture);
     const omitted = yield* write(fixture, {operationId: "omit-negotiated", note: "Apply the agreed omission.",
       omit: [{nodeId: prevent.nodeId, reason: "Ordinary feature work; no defect or correction exposed a gap."}]});
@@ -393,8 +408,11 @@ it.effect("fixed sequences keep their order, and a fixed workflow that does not 
     assert.deepEqual(codeAndPath(yield* statusEdit(fixture, "finalize-first", [["release", "underway"], ["finalize", "underway"]], {status: "underway"})),
       ["sequence_order", "/input/statuses/1/status"]);
     assert.equal((yield* statusEdit(fixture, "verify", [["release", "underway"], ["verify-behavior", "completed"]], {status: "underway"})).result.status, "applied");
-    assert.equal(codeAndPath(yield* statusEdit(fixture, "release-complete-early", [["release", "completed"]]))[0], "branch_decision_pending",
-      "Review's open decision holds Release until Review is assessed");
+    const releaseEarly = codeAndPath(yield* statusEdit(fixture, "release-complete-early", [["release", "completed"]]));
+    assert.equal(releaseEarly[0], "branch_decision_pending", "Review's open decision holds Release until Review is assessed");
+    const reviewNode = (yield* occurrence(fixture, "review")) as Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>;
+    assert.equal((planNodeAtPointer((yield* current(fixture)).plan, String(releaseEarly[1]).replace(/^\/current/u, "")) as {nodeId?: string} | null)?.nodeId,
+      (reviewNode.plan!.nodes[0] as {nodeId: string}).nodeId, `${String(releaseEarly[1])} names the pending branch`);
 
     // the fixed Review, with its decision still pending, and the flexible Hotfix do not apply: each is recorded once and stays planned
     const review = yield* occurrence(fixture, "review");
@@ -428,9 +446,14 @@ it.effect("fixed sequences keep their order, and a fixed workflow that does not 
     const live = liveProgress(document.plan, currentBranchPaths(progress), settled);
     assert.deepEqual(live.steps.map(step => step.definitionId), ["verify-behavior", "finalize", "data-and-rollout"]);
     assert.deepEqual(live.pending, [], "the decision inside the assessed Review is not asked for");
-    const html = renderToStaticMarkup(createElement(PlanJourney, {node: document.plan!, mode: "live", notApplicable: settled}));
+    const html = renderToStaticMarkup(createElement(PlanJourney, {node: document.plan!, mode: "live", notApplicable: settled, selections: progress.branchSelections,
+      completions: new Map((progress.completions ?? []).map(item => [item.nodeId, item.completedAt] as const))}));
     assert.match(html, /Review<small>Workflow<\/small><\/span><span class="step-state">Not applicable/u);
     assert.match(html, /Account for findings[\s\S]*?<span class="step-state">Not applicable/u);
+    assert.doesNotMatch(html, /needs reassessment/u, "Release's completion stands although the assessed Review never decided its branch");
+    assert.equal(progress.assessment?.reassessment ?? null, null, "the task's completion stands as current");
+    const statusView = yield* fixture.controller.readTool({...locator(fixture), view: "status"});
+    assert.match(JSON.stringify(statusView), /"pendingBranchDecisions":\[\]/u, "the Supervisor is not asked for a decision inside an assessed workflow");
   } finally {yield* fixture.close;}
 }));
 
@@ -461,5 +484,23 @@ it.effect("Review accounts for findings only after its selected lanes are settle
     assert.match(pointer, /^\/current\/plan\/.+\/status$/u);
     assert.equal((planNodeAtPointer((yield* current(fixture)).plan, pointer.slice("/current".length)) as {nodeId?: string} | null)?.nodeId, pairedWorkflow.nodeId,
       "the open paired review is named in the current plan");
+  } finally {yield* fixture.close;}
+}));
+
+it.effect("a fixed workflow with recorded progress inside it is never assessed not applicable, even after reverting it to planned", () => Effect.gen(function* () {
+  const fixture = yield* agreedFixture([{kind: "workflow", definitionId: "release", reason: "The task ships a release."}]);
+  try {
+    assert.equal((yield* statusEdit(fixture, "verify", [["release", "underway"], ["verify-behavior", "completed"]], {status: "underway"})).result.status, "applied");
+    const review = (yield* occurrence(fixture, "review")) as Extract<WorkflowPlanNodeInfo, {kind: "workflow"}>;
+    const branch = review.plan!.nodes[0] as Extract<WorkflowPlanNodeInfo, {kind: "branch"}>;
+    assert.equal((yield* fixture.workflows.recordBranchSelection(fixture.owner, {nodeId: branch.nodeId, revision: 1, path: "then", reason: "Contained change.",
+      sourceThreadId: fixture.mainThreadId, sourceRunId: "main-run", sourceMessageId: "main-selection", sourceCreatedAt: Date.parse("2100-01-01T00:00:00Z")})).status, "applied");
+    assert.equal((yield* statusEdit(fixture, "lane", [["review", "underway"], ["single-review", "underway"], ["review-correctness", "underway"]])).result.status, "applied");
+    assert.equal((yield* statusEdit(fixture, "revert", [["review", "planned"]])).result.status, "applied");
+    const hidden = (yield* write(fixture, {operationId: "assess-started", note: "Record Review not applicable.",
+      evidence: [{kind: "not_applicable", targetNodeId: review.nodeId, note: "Review is not needed."}]})).result;
+    assert.deepEqual("diagnostic" in hidden ? [hidden.diagnostic?.code, hidden.diagnostic?.path] : null, ["not_applicable_invalid", "/input/evidence/0"]);
+    const finished = (yield* statusEdit(fixture, "finish", [["finalize", "completed"]])).result;
+    assert.equal("diagnostic" in finished ? finished.diagnostic?.code : finished.status, "sequence_order", "the underway lane still holds what follows");
   } finally {yield* fixture.close;}
 }));

@@ -10,7 +10,7 @@ import {fingerprint} from "./guidance-store.js";
 import {SupervisorIds} from "./ids.js";
 import {ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
-import {branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceFacts, pendingDecisionsOutside, planBranches, planEntities, planReach, unsettledOccurrences, type PlanEntityInfo} from "./workflow-plan-tree.js";
+import {branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceFacts, pendingDecisionsOutside, planBranches, planEntities, planReach, planStatusPointer as planNodeStatusPointer, unsettledOccurrences, wholeOccurrencePlanned, type PlanEntityInfo} from "./workflow-plan-tree.js";
 import {
   branchSelectionLimits,
   branchSelectionPaths,
@@ -236,29 +236,7 @@ const validContributionAssessmentInput = (value: unknown): value is WorkflowCont
   typeof value.note === "string" && value.note.trim().length > 0 && value.note.length <= externalContributionLimits.maxAssessmentNoteLength;
 
 // points into the canonical plan; workflow_write maps it onto the submitted arguments
-const planStatusPointer = (plan: WorkflowStatePlan, target: PlanEntity | WorkflowPlanBranchInfo): string | null => {
-  const visit = (group: WorkflowPlanGroupInfo | null, path: string): string | null => {
-    if (!group) return null;
-    for (const [index, node] of group.nodes.entries()) {
-      const nodePath = `${path}/nodes/${index}`;
-      if (isPlanGroup(node)) {
-        const found = visit(node, nodePath);
-        if (found) return found;
-        continue;
-      }
-      if (node === target) return node.kind === "branch" ? nodePath : `${nodePath}/status`;
-      if (node.kind === "workflow") {
-        const found = visit(node.plan, `${nodePath}/plan`);
-        if (found) return found;
-      } else if (node.kind === "branch") {
-        const found = visit(node.then, `${nodePath}/then`) ?? visit(node.else, `${nodePath}/else`);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-  return visit(plan, "/plan");
-};
+const planStatusPointer = (plan: WorkflowStatePlan, target: PlanEntity | WorkflowPlanBranchInfo): string | null => planNodeStatusPointer(plan, target.nodeId);
 
 const collectPlanEntities = planEntities;
 
@@ -568,7 +546,8 @@ const pendingDecisionProblem = (current: WorkflowStateDocument, input: WorkflowA
   for (const {node, reach} of planReach(nextPlan, selected)) {
     if (node.kind !== "workflow" || node.status !== "completed" || previous.get(node.nodeId) === "completed" || reach === "not_selected") continue;
     const pending = pendingDecisionsOutside(node.plan, selected, notApplicable, node.fixed === true)[0];
-    if (pending) return {code: "branch_decision_pending", path: planStatusPointer(nextPlan, node) ?? "/plan", expected: branchDecisionPendingExpected};
+    if (pending) return {code: "branch_decision_pending", path: planStatusPointer(nextPlan, pending) ?? planStatusPointer(nextPlan, node) ?? "/plan",
+      expected: branchDecisionPendingExpected};
   }
   return null;
 };
@@ -581,7 +560,8 @@ const undecidedPathExpected = "record the operative's selection for this branch 
 const nestedStatusExpected = "enter a workflow or the task together with the member that is actually underway, and enter a member only inside an entered workflow and task.";
 const completionExpected = "complete every applicable member first; omit a not-applicable flexible member through an agreed proposal, " +
   "and record a not-applicable fixed member with not_applicable evidence while it stays planned.";
-const notApplicableExpected = "record not_applicable only for a planned member of a fixed workflow that stays planned; omit a flexible member through an agreed proposal.";
+const notApplicableExpected = "record not_applicable only for a planned member of a fixed workflow with no recorded progress inside it, which stays planned; " +
+  "omit a flexible member through an agreed proposal.";
 
 type ProgressReach = ReturnType<typeof planReach>[number]["reach"];
 const applicableReach = (reach: ProgressReach): boolean => reach === "unconditional" || reach === "selected";
@@ -601,7 +581,8 @@ import {notApplicableNodeIds} from "./workflow-plan-tree.js";
  */
 const recordedProgressProblem = (current: WorkflowStateDocument, input: WorkflowApplyInput, nextPlan: WorkflowStatePlan,
   selections: readonly BranchSelection[], scopeReassessment: boolean, notApplicable: ReadonlySet<string>): WorkflowApplyDiagnostic | null => {
-  const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
+  const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node] as const));
+  const previous = new Map([...previousNodes].map(([nodeId, node]) => [nodeId, node.status] as const));
   const next = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node] as const));
   const selected = effectiveBranchSelections(nextPlan, selections);
   const facts = new Map(occurrenceFacts(nextPlan, selected).map(fact => [fact.node.nodeId, fact] as const));
@@ -609,7 +590,9 @@ const recordedProgressProblem = (current: WorkflowStateDocument, input: Workflow
     const nodeId = item.targetNodeId ?? null;
     const node = nodeId === null ? null : next.get(nodeId);
     if (item.kind === "not_applicable") {
-      if (!node || !facts.get(node.nodeId)?.fixedMember || node.status !== "planned" || previous.get(node.nodeId) !== "planned")
+      // an occurrence with recorded progress inside it, such as a workflow reverted to planned while its members are underway, is not assessed
+      const before = nodeId === null ? undefined : previousNodes.get(nodeId);
+      if (!node || !facts.get(node.nodeId)?.fixedMember || !wholeOccurrencePlanned(node) || !before || !wholeOccurrencePlanned(before))
         return {code: "not_applicable_invalid", path: `/evidence/${index}`, expected: notApplicableExpected};
       continue;
     }

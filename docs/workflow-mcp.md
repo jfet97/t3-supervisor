@@ -374,11 +374,12 @@ the operative has accepted the current proposal and it omits the same member of 
 occurrence. Members with recorded progress, fixed members and an omission that would
 empty a workflow or branch path, directly or through a nested group, are refused.
 Neither may be combined with `plan` (`plan_edit_conflict`). Evidence of kind
-`not_applicable` records that a planned member of a fixed workflow does not apply to the
-current task scope; it changes no status, is refused for any other target
+`not_applicable` records that a planned member of a fixed workflow, with no recorded
+progress inside it, does not apply to the current task scope; it changes no status, is refused for any other target
 (`not_applicable_invalid`) and stops counting after a later status change or scope
 change. Assessing a fixed workflow member settles that whole occurrence: its own
-members and any branch decisions inside it need no further record.
+members and any branch decisions inside it need no further record, and neither pending
+decision lists nor completion reassessment ask for those decisions.
 
 Recorded progress is checked, never operative work. A `status_changed` record must
 change its target's status (`status_unchanged`), except the retained-progress
