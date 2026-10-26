@@ -20,6 +20,7 @@ import {
   externalContributionReferenceKinds,
   externalContributionStates,
   workflowExecutionStatuses,
+  storedPlanJsonDepth,
   workflowMutationLimits,
   WorkflowMutationReceiptSchema,
   WorkflowStateDocumentSchema,
@@ -408,7 +409,7 @@ const staticPlan = (plan: WorkflowStatePlan): unknown => {
 // compared only within this process, between the live plan and an accepted or edited one: key order from a decoded record never matters
 const workflowPlanSignature = (objective: string | null, sourceBinding: WorkflowStateSourceBinding | null,
   requirements: readonly WorkflowStateRequirement[], issues: readonly WorkflowStateIssue[], plan: WorkflowStatePlan): string =>
-  fingerprint(canonicalStoredJson({objective, sourceBinding, requirements, issues, plan: staticPlan(plan)}));
+  fingerprint(canonicalStoredJson({objective, sourceBinding, requirements, issues, plan: staticPlan(plan)}, storedPlanJsonDepth));
 
 const sourceBindingOf = (workflow: WorkflowAgreementInfo["workflow"], taskId: string, proposalId: string, sourceHash: string): WorkflowStateSourceBinding => ({
   workspaceRoot: workflow.workspaceRoot ?? "",

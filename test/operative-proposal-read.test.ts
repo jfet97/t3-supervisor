@@ -4,6 +4,8 @@ import { Effect } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { preparedAcceptanceRecord } from "../src/supervisor-conversation.js";
 import { T3TransportError } from "../src/t3.js";
+import { taskScopeRevision } from "../src/supervision-conversation-contract.js";
+import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection } from "../src/types.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete, type WorkflowFixture } from "./support/ctl-workflow.js";
@@ -87,8 +89,9 @@ it.effect("the operative gets a short pinned notice, reads its own complete prop
   const later = yield* readAs(fixture, controller, operative, args);
   assert.equal(later.status, "ok", JSON.stringify(later));
   assert.match(later.status === "ok" ? later.proposal : "", /- branch \[branch:[0-9a-f-]{36}\] if: The change is contained\./u);
+  yield* fixture.stores.requests.saveAgreementCandidate({...(yield* fixture.stores.requests.agreementCandidate(task.id, proposalId))!, proposalId: `${proposalId}:earlier`});
   const earlier = yield* readAs(fixture, controller, operative, {...args, proposalId: `${proposalId}:earlier`});
-  assert.deepEqual([earlier.status, Object.hasOwn(earlier, "proposal")], ["denied", false]);
+  assert.deepEqual(earlier, {status: "denied", reason: "proposal_not_current"});
 }));
 
 it.effect("a read that is forged, foreign, outdated or for a stopped chat returns nothing and changes nothing", () => Effect.gen(function* () {
@@ -110,11 +113,37 @@ it.effect("a read that is forged, foreign, outdated or for a stopped chat return
   for (const node of other.nodes as Array<Record<string, unknown>>) node.threadId = "other-chat";
   fixture.projections.set("other-chat", other);
   noProposal(yield* readAs(fixture, controller, other, {callerThreadId: "other-chat", taskId: task.id, proposalId}), "foreign");
-  // outdated: the operative's own verified call names a proposal that is not the current one
-  noProposal(yield* readAs(fixture, controller, operative, {callerThreadId: sourceThreadId, taskId: task.id, proposalId: `${proposalId}-earlier`}), "outdated");
+  // outdated: the operative's own verified call names an earlier proposal of its task
+  yield* fixture.stores.requests.saveAgreementCandidate({...(yield* fixture.stores.requests.agreementCandidate(task.id, proposalId))!, proposalId: `${proposalId}-earlier`});
+  const outdated = yield* readAs(fixture, controller, operative, {callerThreadId: sourceThreadId, taskId: task.id, proposalId: `${proposalId}-earlier`});
+  noProposal(outdated, "outdated");
+  assert.equal(outdated.status, "denied");
+  // unknown: a proposal ID of its own task that was never recorded
+  const unknown = yield* readAs(fixture, controller, operative, {callerThreadId: sourceThreadId, taskId: task.id, proposalId: `${proposalId}-next`});
+  noProposal(unknown, "unknown");
+  assert.equal(unknown.status, "denied");
   // stopped: the human stopped supervision of this chat
   const policy = yield* fixture.stores.policy.get();
   yield* fixture.stores.policy.save({...policy, excludedThreadIds: [...policy.excludedThreadIds, sourceThreadId]});
   noProposal(yield* readAs(fixture, controller, operative, {callerThreadId: sourceThreadId, taskId: task.id, proposalId}), "stopped");
   assert.equal(JSON.stringify(yield* fixture.task()), before, "no read changes the task");
+}));
+
+// each change makes the proposal the notice named obsolete for the same call: the operative's request was edited, a new Supervisor generation
+// took over, or the task's scope pin moved under the same proposal ID so its recorded acceptance no longer matches
+const obsolete: ReadonlyArray<readonly [string, (fixture: WorkflowFixture, task: TaskRecord) => Effect.Effect<void, unknown>]> = [
+  ["edited source", (fixture) => Effect.sync(() => { fixture.projections.get(sourceThreadId)!.messages[0]!.text = "Fix the export retry bug and redesign exports."; })],
+  ["new generation", (fixture) => Effect.flatMap(fixture.binding(), (binding) => fixture.stores.supervisors.setBinding({...binding!, generation: binding!.generation + 1}))],
+  ["moved scope pin", (fixture, task) => fixture.stores.supervisors.saveTask({...task, conversation: {...task.conversation!,
+    authorization: {...task.conversation!.authorization!, scopeRevision: `${taskScopeRevision(task)}:moved`}}})],
+];
+for (const [label, change] of obsolete) it.effect(`a read after an obsolete ${label} returns nothing and changes nothing`, () => Effect.gen(function* () {
+  const {fixture, task, controller} = yield* introduced;
+  const operative = fixture.projections.get(sourceThreadId)!;
+  const args = {callerThreadId: sourceThreadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id};
+  assert.equal((yield* readAs(fixture, controller, operative, args)).status, "ok", "current before the change");
+  yield* change(fixture, task);
+  const before = JSON.stringify(yield* fixture.task());
+  assert.deepEqual(yield* readAs(fixture, controller, operative, args), {status: "denied", reason: "proposal_not_current"});
+  assert.equal(JSON.stringify(yield* fixture.task()), before, "the read changes nothing");
 }));

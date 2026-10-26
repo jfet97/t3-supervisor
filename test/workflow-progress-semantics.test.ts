@@ -327,7 +327,9 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
     // whole messages count, fixed protocol prose included: both notices together stay below one complete proposal
     assert.ok(notice.length + delta.length < full.length, `notices ${notice.length} + ${delta.length} characters against ${full.length}`);
     const changedPlan = {...revised, agreement: {...revised.agreement, workflow: {...earlier, plan: sequencePlan([localStep("Other plan", "A different plan.")])}}};
-    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — proposal proposal-change-limits\nAgree a proportionate workflow/u, "a changed plan gets the proposal notice");
+    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — revised proposal proposal-change-limits\nYour Supervisor revised the workflow you agreed as proposal proposal-change; agree this revision/u,
+      "a changed plan gets the proposal notice naming the agreed proposal it replaces");
+    assert.match(workflowIntroductionText(changedPlan), /Read the complete proposal \(limits, required references, the plan with its omissions and branches, and the exact acceptance record\)/u);
   } finally {yield* fixture.close;}
 }));
 

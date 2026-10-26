@@ -853,7 +853,7 @@ export const supervisionStartToolDefinition = {
 };
 export const supervisionPlanToolDefinition = {
   name: "supervision_plan",
-  description: "Read your own current supervised task's complete workflow proposal: objective and authorized scope, limits, required references, the plan with its omissions and branches, and the exact acceptance record. Copy callerThreadId, taskId and proposalId exactly from the Supervisor notice; callerThreadId is your own native thread, whose own executed call the service verifies. Read-only: it changes nothing, grants nothing and returns nothing for another chat or an outdated proposal. After pending, retry the identical call; when it is not current, ask your Supervisor.",
+  description: "Read your own current supervised task's complete workflow proposal: objective and authorized scope, limits, required references, the plan with its omissions and branches, and the exact acceptance record. Copy callerThreadId, taskId and proposalId exactly from the Supervisor notice; callerThreadId is your own native thread, whose own executed call the service verifies. Read-only: it changes nothing, grants nothing and returns nothing for another chat or an outdated proposal. pending means your own call is not recorded yet: retry the identical call shortly. When it stays pending or is not current, ask your Supervisor.",
   inputSchema: {type: "object", additionalProperties: false, required: ["callerThreadId", "taskId", "proposalId"],
     properties: {callerThreadId: idSchema(), taskId: idSchema(), proposalId: idSchema()}},
 };
@@ -1711,7 +1711,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       return {status: "denied", reason: "caller_not_current"};
     const verified = yield* findToolEvidence(args.callerThreadId, caller.thread.projectId, args, "plan", cancel);
     if (verified.status !== "verified") return {status: verified.status, reason: verified.reason, retryable: verified.status === "pending"};
-    return yield* conversation.operativeProposal({...args, projectId: caller.thread.projectId});
+    return yield* conversation.operativeProposal({...args, projectId: caller.thread.projectId, caller});
   });
 
   // the timestamped phases of one submission, by name only (ct-isub-14)

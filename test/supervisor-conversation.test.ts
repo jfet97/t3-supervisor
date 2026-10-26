@@ -9,9 +9,11 @@ import { stringify } from "yaml";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Effect, Exit, FileSystem, Schema } from "effect";
 import { TestClock } from "effect/testing";
+import { canonicalJson, canonicalStoredJson } from "../src/canonical-json.js";
+import { storedPlanJsonDepth, workflowMutationLimits } from "../src/workflow-state-contract.js";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { WorkflowProposal } from "../src/project-supervisor-contract.js";
+import { WorkflowPlanGroupSchema, WorkflowProposal } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
@@ -851,7 +853,7 @@ it.effect("an initial interpretation that omits a flexible member is introduced 
   assert.deepEqual(liveChange?.kind === "workflow" ? liveChange.omissions.map(item => item.id) : null, ["prevent"], "the agreed omission reaches the live plan");
 }));
 
-it.effect("a revised proposal that omits a flexible member from the agreed plan is agreed with the record its introduction carries", () => Effect.gen(function* () {
+it.effect("a revised proposal that omits a flexible member from the agreed plan is noticed once it is durable, read on delivery and agreed", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
   const fixture = yield* makeFixture(clock, {operativeActive: false});
   const task = yield* installNestedCatalog(fixture);
@@ -876,15 +878,55 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   yield* observeAgreement(fixture, clock.now + 60_000);
   const revised = (yield* fixture.projectStore.task(task.threadId))!;
   assert.equal(revised.workflowProposalId, revisionId);
-  // the operative copies the acceptance record the service presents for the revision
+  assert.deepEqual([revised.agreement?.status, revised.agreement?.proposalId], ["agreed", task.id], "the agreed plan holds until the revision is accepted");
   const acceptance = preparedAcceptanceRecord(revised)!;
   assert.equal((yield* fixture.conversation.requests.agreementCandidate(task.id, revisionId))?.planHash, acceptance.digest,
     "the presented record names the candidate's digest");
-  appendMessageToRun(fixture.operative, firstRun, {id: "revision-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
+  // the service sends the notice once the revision is durable, and a read on its delivery returns exactly that proposal and record
+  const callsBefore = fixture.calls.length;
+  const noticesSince = () => fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId);
+  yield* fixture.run();
+  assert.equal(noticesSince().length, 1, "one notice for the revision");
+  assert.match(String(noticesSince()[0]!.payload.text), new RegExp(`^Project Supervisor — revised proposal ${revisionId}\n[^\n]*agreed as proposal ${task.id};`, "u"));
+  assert.notEqual(noticesSince()[0]!.payload.messageId, first.messageId, "the revision's notice has its own identity");
+  const read = yield* fixture.conversation.operativeProposal({callerThreadId: operativeThreadId, projectId, taskId: task.id, proposalId: revisionId, caller: fixture.operative});
+  assert.equal(read.status, "ok", JSON.stringify(read));
+  assert.ok(read.status === "ok" && read.proposal.includes(workflowFence("workflow-acceptance", acceptance)) &&
+    /not applicable: Check prevent — No defect or correction exposed a gap\./u.test(read.proposal), "the read holds the omission and the exact record");
+  yield* fixture.run();
+  yield* fixture.run();
+  const notice = (yield* fixture.conversation.requests.introduction(task.id))!;
+  assert.deepEqual([notice.state, notice.proposalId, noticesSince().length], ["sent", revisionId, 1], "delivered once, never repeated");
+  // the operative copies the record it read into its reply after the notice
+  const noticeRun = fixture.operative.runs.find(run => run.id === fixture.operative.messages.find(message => message.id === notice.messageId)!.runId)!;
+  appendMessageToRun(fixture.operative, noticeRun, {id: "revision-acceptance", role: "assistant", text: workflowFence("workflow-acceptance", acceptance), now: yield* clock.advance(1)});
+  completeRun(fixture.operative, noticeRun, "Accepted the revised workflow.", clock.now);
   yield* observeAgreement(fixture, clock.now + 90_000);
   const settled = (yield* fixture.projectStore.task(task.threadId))!;
   assert.deepEqual([settled.agreement?.status, settled.agreement?.proposalId], ["agreed", revisionId]);
 }));
+
+// a plan at the stored validation's nesting bound: a branch in each group down to the deepest group level, which holds a workflow
+// with an omission, the deepest node detail
+it("the stored plan identity covers a plan nested to the validated bound and still sees any changed value", () => {
+  const source = {origin: "project", path: ".t3-supervisor/workflows/change.yaml", sourceId: "change"};
+  const group = (level: number, reason: string): unknown => ({kind: "sequence", templatePath: null, nodes: level < workflowMutationLimits.maxPlanDepth
+    ? [{kind: "branch", nodeId: `branch-${level}`, templatePath: null, condition: `Level ${level} applies.`, reason, then: group(level + 1, reason), else: null}]
+    : [{kind: "workflow", nodeId: "change", definitionId: "change", templatePath: null, name: "Change", description: "Change behavior.", fixed: false, source,
+      resolution: "resolved", reason, status: "planned", contributorThreadIds: [], plan: null,
+      omissions: [{templatePath: "workflows/change/0", kind: "step", id: "prevent", name: "Check prevent", source, reason: "No gap."}]}]});
+  const value = (reason: string) => ({definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [],
+    plan: Schema.decodeUnknownSync(WorkflowPlanGroupSchema)(group(0, reason))});
+  const reversed = (item: unknown): unknown => Array.isArray(item) ? item.map(reversed) : item && typeof item === "object"
+    ? Object.fromEntries(Object.entries(item).reverse().map(([key, entry]) => [key, reversed(entry)])) : item;
+  const depth = (item: unknown): number => item && typeof item === "object" ? 1 + Math.max(0, ...Object.values(item).map(depth)) : 0;
+  const plan = value("Needed.");
+  assert.equal(depth(plan), storedPlanJsonDepth, "the bound derived from the plan limits is exactly this plan's depth");
+  assert.throws(() => canonicalJson(plan), /json_depth/u, "request arguments keep their own bound");
+  assert.equal(canonicalStoredJson(reversed(plan), storedPlanJsonDepth), canonicalStoredJson(plan, storedPlanJsonDepth), "the same values in another key order are the same plan");
+  assert.notEqual(canonicalStoredJson(value("Needed later."), storedPlanJsonDepth), canonicalStoredJson(plan, storedPlanJsonDepth), "a changed value is a changed plan");
+  assert.throws(() => canonicalStoredJson({nested: plan}, storedPlanJsonDepth), /json_depth/u, "and nothing deeper than a valid plan is accepted");
+});
 
 it.effect("a stored initial plan that no longer matches its validated form is never introduced, even when its evidence digest agrees", () => Effect.gen(function* () {
   for (const variant of ["identity", "digest"] as const) {
@@ -1324,8 +1366,12 @@ it.effect("workflow editing guidance tells authors to start live steps planned a
   assert.match(role, /never present it as a requester instruction/u);
   assert.match(role, /restate the unfinished task and its next authorized action/u);
   assert.match(role, /Never repeat an acceptance request in the check-in that delivered the proposal or while the operative turn that received it is still running/u);
-  assert.match(role, /send the operative main a short notice: the proposalId, what changed \(one sentence when only the scope or limits changed; otherwise the members added, removed or omitted against the plan it last accepted, with reasons\)/u);
-  assert.match(role, /reads the complete proposal and its exact acceptance record, a workflow-acceptance fence holding exactly \{"taskId","proposalId","digest"\}, with the t3-supervisor-workflows tool supervision_plan/u);
+  // the service sends each notice once the proposal is recorded; the Supervisor never sends an earlier notice of its own
+  assert.match(role, /Publishing is the delivery: once your completed answer is recorded, the service sends the operative main a short notice naming the proposal/u);
+  assert.match(role, /reads the complete proposal, with each node's and omission's reason and its exact acceptance record, a workflow-acceptance fence holding exactly \{"taskId","proposalId","digest"\}, with the t3-supervisor-workflows tool supervision_plan/u);
+  assert.match(role, /Send no notice, outline or record of your own before that/u);
+  assert.match(role, /once that answer is recorded, the service sends the operative main a short notice naming it, which it reads in full with supervision_plan, so send no notice of your own/u);
+  assert.doesNotMatch(role, /send the operative main a short notice/u);
   assert.match(role, /"omit":\[\{"member":/u);
   assert.doesNotMatch(role, /may proceed together|infer dependency scheduling|promptly reconcile EVERY duty|keep parent and child assessments separate/u);
   assert.match(role, /separate later apply with status_changed evidence and exact activity references/u);

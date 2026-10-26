@@ -193,12 +193,16 @@ proposal by echoing its exact reference `{taskId, proposalId, digest}`; definiti
 stay available through `workflow_read`. The introduction outline names each member once;
 nested workflows without a branch are one line. It points to the `project.yaml` index
 instead of copying the references and skills of the plan's definitions, because each
-definition file carries its own. A revised proposal for a changed scope whose plan,
-definitions and requirements are unchanged is sent as a short delta with the objective,
-limits and new acceptance record; a revision of a plan the operative already accepted
-names only the members added, removed or omitted, with reasons, and the new acceptance
-record. The Supervisor does not repeat an acceptance request while the operative turn
-that received the proposal can still answer it. The operative receives a short notice: the obligation to agree a workflow for the
+definition file carries its own. Every notice points to a proposal the service has
+already recorded: the first one once the interpretation is recorded, and a revision the
+Supervisor publishes in its completed answer once that answer is recorded as the
+proposal's candidate. The service delivers each notice once, under its own message
+identity, and the Supervisor sends no notice of its own. A revised proposal for a
+changed scope whose plan, definitions and requirements are unchanged is noticed as such
+with its new acceptance record; a revision of an agreed plan names the agreed proposal it
+replaces, and its read shows each member, omission and reason. The Supervisor does not
+repeat an acceptance request while the operative turn that received the proposal can
+still answer it. The operative receives a short notice: the obligation to agree a workflow for the
 authorized outcome promptly (earlier work may already exist; the Supervisor cannot block
 tools), the objective, the `.t3-supervisor/project.yaml` entry point and the exact
 `supervision_plan` call that returns its complete current proposal with the outline and

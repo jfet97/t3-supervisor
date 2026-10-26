@@ -266,10 +266,13 @@ service verifies the caller's own executed native tool call with exactly these a
 in its own main run, then returns the complete current proposal: objective and authorized
 scope, limits, required references, the plan with its omissions and branches, the branch
 protocol and the exact acceptance record. It answers only for the caller's own interpreted
-task under its ready Supervisor, for exactly the current proposal, before or after its
-agreement, while supervision of that chat is enabled and not stopped. Any other call, such
-as a forged, foreign or outdated one, gets one refusal that names nothing; the read writes
-nothing and grants no Supervisor, helper or write authority.
+task under the ready Supervisor generation that interpreted it, while the task's request is
+unchanged and fully considered and supervision of that chat is enabled and not stopped, for
+exactly the current proposal whose acceptance record is still the one recorded with its
+candidate, before or after its agreement. A notice names only an already recorded
+proposal, so `pending` means only that the caller's own call is not visible yet. Any other
+call, such as a forged, foreign, outdated or obsolete one, gets one refusal that names
+nothing; the read writes nothing and grants no Supervisor, helper or write authority.
 
 `supervision_stop` durably stops supervision of one chat on a genuine human request.
 Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and
