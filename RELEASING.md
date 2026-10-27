@@ -91,6 +91,10 @@ fixture. It checks health metadata, CLI version, dashboard HTML, its hashed asse
 and clean cancellation. It checks a local container before pushing, then exercises
 both published image variants by their immutable index digest before moving an
 image channel or publishing the package. ARM64 runs under QEMU on the hosted runner.
+Pull-request static checks also build and smoke-test ARM64 under QEMU without
+publishing, so this readiness boundary is checked before a release. A failed
+readiness check retains the last classified health state and bounded, redacted
+startup output; its HTTP 200 requirement and 30-second deadline remain unchanged.
 It reuses the successful exact-source CI verdict, including any independently
 proved release baseline; it does not run the full suite again.
 
