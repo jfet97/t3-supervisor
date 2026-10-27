@@ -27,7 +27,7 @@ it("the complete nested plan retains parallel boundaries and every step beyond e
   assert.match(html, /aria-label="Plan sequence"/);
   assert.match(html, /Deliver and close out/);
   assert.match(html, /aria-current="step"/);
-  assert.match(html, /Review<small>Workflow<\/small><\/span><span class="step-state">In progress/);
+  assert.match(html, /Review<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">In progress/);
   assert.doesNotMatch(html, /first 8|percent|%/);
 });
 
@@ -204,7 +204,7 @@ it("a planned workflow opens to reveal active descendants without borrowing thei
     const node = {...branch, status: "planned" as const, plan: {...branch.plan, nodes: branch.plan.nodes.map(child => "nodes" in child ? child : {...child, status})}};
     const shown = renderToStaticMarkup(createElement(PlanJourney, {node, mode: "live"}));
     assert.match(shown, /state-planned"><details open="" class="disclosure disclosure-entity journey-step"/);
-    assert.match(shown, /Review<small>Workflow<\/small><\/span><span class="step-state">Planned/);
+    assert.match(shown, /Review<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Planned/);
     const accepted = renderToStaticMarkup(createElement(PlanJourney, {node, mode: "agreed"}));
     assert.doesNotMatch(accepted, /open=""|aria-current="step"/);
   }

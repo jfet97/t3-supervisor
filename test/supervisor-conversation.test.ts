@@ -6597,6 +6597,7 @@ it.effect("the introduction teaches the exact branch-selection record and the ma
   const text = workflowProposalText({...task, workflow: {...task.workflow!, ...branchPlanFor(task)}});
   assert.match(text, /- branch \[branch:[0-9a-f-]{36}\] if: The change is contained and well understood\.\n  then:\n    - Single review \[local:single-review\]\n  else:\n    - Paired review \[local:paired-review\]\n- Delivery \[local:deliver\]/u,
     "the outline labels both paths and dedents the following step");
+  assert.match(text, /Task-local duties:\n- Single review \[local:single-review\]:\n  Single review for this change\./u, "the operative can recover a local duty that has no definition file");
   const example = /```branch-selection\n(.+)\n```/u.exec(text);
   assert.ok(example, "the introduction carries one concrete record");
   const record = JSON.parse(example[1]!) as Record<string, unknown>;

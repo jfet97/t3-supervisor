@@ -234,8 +234,8 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
   const changeProposed = notes.changed.has(node.nodeId);
   return <div className={`journey-stop state-${state}`}>
     <EntityDetails title={<>
-        <StepMark state={state}/><span className="step-name">{node.name}{node.kind === "workflow" && <small>Workflow</small>}
-          {(changeProposed || outsideAccepted || attempt) && <span className="step-flags">{attempt && <span className="pill">Attempt {attempt}</span>}{changeProposed && <span className="pill blue">Update proposed</span>}{outsideAccepted && <span className="pill">Not in the accepted plan</span>}</span>}</span>
+        <StepMark state={state}/><span className="step-name">{node.name}
+          {(node.kind === "workflow" || changeProposed || outsideAccepted || attempt) && <span className="step-flags">{attempt && <span className="pill">Attempt {attempt}</span>}{node.kind === "workflow" && <small>Workflow</small>}{changeProposed && <span className="pill blue">Update proposed</span>}{outsideAccepted && <span className="pill">Not in the accepted plan</span>}</span>}</span>
         <span className="step-state">{label}</span>
       </>} className="journey-step" open={live && reach !== "not_selected" && hasActiveNode(node, currentBranchPaths({branchSelections: selections ?? []})) || undefined}
       summaryProps={{"aria-current":live && node.status === "underway" && reach !== "not_selected" ? "step" : undefined}}>

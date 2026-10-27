@@ -645,7 +645,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           ? <p className="muted">{task?.supervision === "not_needed" && !task.agreement ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
             : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
-            completions: completionTimes(record.workflow), notApplicable} : {})}/>}
+            completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt]))} : {})}/>}
       </section>
       <aside className="workflow-context">
         <TaskAlignment task={task} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>

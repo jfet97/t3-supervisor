@@ -260,14 +260,38 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
   }
   childRun.status = "completed";
   lifecycle.status = "completed";
+  for (const status of ["queued", "preparing", "starting", "running", "waiting"]) {
+    const newerRun = {...main.runs[0]!, id: `post-ack-${status}`, ordinal: 2, status, startedAt: null, completedAt: null, rootNodeId: null};
+    main.runs.push(newerRun);
+    assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_changed_run", `an ACK cannot cover newly ${status} operative work`);
+    main.runs.pop();
+  }
+  if (execution === "app_run") f.projections.get("reviewer")!.runs.unshift({...childRun, id: "earlier-review-run", ordinal: 0});
+  main.providerTurns = [{...nativeTurn, id: "post-ack-native-turn", status: "pending", nativeTurnRef: {...nativeTurn.nativeTurnRef, strength: "weak"}}];
+  assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_not_quiescent", "an ACK does not settle weakly identified pending native work");
+  delete main.providerTurns;
+  main.runs[0]!.status = "waiting";
+  main.thread.activeRunId = "source-run";
   const result = yield* f.controller.call(input);
   assert.equal((result as {status: string}).status, "applied");
   const returned = (yield* f.states.get("project", "main"))!;
-  assert.deepEqual(returned.returns[0]!.retiredRuns, execution === "app_run" ? [{kind: "run", threadId: "reviewer", runId: "old-review-run"}]
+  assert.deepEqual(returned.returns[0]!.retiredRuns, execution === "app_run" ? [{kind: "run", threadId: "reviewer", runId: "earlier-review-run"}, {kind: "run", threadId: "reviewer", runId: "old-review-run"}]
     : execution === "native_turn" ? [{kind: "provider_turns", threadId: "reviewer", providerThreadId: "provider-reviewer", providerTurnIds: [nativeTurn.id]}]
       : [{kind: "thread", threadId: "reviewer", reason: "No published per-execution identity; replace this reviewer and carry forward its findings."}]);
   assert.deepEqual(returned.sourceBinding, document.sourceBinding);
   assert.equal(returned.currentAgreementKey, document.currentAgreementKey);
+  if (execution === "app_run") {
+    const review = planEntities(returned.plan).find(node => node.kind === "step" && node.localId === "review")!;
+    const next = withOccurrenceStatuses(returned.plan!, [{nodeId: review.nodeId, status: "completed"}]);
+    assert.ok("plan" in next);
+    const stale = yield* f.states.apply(owner, {operationId: "old-earlier-review-report", workflowId: returned.workflowId, expectedRevision: returned.revision,
+      status: "underway", objective: returned.objective, sourceBinding: returned.sourceBinding!, requirements: [], issues: [], plan: next.plan, note: "An earlier run claims the repeated review is complete.",
+      evidence: [{kind: "status_changed", targetNodeId: review.nodeId, note: "An old review result.", sourceThreadId: "reviewer", sourceRunId: "earlier-review-run"}]},
+    {pinnedContext: context, originalProposal: proposal, expectedTaskId: f.task.id, expectedProposalId: "proposal-a", expectedSourceHash: f.task.sourceHash,
+      acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null}, now + 3);
+    assert.ok(stale.status === "invalid", JSON.stringify(stale));
+    assert.equal(stale.reason, "retired_run_evidence");
+  }
   assert.deepEqual(yield* f.controller.call(input), result, "identical retry returns the original receipt");
   assert.equal((yield* f.states.get("project", "main"))!.revision, returned.revision);
 }));

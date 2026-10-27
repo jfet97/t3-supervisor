@@ -50,7 +50,7 @@ import {
   type WorkflowEvidenceTool,
   type WorkflowEvidenceMatch,
 } from "./workflow-write-evidence.js";
-import {interpretationLimits, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
+import {interpretationLimits, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 import { commitInterpretationSubmission, interpretationChecks, interpretationReceiptOwner, rawInterpretationArguments, readInterpretationReceipt, taskPendingStart,
   workflowWriteReceiptsTable, type InterpretationIntake } from "./interpretation-intake.js";
 import {
@@ -333,25 +333,36 @@ const maxScopedWorkflowTextLength = 200_000;
 
 /**
  * The text a child reads of its own scoped workflow: its identity, objective and every occurrence with nesting, status, attempt and
- * branch reach, then the decisions and returns pending. Descriptions stay with the definitions the plan names; history stays in the
- * document.
+ * branch reach, then the returns pending. Each applicable step and workflow carries its recorded duty with its references and skills:
+ * a task-local step has no definition file to read them from. History stays in the document.
  */
 export const scopedWorkflowText = (document: WorkflowStateDocument): string => {
   const selected = documentBranchSelections(document);
   const rows = planStatusOutline(document.plan, selected, notApplicableSubtrees(document.plan, selected,
     notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)), occurrenceAttempts(document.returns));
+  const entities = new Map(planEntities(document.plan).map(entity => [entity.nodeId, entity] as const));
   const where = (row: PlanStatusOutlineRow) => row.group === "then" || row.group === "else"
     ? ` (${row.group} path${row.reach === "not_selected" ? ", not selected" : row.reach === "undecided" ? ", awaiting decision" : ""})` : "";
   const line = (row: PlanStatusOutlineRow) => `${"  ".repeat(row.depth)}- ${row.kind === "branch"
     ? `branch [${row.nodeId}] if: ${row.condition} — ${row.selected ? `${row.selected} path selected` : "decision pending"}`
     : row.kind === "back_to" ? `return to ${(row.ref ?? "").slice("back_to:".length)} [${row.nodeId}]`
     : `${row.name} [${row.ref}; ${row.nodeId}] ${row.notApplicable ? "not applicable" : row.status}${row.attempt ? `, attempt ${row.attempt}` : ""}`}${where(row)}`;
+  // a member recorded not applicable or on a path not taken owes nothing, so its duty is not restated
+  const duty = (row: PlanStatusOutlineRow): string[] => {
+    const entity = entities.get(row.nodeId);
+    if (!entity || row.notApplicable || row.reach === "not_selected") return [];
+    const indent = "  ".repeat(row.depth + 1);
+    return [...entity.description.split("\n").map((part, index) => `${indent}${index ? "  " : "Duty: "}${part}`),
+      ...(entity.references ?? []).map(reference => `${indent}Reference: ${reference}`), ...(entity.skills ?? []).map(skill => `${indent}Skill: ${skill}`)];
+  };
+  const pointers = [...entities.values()].some(entity => entity.references?.length || entity.skills?.length);
   const pendingReturns = document.returns.filter(item => item.state === "pending");
-  const text = [`Your scoped workflow ${document.workflowId}, revision ${document.revision}, status ${document.status}, inside parent workflow ${document.parentWorkflowId}.`,
+  const text = redact([`Your scoped workflow ${document.workflowId}, revision ${document.revision}, status ${document.status}, inside parent workflow ${document.parentWorkflowId}.`,
     `Objective: ${document.objective ?? "(none recorded)"}`,
-    ...document.plan ? ["Plan:", ...rows.map(line)] : ["No plan is recorded for you yet."],
+    ...document.plan ? ["Plan:", ...rows.flatMap(row => [line(row), ...duty(row)])] : ["No plan is recorded for you yet."],
+    ...pointers && document.sourceBinding ? [`References and skill paths are relative to the checkout root ${document.sourceBinding.workspaceRoot}; read those that apply, progressively. They grant no authority.`] : [],
     ...pendingReturns.map(item => `Return pending since attempt ${item.attempt}: back to [${item.targetNodeId}]; your Supervisor starts the next attempt.`),
-    "Read-only: your Supervisor owns this document. Record your own branch decisions with branch-selection records as your notice describes."].join("\n");
+    "Read-only: your Supervisor owns this document. Record your own branch decisions with branch-selection records as your notice describes."].join("\n"));
   return text.length <= maxScopedWorkflowTextLength ? text : `${text.slice(0, maxScopedWorkflowTextLength)}\n[the rest of the plan is omitted to keep this read bounded]`;
 };
 const maxActivityReferencesPerWrite = 16;
@@ -1794,8 +1805,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   });
 
   // a verified native child's read of its own scoped workflow, after its own executed call was verified: a live descendant, on a
-  // complete subagent path, of a main whose binding is ready, enabled and not stopped, under that main's current supervised task, and
-  // its own linked document under its native parent, named by its workflow ID. It writes nothing, and a refusal names nothing
+  // complete subagent path, of a main whose binding is ready, enabled and not stopped, whose requester messages, read fresh, still grant
+  // that main's current supervised task, and its own linked document under its native parent, named by its workflow ID and bound to
+  // that task's current scope. It writes nothing, and a refusal names nothing
   const readOwnScopedWorkflow = Effect.fnUntraced(function* (args: {callerThreadId: string; taskId: string; proposalId: string}, projectId: string,
     cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionPlanResult, SupervisionStoreError> {
     const refused: SupervisionPlanResult = {status: "denied", reason: "proposal_not_current"};
@@ -1810,20 +1822,29 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const binding = yield* supervisors.binding(projectId, main.id);
     if (!binding || binding.state !== "ready" || binding.projectId !== projectId || binding.mainThreadId !== main.id || !supervisors.ownedIds.has(binding.threadId))
       return refused;
+    // the main's own conversation, read before the stored state it is compared with: an edited, withdrawn or newer request makes the
+    // task's plans obsolete, a stored task newer than this read is refused, and a Stop during the read still closes this one
+    const mainRead = yield* settled(native.projection(binding.mainThreadId, cancel));
+    if (Option.isNone(mainRead)) return {status: "unavailable", reason: "main_projection_unavailable", retryable: true};
+    const mainProjection = mainRead.value;
     const closed = yield* denyOnFailure(Effect.gen(function* () {
       return !(yield* scope.workflowEditingEnabled(binding.projectId, binding.mainThreadId, "read")) || (yield* scope.supervisionStopped(binding.mainThreadId));
     }));
     if (closed !== false) return refused;
     const nativeScope = currentNativeScope(listed.value, ownerFor(binding), supervisors.ownedIds);
     if (!nativeScope || !nativeScope.liveIds.has(args.callerThreadId)) return refused;
+    if (mainProjection.thread.id !== binding.mainThreadId || mainProjection.thread.projectId !== projectId || mainProjection.thread.archivedAt ||
+      mainProjection.thread.deletedAt) return refused;
     const task = yield* supervisors.task(binding.mainThreadId);
     if (!task || task.id !== args.taskId || task.threadId !== binding.mainThreadId || task.projectId !== projectId || task.supervisorThreadId !== binding.threadId ||
-      task.status !== "inferred" || task.supervision === "not_needed" || !conversationMayContact(task)) return refused;
+      task.status !== "inferred" || task.supervision === "not_needed" || !conversationMayContact(task) ||
+      !conversationAuthorityCurrent(task, mainProjection, yield* projectRequesterPolicy(supervisors, projectId))) return refused;
     const state = yield* workflows.getState(projectId, binding.mainThreadId, args.callerThreadId);
     if (state.status !== "found") return refused;
     const document = state.document;
     if (document.workflowId !== args.proposalId || document.threadId !== args.callerThreadId || document.parentWorkflowId === null ||
-      document.parentThreadId !== nativeScope.byId.get(args.callerThreadId)?.lineage.parentThreadId) return refused;
+      document.parentThreadId !== nativeScope.byId.get(args.callerThreadId)?.lineage.parentThreadId ||
+      document.sourceBinding?.taskId !== task.id || document.sourceBinding.sourceHash !== taskScopeRevision(task)) return refused;
     return {status: "ok", taskId: task.id, proposalId: document.workflowId, proposal: scopedWorkflowText(document)};
   });
 
