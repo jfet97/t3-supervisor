@@ -224,8 +224,14 @@ holds at most 100.
 The Supervisor applies a pending, still reached return at a safe point. Applying it
 records `return_applied` evidence and keeps the closed attempt on the entry: `closed`
 holds each region occurrence's status and contributors, `closedSelections` the branch
-selections that were current, and `retiredRuns` the child runs `{threadId, runId}`
-that belonged to the closed attempt, at most 50. Every occurrence in the region
+selections that were current, and `retiredRuns` the earlier child executions, at most
+50 entries. AppRun entries have `kind: "run"`, `threadId` and `runId`; every known
+earlier run is retired, including completed runs before the latest one. Native entries
+have `kind: "provider_turns"`, `threadId`, `providerThreadId` and `providerTurnIds`,
+or `kind: "thread"`, `threadId` and `reason` when separate rounds cannot be identified.
+An ACK covers its acknowledged execution; newly queued or other active runs still
+prevent the return, as do pending native turns with weak execution identity.
+Every occurrence in the region
 returns to `planned` with its contributors still linked, and each selection in the
 region is invalidated, so the operative decides again with the next revision. The
 plan and the agreement pointer are unchanged. The operation is idempotent by its

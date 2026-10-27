@@ -439,7 +439,7 @@ it("workflow proposal shows recursive requirements, nested plan groups, fixed om
   assert.match(html, /Included recursively within reviewer/);
   assert.match(html, /In parallel/);
   assert.match(html, /Inspect source/);
-  assert.match(html, /Reviewer<small>Workflow<\/small>/);
+  assert.match(html, /Reviewer<span class="step-flags"><small>Workflow<\/small><\/span>/);
   assert.match(html, /fixed workflow/);
   assert.match(html, /Not applicable in this plan/);
   assert.match(html, /The task does not change a security boundary/);
@@ -1294,6 +1294,7 @@ it("a returned task shows reopened implementation as current work, keeping futur
   assert.match(html, /Now: Implement within scope<\/p>/);
   assert.doesNotMatch(html, /Now: [^<]*Decide:/);
   assert.match(html, /1 branch decision pending/);
+  assert.match(html, /Attempt 2/);
 });
 
 it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {
@@ -1340,8 +1341,8 @@ it("a completed child or nested workflow with a pending or changed decision is n
   const review = pending.plan!.nodes.find(node => node.kind === "workflow")!;
   const completedReview = {...pending.plan!, nodes: pending.plan!.nodes.map(node => node === review ? {...review, status: "completed" as const} : node)};
   const html = renderToStaticMarkup(createElement(PlanJourney, {node: completedReview, mode: "live", selections: []}));
-  const reviewHtml = html.slice(html.indexOf("Review<small>Workflow</small>"));
-  assert.match(reviewHtml, /^Review<small>Workflow<\/small><\/span><span class="step-state">Completed earlier · needs reassessment</);
+  const reviewHtml = html.slice(html.indexOf('Review<span class="step-flags"><small>Workflow</small>'));
+  assert.match(reviewHtml, /^Review<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Completed earlier · needs reassessment</);
   assert.match(reviewHtml, /its completion needs reassessment\. The recorded status stays as history\./);
   assert.match(reviewHtml, /class="step-state">Decision pending</);
 });

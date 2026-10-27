@@ -4,7 +4,7 @@ import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.j
 import { planEntities } from "./workflow-plan-tree.js";
 import { Cause, Clock, Context, Effect, Exit, FiberMap, Layer, Option, Schedule, Schema, Semaphore } from "effect";
 import { GuidanceDb } from "./db.js";
-import { mainRunNodeReader, projectionHasOngoingWork } from "./domain.js";
+import { mainRunNodeReader, projectionHasOngoingProviderTurns, projectionHasOngoingWork } from "./domain.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
 import { projectRequesterPolicy } from "./task-requester.js";
@@ -286,6 +286,7 @@ const make = Effect.gen(function* () {
         (row.requestSource ? row.requestSource.messageId === task.sourceMessageId && row.requestSource.hash === fingerprint(source.text) : row.taskRevision === payload.taskRevision));
       if (!pauses.some(row => row.id === payload.attemptId && row.ownerThreadId === payload.supervisorThreadId)) return denied("return_pause_not_open");
       const held = new Set<string>();
+      const acknowledgedRuns = new Map<string, Set<string>>();
       for (const pause of pauses) for (const target of pause.targets) {
         const observed = projections.get(target.threadId);
         if (!observed) continue;
@@ -296,17 +297,24 @@ const make = Effect.gen(function* () {
         if (message && exactFenceRecords(message.text, "planning-pause-ack", 2, true).some(record => {
           const parsed = Schema.decodeUnknownExit(PlanningAcknowledgement)(record.value, {onExcessProperty: "error"});
           return Exit.isSuccess(parsed) && parsed.value.attemptId === pause.id && parsed.value.targetThreadId === target.threadId;
-        })) held.add(target.threadId);
+        })) {
+          held.add(target.threadId);
+          const runs = acknowledgedRuns.get(target.threadId) ?? new Set<string>();
+          runs.add(acknowledgment.runId);
+          acknowledgedRuns.set(target.threadId, runs);
+        }
       }
       if (!held.has(targetId)) return denied("return_owner_not_paused");
       for (const id of required) {
         const projection = projections.get(id)!;
         const turns = readNativeProviderTurns(projection);
         if (turns === null) return denied("return_contributor_identity_unavailable");
-        if (turns.some(turn => !terminal.has(turn.status))) return denied("return_actor_not_quiescent");
+        if (projectionHasOngoingProviderTurns(projection)) return denied("return_actor_not_quiescent");
         if (held.has(id)) {
-          const acknowledgment = pauses.flatMap(row => row.targets).find(target => target.threadId === id && target.state === "acknowledged")?.acknowledgement;
-          if (projection.thread.activeRunId && acknowledgment && projection.thread.activeRunId !== acknowledgment.runId) return denied("return_actor_changed_run");
+          const acknowledged = acknowledgedRuns.get(id);
+          if (projection.thread.activeRunId && acknowledged && !acknowledged.has(projection.thread.activeRunId) ||
+            projection.runs.some(run => run.status === "queued" || !terminal.has(run.status) && run.status !== "rolled_back" && !acknowledged?.has(run.id)))
+            return denied("return_actor_changed_run");
           continue;
         }
         const parentId = parents.get(id);
@@ -320,8 +328,7 @@ const make = Effect.gen(function* () {
       for (const id of required) if (id !== binding.mainThreadId && id !== targetId) {
         const projection = projections.get(id)!;
         if (projection.runs.length) {
-          const latest = [...projection.runs].filter(run => run.status !== "rolled_back").sort((a, b) => b.ordinal - a.ordinal)[0];
-          for (const run of projection.runs.filter(run => run === latest || ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)))
+          for (const run of projection.runs.filter(run => run.status !== "rolled_back"))
             retiredRuns.push({kind: "run", threadId: id, runId: run.id});
           continue;
         }
