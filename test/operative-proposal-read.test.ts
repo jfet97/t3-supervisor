@@ -9,7 +9,8 @@ import { taskScopeRevision } from "../src/supervision-conversation-contract.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection } from "../src/types.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
-import { completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete, type WorkflowFixture } from "./support/ctl-workflow.js";
+import { appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete, type WorkflowFixture } from "./support/ctl-workflow.js";
+import { proposalContextFromDefinitions } from "../src/supervisor-workflow.js";
 import { writeController } from "./support/g1a-conversation.js";
 import { installSubmission, submissionDetail } from "./support/interpretation-submit.js";
 
@@ -150,12 +151,13 @@ for (const [label, change] of obsolete) it.effect(`a read after an obsolete ${la
   assert.equal(JSON.stringify(yield* fixture.task()), before, "the read changes nothing");
 }));
 
-it.effect("a verified child reads its own scoped workflow under its main's current task, and nothing else", () => Effect.gen(function* () {
+// a native child of the main whose scoped workflow its Supervisor linked, the controller that serves its reads over a lineage and a main
+// projection the test changes, and the bind that gives the child its plan under the main's current task and scope
+const childScoped = Effect.gen(function* () {
   const {fixture, supervisor, task} = yield* introduced;
   const binding = (yield* fixture.binding())!;
   const owner = {projectId: binding.projectId, mainThreadId: binding.mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation};
   assert.ok(["created", "exists"].includes((yield* supervisor.workflows.ensureMain(owner, "main-draft", "Connect the main.")).status));
-  // a native child of the main whose scoped workflow its Supervisor connected
   const operative = fixture.projections.get(sourceThreadId)!;
   const childId = "child-chat";
   const child = structuredClone(operative);
@@ -168,32 +170,86 @@ it.effect("a verified child reads its own scoped workflow under its main's curre
     relationshipToParent: "subagent"}, note: "The child builds the client."});
   assert.equal(linked.status, "created", JSON.stringify(linked));
   const scoped = (yield* supervisor.workflows.get(owner.projectId, owner.mainThreadId, childId))!;
-  let lineage = [{...operative.thread}, {...child.thread}];
+  const native = {lineage: [{...operative.thread}, {...child.thread}], mainReadable: true};
   const controller = yield* writeController({stores: fixture.stores, workflows: supervisor.workflows, conversation: supervisor.conversation, policyStops: true, native: {
-    listThreads: () => Effect.sync(() => lineage),
+    listThreads: () => Effect.sync(() => native.lineage),
     projection: (threadId) => {
-      const projection = fixture.projections.get(threadId);
+      const projection = threadId === sourceThreadId && !native.mainReadable ? undefined : fixture.projections.get(threadId);
       return projection ? Effect.succeed(projection) : Effect.fail(new T3TransportError("missing projection", 404));
     },
     getTurnItem: ({threadId, itemId}) => Effect.succeed({item: submissionDetail(fixture.projections.get(threadId), itemId)}),
   }});
-  const args = {callerThreadId: childId, taskId: task.id, proposalId: scoped.workflowId};
+  // a task-local duty with its pointers, which no definition file holds, and a defined step
+  const workflow = task.workflow!;
+  const proposalId = task.workflowProposalId ?? task.id;
+  const bind = Effect.gen(function* () {
+    const applied = yield* supervisor.workflows.apply(owner, {operationId: "bind-child-plan", workflowId: scoped.workflowId, expectedRevision: scoped.revision,
+      status: "planned", objective: "Build the export client.", requirements: [], issues: [...workflow.issues], note: "Assign the client to the child.",
+      sourceBinding: {workspaceRoot: workflow.workspaceRoot!, revision: workflow.revision, globalRevision: workflow.globalRevision ?? null, definitionsStatus: "ready",
+        definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId, sourceHash: taskScopeRevision(task)},
+      plan: {kind: "sequence", nodes: [{kind: "step", definitionId: null, localId: "client", name: "Build the client", reason: "The child owns the client.",
+        description: "Retry each failed export with capped backoff.\nKeep every export request idempotent.", references: ["docs/export.md"], skills: ["effect-v4-development"]},
+      {kind: "step", definitionId: "implement", reason: "The client is implemented as agreed."}]} as never},
+    {pinnedContext: proposalContextFromDefinitions(task.definitionSnapshot!), originalProposal: workflow, expectedTaskId: task.id, expectedProposalId: proposalId,
+      expectedSourceHash: taskScopeRevision(task), acceptedTaskAgreement: task.agreement ?? null, acceptedTaskAgreementSourceHash: task.agreementSourceHash ?? null});
+    assert.equal(applied.status, "applied", JSON.stringify(applied));
+    return (yield* supervisor.workflows.get(owner.projectId, owner.mainThreadId, childId))!;
+  });
+  return {fixture, task, operative, child, scoped, native, controller, bind, args: {callerThreadId: childId, taskId: task.id, proposalId: scoped.workflowId}};
+});
+const denied = {status: "denied", reason: "proposal_not_current"};
+
+it.effect("a verified child reads its own bound scoped workflow with every recorded duty under its main's current task, and nothing else", () => Effect.gen(function* () {
+  const {fixture, task, operative, child, scoped, native, controller, bind, args} = yield* childScoped;
   assert.notEqual((yield* readAs(fixture, controller, child, args, false)).status, "ok", "only through the child's own executed call");
+  assert.deepEqual(yield* readAs(fixture, controller, child, args), denied, "a document its Supervisor has not bound to the current task holds no current plan");
+  const bound = yield* bind;
   const read = yield* readAs(fixture, controller, child, args);
   assert.equal(read.status, "ok", JSON.stringify(read));
-  assert.ok(read.status === "ok" && read.proposal.startsWith(`Your scoped workflow ${scoped.workflowId}, revision 1, status planned, inside parent workflow ${scoped.parentWorkflowId}.`), JSON.stringify(read));
-  assert.match(read.status === "ok" ? read.proposal : "", /No plan is recorded for you yet\./u);
+  const text = read.status === "ok" ? read.proposal : "";
+  assert.ok(text.startsWith(`Your scoped workflow ${scoped.workflowId}, revision ${bound.revision}, status planned, inside parent workflow ${scoped.parentWorkflowId}.\nObjective: Build the export client.\nPlan:\n`), text);
+  // the task-local duty is only in the plan, so the read carries its whole description, references and skills, as it does each defined step's duty
+  assert.match(text, /\n- Build the client \[local:client; [0-9a-f-]{36}\] planned\n  Duty: Retry each failed export with capped backoff\.\n    Keep every export request idempotent\.\n  Reference: docs\/export\.md\n  Skill: effect-v4-development\n- Step implement \[step:implement; [0-9a-f-]{36}\] planned\n  Duty: Do implement\.\n/u);
+  assert.ok(text.includes(`References and skill paths are relative to the checkout root ${task.workflow!.workspaceRoot};`), text);
   assert.deepEqual(read.status === "ok" ? [read.taskId, read.proposalId] : null, [task.id, scoped.workflowId]);
 
-  const denied = {status: "denied", reason: "proposal_not_current"};
   assert.deepEqual(yield* readAs(fixture, controller, child, {...args, proposalId: task.workflowProposalId ?? task.id}), denied, "the main's proposal is not the child's to read");
   assert.deepEqual(yield* readAs(fixture, controller, child, {...args, taskId: `${task.id}-earlier`}), denied, "only under the main's current task");
   // a conversation the native lineage does not connect to the main reads nothing
-  lineage = [{...operative.thread}, {...child.thread, lineage: {parentThreadId: sourceThreadId, relationshipToParent: "fork"}}];
+  native.lineage = [{...operative.thread}, {...child.thread, lineage: {parentThreadId: sourceThreadId, relationshipToParent: "fork"}}];
   assert.deepEqual(yield* readAs(fixture, controller, child, args), denied, "an independent fork");
-  lineage = [{...operative.thread}, {...child.thread}];
+  native.lineage = [{...operative.thread}, {...child.thread}];
   // nor once the human stopped supervision of the main
   const policy = yield* fixture.stores.policy.get();
   yield* fixture.stores.policy.save({...policy, excludedThreadIds: [...policy.excludedThreadIds, sourceThreadId]});
   assert.deepEqual(yield* readAs(fixture, controller, child, args), denied, "a stopped main");
+}));
+
+it.effect("a child's read follows its main's requester messages, read fresh, and the scope its own plan was bound to", () => Effect.gen(function* () {
+  const {fixture, task, operative, child, native, controller, bind, args} = yield* childScoped;
+  yield* bind;
+  const read = () => readAs(fixture, controller, child, args);
+  assert.equal((yield* read()).status, "ok");
+  const before = JSON.stringify(yield* fixture.task());
+  // the requester edits the request to stop and discuss: the read refuses at once, before any cycle reconsiders the task
+  const request = operative.messages[0]!;
+  const original = request.text;
+  request.text = "Stop implementing the retry fix; let's discuss alternatives first.";
+  assert.deepEqual(yield* read(), denied, "an edited request");
+  request.text = original;
+  assert.equal((yield* read()).status, "ok", "the unchanged request grants it again");
+  // an unreadable main answers nothing from stored state alone
+  native.mainReadable = false;
+  assert.deepEqual(yield* read(), {status: "unavailable", reason: "main_projection_unavailable", retryable: true});
+  native.mainReadable = true;
+  // the task's scope moved under the same task and request: the plan bound to the earlier scope is not current until its Supervisor binds it again
+  yield* fixture.stores.supervisors.saveTask({...task, conversation: {...task.conversation!, authorization: {...task.conversation!.authorization!,
+    scopeRevision: `${taskScopeRevision(task)}:moved`}}});
+  assert.deepEqual(yield* read(), denied, "a plan bound to an earlier scope");
+  yield* fixture.stores.supervisors.saveTask(task);
+  assert.equal((yield* read()).status, "ok");
+  assert.equal(JSON.stringify(yield* fixture.task()), before, "no read changes the task");
+  // a newer requester message the task has not considered withdraws it too
+  appendSourceMessage(operative, "newer-request", 2, "Stop implementing; let's discuss alternatives first.");
+  assert.deepEqual(yield* read(), denied, "a newer request");
 }));
