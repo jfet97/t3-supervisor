@@ -3,7 +3,7 @@ import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapsh
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBranches, planEntities } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
-  type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
+  WorkflowReturnRunSchema, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
 import { WorkflowAssessment, workflowAssessment } from "./workflow-assessment.js";
 
@@ -119,7 +119,7 @@ export const WorkflowProgressReturnSchema = Schema.Struct({
   requestedAt: Schema.Number,
   resolvedAt: Schema.NullOr(Schema.Number),
   closed: Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, status: WorkflowExecutionStatus, contributorThreadIds: Schema.Array(Schema.String)}))),
-  retiredRuns: Schema.Array(Schema.Struct({threadId: Schema.String, runId: Schema.String})),
+  retiredRuns: Schema.Array(WorkflowReturnRunSchema),
   note: NullableText,
 });
 export type WorkflowProgressReturn = typeof WorkflowProgressReturnSchema.Type;
@@ -310,7 +310,8 @@ const progressReturns = (document: WorkflowStateDocument): WorkflowProgressRetur
     targetName: contributionNodeName(document, item.targetNodeId, planNames), regionNodeIds: [...item.regionNodeIds], attempt: item.attempt, state: item.state,
     reason: item.reason, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId, requestedAt: item.requestedAt, resolvedAt: item.resolvedAt,
     closed: item.closed ? item.closed.map(closed => ({nodeId: closed.nodeId, status: closed.status, contributorThreadIds: [...closed.contributorThreadIds]})) : null,
-    retiredRuns: item.retiredRuns.map(run => ({threadId: run.threadId, runId: run.runId})), note: item.resolution?.note ?? null}));
+    retiredRuns: item.retiredRuns.map(run => run.kind === "provider_turns" ? {...run, providerTurnIds: [...run.providerTurnIds]} : {...run}),
+    note: item.resolution?.note ?? null}));
 };
 
 /** Previous attempts stay in History, while the current Plan gets only this attempt's assessments. */

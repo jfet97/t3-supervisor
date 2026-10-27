@@ -383,6 +383,11 @@ const validApplyPlan = (value: unknown): boolean => {
   return value === null || visit(value, 0);
 };
 
+// a resolved native turn carries both its ID and its start time, or neither
+const validProviderTurnReference = (item: Record<string, unknown>): boolean =>
+  (item.sourceProviderTurnId === undefined || item.sourceProviderTurnId === null)
+    ? item.sourceProviderTurnStartedAt === undefined || item.sourceProviderTurnStartedAt === null
+    : validNativeReference(item.sourceProviderTurnId) && typeof item.sourceProviderTurnStartedAt === "number" && Number.isFinite(item.sourceProviderTurnStartedAt);
 const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowStateEvidenceInput[] =>
   evidence === undefined || Array.isArray(evidence) && evidence.length <= workflowMutationLimits.maxEvidencePerApply && evidence.every(item => item !== null &&
     typeof item === "object" && ["status_changed", "note", "observation", "not_applicable"].includes((item as Record<string, unknown>).kind as string) &&
@@ -391,7 +396,7 @@ const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowSta
     nativeReferenceFields.every(field => {
       const reference = (item as Record<string, unknown>)[field];
       return reference === undefined || reference === null || validNativeReference(reference);
-    }));
+    }) && validProviderTurnReference(item as Record<string, unknown>));
 
 export const workflowPlanEntities = collectPlanEntities;
 
@@ -514,10 +519,26 @@ export const branchChangedAt = (document: Pick<WorkflowStateDocument, "evidence"
     (latest === null || item.resolvedAt > latest) ? item.resolvedAt : latest, edited);
 };
 
-/** The applied return that retired a child run, when that run's output concerns an occurrence the return reopened. */
-export const retiredRunReturn = (document: Pick<WorkflowStateDocument, "returns">, nodeId: string | null, run: {threadId?: string | null; runId?: string | null}): WorkflowReturn | null =>
-  !nodeId || !run.runId ? null : document.returns.find(item => item.state === "applied" && item.regionNodeIds.includes(nodeId) &&
-    item.retiredRuns.some(retired => retired.runId === run.runId && (!run.threadId || retired.threadId === run.threadId))) ?? null;
+/** What a reference rests on: its native thread and, when known, its AppRun or the published native turn behind it and that turn's start. */
+export type RetirementSource = {threadId?: string | null; runId?: string | null; providerTurnId?: string | null; providerTurnStartedAt?: number | null};
+
+/**
+ * The applied return whose retired executions cover a reference, or null. A retired AppRun covers references to that run about an
+ * occurrence the return reopened. Retired native turns cover every reference from that child about a reopened occurrence unless it rests on
+ * an identifiable fresh turn: one outside the retired turns that started after the return was applied. A wholly retired native child
+ * covers every reference from it, whatever it concerns.
+ */
+export const retiredRunReturn = (document: Pick<WorkflowStateDocument, "returns">, nodeId: string | null, source: RetirementSource): WorkflowReturn | null =>
+  document.returns.find(item => item.state === "applied" && item.resolvedAt !== null && item.retiredRuns.some(retired => {
+    const reopened = nodeId !== null && item.regionNodeIds.includes(nodeId);
+    switch (retired.kind) {
+      case "run": return reopened && source.runId === retired.runId && (!source.threadId || source.threadId === retired.threadId);
+      case "provider_turns": return reopened && source.threadId === retired.threadId &&
+        !(typeof source.providerTurnId === "string" && !retired.providerTurnIds.includes(source.providerTurnId) &&
+          typeof source.providerTurnStartedAt === "number" && source.providerTurnStartedAt > item.resolvedAt!);
+      case "thread": return source.threadId === retired.threadId;
+    }
+  })) ?? null;
 
 // the branch occurrences an edit added, removed or changed in condition, else path or enclosing position
 const changedBranches = (previous: WorkflowStatePlan, next: WorkflowStatePlan): Array<{nodeId: string; condition: string | null}> => {
@@ -593,7 +614,8 @@ const pendingDecisionProblem = (current: WorkflowStateDocument, input: WorkflowA
 
 const returnPendingExpected = "wait until the Supervisor applies the pending return, which starts the new attempt; record findings meanwhile as observations, " +
   "or have the operative select another path so the return is no longer reached.";
-const retiredRunExpected = "cite a run of the current attempt: this run belonged to an attempt a return closed, so its output stays with that attempt.";
+const retiredRunExpected = "cite work of the current attempt: an AppRun or native turn a return retired, or a native child it retired whole, stays with the " +
+  "closed attempt; a retired child's fresh turn counts only once it started after the return was applied.";
 type ReturnEvent = {kind: "return_requested" | "return_dismissed"; entry: WorkflowReturn};
 const unconditionalReturnReason = "Reached on every path once the members before it were settled.";
 
@@ -660,16 +682,33 @@ const pendingReturnProblem = (current: WorkflowStateDocument, input: Pick<Workfl
   return null;
 };
 
-// a status or applicability assertion about a reopened occurrence never rests on a run its return retired
+// a status or applicability assertion never rests on an execution a return retired; a reference without a thread cites the workflow's own
 const retiredRunProblem = (current: WorkflowStateDocument, evidence: readonly WorkflowStateEvidenceInput[]): WorkflowApplyDiagnostic | null => {
   const index = evidence.findIndex(item => (item.kind === "status_changed" || item.kind === "not_applicable") &&
-    retiredRunReturn(current, item.targetNodeId ?? null, {threadId: item.sourceThreadId ?? null, runId: item.sourceRunId ?? null}) !== null);
+    retiredRunReturn(current, item.targetNodeId ?? null, {
+      threadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
+      runId: item.sourceRunId ?? null, providerTurnId: item.sourceProviderTurnId ?? null, providerTurnStartedAt: item.sourceProviderTurnStartedAt ?? null,
+    }) !== null);
   return index < 0 ? null : {code: "retired_run_evidence", path: `/evidence/${index}`, expected: retiredRunExpected};
 };
 
+// one retired execution: an AppRun, a native child's published turns (at most maxRetiredRuns of them) or a whole native child with a reason
+const validRetiredRun = (item: unknown): item is WorkflowReturnRun => {
+  if (!isRecord(item) || !validNativeReference(item.threadId)) return false;
+  switch (item.kind) {
+    case "run": return exactRecordKeys(item, ["kind", "threadId", "runId"]) && validNativeReference(item.runId);
+    case "provider_turns": return exactRecordKeys(item, ["kind", "threadId", "providerThreadId", "providerTurnIds"]) && validNativeReference(item.providerThreadId) &&
+      Array.isArray(item.providerTurnIds) && item.providerTurnIds.length >= 1 && item.providerTurnIds.length <= workflowMutationLimits.maxRetiredRuns &&
+      item.providerTurnIds.every(validNativeReference) && new Set(item.providerTurnIds).size === item.providerTurnIds.length;
+    case "thread": return exactRecordKeys(item, ["kind", "threadId", "reason"]) && validText(item.reason);
+    default: return false;
+  }
+};
+const retiredRunKey = (item: WorkflowReturnRun): string => json(item.kind === "run" ? [item.kind, item.threadId, item.runId]
+  : item.kind === "provider_turns" ? [item.kind, item.threadId, item.providerThreadId] : [item.kind, item.threadId]);
 const validRetiredRuns = (value: unknown): value is WorkflowReturnRun[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxRetiredRuns &&
-  value.every(item => isRecord(item) && exactRecordKeys(item, ["threadId", "runId"]) && validNativeReference(item.threadId) && validNativeReference(item.runId)) &&
-  new Set(value.map(item => json([item.threadId, item.runId]))).size === value.length;
+  value.every(validRetiredRun) && new Set(value.map(retiredRunKey)).size === value.length;
+const copyRetiredRun = (item: WorkflowReturnRun): WorkflowReturnRun => item.kind === "provider_turns" ? {...item, providerTurnIds: [...item.providerTurnIds]} : {...item};
 const validReturnApplyInput = (value: unknown): value is WorkflowReturnApplyInput => isRecord(value) && validId(value.operationId) && validId(value.workflowId) &&
   Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 && validId(value.returnId) && validText(value.note) &&
   (value.retiredRuns === undefined || validRetiredRuns(value.retiredRuns));
@@ -841,7 +880,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
     (item.sourceRunId === null || validNativeReference(item.sourceRunId)) && (item.sourceMessageId === null || validNativeReference(item.sourceMessageId)) &&
-    (item.sourceItemId === undefined || item.sourceItemId === null || validNativeReference(item.sourceItemId)) &&
+    (item.sourceItemId === undefined || item.sourceItemId === null || validNativeReference(item.sourceItemId)) && validProviderTurnReference(item) &&
     (item.agreementKey === null || validText(item.agreementKey)) && validText(item.note) &&
     (item.scopeRevision === undefined || validText(item.scopeRevision))) &&
   Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt);
@@ -1210,6 +1249,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceThreadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
         sourceRunId: item.sourceRunId ?? null,
         sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note,
+        ...(typeof item.sourceProviderTurnId === "string"
+          ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1543,7 +1584,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       closed: reopened.map(node => ({nodeId: node.nodeId, status: node.status, contributorThreadIds: [...node.contributorThreadIds]})),
       closedSelections: current.branchSelections.filter(item => item.state === "current" && region.has(item.nodeId))
         .map(item => ({nodeId: item.nodeId, revision: item.revision, path: item.path})),
-      retiredRuns: (input.retiredRuns ?? []).map(run => ({threadId: run.threadId, runId: run.runId})),
+      retiredRuns: (input.retiredRuns ?? []).map(copyRetiredRun),
       resolution: {operationId, actorSupervisorThreadId: owner.supervisorThreadId, note: input.note}};
     const branchSelections = current.branchSelections.map(item => item.state === "current" && region.has(item.nodeId)
       ? {...item, state: "invalidated" as const, invalidatedAt: at} : item);

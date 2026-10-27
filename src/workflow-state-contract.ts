@@ -193,8 +193,15 @@ export type BranchSelectionImportResult =
   | {status: "owner_mismatch" | "not_found"}
   | {status: "incompatible"; workflowId: string; formatVersion: number | null};
 
-/** A child run that belonged to an attempt a return closed: whatever it reports later stays with that attempt. */
-export type WorkflowReturnRun = {threadId: string; runId: string};
+/**
+ * An execution that belonged to an attempt a return closed, so whatever it reports later stays with that attempt: an AppRun; the native
+ * turns of a child without an AppRun of its own, named by the provider turn IDs T3 publishes for it; or a whole native child that
+ * publishes no per-execution identity, which nothing it reports can satisfy again.
+ */
+export type WorkflowReturnRun =
+  | {kind: "run"; threadId: string; runId: string}
+  | {kind: "provider_turns"; threadId: string; providerThreadId: string; providerTurnIds: string[]}
+  | {kind: "thread"; threadId: string; reason: string};
 
 /**
  * One return of this workflow: a reached back_to asks to repeat its region, every occurrence from its target through the member that
@@ -223,7 +230,7 @@ export type WorkflowReturn = {
   resolution: {operationId: string; actorSupervisorThreadId: string; note: string} | null;
 };
 
-/** Applies one pending return; retiredRuns names the child runs of the closed attempt whose later output must not count for the new one. */
+/** Applies one pending return; retiredRuns names the executions of the closed attempt whose later output must not count for the new one. */
 export type WorkflowReturnApplyInput = {
   operationId: string;
   workflowId: string;
@@ -249,6 +256,10 @@ export type WorkflowStateEvidence = {
   sourceRunId: string | null;
   sourceMessageId: string | null;
   sourceItemId?: string | null;
+  // resolved by the service for a native child reference without an AppRun: the published provider turn behind the cited item or
+  // message and when it started; absent otherwise
+  sourceProviderTurnId?: string | null;
+  sourceProviderTurnStartedAt?: number | null;
   agreementKey: string | null;
   note: string;
   /** present only on not_applicable evidence: the task scope it assessed; a later scope needs a fresh assessment */
@@ -271,6 +282,9 @@ export type WorkflowStateEvidenceInput = {
   sourceRunId?: string | null;
   sourceMessageId?: string | null;
   sourceItemId?: string | null;
+  /** Resolved by the write controller from the cited native item or message and T3's published provider turns; never caller input. */
+  sourceProviderTurnId?: string | null;
+  sourceProviderTurnStartedAt?: number | null;
 };
 
 export type AcceptedWorkflowAgreementRecord = {
@@ -540,6 +554,8 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   sourceRunId: Schema.NullOr(Schema.String),
   sourceMessageId: Schema.NullOr(Schema.String),
   sourceItemId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  sourceProviderTurnId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  sourceProviderTurnStartedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   agreementKey: Schema.NullOr(Schema.String),
   note: Schema.String,
   scopeRevision: Schema.optionalKey(Schema.String),
@@ -554,7 +570,11 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   return: Schema.optionalKey(Schema.Struct({returnId: Schema.String, regionNodeIds: Schema.optionalKey(mutableArray(Schema.String))})),
 });
 
-export const WorkflowReturnRunSchema = Schema.Struct({threadId: Schema.String, runId: Schema.String});
+export const WorkflowReturnRunSchema = Schema.Union([
+  Schema.Struct({kind: Schema.Literal("run"), threadId: Schema.String, runId: Schema.String}),
+  Schema.Struct({kind: Schema.Literal("provider_turns"), threadId: Schema.String, providerThreadId: Schema.String, providerTurnIds: mutableArray(Schema.String)}),
+  Schema.Struct({kind: Schema.Literal("thread"), threadId: Schema.String, reason: Schema.String}),
+]);
 
 export const WorkflowReturnSchema = Schema.Struct({
   returnId: Schema.String,
@@ -639,5 +659,6 @@ const mirrors: [
   Same<typeof BranchSelectionRecordSchema.Type, BranchSelectionRecord>,
   Same<typeof AcceptedWorkflowAgreementRecordSchema.Type, AcceptedWorkflowAgreementRecord>,
   Same<typeof WorkflowReturnSchema.Type, WorkflowReturn>,
-] = [true, true, true, true, true, true, true, true, true];
+  Same<typeof WorkflowReturnRunSchema.Type, WorkflowReturnRun>,
+] = [true, true, true, true, true, true, true, true, true, true];
 void mirrors;

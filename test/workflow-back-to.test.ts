@@ -262,7 +262,8 @@ const storeFixture = (nodes: unknown[]) => Effect.gen(function* () {
   const validation = {pinnedContext: context, originalProposal: proposal, expectedTaskId: "task-a", expectedProposalId: "proposal-a",
     expectedSourceHash: taskSourceHash, acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null};
   const main = () => Effect.map(stores.workflows.get("project-a", "main-a"), document => document!);
-  type Cite = {sourceThreadId?: string; sourceRunId?: string};
+  // the controller's resolved citation: a native thread with its AppRun, or the published turn of a run-less native child
+  type Cite = {sourceThreadId?: string; sourceRunId?: string; sourceProviderTurnId?: string; sourceProviderTurnStartedAt?: number};
   // records the named local steps' statuses, with the status evidence each change needs, citing the given run
   const advance = (document: WorkflowStateDocument, operationId: string, at: number, changes: Record<string, WorkflowExecutionStatus>,
     options: {status?: WorkflowExecutionStatus; cite?: Cite; contributors?: Record<string, string[]>; evidence?: NonNullable<WorkflowApplyInput["evidence"]>} = {}) => {
@@ -319,10 +320,11 @@ it.live("a reached return waits for the Supervisor, then starts a new attempt th
 
   // the Supervisor applies it at a safe point, naming the child runs of the closed attempt
   const applyInput = {operationId: "return-1", workflowId: document.workflowId, expectedRevision: document.revision, returnId: pending!.returnId,
-    note: "The reviewer found issues; repeat the review.", retiredRuns: [{threadId: "child-1", runId: "child-run-1"}]};
+    note: "The reviewer found issues; repeat the review.", retiredRuns: [{kind: "run" as const, threadId: "child-1", runId: "child-run-1"}]};
   assert.equal((yield* stores.workflows.applyReturn(owner, {...applyInput, expectedRevision: document.revision - 1}, 2000)).status, "conflict");
   assert.equal(invalidReason(yield* stores.workflows.applyReturn(owner, {...applyInput, returnId: "unknown"}, 2000)), "return_not_pending");
-  assert.equal(invalidReason(yield* stores.workflows.applyReturn(owner, {...applyInput, retiredRuns: [{threadId: "child-1"}] as never}, 2000)), "invalid_return_apply");
+  assert.equal(invalidReason(yield* stores.workflows.applyReturn(owner, {...applyInput, retiredRuns: [{threadId: "child-1", runId: "child-run-1"}] as never}, 2000)),
+    "invalid_return_apply", "a retired execution names its kind");
   const receipt = yield* stores.workflows.applyReturn(owner, applyInput, 2000);
   assert.equal(receipt.status, "applied", JSON.stringify(receipt));
   assert.deepEqual(yield* stores.workflows.applyReturn(owner, applyInput, 2500), receipt, "an exact replay returns the stored receipt");
@@ -337,7 +339,7 @@ it.live("a reached return waits for the Supervisor, then starts a new attempt th
   const [applied] = document.returns;
   assert.deepEqual([applied!.state, applied!.resolvedAt, applied!.closed, applied!.closedSelections, applied!.retiredRuns, applied!.resolution],
     ["applied", 2000, [{nodeId: ids.review, status: "completed", contributorThreadIds: ["reviewer-1"]}, {nodeId: ids.fix, status: "completed", contributorThreadIds: []}],
-      [{nodeId: loop.nodeId, revision: 1, path: "then"}], [{threadId: "child-1", runId: "child-run-1"}],
+      [{nodeId: loop.nodeId, revision: 1, path: "then"}], [{kind: "run", threadId: "child-1", runId: "child-run-1"}],
       {operationId: "return-1", actorSupervisorThreadId: owner.supervisorThreadId, note: "The reviewer found issues; repeat the review."}]);
   assert.deepEqual(document.branchSelections.map(item => [item.revision, item.state, item.invalidatedAt]), [[1, "invalidated", 2000]]);
   assert.equal(documentBranchSelections(document).size, 0, "the decision is taken again in the new attempt");
@@ -401,7 +403,7 @@ it("a branch record from a run a return retired never decides the reopened branc
   const document = {workflowId: "workflow-a", plan, branchSelections: [], evidence: [], returns: [{returnId: "return-a", backToNodeId: planBackTos(plan)[0]!.nodeId,
     targetNodeId: localNode(plan, "review").nodeId, regionNodeIds: [localNode(plan, "review").nodeId, loop.nodeId], attempt: 1, state: "applied", reason: "Findings remained.",
     sourceThreadId: null, sourceRunId: null, sourceMessageId: null, requestedAt: 10, resolvedAt: 20, closed: [], closedSelections: [],
-    retiredRuns: [{threadId: "main-a", runId: "stale-run"}], resolution: {operationId: "return-a", actorSupervisorThreadId: "supervisor", note: "Repeat."}}]} as unknown as WorkflowStateDocument;
+    retiredRuns: [{kind: "run", threadId: "main-a", runId: "stale-run"}], resolution: {operationId: "return-a", actorSupervisorThreadId: "supervisor", note: "Repeat."}}]} as unknown as WorkflowStateDocument;
   const record = {nodeId: loop.nodeId, revision: 1, path: "else" as const, reason: "No findings.", sourceCreatedAt: 30};
   assert.deepEqual(branchSelectionImportDecision(document, {...record, sourceThreadId: "main-a", sourceRunId: "stale-run"}), {kind: "rejected", code: "branch_record_outdated"});
   assert.equal(branchSelectionImportDecision(document, {...record, sourceThreadId: "main-a", sourceRunId: "fresh-run"}).kind, "record");
@@ -481,3 +483,76 @@ it.live("forward history includes the old records beyond the current-step previe
   assert.ok(progress.history?.some(item => item.note === "Observation 30"));
   assert.deepEqual(progress.history?.map(item => item.sequence), Array.from({length: progress.history!.length}, (_, index) => index + 1));
 }));
+it.live("a retired native child counts again only through a fresh turn started after the return, and a wholly retired child never does", () => Effect.gen(function* () {
+  const {stores, owner, main, advance, select} = yield* storeFixture([local("implement"), local("review"), branch("Findings remain.", [local("fix"), backTo("review")]), local("deliver")]);
+  let document = yield* main();
+  const loop = planBranches(document.plan)[0]!;
+  assert.equal((yield* advance(document, "attempt-1-review", 1000, {implement: "completed", review: "completed"}, {status: "underway"})).status, "applied");
+  assert.equal((yield* select(loop.nodeId, 1, "then", 1100, 1100)).status, "applied");
+  document = yield* main();
+  const turn = (id: string, startedAt: number) => ({sourceThreadId: "codex-child", sourceProviderTurnId: id, sourceProviderTurnStartedAt: startedAt});
+  assert.equal((yield* advance(document, "attempt-1-fix", 1200, {fix: "completed"}, {cite: turn("turn-1", 1150)})).status, "applied");
+  document = yield* main();
+  const [pending] = document.returns;
+  const applyInput = {operationId: "return-native", workflowId: document.workflowId, expectedRevision: document.revision, returnId: pending!.returnId,
+    note: "Findings remain; repeat the review.", retiredRuns: [
+      {kind: "provider_turns" as const, threadId: "codex-child", providerThreadId: "codex-provider-thread", providerTurnIds: ["turn-1"]},
+      {kind: "thread" as const, threadId: "claude-child", reason: "The child publishes no per-execution identity."},
+    ]};
+  const refused = (retiredRuns: unknown[]) => Effect.map(stores.workflows.applyReturn(owner, {...applyInput, retiredRuns} as never, 2000), invalidReason);
+  assert.equal(yield* refused([{kind: "provider_turns", threadId: "codex-child", providerThreadId: "codex-provider-thread", providerTurnIds: []}]), "invalid_return_apply");
+  assert.equal(yield* refused([{kind: "provider_turns", threadId: "codex-child", providerThreadId: "codex-provider-thread", providerTurnIds: ["turn-1", "turn-1"]}]),
+    "invalid_return_apply");
+  assert.equal(yield* refused([{kind: "thread", threadId: "claude-child", reason: " "}]), "invalid_return_apply");
+  assert.equal(yield* refused([{kind: "thread", threadId: "claude-child", reason: "Once."}, {kind: "thread", threadId: "claude-child", reason: "Twice."}]),
+    "invalid_return_apply");
+  assert.equal(yield* refused([{kind: "session", threadId: "claude-child"}]), "invalid_return_apply");
+  assert.equal((yield* stores.workflows.applyReturn(owner, applyInput, 2000)).status, "applied");
+  document = yield* main();
+  assert.deepEqual(document.returns[0]!.retiredRuns, applyInput.retiredRuns, "the closed attempt keeps what it retired");
+
+  // the retired child's later output counts only from an identifiable turn outside the retired ones that started after the return
+  const retired = (operationId: string, cite: Record<string, unknown>) =>
+    Effect.map(advance(document, operationId, 2400, {review: "completed"}, {cite: cite as never}), result => [invalidReason(result), diagnosticPath(result)]);
+  assert.deepEqual(yield* retired("no-turn", {sourceThreadId: "codex-child"}), ["retired_run_evidence", "/evidence/0"], "no identifiable turn");
+  assert.deepEqual(yield* retired("retired-turn", turn("turn-1", 2300)), ["retired_run_evidence", "/evidence/0"], "a retired turn");
+  assert.deepEqual(yield* retired("early-turn", turn("turn-2", 1999)), ["retired_run_evidence", "/evidence/0"], "a turn started before the return");
+  assert.deepEqual(yield* retired("same-instant", turn("turn-2", 2000)), ["retired_run_evidence", "/evidence/0"], "a turn started as the return was applied");
+  assert.equal(invalidReason(yield* advance(document, "unpaired-turn", 2400, {review: "completed"}, {cite: {sourceThreadId: "codex-child", sourceProviderTurnId: "turn-2"}})),
+    "invalid_workflow_document", "a turn without its start is not an identity");
+  assert.equal((yield* advance(document, "observe-late", 2400, {}, {evidence: [{kind: "observation", targetNodeId: localNode(document.plan, "review").nodeId,
+    note: "Late output of the closed attempt.", sourceThreadId: "codex-child"}]})).status, "applied", "it stays visible as history");
+  document = yield* main();
+  assert.equal((yield* advance(document, "fresh-turn", 2500, {review: "completed"}, {cite: turn("turn-2", 2100)})).status, "applied");
+  document = yield* main();
+  assert.deepEqual(document.evidence.filter(item => item.operationId === "fresh-turn" && item.targetNodeId !== null)
+    .map(item => [item.sourceThreadId, item.sourceProviderTurnId, item.sourceProviderTurnStartedAt]), [["codex-child", "turn-2", 2100]]);
+
+  // a wholly retired child is fenced for every later status or applicability record, whatever it concerns
+  assert.equal((yield* select(loop.nodeId, 2, "else", 2600, 2600)).status, "applied");
+  document = yield* main();
+  const deliver = (operationId: string, cite: Record<string, unknown>) => advance(document, operationId, 2700, {deliver: "completed"}, {cite: cite as never});
+  const fenced = [yield* deliver("whole-thread", {sourceThreadId: "claude-child", sourceProviderTurnId: "turn-9", sourceProviderTurnStartedAt: 2650}),
+    yield* deliver("whole-thread-plain", {sourceThreadId: "claude-child"})];
+  assert.deepEqual(fenced.map(result => [invalidReason(result), diagnosticPath(result)]), [["retired_run_evidence", "/evidence/0"], ["retired_run_evidence", "/evidence/0"]],
+    "an occurrence the return did not reopen is fenced too, fresh turn or not");
+  assert.equal((yield* advance(document, "observe-whole", 2700, {}, {evidence: [{kind: "observation", targetNodeId: null, note: "The replaced reviewer's late note.",
+    sourceThreadId: "claude-child"}]})).status, "applied", "observations stay history");
+  document = yield* main();
+  assert.equal((yield* deliver("replacement", {sourceThreadId: "replacement-reviewer", sourceRunId: "replacement-run"})).status, "applied",
+    "a fresh managed reviewer's own run counts");
+  document = yield* main();
+  const taskByRetired = yield* advance(document, "task-by-retired", 2800, {}, {status: "completed",
+    evidence: [{kind: "status_changed", targetNodeId: null, note: "The replaced reviewer says the task is done.", sourceThreadId: "claude-child"}]});
+  assert.deepEqual([invalidReason(taskByRetired), diagnosticPath(taskByRetired)], ["retired_run_evidence", "/evidence/1"], "the task's own status as well");
+  assert.equal((yield* advance(document, "task", 2800, {}, {status: "completed"})).status, "applied");
+  document = yield* main();
+  assert.equal(document.status, "completed");
+
+  // its branch records stay outdated too, and the progress read shows each retired execution as recorded
+  const record = {nodeId: loop.nodeId, revision: 3, path: "then" as const, reason: "Findings again.", sourceCreatedAt: 3000};
+  assert.deepEqual(branchSelectionImportDecision(document, {...record, sourceThreadId: "claude-child", sourceRunId: "claude-run"}), {kind: "rejected", code: "branch_record_outdated"});
+  assert.deepEqual(branchSelectionImportDecision(document, {...record, sourceThreadId: "codex-child", sourceRunId: "codex-run"}), {kind: "rejected", code: "branch_record_outdated"});
+  assert.equal(branchSelectionImportDecision(document, {...record, sourceThreadId: "main-a", sourceRunId: "main-run-3"}).kind, "record");
+  assert.deepEqual(progressWorkflow(document, []).returns?.[0]?.retiredRuns, applyInput.retiredRuns);
+}), {timeout: 20_000});

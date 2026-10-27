@@ -37,6 +37,7 @@ import {
 } from "./workflow-state-contract.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import {resolveSupervisorScope, type SupervisorScopeResolution} from "./supervisor-scope.js";
+import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.js";
 import {
   canonicalJson,
   isRecord,
@@ -327,6 +328,7 @@ const writeSchema = [
 const maxBindingGeneration = 2_147_483_647;
 const maxWorkflowReadDocs = 50;
 const maxWorkflowReadBytes = 1024 * 1024;
+const nativeText = (value: unknown): string | null => typeof value === "string" && value.length > 0 ? value : null;
 const maxScopedWorkflowTextLength = 200_000;
 
 /**
@@ -1659,6 +1661,24 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       const nativeRunId = message?.runId ?? (typeof activityItem?.runId === "string" ? activityItem.runId : null);
       const index = evidence.indexOf(item);
       if (item.sourceRunId == null && nativeRunId) resolved[index] = {...resolved[index]!, sourceRunId: nativeRunId};
+      // a native child's command has no AppRun: the provider turn T3 publishes with strong provenance behind the cited item or message
+      // identifies its execution, recorded with when it started. A turn that is not published that way, or has not started, identifies
+      // nothing, so a reference to a retired child's work stays fenced
+      if (item.sourceRunId == null && !nativeRunId && (message || activityItem)) {
+        const nodeTurn = message?.nodeId && projection ? nativeNodeTurn(projection, message.nodeId, sourceThreadId) : undefined;
+        const itemTurnId = nativeText(activityItem?.providerTurnId);
+        const nodeTurnId = nodeTurn?.providerTurnId ?? null;
+        if (itemTurnId && nodeTurnId && itemTurnId !== nodeTurnId) return {status: "invalid", reason: "activity_reference_turn_mismatch"};
+        const providerTurnId = itemTurnId ?? nodeTurnId;
+        if (providerTurnId) {
+          const turnProjection = projection ?? (yield* projectionFor(sourceThreadId));
+          if (!turnProjection) return {status: "pending", reason: "activity_reference_read_unavailable"};
+          const turn = readNativeProviderTurns(turnProjection)?.find(candidate => candidate.id === providerTurnId);
+          const providerThreadId = nativeText(activityItem?.providerThreadId) ?? nodeTurn?.providerThreadId ?? null;
+          if (turn && providerThreadId && turn.providerThreadId !== providerThreadId) return {status: "invalid", reason: "activity_reference_turn_mismatch"};
+          if (turn && turn.startedAt !== null) resolved[index] = {...resolved[index]!, sourceProviderTurnId: turn.id, sourceProviderTurnStartedAt: turn.startedAt};
+        }
+      }
     }
     return {status: "ready", evidence: resolved};
   });
