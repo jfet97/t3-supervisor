@@ -237,6 +237,16 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
     threadId: child.id, providerThreadId: nativeTurn.providerThreadId, providerTurnId: nativeTurn.id}] : [],
     providerTurns: execution === "native_turn" ? [nativeTurn] : [], messages: [], turnItems: [], runtimeRequests: []});
   if (execution !== "app_run") f.projections.get("main")!.subagents = [lifecycle];
+  if (execution === "app_run") {
+    const coordinator: ThreadInfo = {...child, id: "coordinator", title: "Coordinator"};
+    child.lineage = {...child.lineage, parentThreadId: coordinator.id};
+    f.threads.push(coordinator);
+    const mainProjection = f.projections.get("main")!;
+    const run = {...mainProjection.runs[0]!, id: "coordinator-run", threadId: coordinator.id, rootNodeId: "coordinator-root", providerThreadId: "provider-coordinator", status: "running"};
+    f.projections.set(coordinator.id, {thread: coordinator, runs: [run], messages: [], turnItems: [], runtimeRequests: [],
+      nodes: [{...(mainProjection.nodes as Record<string, unknown>[])[0], id: "coordinator-root", threadId: coordinator.id, runId: run.id, rootNodeId: "coordinator-root", parentNodeId: null, providerThreadId: "provider-coordinator"}]});
+    f.args.targetThreadIds.push(coordinator.id);
+  }
   f.proof(f.args);
   const paused = (yield* f.controller.call(f.args)) as {attempt: {id: string}};
   const input = {...f.args, action: "apply_return", operationId: "return-a", attemptId: paused.attempt.id, workflowId: document.workflowId,
@@ -249,6 +259,12 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
   main.messages.push({id: "return-ack", threadId: "main", runId: "source-run", nodeId: "return-ack-node", role: "assistant", streaming: false,
     text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.id, targetThreadId: "main"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
   (main.nodes as Record<string, unknown>[]).push({id: "return-ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  if (execution === "app_run") {
+    const coordinator = f.projections.get("coordinator")!;
+    coordinator.messages.push({id: "coordinator-ack", threadId: "coordinator", runId: "coordinator-run", nodeId: "coordinator-ack-node", role: "assistant", streaming: false,
+      text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.id, targetThreadId: "coordinator"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
+    (coordinator.nodes as Record<string, unknown>[]).push({id: "coordinator-ack-node", kind: "assistant_message", threadId: "coordinator", runId: "coordinator-run", rootNodeId: "coordinator-root", parentNodeId: "coordinator-root", providerThreadId: "provider-coordinator", status: "completed"});
+  }
   yield* f.controller.reconcile(f.binding);
   assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_not_quiescent", "a parent ACK cannot pause a running reviewer");
   if (execution === "native_turn") {
@@ -266,7 +282,21 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
     assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_changed_run", `an ACK cannot cover newly ${status} operative work`);
     main.runs.pop();
   }
-  if (execution === "app_run") f.projections.get("reviewer")!.runs.unshift({...childRun, id: "earlier-review-run", ordinal: 0});
+  if (execution === "app_run") {
+    const coordinator = f.projections.get("coordinator")!;
+    coordinator.runs.push({...coordinator.runs[0]!, id: "queued-coordinator-run", ordinal: 2, status: "queued"});
+    assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_changed_run", "an intermediary parent cannot dispatch work after its ACK");
+    coordinator.runs.pop();
+    f.projections.get("reviewer")!.runs.unshift({...childRun, id: "earlier-review-run", ordinal: 0});
+  }
+  const currentTask = (yield* f.stores.supervisors.task("main"))!;
+  const scopeRevision = fingerprint("A reconsidered authorized scope.");
+  yield* f.stores.supervisors.saveTask({...currentTask, conversation: {...currentTask.conversation!, authorization: {...currentTask.conversation!.authorization!, scopeRevision}}});
+  const changedScopeInput = {...input, taskRevision: scopeRevision};
+  f.proof(changedScopeInput);
+  assert.equal(((yield* f.controller.call(changedScopeInput)) as {reason: string}).reason, "return_workflow_scope_changed", "current task pins cannot reopen an earlier scope's document");
+  yield* f.stores.supervisors.saveTask(currentTask);
+  f.proof(input);
   main.providerTurns = [{...nativeTurn, id: "post-ack-native-turn", status: "pending", nativeTurnRef: {...nativeTurn.nativeTurnRef, strength: "weak"}}];
   assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_not_quiescent", "an ACK does not settle weakly identified pending native work");
   delete main.providerTurns;

@@ -1,5 +1,5 @@
-import { completelyQuotedEarlierMessageIds, localThreadToolRules, redact } from "./supervisor-workflow.js";
-import { emptyConversation, taskScopeRevision } from "./supervision-conversation-contract.js";
+import { localThreadToolRules } from "./supervisor-workflow.js";
+import { emptyConversation } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { posix, resolve } from "node:path";
@@ -1483,44 +1483,15 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         }
         const preparing = current;
         const message = source.messages.find(item => item.id === preparing.sourceMessageId)!;
-        const sourceRun = source.runs.find(item => item.id === preparing.sourceRunId);
-        const requesters = yield* requesterPolicy(preparing.projectId);
-        // an agent request is introduced to the Supervisor as the launching agent's, never as the human's
-        const requester = sourceRun ? taskRequester(source, sourceRun, message, requesters) : null;
-        // the earlier unresolved requests stay context; only genuine visible requests of this main's permitted requesters are carried
-        const earlierMessages = (preparing.contextMessageIds ?? []).flatMap(id => {
-          const earlier = source.messages.find(item => item.id === id && item.threadId === preparing.threadId);
-          const run = earlier?.runId ? source.runs.find(item => item.id === earlier.runId) : undefined;
-          return earlier && run && taskRequester(source, run, earlier, requesters) ? [{messageId: earlier.id, text: earlier.text}] : [];
-        });
         const reader = yield* scope.workflowEditingEnabled(preparing.projectId, preparing.threadId, "status");
         // the root's first message carries its concise standing role once, so no separate initialization turn is needed
         const role = reader ? yield* conversation.interpretationRole(owner) : null;
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
         // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
-        const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
-        const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
         const build = (attemptId: string) => {
-          // each exact source body is quoted once: a requester message the envelope already carries as the request text or as an earlier
-          // request keeps its identity and requester relationship and names where its body is
-          const quoted = new Map<string, "text" | "earlierMessages">([[preparing.sourceMessageId, "text"],
-            ...[...completelyQuotedEarlierMessageIds(earlierMessages)].map(id => [id, "earlierMessages"] as const)]);
-          const requesterMessages = requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal).slice(-12).map(item => {
-            const quotedIn = quoted.get(item.messageId);
-            return quotedIn ? {...item, quoted: quotedIn} : {...item, text: redact(source.messages.find(message => message.id === item.messageId)?.text ?? "").slice(0, 1600)};
-          });
-          const operativeMessages = source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
-            (source.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= preparing.sourceOrdinal &&
-            (source.runs.find(run => run.id === item.runId)?.ordinal ?? -1) > (contextFloor ?? Infinity)).slice(-6)
-            .map(item => ({messageId: item.id, runId: item.runId, text: redact(item.text).slice(0, 1600)}));
-          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages,
-            conversationContext: reader ? {facts: {readView: "context"}, requesterMessages: requesterMessages.map(item => ({messageId: item.messageId,
-              requester: item.requester, ...("quoted" in item ? {quoted: item.quoted} : {})})),
-              operativeMessages: operativeMessages.map(item => ({messageId: item.messageId}))} : {facts: preparing.conversation, requesterMessages, operativeMessages},
-            ...(requester?.kind === "agent" ? {requester: {kind: "agent" as const, threadId: requester.threadId}} : {}),
-            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation},
-              planning: {taskId: preparing.id, taskRevision: taskScopeRevision(preparing)}} : {}),
+          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {
+            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
           const requestText = role ? `${role.text}\n${request.requestText.startsWith(`${localThreadToolRules}\n`)

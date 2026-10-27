@@ -961,7 +961,7 @@ const interpretationPlanDefinitions = {
 };
 export const supervisionInterpretationSubmitToolDefinition = {
   name: interpretationSubmitToolName,
-  description: "Submit your one interpretation of the quoted Supervisor task request. Copy supervisorThreadId, bindingGeneration, taskId, attemptId and sourcePin exactly from the request; add objective, reason and sourceMessageIds, and only when the request asks for them supervision with workflow and startRequested. Call this tool directly by name or, when it is not listed, with the native MCPX tool mcpx_call_tool and {name: \"t3-supervisor-workflows__supervision_interpretation_submit\", arguments: these arguments}. Only the executed tool call T3 records counts, never chat text. submitted means recorded and awaiting the completion of your current turn; it is not delivery, acceptance or agreement. After pending_proof, storage_failed, unavailable or a lost response, retry once with identical arguments; after invalid, correct the reported paths and submit again; stale, denied and conflict end the attempt. The service introduces the result to the operative itself; never answer with JSON in chat, which is ignored.",
+  description: "Record the current task interpretation through your own executed call. Read current pins from workflow_read context and rules from interpretation. Use advertised tools or the available gateway. A recorded submission is neither delivery nor agreement.",
   inputSchema: {
     $defs: interpretationPlanDefinitions,
     type: "object",

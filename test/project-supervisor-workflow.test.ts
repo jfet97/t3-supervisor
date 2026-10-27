@@ -144,7 +144,7 @@ it.effect("a transient preparation read failure recovers across Supervisor insta
   assert.equal(waiting?.definitionReadAttempts, 1);
   assert.equal(waiting?.definitionContext?.revision, "revision-1");
   assert.equal(fixture.dispatches().length, 1);
-  assert.match(String(fixture.dispatches()[0]?.payload.text), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
+  assert.match(String(fixture.dispatches()[0]?.payload.text), /Interpretation requested\./u);
 
   yield* (yield* fixture.makeSupervisor()).cycle;
   assert.equal(fixture.definitionReads.length, 2);
@@ -177,7 +177,7 @@ it.effect("bounded unavailable preparation reads still dispatch a provisional wo
   assert.equal(dispatched?.definitionContext?.complete, false);
   assert.equal(dispatched?.definitionContext?.requirementsKnown, false);
   assert.equal(dispatched?.definitionContext?.revision, null);
-  assert.match(String(request), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
+  assert.match(String(request), /Interpretation requested\./u);
   assert.doesNotMatch(String(request), /"requirementsKnown"/u, "unknown definition details stay in the source-bound reader");
   assert.equal(fixture.dispatches().length, 1);
 
@@ -368,9 +368,9 @@ it.effect("a link-only request stays context for the next genuine request instea
   assert.equal(second.sourceMessageId, "bootstrap-message");
   assert.deepEqual(second.contextMessageIds, [sourceMessageId], "the unresolved link stays part of the task");
   const dispatched = String(fixture.dispatches().at(-1)?.payload.text);
-  assert.ok(dispatched.includes(JSON.stringify([{messageId: sourceMessageId, text: "https://issues.example/browse/PROJ-1"}])),
-    "the interpretation sees the original request beside the bootstrap instruction");
-  assert.match(dispatched, /Earlier unresolved requests remain part of the task/u);
+  assert.doesNotMatch(dispatched, /issues\.example|Recover the failed worktree/u);
+  const current = yield* supervisor.conversation.readContextView((yield* fixture.binding())!, {view: "context"});
+  assert.deepEqual((current.task as {contextMessageIds: string[]}).contextMessageIds, [sourceMessageId], "the original request remains discoverable on demand");
 }));
 
 it.effect("a semantic not-needed decision is persisted without negotiation and the next genuine request is reconsidered", () => Effect.gen(function* () {
@@ -533,25 +533,25 @@ it.effect("the interpretation request carries the concise standing role once, pe
   assert.ok(task.roleVersion, "the root's first message carries the standing role");
   const occurrences = (part: string) => text.split(part).length - 1;
   assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 1);
-  assert.equal(occurrences("Thread tools: load this environment"), 1, "the standing role carries the local routing rule once");
+  assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the standing role carries the local routing rule once");
   assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
   assert.match(text, /Use local T3\/Workflow tools and supervision_interpretation_submit when an interpretation request asks for it/u);
-  assert.match(text, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
-  assert.match(text, /Decide whether an authorised outcome needs a plan before reading catalog\/selected definitions/u);
+  assert.match(text, /Do not assume a particular gateway/u);
   assert.match(text, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
   assert.match(text, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
-  const envelope = JSON.parse(text.slice(text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n") + "UNTRUSTED_WORKFLOW_ENVELOPE\n".length, text.indexOf("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")));
-  assert.deepEqual(envelope.reader, {supervisorThreadId: (yield* fixture.binding())!.threadId, bindingGeneration: (yield* fixture.binding())!.generation});
-  const instructions = yield* supervisor.conversation.readContextView((yield* fixture.binding())!, {view: "interpretation"});
+  const notice = JSON.parse(text.slice(text.lastIndexOf("\n{") + 1));
+  const binding = (yield* fixture.binding())!;
+  assert.deepEqual(notice.reader, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation});
+  assert.equal(notice.taskId, task.id);
+  assert.equal(notice.sourceMessageId, task.sourceMessageId);
+  assert.doesNotMatch(text, /SUBMISSION:|UNTRUSTED_WORKFLOW_ENVELOPE|sourcePin/u);
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  assert.deepEqual((context.submission as {arguments: unknown}).arguments, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
+    taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source});
+  const instructions = yield* supervisor.conversation.readContextView(binding, {view: "interpretation"});
   assert.match(String(instructions.instructions), /configured required references alone never make a task needed/u);
   assert.match(String(instructions.instructions), /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
-  // the typed protocol adds one bounded submission block with the quoted attempt; the rest of the request stays as concise as before
-  const submission = text.slice(text.indexOf("SUBMISSION: "), text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n"));
-  assert.match(submission, /supervision_interpretation_submit/u);
-  assert.ok(submission.length < 1000, `submission block ${submission.length} characters`);
-  // the standing role it carries once per instructions version includes the monitoring review duty and outcome rules (about 0.9 KB)
-  // and the no-plan route for quick routine work
-  assert.ok(text.length - submission.length < 7300, `interpretation request ${text.length - submission.length} characters without the submission block`);
+  assert.match(String(instructions.instructions), /Read view context for current submission.arguments/u);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
   assert.equal((yield* fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
@@ -652,7 +652,8 @@ it.effect("after an Enable the chat's next request is interpreted afresh by the 
   assert.equal(fresh.sourceMessageId, "after-enable-greeting");
   assert.equal(fresh.supervisorThreadId, first.supervisorThreadId);
   assert.equal(interpretations(), before + 2);
-  assert.match(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
+  assert.doesNotMatch(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
+  assert.match(String(fixture.dispatches().at(-1)?.payload.text), /after-enable-greeting/u);
 }));
 
 it.effect("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", () => Effect.gen(function* () {

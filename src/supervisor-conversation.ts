@@ -6,7 +6,7 @@ import { mainRunNodeReader, hasUnansweredHuman, nativeUserMessageVisible, operat
 import { activeWatchInstructions, activeWatchReminder, hasActiveMonitoredRun, isCurrentMainGraphRun, SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type ReviewOutcomeRecord, type ReviewPins, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
 import { NativeOperateRpc, NativeRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
-import { fixedOccurrencesPreserved, localThreadToolRules, proportionatePlanRule, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
+import { fixedOccurrencesPreserved, localThreadToolRules, workflowToolDiscoveryRules, proportionatePlanRule, readerWorkflowInstruction, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest, sameDefinitionContents } from "./supervisor-definition-review.js";
 import { isSupervisorThread, prepareStopNotice, ProjectSupervisorStore, type BindingRecord, type ProtocolAnchor, type TaskRecord } from "./project-supervisor-store.js";
@@ -34,6 +34,7 @@ import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from ".
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { agreementEvidenceNames, agreementEvidenceOf, interpretationPlanDigest, type InterpretationEvidence, type InterpretationSubmissionEvidence, type SupervisorMessageEvidence } from "./interpretation-evidence.js";
 import { interpretationSourcePin, type InterpretationSourcePin } from "./interpretation-submission.js";
+import { taskPendingStart } from "./interpretation-intake.js";
 import { verifyWorkflowToolEvidence, workflowRequestHash, workflowToolNames, workflowTurnItemDetailMaxBytes } from "./workflow-write-evidence.js";
 
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
@@ -665,9 +666,12 @@ const makeSupervisorConversation = Effect.gen(function* () {
     const view = input.view;
     if (view === "interpretation") return {status: "ok", view, instructions: readerWorkflowInstruction};
     // a stopped pair contacts nobody; the current resume action is named here, since the conversation may carry an older role
-    if (view === "context" && (yield* supervisionStopped(binding.mainThreadId))) return {status: "ok", view, supervision: "stopped", mainThreadId: binding.mainThreadId,
+    if (view === "context" && (yield* supervisionStopped(binding.mainThreadId))) {
+      const pending = yield* store.task(binding.mainThreadId);
+      if (!pending || !taskPendingStart(pending, yield* store.start(binding.mainThreadId))) return {status: "ok", view, supervision: "stopped", mainThreadId: binding.mainThreadId,
       resume: `Contact nobody while stopped. Only when a genuine human in your own conversation now directly asks you to resume, call t3-supervisor-workflows supervision_start with ${
         JSON.stringify({callerThreadId: binding.threadId, userMessageId: "<that message's ID>", operationId: "<unique to that message>"})}; this current action is allowed even if older instructions omit it.`};
+    }
     if (view === "instructions") {
       const teamPolicy = yield* teamPolicyOf(binding);
       return {status: "ok", view, version: roleVersion(binding, teamPolicy),
@@ -680,9 +684,17 @@ const makeSupervisorConversation = Effect.gen(function* () {
     const definitionState = snapshot ? {workspaceRoot: snapshot.workspaceRoot, revision: snapshot.revision, globalRevision: snapshot.globalRevision ?? null,
       definitionsStatus: snapshot.status, complete: snapshot.complete,
       issues: snapshot.issues.map(item => ({path: redact(item.path), code: item.code, message: redact(item.message)}))} : null;
-    if (view === "context") return {status: "ok", view, supervision: "enabled", task: {...(yield* taskContextSummary(task)), status: task.status, sourceMessageId: task.sourceMessageId,
-      contextMessageIds: task.contextMessageIds ?? []}, definitions: definitionState,
-      requirements: task.workflow?.requirements ?? [], outline: task.workflow?.plan ? renderPlan(task.workflow.plan) : null};
+    if (view === "context") {
+      const startVerdict = taskPendingStart(task, yield* store.start(task.threadId));
+      const attempt = task.attempt;
+      const submission = attempt && attempt.key.bindingGeneration === binding.generation && attempt.key.taskId === task.id ? {
+        tool: "supervision_interpretation_submit", arguments: {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
+          taskId: task.id, attemptId: attempt.attemptId, sourcePin: attempt.key.source}, startVerdict} : null;
+      return {status: "ok", view, supervision: startVerdict ? "pending_start" : "enabled", task: {...(yield* taskContextSummary(task)), status: task.status,
+        sourceMessageId: task.sourceMessageId, contextMessageIds: task.contextMessageIds ?? []},
+        submission, definitions: definitionState, requirements: task.workflow?.requirements ?? [],
+        outline: task.workflow?.plan ? renderPlan(task.workflow.plan) : null};
+    }
     if (view === "definitions") {
       if (!snapshot || !definitionState) return {status: "unavailable", view, reason: "definitions_unavailable"};
       // a snapshot saved before project.yaml became the index has no summaries; it needs a fresh definition read
@@ -746,7 +758,7 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const standingRole = (binding: BindingRecord, teamPolicy: TeamPolicy | null): string => {
     if (!workflows) return roleFor(binding, teamPolicy);
     return `${localThreadToolRules}
-Supervisor for main ${JSON.stringify(binding.mainThreadId)} and verified descendants; forks stay separate. No operative work, files, shell, browsing, settings, approvals or top-level launches. Use local T3/Workflow tools and supervision_interpretation_submit when an interpretation request asks for it; discover missing tools through native mcpx_search_tools/mcpx_get_tool_schema/mcpx_call_tool.
+Supervisor for main ${JSON.stringify(binding.mainThreadId)} and verified descendants; forks stay separate. No operative work, files, shell, browsing, settings, approvals or top-level launches. Use local T3/Workflow tools and supervision_interpretation_submit when an interpretation request asks for it; ${workflowToolDiscoveryRules}
 Use envelope reader coordinates. Read workflow_read view instructions before plans, delegation, guidance or edits; reuse until changed/missing. Routine record_review needs no full workflow manual.
 ${evidenceReadReminder} ${reviewDuty} ${reviewOutcomeReminder}
 Contact the operative only with one brief actionable delta or question citing message or item IDs; defer owner input. Never paste plans, definitions, protocol or service notices; use supervision_plan. Send auto to main, steer to children; preserve unknown arguments/clientRequestId. Only a workflow-proposal block in your completed final answer publishes a proposal. Main acceptance needs its own record. Children do not complete parents. Preserve prior work; no added approvals.

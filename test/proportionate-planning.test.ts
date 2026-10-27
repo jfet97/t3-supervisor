@@ -58,7 +58,8 @@ const operativeSends = (fixture: WorkflowFixture) => fixture.dispatches().filter
 
 it("the complete interpretation instructions decide whether a plan helps first and keep unused catalog entries out", () => {
   const prepared = prepareWorkflowRequest("thread-a", "message-a", "Pull the latest changes, then refresh the local index.", catalog());
-  for (const text of [prepared.requestText, readerWorkflowInstruction]) {
+  assert.doesNotMatch(prepared.requestText, /Pull the latest changes|not_needed|requirements/u);
+  for (const text of [readerWorkflowInstruction]) {
     assert.equal(text.split(proportionatePlanRule).length - 1, 1, "the planning rule is stated once");
     assert.match(text, /Decide first, from the request itself and before reading or assessing any definitions, whether it warrants supervision/u);
     assert.match(text, /It is "not_needed" when a plan would add nothing: a communication, lookup or status request, or quick routine work the operative completes and checks itself/u);
