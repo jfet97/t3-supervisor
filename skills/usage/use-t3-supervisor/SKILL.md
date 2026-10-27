@@ -90,6 +90,8 @@ Matching complete native proposal/acceptance records establish agreement, not ac
 execution. Keep incomplete requirements and source issues visible. The operative gets a
 short notice and reads its complete current proposal, with the plan and the exact
 acceptance record, through `supervision_plan`, which answers only for its own current task.
+A conversation started inside the supervised chat reads its own scoped workflow through
+the same tool, with the IDs its notice gives; it accepts nothing.
 
 “Following the conversation” means the enabled Supervisor has considered the current
 dialogue and is keeping a quiet understanding and draft duties. Discussion can include

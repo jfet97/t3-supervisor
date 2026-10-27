@@ -147,3 +147,51 @@ for (const [label, change] of obsolete) it.effect(`a read after an obsolete ${la
   assert.deepEqual(yield* readAs(fixture, controller, operative, args), {status: "denied", reason: "proposal_not_current"});
   assert.equal(JSON.stringify(yield* fixture.task()), before, "the read changes nothing");
 }));
+
+it.effect("a verified child reads its own scoped workflow under its main's current task, and nothing else", () => Effect.gen(function* () {
+  const {fixture, supervisor, task} = yield* introduced;
+  const binding = (yield* fixture.binding())!;
+  const owner = {projectId: binding.projectId, mainThreadId: binding.mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation};
+  assert.ok(["created", "exists"].includes((yield* supervisor.workflows.ensureMain(owner, "main-draft", "Connect the main.")).status));
+  // a native child of the main whose scoped workflow its Supervisor connected
+  const operative = fixture.projections.get(sourceThreadId)!;
+  const childId = "child-chat";
+  const child = structuredClone(operative);
+  Object.assign(child.thread, {id: childId, lineage: {parentThreadId: sourceThreadId, relationshipToParent: "subagent", rootThreadId: sourceThreadId}});
+  for (const run of child.runs) run.threadId = childId;
+  for (const message of child.messages) message.threadId = childId;
+  for (const node of child.nodes as Array<Record<string, unknown>>) node.threadId = childId;
+  fixture.projections.set(childId, child);
+  const linked = yield* supervisor.workflows.linkChild(owner, {operationId: "link-child", lineage: {threadId: childId, parentThreadId: sourceThreadId,
+    relationshipToParent: "subagent"}, note: "The child builds the client."});
+  assert.equal(linked.status, "created", JSON.stringify(linked));
+  const scoped = (yield* supervisor.workflows.get(owner.projectId, owner.mainThreadId, childId))!;
+  let lineage = [{...operative.thread}, {...child.thread}];
+  const controller = yield* writeController({stores: fixture.stores, workflows: supervisor.workflows, conversation: supervisor.conversation, policyStops: true, native: {
+    listThreads: () => Effect.sync(() => lineage),
+    projection: (threadId) => {
+      const projection = fixture.projections.get(threadId);
+      return projection ? Effect.succeed(projection) : Effect.fail(new T3TransportError("missing projection", 404));
+    },
+    getTurnItem: ({threadId, itemId}) => Effect.succeed({item: submissionDetail(fixture.projections.get(threadId), itemId)}),
+  }});
+  const args = {callerThreadId: childId, taskId: task.id, proposalId: scoped.workflowId};
+  assert.notEqual((yield* readAs(fixture, controller, child, args, false)).status, "ok", "only through the child's own executed call");
+  const read = yield* readAs(fixture, controller, child, args);
+  assert.equal(read.status, "ok", JSON.stringify(read));
+  assert.ok(read.status === "ok" && read.proposal.startsWith(`Your scoped workflow ${scoped.workflowId}, revision 1, status planned, inside parent workflow ${scoped.parentWorkflowId}.`), JSON.stringify(read));
+  assert.match(read.status === "ok" ? read.proposal : "", /No plan is recorded for you yet\./u);
+  assert.deepEqual(read.status === "ok" ? [read.taskId, read.proposalId] : null, [task.id, scoped.workflowId]);
+
+  const denied = {status: "denied", reason: "proposal_not_current"};
+  assert.deepEqual(yield* readAs(fixture, controller, child, {...args, proposalId: task.workflowProposalId ?? task.id}), denied, "the main's proposal is not the child's to read");
+  assert.deepEqual(yield* readAs(fixture, controller, child, {...args, taskId: `${task.id}-earlier`}), denied, "only under the main's current task");
+  // a conversation the native lineage does not connect to the main reads nothing
+  lineage = [{...operative.thread}, {...child.thread, lineage: {parentThreadId: sourceThreadId, relationshipToParent: "fork"}}];
+  assert.deepEqual(yield* readAs(fixture, controller, child, args), denied, "an independent fork");
+  lineage = [{...operative.thread}, {...child.thread}];
+  // nor once the human stopped supervision of the main
+  const policy = yield* fixture.stores.policy.get();
+  yield* fixture.stores.policy.save({...policy, excludedThreadIds: [...policy.excludedThreadIds, sourceThreadId]});
+  assert.deepEqual(yield* readAs(fixture, controller, child, args), denied, "a stopped main");
+}));

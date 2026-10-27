@@ -71,7 +71,7 @@ import { InterpretationWake } from "./interpretation-wake.js";
 import { logEvent, type LogFields } from "./logging.js";
 import {branchConditionMaxLength, definitionSnapshotIndexed, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import {currentPendingDecisions, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
+import {currentPendingDecisions, occurrenceAttempts, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
 
 // the native item read returned no item record
 export class WorkflowNativeItemUnavailable extends Data.TaggedError("WorkflowNativeItemUnavailable") {}
@@ -151,7 +151,8 @@ export type SupervisorContextViewResult = {status: string; view: SupervisorConte
 /** The compact current status of each workflow in the verified scope, for reconciling statuses without full documents. */
 export type WorkflowStatusViewResult = {status: "ok"; view: "status"; mainTaskAgreementStatus: "agreed" | "stale" | null; statusNote: string;
   workflowOffset: number; workflowHasMore: boolean; workflows: Array<{workflowId: string; threadId: string; parentWorkflowId: string | null;
-    revision: number; status: WorkflowExecutionStatus; occurrences: PlanStatusOutlineRow[]; pendingBranchDecisions: string[]}>};
+    revision: number; status: WorkflowExecutionStatus; occurrences: PlanStatusOutlineRow[]; pendingBranchDecisions: string[];
+    pendingReturns: Array<{returnId: string; backToNodeId: string; targetNodeId: string; attempt: number; regionNodeIds: string[]; reason: string; requestedAt: number}>}>};
 export type SupervisionStartInput = {callerThreadId: string; userMessageId: string; operationId: string};
 export type SupervisionStartResult = {status: "pending" | "active" | "rejected" | "denied" | "invalid" | "unavailable"; reason: string; retryable?: boolean};
 /** The operative's own current proposal, or why it is not returned; a refusal never names or describes another task. */
@@ -325,6 +326,31 @@ const writeSchema = [
 const maxBindingGeneration = 2_147_483_647;
 const maxWorkflowReadDocs = 50;
 const maxWorkflowReadBytes = 1024 * 1024;
+const maxScopedWorkflowTextLength = 200_000;
+
+/**
+ * The text a child reads of its own scoped workflow: its identity, objective and every occurrence with nesting, status, attempt and
+ * branch reach, then the decisions and returns pending. Descriptions stay with the definitions the plan names; history stays in the
+ * document.
+ */
+export const scopedWorkflowText = (document: WorkflowStateDocument): string => {
+  const selected = documentBranchSelections(document);
+  const rows = planStatusOutline(document.plan, selected, notApplicableSubtrees(document.plan, selected,
+    notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)), occurrenceAttempts(document.returns));
+  const where = (row: PlanStatusOutlineRow) => row.group === "then" || row.group === "else"
+    ? ` (${row.group} path${row.reach === "not_selected" ? ", not selected" : row.reach === "undecided" ? ", awaiting decision" : ""})` : "";
+  const line = (row: PlanStatusOutlineRow) => `${"  ".repeat(row.depth)}- ${row.kind === "branch"
+    ? `branch [${row.nodeId}] if: ${row.condition} — ${row.selected ? `${row.selected} path selected` : "decision pending"}`
+    : row.kind === "back_to" ? `return to ${(row.ref ?? "").slice("back_to:".length)} [${row.nodeId}]`
+    : `${row.name} [${row.ref}; ${row.nodeId}] ${row.notApplicable ? "not applicable" : row.status}${row.attempt ? `, attempt ${row.attempt}` : ""}`}${where(row)}`;
+  const pendingReturns = document.returns.filter(item => item.state === "pending");
+  const text = [`Your scoped workflow ${document.workflowId}, revision ${document.revision}, status ${document.status}, inside parent workflow ${document.parentWorkflowId}.`,
+    `Objective: ${document.objective ?? "(none recorded)"}`,
+    ...document.plan ? ["Plan:", ...rows.map(line)] : ["No plan is recorded for you yet."],
+    ...pendingReturns.map(item => `Return pending since attempt ${item.attempt}: back to [${item.targetNodeId}]; your Supervisor starts the next attempt.`),
+    "Read-only: your Supervisor owns this document. Record your own branch decisions with branch-selection records as your notice describes."].join("\n");
+  return text.length <= maxScopedWorkflowTextLength ? text : `${text.slice(0, maxScopedWorkflowTextLength)}\n[the rest of the plan is omitted to keep this read bounded]`;
+};
 const maxActivityReferencesPerWrite = 16;
 const maxActivityReferenceThreadsPerWrite = 8;
 const writeOperationNamespace = "edit" as const;
@@ -376,6 +402,12 @@ const validPlanRequest = (value: unknown): boolean => {
         (node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) &&
         isText(node.condition, branchConditionMaxLength) && isText(node.reason, maxPlanReasonLength) &&
         visitGroup(node.then, depth + 1) && (node.else === undefined || node.else === null || visitGroup(node.else, depth + 1));
+      if (node.kind === "back_to") return ++count <= workflowMutationLimits.maxPlanNodes &&
+        hasExactKeys(node, ["kind", "target", "reason"], ["nodeId", "templatePath", "targetNodeId"]) &&
+        (node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) &&
+        (node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) && isText(node.target, 200) &&
+        (node.targetNodeId === undefined || node.targetNodeId === null || typeof node.targetNodeId === "string" && planNodeIdPattern.test(node.targetNodeId)) &&
+        isText(node.reason, maxPlanReasonLength);
       if (++count > workflowMutationLimits.maxPlanNodes || !(node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) ||
         !(node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) ||
         !isText(node.reason, maxPlanReasonLength)) return false;
@@ -472,6 +504,7 @@ const omissionProblemExpected: Record<OmissionEditProblem, string> = {
   not_flexible_member: "a member declared by a flexible workflow; fixed workflows, added support work and top-level nodes are not omitted",
   started: "a member with no recorded progress; started or completed work stays recorded",
   empties_group: "an omission that leaves at least one member in its workflow and branch path",
+  return_target: "a member no return repeats; a return needs its target, so keep that member",
 };
 
 // a store pointer into the edited plan of an apply without a plan, mapped to the status edit that set that occurrence's status
@@ -695,7 +728,9 @@ const workflowStatusViewNote = "Statuses record formal progress: in a sequence a
   "completed, and a workflow is entered with the member that is actually underway. Edit statuses with apply statuses and status_changed " +
   "evidence per changed nodeId; record early, preparatory or diagnostic work as an observation. A not-applicable member is never completed: " +
   "a member a flexible workflow declares is omitted through an agreed proposal and apply omit, and a planned fixed member gets not_applicable " +
-  "evidence. Read the full document only for descriptions or history.";
+  "evidence. A pending return asks to repeat its region, from targetNodeId through the member holding its back_to, as the next attempt: " +
+  "statuses there and after it stay unchanged until you apply it at a safe point, and attempt shows each reopened occurrence's current attempt. " +
+  "Read the full document only for descriptions or history.";
 
 const currentNativeScope = (threads: readonly ThreadInfo[], owner: WorkflowOwner, ownedThreadIds: ReadonlySet<string>): NativeScope | null => {
   const resolution = resolveSupervisorScope(threads, owner.projectId, owner.mainThreadId, ownedThreadIds);
@@ -748,7 +783,15 @@ const workflowPlanDefinitions = {
       nodes: {type: "array", minItems: 1, maxItems: workflowMutationLimits.maxPlanNodes, items: {$ref: "#/$defs/node"}},
     },
   },
-  node: {oneOf: [{$ref: "#/$defs/group"}, {$ref: "#/$defs/step"}, {$ref: "#/$defs/workflow"}, {$ref: "#/$defs/branch"}]},
+  node: {oneOf: [{$ref: "#/$defs/group"}, {$ref: "#/$defs/step"}, {$ref: "#/$defs/workflow"}, {$ref: "#/$defs/branch"}, {$ref: "#/$defs/back_to"}]},
+  back_to: {
+    type: "object", additionalProperties: false, required: ["kind", "target", "reason"],
+    description: "A return to the earlier step or workflow member of the same sequential lane whose definitionId or localId is target; it ends its path. Keep nodeId and templatePath of an existing return; the service resolves targetNodeId.",
+    properties: {
+      kind: {const: "back_to"}, nodeId: idSchema(64), templatePath: nullableTextSchema(2000), target: textSchema(200),
+      targetNodeId: {anyOf: [idSchema(64), {type: "null"}]}, reason: textSchema(maxPlanReasonLength),
+    },
+  },
   branch: {
     type: "object", additionalProperties: false, required: ["kind", "condition", "reason", "then"],
     description: "A coarse semantic branch: the operative selects then or else from actual context with its own branch-selection record. Keep nodeId and templatePath of an existing branch; a definition branch keeps its condition and paths.",
@@ -858,7 +901,7 @@ export const supervisionStartToolDefinition = {
 };
 export const supervisionPlanToolDefinition = {
   name: "supervision_plan",
-  description: "Read your own current supervised task's complete workflow proposal: objective and authorized scope, limits, required references, the plan with its omissions and branches, and the exact acceptance record. Copy callerThreadId, taskId and proposalId exactly from the Supervisor notice; callerThreadId is your own native thread, whose own executed call the service verifies. Read-only: it changes nothing, grants nothing and returns nothing for another chat or an outdated proposal. pending means your own call is not recorded yet: retry the identical call shortly. When it stays pending or is not current, ask your Supervisor.",
+  description: "Read your own current supervised task's complete workflow proposal: objective and authorized scope, limits, required references, the plan with its omissions and branches, and the exact acceptance record. Copy callerThreadId, taskId and proposalId exactly from the Supervisor notice; callerThreadId is your own native thread, whose own executed call the service verifies. A conversation started inside a supervised chat reads its own scoped workflow the same way, with the main task's taskId and its scoped workflow's ID as proposalId, both from its notice. Read-only: it changes nothing, grants nothing and returns nothing for another chat or an outdated proposal. pending means your own call is not recorded yet: retry the identical call shortly. When it stays pending or is not current, ask your Supervisor.",
   inputSchema: {type: "object", additionalProperties: false, required: ["callerThreadId", "taskId", "proposalId"],
     properties: {callerThreadId: idSchema(), taskId: idSchema(), proposalId: idSchema()}},
 };
@@ -895,6 +938,8 @@ const interpretationPlanDefinitions = {
     {type: "object", additionalProperties: false, required: ["kind", "condition", "reason", "then"],
       properties: {kind: {const: "branch"}, condition: interpretationText(branchConditionMaxLength), reason: interpretationText(interpretationLimits.maxReasonLength),
         then: {$ref: "#/$defs/group"}, else: {anyOf: [{$ref: "#/$defs/group"}, {type: "null"}]}}},
+    {type: "object", additionalProperties: false, required: ["kind", "target", "reason"],
+      properties: {kind: {const: "back_to"}, target: interpretationText(interpretationLimits.maxDefinitionIdLength), reason: interpretationText(interpretationLimits.maxReasonLength)}},
     {$ref: "#/$defs/group"},
   ]},
   group: {type: "object", additionalProperties: false, required: ["kind", "nodes"],
@@ -1609,6 +1654,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       }
       if (message && activityItem && message.runId !== (typeof activityItem.runId === "string" ? activityItem.runId : null))
         return {status: "invalid", reason: "activity_reference_context_mismatch"};
+      // the run behind a cited message or item is recorded with the evidence, so a run a return retired is recognized however it is cited
+      const nativeRunId = message?.runId ?? (typeof activityItem?.runId === "string" ? activityItem.runId : null);
+      const index = evidence.indexOf(item);
+      if (item.sourceRunId == null && nativeRunId) resolved[index] = {...resolved[index]!, sourceRunId: nativeRunId};
     }
     return {status: "ready", evidence: resolved};
   });
@@ -1718,7 +1767,43 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       return {status: "denied", reason: "caller_not_current"};
     const verified = yield* findToolEvidence(args.callerThreadId, caller.thread.projectId, args, "plan", cancel);
     if (verified.status !== "verified") return {status: verified.status, reason: verified.reason, retryable: verified.status === "pending"};
+    // a native child reads its own scoped workflow; the main reads its current proposal
+    if (caller.thread.lineage.relationshipToParent === "subagent") return yield* readOwnScopedWorkflow(args, caller.thread.projectId, cancel);
     return yield* conversation.operativeProposal({...args, projectId: caller.thread.projectId, caller});
+  });
+
+  // a verified native child's read of its own scoped workflow, after its own executed call was verified: a live descendant, on a
+  // complete subagent path, of a main whose binding is ready, enabled and not stopped, under that main's current supervised task, and
+  // its own linked document under its native parent, named by its workflow ID. It writes nothing, and a refusal names nothing
+  const readOwnScopedWorkflow = Effect.fnUntraced(function* (args: {callerThreadId: string; taskId: string; proposalId: string}, projectId: string,
+    cancel: WorkflowCallCancel): Effect.fn.Return<SupervisionPlanResult, SupervisionStoreError> {
+    const refused: SupervisionPlanResult = {status: "denied", reason: "proposal_not_current"};
+    if (!supervisors.scopeCompatible) return refused;
+    const listed = yield* settled(native.listThreads(cancel));
+    if (Option.isNone(listed)) return {status: "unavailable", reason: "native_lineage_unavailable", retryable: true};
+    const threads = new Map(listed.value.map(thread => [thread.id, thread] as const));
+    let main = threads.get(args.callerThreadId);
+    for (let depth = 0; main?.lineage.relationshipToParent === "subagent" && depth < 64; depth++)
+      main = main.lineage.parentThreadId ? threads.get(main.lineage.parentThreadId) : undefined;
+    if (!main || main.id === args.callerThreadId || main.lineage.relationshipToParent === "subagent") return refused;
+    const binding = yield* supervisors.binding(projectId, main.id);
+    if (!binding || binding.state !== "ready" || binding.projectId !== projectId || binding.mainThreadId !== main.id || !supervisors.ownedIds.has(binding.threadId))
+      return refused;
+    const closed = yield* denyOnFailure(Effect.gen(function* () {
+      return !(yield* scope.workflowEditingEnabled(binding.projectId, binding.mainThreadId, "read")) || (yield* scope.supervisionStopped(binding.mainThreadId));
+    }));
+    if (closed !== false) return refused;
+    const nativeScope = currentNativeScope(listed.value, ownerFor(binding), supervisors.ownedIds);
+    if (!nativeScope || !nativeScope.liveIds.has(args.callerThreadId)) return refused;
+    const task = yield* supervisors.task(binding.mainThreadId);
+    if (!task || task.id !== args.taskId || task.threadId !== binding.mainThreadId || task.projectId !== projectId || task.supervisorThreadId !== binding.threadId ||
+      task.status !== "inferred" || task.supervision === "not_needed" || !conversationMayContact(task)) return refused;
+    const state = yield* workflows.getState(projectId, binding.mainThreadId, args.callerThreadId);
+    if (state.status !== "found") return refused;
+    const document = state.document;
+    if (document.workflowId !== args.proposalId || document.threadId !== args.callerThreadId || document.parentWorkflowId === null ||
+      document.parentThreadId !== nativeScope.byId.get(args.callerThreadId)?.lineage.parentThreadId) return refused;
+    return {status: "ok", taskId: task.id, proposalId: document.workflowId, proposal: scopedWorkflowText(document)};
   });
 
   // the timestamped phases of one submission, by name only (ct-isub-14)
@@ -1908,8 +1993,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
         workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => ({workflowId: document.workflowId, threadId: document.threadId,
           parentWorkflowId: document.parentWorkflowId, revision: document.revision, status: document.status,
           occurrences: planStatusOutline(document.plan, documentBranchSelections(document), notApplicableSubtrees(document.plan, documentBranchSelections(document),
-            notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))),
-          pendingBranchDecisions: pending.map(item => item.nodeId)}))};
+            notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)), occurrenceAttempts(document.returns)),
+          pendingBranchDecisions: pending.map(item => item.nodeId),
+          pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
+            targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))}))};
     }
     const binding = yield* resolveBinding(parsed.value, false, parsed.value.view === "context" ? "status" : "read");
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};

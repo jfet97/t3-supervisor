@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
-import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, planBranches, planEntities } from "./workflow-plan-tree.js";
+import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBranches, planEntities } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
   type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
@@ -78,6 +78,29 @@ export const WorkflowProgressBranchEventSchema = Schema.Struct({
 });
 export type WorkflowProgressBranchEvent = typeof WorkflowProgressBranchEventSchema.Type;
 
+/**
+ * One return of the workflow in request order: pending until the Supervisor applies it, applied when it started a new attempt of its
+ * region, dismissed when its back_to was no longer reached. An applied return keeps what the attempt it closed ended with.
+ */
+export const WorkflowProgressReturnSchema = Schema.Struct({
+  returnId: Schema.String,
+  backToNodeId: Schema.String,
+  targetNodeId: Schema.String,
+  targetName: NullableText,
+  regionNodeIds: Schema.Array(Schema.String),
+  attempt: Schema.Number,
+  state: Schema.Literals(["pending", "applied", "dismissed"]),
+  reason: Schema.String,
+  sourceThreadId: NullableText,
+  sourceMessageId: NullableText,
+  requestedAt: Schema.Number,
+  resolvedAt: Schema.NullOr(Schema.Number),
+  closed: Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, status: WorkflowExecutionStatus, contributorThreadIds: Schema.Array(Schema.String)}))),
+  retiredRuns: Schema.Array(Schema.Struct({threadId: Schema.String, runId: Schema.String})),
+  note: NullableText,
+});
+export type WorkflowProgressReturn = typeof WorkflowProgressReturnSchema.Type;
+
 /** A completed workflow occurrence and its latest completion record's time, or null when no completion record exists. */
 export const WorkflowProgressCompletionSchema = Schema.Struct({
   nodeId: Schema.String,
@@ -111,6 +134,9 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   completions: Schema.optionalKey(Schema.Array(WorkflowProgressCompletionSchema)),
   /** Occurrences settled by a current not-applicable assessment, including everything inside an assessed workflow. */
   notApplicable: Schema.optionalKey(Schema.Array(Schema.String)),
+  returns: Schema.optionalKey(Schema.Array(WorkflowProgressReturnSchema)),
+  /** The current attempt of each occurrence an applied return reopened; any other occurrence is in its first attempt. */
+  attempts: Schema.optionalKey(Schema.Array(Schema.Struct({nodeId: Schema.String, attempt: Schema.Number}))),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -253,6 +279,15 @@ const progressCompletions = (document: WorkflowStateDocument): WorkflowProgressC
     completedAt: document.evidence.reduce<number | null>((latest, item) => item.kind === "status_changed" && item.targetNodeId === node.nodeId &&
       item.statusTo === "completed" && (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null)}]);
 
+const progressReturns = (document: WorkflowStateDocument): WorkflowProgressReturn[] => {
+  const planNames = planNodeNames(document.plan);
+  return document.returns.map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId, targetNodeId: item.targetNodeId,
+    targetName: contributionNodeName(document, item.targetNodeId, planNames), regionNodeIds: [...item.regionNodeIds], attempt: item.attempt, state: item.state,
+    reason: item.reason, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId, requestedAt: item.requestedAt, resolvedAt: item.resolvedAt,
+    closed: item.closed ? item.closed.map(closed => ({nodeId: closed.nodeId, status: closed.status, contributorThreadIds: [...closed.contributorThreadIds]})) : null,
+    retiredRuns: item.retiredRuns.map(run => ({threadId: run.threadId, runId: run.runId})), note: item.resolution?.note ?? null}));
+};
+
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
   projectId: document.projectId,
@@ -289,4 +324,6 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   completions: progressCompletions(document),
   notApplicable: [...notApplicableSubtrees(document.plan, effectiveBranchSelections(document.plan, document.branchSelections ?? []),
     notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))],
+  returns: progressReturns(document),
+  attempts: [...occurrenceAttempts(document.returns ?? [])].map(([nodeId, attempt]) => ({nodeId, attempt})),
 });

@@ -106,8 +106,10 @@ independently controlled decisions differ.
 Use a workflow `branch:` (`if`, `then`, optional `else`) only when one short, observable
 condition selects between substantially different pieces of work, such as a contained
 change getting one review instead of an iterative multi-model review. Keep finer
-conditions, iteration and completion rules in descriptions; there is no `elif`, jump,
-loop or `goto`. Branches belong in workflow files, never in step frontmatter. The next
+conditions and completion rules in descriptions; there is no `elif`, jump or `goto`.
+To repeat earlier members as a visible new attempt, end a branch path with
+`back_to: <id>` naming an earlier member of the same sequential lane; the reference
+shows the review-round pattern. Branches belong in workflow files, never in step frontmatter. The next
 member after a branch follows whichever path applies. The operative working on the
 workflow selects the path from actual context with its own `branch-selection` record;
 do not write definitions that make the Supervisor approve each choice, and keep the
@@ -168,7 +170,8 @@ request, are evidence for it, not its start. Do not invent schema fields or a se
 required list.
 
 Let an iterative workflow's description own repetition and completion; callers reference
-it directly. A findings step owns the main's accounting, not a wrapper whose only
+it directly. A return repeats earlier members as a new attempt only for findings that
+change the outcome, which its branch condition names; never return for preferences. A findings step owns the main's accounting, not a wrapper whose only
 purpose is invoking Review. Distinguish reviewer assessment from author fixes. The
 reference explains reporting versus acceptance and persistent review.
 

@@ -207,7 +207,20 @@ export type WorkflowPlanBranchInfo = {
   then: WorkflowPlanGroupInfo;
   else: WorkflowPlanGroupInfo | null;
 };
-export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanBranchInfo | WorkflowPlanGroupInfo;
+/**
+ * A return to a fixed earlier occurrence of the same sequential lane, named by its step or workflow ID. Reaching it ends the current
+ * forward path and opens another runtime attempt of the region from the target through the member holding it; it has no status of
+ * its own. targetNodeId is resolved in every composed plan and is null only inside a definition's own template expansion.
+ */
+export type WorkflowPlanBackToInfo = {
+  kind: "back_to";
+  nodeId: string;
+  templatePath: string | null;
+  target: string;
+  targetNodeId: string | null;
+  reason: string;
+};
+export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanBranchInfo | WorkflowPlanBackToInfo | WorkflowPlanGroupInfo;
 const WorkflowPlanStep = Schema.Struct({
   kind: Schema.Literal("step"),
   nodeId: Schema.String,
@@ -223,10 +236,19 @@ const WorkflowPlanStep = Schema.Struct({
   status: WorkflowExecutionStatus,
   contributorThreadIds: Schema.Array(Schema.String),
 });
+const WorkflowPlanBackTo = Schema.Struct({
+  kind: Schema.Literal("back_to"),
+  nodeId: Schema.String,
+  templatePath: Schema.NullOr(Schema.String),
+  target: Schema.String,
+  targetNodeId: Schema.NullOr(Schema.String),
+  reason: Schema.String,
+});
 const workflowPlanNodeSchema = (): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.suspend((): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.Union([
   WorkflowPlanStep,
   WorkflowPlanWorkflow,
   WorkflowPlanBranch,
+  WorkflowPlanBackTo,
   WorkflowPlanGroup,
 ]));
 const WorkflowPlanGroup: Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> = Schema.suspend((): Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> => Schema.Struct({

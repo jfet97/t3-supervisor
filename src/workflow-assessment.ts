@@ -23,12 +23,15 @@ export function workflowAssessment(document: WorkflowStateDocument): WorkflowAss
     updatedAt: document.updatedAt, reassessment: completionReassessment(document, evidence?.recordedAt ?? null)};
 }
 
-// a completion assessment keeps its status and evidence, but it is not current while a reached decision is pending, outside workflows
-// recorded not applicable, or after a branch decision changed or was invalidated
+// a completion assessment keeps its status and evidence, but it is not current while a reached decision or a return is pending, outside
+// workflows recorded not applicable, or after a branch decision changed or was invalidated or a return reopened earlier work
 const completionReassessment = (document: WorkflowStateDocument, assessedAt: number | null): string | null => {
   if (document.status !== "completed") return null;
   const pending = currentPendingDecisions(document).length;
   if (pending) return `${pending === 1 ? "A branch decision is" : `${pending} branch decisions are`} pending, so this completion needs reassessment.`;
+  if (document.returns.some(item => item.state === "pending")) return "A return to earlier work is pending, so this completion needs reassessment.";
+  if (document.returns.some(item => item.state === "applied" && item.resolvedAt !== null && (assessedAt === null || item.resolvedAt > assessedAt)))
+    return "A return reopened earlier work after this completion was assessed, so it needs reassessment.";
   const changed = document.evidence.some(item => (item.kind === "branch_selection_invalidated" || item.kind === "branch_selected" && item.branch?.changed === true) &&
     (assessedAt === null || item.recordedAt > assessedAt));
   return changed ? "A branch decision changed after this completion was assessed, so it needs reassessment." : null;

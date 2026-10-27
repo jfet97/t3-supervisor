@@ -177,6 +177,14 @@ not selected; undecided and not-selected steps are not counted as outstanding.
 A selection never proves work, and a completion recorded before a changed decision
 is shown as needing reassessment. See [branch selections](workflow-mcp.md#branch-selections).
 
+A return (`back_to`) repeats earlier work as a new attempt. When the operative's work
+reaches it, the region from its target through the member that holds it waits for the
+Supervisor, which applies the return at a safe point once the closed attempt's work has
+stopped. The closed attempt keeps its statuses, contributors, decisions and retired
+child runs as history; the reopened occurrences keep their contributor conversations
+and show their attempt. Output of the closed attempt never counts for the new one.
+See [returns and attempts](workflow-mcp.md#returns-and-attempts).
+
 Required controls inclusion; an applicable required item must be on every path of a
 branch to count as included. Fixed preserves original commitments, relative order,
 parallel relationships and branches with their conditions and paths. Added work may

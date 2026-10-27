@@ -155,9 +155,9 @@ sequence:
 ```
 
 Use a branch only when the alternatives are substantially different pieces of work.
-Keep fine-grained conditions, iteration and completion rules in descriptions. There
-is no `elif`, jump, loop or `goto`; nest a branch inside a path when a second choice
-depends on the first. Branches belong to workflow composition only: a step file stays
+Keep fine-grained conditions and completion rules in descriptions. There is no `elif`,
+jump or `goto`; nest a branch inside a path when a second choice depends on the first,
+and repeat earlier work with a [return](#returns). Branches belong to workflow composition only: a step file stays
 a description with no structural fields. Negotiated task plans may add task-local
 branches in the same shape. Validation, reference checks, cycle detection, local ID
 uniqueness and the expansion bounds cover both paths, whichever is later selected.
@@ -177,6 +177,51 @@ applicable path is pending. A changed decision keeps the statuses and evidence
 already recorded on the earlier path as history, and a completion recorded before
 the change needs reassessment. Accepted and earlier plans show their agreed
 alternatives without a later selection.
+
+## Returns
+
+A `back_to:` member repeats earlier work. It names the step, local step or workflow
+ID of an earlier member in the same sequential lane: earlier in its own sequence or
+branch path, then in each enclosing sequence, branch path or workflow, up to the first
+enclosing parallel group. It ends its sequence or branch path, it is never a direct
+member of a parallel group, and the member that holds it must still be able to finish
+without returning, so a return belongs in a branch path:
+
+```yaml
+name: Reviewed change
+description: Implement, then review until no material findings remain.
+sequence:
+  - step: implement
+  - workflow: review
+  - branch:
+      if: The review left material findings.
+      then:
+        - step: address-findings
+        - back_to: review
+  - step: deliver
+```
+
+When work reaches the return, on the selected path with every earlier member settled,
+the workflow asks for a new attempt of its region: every occurrence from the target
+through the member that holds the return, here `review`, the branch and
+`address-findings`. Nothing after it, here `deliver`, starts while it waits, and the
+recorded statuses in the region stay as the attempt left them. The Supervisor applies
+the return at a safe point, after the closed attempt's work has stopped. The closed
+attempt stays as history: its statuses, contributors, branch decisions and the child
+runs it retired. Every occurrence in the region is planned again with the same
+contributor conversations linked, and the branch is decided again with the next
+selection revision. Output of a retired run, or a decision written before the return,
+stays with the closed attempt. A return that is no longer reached, because the
+operative selected the other path, is dismissed and kept as history.
+
+A reusable workflow may also return to an earlier member of the workflow that includes
+it, so a return's target resolves in the composed plan. A target that is missing,
+ambiguous, later in the plan or beyond a parallel group is rejected, and so is a
+cycle with no way out: an enclosing branch, in the same workflow or in one that
+includes it, must offer another way to continue. Use a return for iteration that
+changes the outcome: findings
+that do not affect correctness, safety or the agreed result do not justify another
+attempt.
 
 ## References and skills
 

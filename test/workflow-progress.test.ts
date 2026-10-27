@@ -62,6 +62,7 @@ const document = (): WorkflowStateDocument => ({
   }],
   contributions: [],
   branchSelections: [],
+  returns: [],
   evidence: Array.from({length: 25}, (_, index) => ({
     id: `observation-${index}`,
     operationId: `operation-${index}`,

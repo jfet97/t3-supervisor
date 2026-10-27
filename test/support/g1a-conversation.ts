@@ -355,13 +355,14 @@ export type ProjectSupervisorUnit = Effect.Success<ReturnType<typeof projectSupe
 // the write controller's scope predicates of a unit without options: every scope enabled for its sections, workflow editing by the
 // stored control of the project, no chat stopped
 class WriteScope extends SupervisionScope {
-  constructor(private readonly runStores: ConversationStores) {
+  constructor(private readonly runStores: ConversationStores, private readonly policyStops = false) {
     super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0},
       {guidance: runStores.guidance, supervisors: runStores.supervisors, policy: runStores.policy}, true);
   }
   override scopeEnabled() {return Effect.succeed(true);}
   override workflowEditingEnabled(projectId: string) {return this.runStores.supervisors.enabled(projectId);}
-  override supervisionStopped() {return Effect.succeed(false);}
+  // a chat is stopped only when the test opts into the stored policy's Stop list, as production reads it
+  override supervisionStopped(threadId: string) {return this.policyStops ? super.supervisionStopped(threadId) : Effect.succeed(false);}
 }
 
 export interface WriteControllerOptions {
@@ -374,6 +375,8 @@ export interface WriteControllerOptions {
   readonly start?: ((input: SupervisionStartInput, evidence: {runId: string}) => Effect.Effect<SupervisionStartResult, unknown>) | undefined;
   // the production conversation that answers context views and the operative's own proposal read
   readonly conversation?: SupervisorConversation["Service"] | undefined;
+  // reads Stop from the stored policy as production does; by default no chat is stopped
+  readonly policyStops?: boolean | undefined;
 }
 
 /**
@@ -381,7 +384,7 @@ export interface WriteControllerOptions {
  * native reads of `native`; with `stop`, a verified supervision_stop is handed to it and a Start is unavailable.
  */
 export const writeController = Effect.fnUntraced(function* (options: WriteControllerOptions) {
-  const scope = new WriteScope(options.stores);
+  const scope = new WriteScope(options.stores, options.policyStops);
   const context = Context.add(options.stores.context, WorkflowStateStore, options.workflows).pipe(Context.add(SupervisionScopeService, scope));
   const gate = yield* makeSupervisionGate(scope).pipe(Effect.provide(context));
   const {stop, start} = options;

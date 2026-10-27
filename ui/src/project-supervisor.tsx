@@ -540,7 +540,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
           {workflow?.objective && <p>{workflow.objective}</p>}
           {workflow?.parentNodeReferences.length ? <p className="small">Contributes to parent steps: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</p> : null}
-          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)}/>}
+          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))}/>}
           {workflow && <BranchDecisionHistory workflow={workflow}/>}
           {workflow && <SupervisorRecords workflow={workflow}/>}
           <p className="small">Lifecycle: {lifecycle.label}{thread.lifecycleDetail ? ` · T3 detail: ${thread.lifecycleDetail}` : ""}</p>
@@ -641,7 +641,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
       {retained.map(workflow => <EntityDetails title={<>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
         <p className="notice">Retained workflow record. It is not linked to the current task.</p>
-        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)}/>}
+        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))}/>}
         <SupervisorRecords workflow={workflow}/></EntityDetails>)}
       {(view.latest?.incompatibleWorkflows.length ?? 0) > 0 && <p className="notice" role="status">Some retained workflow records use an incompatible format and remain read-only: {view.latest!.incompatibleWorkflows.map(item => item.workflowId).join(", ")}.</p>}
     </div></EntityDetails>
