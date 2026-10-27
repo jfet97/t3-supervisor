@@ -235,13 +235,14 @@ const waitingReview = (clock: FixtureClock) => Effect.gen(function* () {
   const fixture = yield* dueCheckIn(clock);
   yield* fixture.run;
   const request = yield* fixture.requests.pending(projectId, fixture.binding.threadId);
-  assert.ok(request?.kind === "review" && request.state === "waiting" && request.batch && request.roleVersion);
+  // a root with workflow state carries the instructions handle, so no role version waits for delivery
+  assert.ok(request?.kind === "review" && request.state === "waiting" && request.batch && request.roleVersion === undefined);
   const run = fixture.supervisor.runs.find(item => item.userMessageId === request.messageId);
   assert.ok(run);
   return {fixture, request, run};
 });
 
-it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back completion, deliveredRoleVersion and the miss reset, also after reopen", () => Effect.gen(function* () {
+it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back completion and the miss reset, also after reopen", () => Effect.gen(function* () {
   const clock = {now: baseTime};
   const {fixture, request, run} = yield* waitingReview(clock);
   yield* fixture.requests.missedReview(fixture.binding.threadId);
@@ -262,7 +263,7 @@ it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back compl
   yield* execute(fixture.sql, "DROP TRIGGER c1_fail_acknowledgement");
   yield* fixture.run;
   const completed = yield* reviewState(fixture.sql, fixture.binding.threadId, request.id);
-  assert.deepEqual(completed, {state: "completed", error: null, runId: run.id, deliveredRoleVersion: request.roleVersion, reviewMisses: 0,
+  assert.deepEqual(completed, {state: "completed", error: null, runId: run.id, deliveredRoleVersion: null, reviewMisses: 0,
     acknowledged: [...pendingBefore].sort()});
   assert.deepEqual(yield* fixture.monitor.pending(projectId, operativeThreadId), []);
 }), {timeout: 10_000});

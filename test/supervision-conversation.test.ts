@@ -44,7 +44,10 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   const first = (yield* f.task())!;
   const root = f.projections.get(first.supervisorThreadId)!;
   root.thread.runtimeMode = "full-access"; root.thread.interactionMode = "default";
-  assert.match(first.requestText, /discussion with exploration stays quiet/u);
+  // the request is a handle; the discussion-versus-outcome rule is in the interpretation rules the root reads
+  assert.doesNotMatch(first.requestText, /Let's discuss why export is flaky/u);
+  const rules = yield* controller.conversation.readContextView((yield* f.binding())!, {view: "interpretation"});
+  assert.match(String(rules.instructions), /"Let's discuss possible causes before deciding; read what you need" remains quiet following despite exploratory research/u);
   yield* submitAndComplete(f, controller, first, {objective: draft.objective, reason: "Discussion before deciding", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null, conversation: decision()});
   yield* controller.cycle;
   const following = (yield* f.task())!;

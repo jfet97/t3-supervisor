@@ -82,9 +82,10 @@ it.effect("reference lists survive model context, canonical plans and strict rec
   const {definitions} = yield* fixture();
   const prepared = prepareWorkflowRequest("thread", "message", "Deliver the change", definitions);
   assert(prepared.context);
-  const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
-  assert.deepEqual(envelope.definitions.steps[0].references, paths);
-  assert.deepEqual(envelope.definitions.workflows[0].references, ["docs/delivery.md"]);
+  // the request is a handle; the definitions the model reads on demand (view definitions) are this context's, references intact
+  assert.doesNotMatch(prepared.requestText, /docs\/delivery\.md|"references"/u, "no definition is pushed with the request");
+  assert.deepEqual(prepared.context.steps[0]!.references, paths);
+  assert.deepEqual(prepared.context.workflows[0]!.references, ["docs/delivery.md"]);
   const result = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [
     {kind: "workflow", definitionId: "delivery", reason: "Deliver this task."},
     {kind: "step", definitionId: null, localId: "additional", name: "Additional", description: "Check extra behavior.", references: ["src/extra.ts"], reason: "Needed for this task."},

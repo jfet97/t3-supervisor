@@ -189,22 +189,22 @@ without returning, so a return belongs in a branch path:
 
 ```yaml
 name: Reviewed change
-description: Implement, then review until no material findings remain.
+description: Implement, verify and review until no material findings remain.
 sequence:
   - step: implement
+  - step: verify
   - workflow: review
   - branch:
       if: The review left material findings.
       then:
-        - step: address-findings
-        - back_to: review
+        - back_to: implement
   - step: deliver
 ```
 
 When work reaches the return, on the selected path with every earlier member settled,
 the workflow asks for a new attempt of its region: every occurrence from the target
-through the member that holds the return, here `review`, the branch and
-`address-findings`. Nothing after it, here `deliver`, starts while it waits, and the
+through the member that holds the return, here `implement`, `verify`, `review`
+and the branch. Nothing after it, here `deliver`, starts while it waits, and the
 recorded statuses in the region stay as the attempt left them. The Supervisor applies
 the return at a safe point, after the closed attempt's work has stopped. The closed
 attempt stays as history: its statuses, contributors, branch decisions and the child
@@ -378,29 +378,45 @@ A step whose description makes it conditional, such as prevention after a defect
 decided when the work reaches it. A manual workflow choice is not a waiver.
 Unclear applicability and broken definitions remain explicit outstanding issues.
 
-## Giving an entire workflow to reviewers
+## One reviewer pass, composed by its caller
 
-The delegation requirement can be entirely in the workflow description:
+A reviewer workflow describes one assigned reviewer's pass. Its caller owns reviewer
+count, assignments and any repeated work:
 
 ```yaml
 name: Reviewer
 description: |
-  The main agent must assign this entire workflow to one or more independent
-  reviewer agents. Assigned reviewers execute the sequence below and return
-  findings. The main agent addresses findings and requests further review after
-  relevant fixes until important findings are resolved.
+  One assigned reviewer performs one independent pass and reports material
+  findings. On a repeated pass, retain earlier findings and avoid reopening
+  settled issues without new evidence.
 sequence:
   - step: inspect-change
   - step: e2e-testing
   - step: report-findings
 ```
 
-If reviewer is required, the negotiated main plan includes `workflow: reviewer`.
-Its description supplies the obligation to delegate the whole workflow and repeat
-review, rather than adding a special wrapper step or another execution-policy field.
-The role-specific wording distinguishes main coordination from assigned reviewers'
-work. Semantic assessment needs actual independent reviews and follow-up, not merely
-a reference in a plan. Inclusion does not prove delegation or successful execution.
+For two independent reviewers, the caller uses two occurrences under `parallel` and
+assigns each to a different reviewer under the project's model policy. Wait for both
+reports before edits and findings accounting. Each reviewer follows its own sequence;
+one finishing does not complete the other's work. `parallel` does not launch agents.
+
+```yaml
+name: Paired review
+description: |
+  Assign each occurrence to an independent reviewer. Collect both reports before
+  editing or accounting for findings; preserve the project's model policy.
+parallel:
+  - workflow: reviewer
+  - workflow: reviewer
+```
+
+A completed pass can report important problems. The caller's acceptance rule remains
+open until the required findings are resolved or the requester explicitly decides
+them. If another pass is required, the caller uses a conditional `back_to` after the
+reviews join, as in [Returns](#returns), and reuses the same ordinary reviewer
+conversations where supported. Without a return, the plan continues to its following
+members; a reviewer description does not secretly restart earlier work. A reference
+or agreement does not prove delegation, execution or acceptance.
 
 ## Cycles and invalid definitions
 

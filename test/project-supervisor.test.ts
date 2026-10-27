@@ -299,8 +299,12 @@ it.effect("an agent-launched main is silent while off and, once enabled, its lau
   const sent = fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === binding.threadId);
   assert.equal(sent.length, 1);
   const text = String(sent[0]!.payload.text);
-  assert.match(text, /"requestedBy":\{"kind":"launching_agent","threadId":"coordinator"\}/u, "the request stays attributed to the launching agent");
-  assert.match(text, /Implement the CSV export with tests/u);
+  // the request is a handle: the body is read natively, and the context the root reads keeps the launching agent's attribution
+  assert.match(text, /"sourceMessageId":"agent-task"/u);
+  assert.doesNotMatch(text, /Implement the CSV export with tests/u);
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  assert.deepEqual((context.task as {sources: unknown}).sources, {requestedBy: {kind: "launching_agent", threadId: "coordinator"},
+    requesterMessages: [{messageId: "agent-task", requester: "launching_agent"}], operativeMessageIds: []}, "the request stays attributed to the launching agent");
   assert.equal(sent[0]!.payload.createdBy, "system", "the service's own request is not relabelled");
 
   assert.equal((yield* supervisor.submit(task!, taskFields(task!, "Implement the CSV export", "The launching agent asks for a repository change."))).status, "submitted");
@@ -625,7 +629,7 @@ it.effect("a provider-disabled objective does not block another main in the same
   const fixture = yield* makeFixture([{threadId: "first-thread", projectId: "project-a", turns: [{id: "first-task", sequence: 11, text: "Implement first"}]},
     {threadId: "second-thread", projectId: "project-a", turns: [{id: "second-task", sequence: 12, text: "Implement second"}]}]);
   // the two mains dispatch concurrently: only the first main's interpretation request is rejected as provider-disabled
-  fixture.setProviderDisabledDispatchMatching((payload) => String(payload.text).includes("Implement first"));
+  fixture.setProviderDisabledDispatchMatching((payload) => String(payload.text).includes('"mainThreadId":"first-thread"'));
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.runOnce;
   assert.equal((yield* fixture.store.task("first-thread"))?.status, "unavailable");
@@ -1145,7 +1149,7 @@ it.effect("parallel main worktrees retain distinct ownership and scoped recovery
   fixture.projections.get("tree-a")!.thread.worktreePath = "/work/a/tree-a";
   fixture.projections.get("tree-b")!.thread.worktreePath = "/work/a/tree-b";
   // the two mains dispatch concurrently: only tree A's interpretation request loses its response
-  fixture.setUnknownDispatchMatching((payload) => String(payload.text).includes("Implement in tree A"));
+  fixture.setUnknownDispatchMatching((payload) => String(payload.text).includes('"mainThreadId":"tree-a"'));
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.runOnce;
   const a = (yield* fixture.store.binding("project-a", "tree-a"))!;
@@ -1285,7 +1289,8 @@ it.effect("native Start runs one intent interpretation, grants only that chat an
   assert.ok(task);
   assert.equal(yield* f.supervisor.scopeEnabled("project-a", "manual"), false);
   assert.equal(yield* f.supervisor.workflowEditingEnabled("project-a", "manual"), false);
-  assert.match(task.requestText, /startRequested/);
+  assert.match(task.requestText, /Interpretation requested\./u);
+  assert.equal((yield* f.supervisor.conversation.readContextView((yield* f.fixture.store.binding("project-a", "manual"))!, {view: "context"})).supervision, "pending_start", "the Start verdict is asked through the context it reads");
   assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch").length, 1);
   const root = f.fixture.projections.get(task.supervisorThreadId)!;
   assert.equal((yield* f.supervisor.submit(task, {objective: null, reason: "User requested supervision; awaiting a substantive task.", sourceMessageIds: [args.userMessageId],

@@ -6,7 +6,6 @@ export const planningInstructions = "Use supervision_planning pause with current
   "Require each actor's ACK or verified quiescence; parent ACK holds dispatch only. Root/helpers may use local orchestrator_capabilities/delegate_task for one read-only writer created for this attempt; attach_draft uses its childThreadId/taskId as draftThreadId/draftTaskId. Follow draftInstruction and model/isolation rules. Writers cannot guide, edit, publish, monitor or delegate. " +
   "Reconcile ACKs, results and fresh work before adoption. For pending back_to, apply_return takes workflowId, workflowThreadId, expectedRevision, returnId, reason and open attemptId; it verifies pauses and retires old child runs. Main acceptance and child scoped plans remain. " +
   "Release with continue/no_plan. The fixed deadline covers ACK, drafting and negotiation; late results never re-pause. Preserve human Stops, limits and approvals.";
-export const planningReminder = "Use supervision_planning for scoped pause/ACK, optional drafting and release; reconcile fresh work before adoption. Deadlines and human limits remain.";
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
 const Time = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4000));

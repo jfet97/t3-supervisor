@@ -53,6 +53,29 @@ export const readNativeProviderTurns = (projection: Readonly<Record<string, unkn
   return turns;
 };
 
+/**
+ * Whether a published execution node of the thread lies in the provider turn's own graph: the turn's published root node and every
+ * node up to it carry this thread, the turn, its provider thread and no AppRun, and the walk crosses no nested subagent and nothing
+ * rolled back.
+ */
+export const providerTurnNode = (projection: Readonly<Record<string, unknown>> & {thread: {id: string}}, turn: NativeProviderTurn, nodeId: string): boolean => {
+  const nodes = new Map<string, Record<string, unknown>>();
+  for (const node of Array.isArray(projection.nodes) ? projection.nodes as unknown[] : [])
+    if (typeof node === "object" && node !== null && typeof (node as {id?: unknown}).id === "string") nodes.set((node as {id: string}).id, node as Record<string, unknown>);
+  const inTurn = (node: Record<string, unknown> | undefined): node is Record<string, unknown> => node !== undefined &&
+    node.threadId === projection.thread.id && node.providerTurnId === turn.id && node.providerThreadId === turn.providerThreadId &&
+    node.runId == null && node.rootNodeId === turn.nodeId && node.kind !== "subagent" && node.status !== "rolled_back";
+  const root = nodes.get(turn.nodeId);
+  if (!inTurn(root) || root.parentNodeId != null) return false;
+  const visited = new Set<string>();
+  for (let current = nodes.get(nodeId); inTurn(current) && !visited.has(current.id as string);
+    current = typeof current.parentNodeId === "string" ? nodes.get(current.parentNodeId) : undefined) {
+    if (current.id === turn.nodeId) return true;
+    visited.add(current.id as string);
+  }
+  return false;
+};
+
 const PublishedNodes = Schema.Array(Schema.Struct({
   id: Schema.String,
   threadId: Schema.String,

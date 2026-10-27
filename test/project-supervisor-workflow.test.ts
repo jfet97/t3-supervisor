@@ -524,38 +524,53 @@ it.effect("a queued request at or before the project activation boundary is neve
   assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for a request before the boundary");
 }));
 
-it.effect("the interpretation request carries the concise standing role once, permits reader discovery wrappers and decides relevance before definitions", () => Effect.gen(function* () {
+it.effect("the interpretation request carries the root notice and handles; the core, sections and staged rules are read on demand", () => Effect.gen(function* () {
   const fixture = yield* makeWorkflowFixture();
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.cycle;
   const task = (yield* fixture.task())!;
   const text = String(fixture.dispatches()[0]?.payload.text);
-  assert.ok(task.roleVersion, "the root's first message carries the standing role");
-  const occurrences = (part: string) => text.split(part).length - 1;
-  assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 1);
-  assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the standing role carries the local routing rule once");
-  assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
-  assert.match(text, /Use local T3\/Workflow tools and supervision_interpretation_submit when an interpretation request asks for it/u);
-  assert.match(text, /Do not assume a particular gateway/u);
-  assert.match(text, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
-  assert.match(text, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
-  const notice = JSON.parse(text.slice(text.lastIndexOf("\n{") + 1));
   const binding = (yield* fixture.binding())!;
+  const index = yield* supervisor.conversation.readContextView(binding, {view: "instructions"});
+  // the request names the binding fences and the instructions version, never the rules themselves
+  assert.ok(text.startsWith(supervisor.conversation.rootNotice(binding)!), "the root's first message carries the notice");
+  assert.match(text, new RegExp(`version ${String(index.version)}`, "u"));
+  assert.ok(text.length < 1_200, `interpretation request ${text.length} characters`);
+  for (const rule of [/Contact the operative only with one brief actionable delta/u, /Use this environment's local T3 thread tools/u, /SUBMISSION:|UNTRUSTED_WORKFLOW_ENVELOPE|sourcePin/u])
+    assert.doesNotMatch(text, rule);
+  const notice = JSON.parse(text.slice(text.lastIndexOf("\n{") + 1));
   assert.deepEqual(notice.reader, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation});
   assert.equal(notice.taskId, task.id);
   assert.equal(notice.sourceMessageId, task.sourceMessageId);
-  assert.doesNotMatch(text, /SUBMISSION:|UNTRUSTED_WORKFLOW_ENVELOPE|sourcePin/u);
+  // the core holds each reminder once, names operations and tools, and indexes the sections
+  const core = String(index.core);
+  const occurrences = (part: string) => core.split(part).length - 1;
+  assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 0, "the contact rule is its section's");
+  assert.match(String((yield* supervisor.conversation.readContextView(binding, {view: "instructions", section: "contact"})).instructions),
+    /Contact the operative only with one brief actionable delta/u);
+  assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the core carries the local routing rule once");
+  assert.match(core, /supervision_interpretation_submit when an interpretation request asks for it/u);
+  assert.match(core, /if one is not listed directly, check whether a connected gateway exposes it/u);
+  assert.doesNotMatch(core, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix/u, "no gateway, alias or recipe");
+  assert.match(core, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
+  assert.match(core, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
+  assert.deepEqual((index.sections as Array<{id: string}>).map(section => section.id),
+    ["monitoring", "contact", "stop_start", "authoring", "workflow_edit", "branches", "contributions", "planning", "definitions", "team"]);
   const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
   assert.deepEqual((context.submission as {arguments: unknown}).arguments, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
     taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source});
-  const instructions = yield* supervisor.conversation.readContextView(binding, {view: "interpretation"});
-  assert.match(String(instructions.instructions), /configured required references alone never make a task needed/u);
-  assert.match(String(instructions.instructions), /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
-  assert.match(String(instructions.instructions), /Read view context for current submission.arguments/u);
+  // stage one decides relevance before definitions; the plan rules are a second read only when a plan is needed
+  const instructions = String((yield* supervisor.conversation.readContextView(binding, {view: "interpretation"})).instructions);
+  assert.match(instructions, /configured required references alone never make a task needed/u);
+  assert.match(instructions, /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
+  assert.match(instructions, /Read view context for current submission.arguments/u);
+  assert.doesNotMatch(instructions, /A plan node is either|PLANNING PAUSE:/u);
+  const plan = String((yield* supervisor.conversation.readContextView(binding, {view: "interpretation", section: "plan"})).instructions);
+  assert.match(plan, /^PLANNING PAUSE:/u);
+  assert.match(plan, /A plan node is either/u);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
-  assert.equal((yield* fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
-  assert.equal(yield* supervisor.conversation.interpretationRole((yield* fixture.binding())!), null, "later root messages carry no second copy");
+  assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "later root messages carry the same notice, no role copy");
 }));
 
 it.effect("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", () => Effect.gen(function* () {

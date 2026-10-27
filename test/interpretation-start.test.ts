@@ -62,9 +62,16 @@ const pendingStart = Effect.gen(function* () {
   yield* f.runOnce();
   const task = yield* f.task();
   assert.equal(task.status, "waiting");
+  // the request is a handle; the root reads the pending Start's verdict request and its rules through its authenticated reads
   const request = String(f.interpretationDispatches().at(-1)?.text);
-  assert.match(request, /START AUTHORIZATION/u);
-  assert.match(request, /startRequested/u);
+  assert.doesNotMatch(request, /startRequested|sourcePin/u);
+  const context = yield* f.read({view: "context"});
+  assert.equal(context.status, "ok");
+  assert.equal(context.supervision, "pending_start");
+  assert.deepEqual(context.submission, {tool: "supervision_interpretation_submit", arguments: {supervisorThreadId: f.binding.threadId,
+    bindingGeneration: f.binding.generation, taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source}, startVerdict: true});
+  const rules = yield* f.read({view: "interpretation"});
+  assert.match(String(rules.instructions), /If submission\.startVerdict is true, judge whether the original human message explicitly requests supervision and add startRequested/u);
   return {f, task};
 });
 

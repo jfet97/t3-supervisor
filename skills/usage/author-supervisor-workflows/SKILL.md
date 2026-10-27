@@ -105,7 +105,7 @@ independently controlled decisions differ.
 
 Use a workflow `branch:` (`if`, `then`, optional `else`) only when one short, observable
 condition selects between substantially different pieces of work, such as a contained
-change getting one review instead of an iterative multi-model review. Keep finer
+change getting one reviewer instead of two independent complete reviewers. Keep finer
 conditions and completion rules in descriptions; there is no `elif`, jump or `goto`.
 To repeat earlier members as a visible new attempt, end a branch path with
 `back_to: <id>` naming an earlier member of the same sequential lane; the reference
@@ -169,11 +169,16 @@ overlap is intended; obligations a later phase starts early, such as a draft pul
 request, are evidence for it, not its start. Do not invent schema fields or a second
 required list.
 
-Let an iterative workflow's description own repetition and completion; callers reference
-it directly. A return repeats earlier members as a new attempt only for findings that
-change the outcome, which its branch condition names; never return for preferences. A findings step owns the main's accounting, not a wrapper whose only
-purpose is invoking Review. Distinguish reviewer assessment from author fixes. The
-reference explains reporting versus acceptance and persistent review.
+Keep each reviewer workflow to one pass by one reviewer. Its caller owns reviewer
+count and assignments, using `parallel` for independent complete passes. If earlier
+work must repeat, the caller uses a conditional `back_to`, for example after material
+findings or a verification/CI defect. Review preferences alone do not justify a return.
+Fine-grained work within an entered step can remain in its description; do not hide
+repetition across declared steps there. A findings step owns the main's accounting,
+not a wrapper whose only purpose is invoking Review. Distinguish a completed review
+report from acceptance of the work, and reviewer assessment from author fixes. Reuse
+the same ordinary reviewer conversations through supported APIs when repeating work.
+The reference explains reporting, acceptance and reviewer identity.
 
 Check the ledger and concrete cases: factual answers, consequential changes, report-only
 review, contested rebuttals, fixes, changed bases, interrupted chats and both paths of

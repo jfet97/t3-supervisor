@@ -3,6 +3,7 @@ import { mainRunNodeReader, timestampMs } from "./domain.js";
 import { record } from "./supervisor-native.js";
 import type { ConversationRequest } from "./supervisor-conversation-store.js";
 import type { Projection } from "./types.js";
+import { recognisedThreadReadArguments } from "./workflow-write-evidence.js";
 
 import { type NativeActivityRead } from "./supervisor-awareness-contract.js";
 export { NativeActivityRead } from "./supervisor-awareness-contract.js";
@@ -26,13 +27,10 @@ const toolValue = (input: unknown): unknown => {
   }
   return value;
 };
+// a read is recognised on the same native routes as every other call; its input may be recorded as JSON text
 const readArguments = (item: Record<string, unknown>): Record<string, unknown> | null => {
   const input = decodedObject(item.input);
-  if (!record(input)) return null;
-  if (["t3_thread_read", "mcp__t3_code__t3_thread_read", "mcp__t3-code__t3_thread_read", "t3-code.t3_thread_read"].includes(String(item.toolName))) return input;
-  if (["mcp__mcpx__mcpx_call_tool", "mcpx_call_tool"].includes(String(item.toolName)) &&
-    input.name === "t3-code__t3_thread_read" && record(input.arguments)) return input.arguments;
-  return null;
+  return record(input) ? recognisedThreadReadArguments({...item, input}) : null;
 };
 
 /** A successful native read is a fetched page, never proof that its contents were assessed or earlier gaps were filled. */

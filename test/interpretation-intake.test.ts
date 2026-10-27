@@ -265,7 +265,9 @@ it.live("CT-ISUB-01: a queued task prepared under the old prompt is prepared aga
   assert.equal(task.status, "waiting");
   assert.ok(task.attempt, "the old-prompt preparation is replaced by a typed one");
   assert.notEqual(task.requestText, legacyText);
-  assert.deepEqual(f.interpretationDispatches().map(command => String(command.text).includes(task.attempt!.attemptId)), [true]);
+  // the typed attempt is keyed to the exact prepared request, which names the task; its pins are read on demand, never pushed
+  assert.deepEqual(f.interpretationDispatches().map(command => String(command.text)), [task.requestText]);
+  assert.match(task.requestText, new RegExp(`Interpretation requested\\.[\\s\\S]*"taskId":"${task.id}"`, "u"));
   assert.equal(f.commands.some(command => command.text === legacyText), false, "the legacy text is never sent");
   // an in-flight request without a typed attempt and without a native run is never replayed with its stored text
   const root = f.root();

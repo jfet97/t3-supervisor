@@ -57,13 +57,13 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
 
   // reader coordinates and task identity are handles; submission pins and source bodies remain on demand.
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
-    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}]});
+    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}});
   assert.equal(reader.requestText.length, 206);
   assert.equal(sha256(reader.requestText), "eb43953379e962c15a0e699d7b718ba7edf2f9e121befca569a8e5a8a37a9a88");
   assert.deepEqual(reader.context, prepared.context);
   assert.deepEqual(reader.workflow, prepared.workflow);
   const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
-    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}],
+    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3},
       submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
         sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
   assert.equal(typed.requestText.length, 224);
