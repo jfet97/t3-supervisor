@@ -32,6 +32,7 @@ export const ProjectSupervisorScopeThreadSchema = Schema.Struct({
   origin: SupervisorScopeOrigin,
   lifecycle: SupervisorScopeLifecycle,
   lifecycleDetail: Schema.NullOr(Schema.String),
+  observedRunId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   archivedAt: Schema.NullOr(Schema.String),
   deletedAt: Schema.NullOr(Schema.String),
   activityRefs: Schema.Array(SupervisorActivityReferenceSchema),
@@ -189,6 +190,8 @@ export const observeScopeThread = (input: {
     origin,
     lifecycle: current.lifecycle,
     lifecycleDetail: current.detail,
+    ...(projection?.runs.length ? {observedRunId: (projection.runs.find(run => run.id === projection.thread.activeRunId) ??
+      [...projection.runs].filter(run => run.status !== "rolled_back").sort((a, b) => b.ordinal - a.ordinal)[0])?.id ?? null} : {}),
     archivedAt,
     deletedAt,
     activityRefs: input.lineageVerified === false ? [] : input.activityRefs.slice(0, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS),

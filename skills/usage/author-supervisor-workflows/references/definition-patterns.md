@@ -144,13 +144,14 @@ sequence:
       then:
         - workflow: single-review
       else:
-        - workflow: iterative-review
+        - workflow: paired-review
   - step: account-for-findings
 ```
 
-`account-for-findings` follows the whole branch on either path. Define `single-review`
-and `iterative-review` as ordinary workflows whose descriptions own their reviewer,
-model and repetition rules; the branch only chooses between them. Leave out `else`
+`account-for-findings` follows the whole branch on either path. A reviewer pass
+describes one reviewer and one artifact. `paired-review` composes two such passes
+with `parallel`; the caller coordinates findings and any conditional `back_to`
+after they join. Reviewer count and repetition belong to that caller. Leave out `else`
 when a false condition simply skips the extra work. Each path needs at least one
 member, the condition is one line of at most 300 characters, and a path can hold
 groups, workflow references, a further branch or a final return. There is no `elif`,

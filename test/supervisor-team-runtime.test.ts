@@ -594,16 +594,17 @@ it.effect("registration readiness uses a finite native check-in and exact member
   assert.ok(request);
   if (!request) throw new Error("readiness_request_missing");
   assert.ok(request.id.startsWith("team-ready:"));
-  // the readiness check, which precedes every assignment, is the one helper message carrying the full helper role
-  assert.equal(request.text.split("Use link_child only when the assigned target has no workflow document").length - 1, 1);
-  assert.ok(request.text.length < 9_500, `readiness ${request.text.length}`);
+  // the bootstrap supplies scope and reference coordinates, without copying the operating manual
+  assert.doesNotMatch(request.text, /link_child is needed|New steps start planned/u);
+  assert.match(request.text, /Read workflow_read view instructions using/u);
+  assert.ok(request.text.length < 2_000, `readiness ${request.text.length}`);
   // the helper reaches its tools as native MCP/MCPX tool calls; nothing suggests code (native proof 2026-10-23)
-  assert.match(request.text, /Discover and invoke actual MCP tools as native tool calls, directly or through mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool/u);
+  assert.match(request.text, /Native discovery: mcpx_search_tools, mcpx_get_tool_schema, mcpx_call_tool/u);
   assert.doesNotMatch(request.text, /\b(wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b/iu);
   assert.ok(request.text.includes("t3-supervisor-workflows__supervision_team"));
-  assert.ok(request.text.includes(`bindingGeneration=${f.binding.generation}`));
-  assert.ok(request.text.includes(`memberEpoch=${member.epoch}`));
-  const operation = JSON.parse(request.text.match(/operationId=("[^"]+")/u)?.[1] ?? "null") as string;
+  assert.ok(request.text.includes(`"bindingGeneration":${f.binding.generation}`));
+  assert.ok(request.text.includes(`"memberEpoch":${member.epoch}`));
+  const operation = JSON.parse(request.text.match(/"operationId":("[^"]+")/u)?.[1] ?? "null") as string;
   assert.ok(operation.length <= 128);
   assert.equal(transport.sent.get(request.messageId)?.threadId, member.threadId);
   assert.equal(yield* runtime.hasBlockingWork(f.binding), true);
@@ -840,9 +841,9 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   assert.ok(activityRefs.every(reference => !Object.hasOwn(reference, "sourceRunId")));
   assert.equal(request.text.includes("Omit sourceRunId"), true);
   assert.equal(request.text.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
-  assert.match(request.text, /mark them underway or completed in a separate later apply \(statuses, without resending the plan\) with status_changed evidence/u);
+  assert.match(request.text, /Read workflow_read view instructions once for version/u);
   assert.doesNotMatch(request.text, /record completion in a separate apply/u, "role and check-in text state one planned-first rule");
-  assert.match(request.text, /On rejection, read the reason, code, and path/u);
+  assert.doesNotMatch(request.text, /An apply call has action at the top level/u, "mutation examples live in the reference and tool schema");
   assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
     assignmentEpoch: targetEnvelope.assignmentEpoch}, {targetThreadId: "branch", assignmentRootThreadId: "branch",
     assignmentEpoch: (yield* f.teamStore.coverage(f.binding, "branch", parents)).assignmentEpoch});
@@ -873,14 +874,14 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   assertAdvertisedInput(workflowWriteToolDefinition, applyArguments, false);
   assertAdvertisedInput(supervisionGuideToolDefinition, guideArguments, false);
   assertAdvertisedInput(supervisionTeamToolDefinition, reportArguments, false);
-  assert.match(request.text, /\{action:"apply", \.\.\.that input, input:\{operationId, workflowId, expectedRevision, note, plan\}\}/u);
-  assert.match(request.text, /original toolInputs\.workflow_read\.input of that same target record in the latest normal monitor envelope, copied exactly without any read-pagination fields/u);
-  assert.match(request.text, /Guide adds that record's exact targetThreadId, not its assignmentRootThreadId/u);
-  assert.match(request.text, /only after fresh child evidence/u);
+  assert.match(request.text, /fetch plans\/status and local T3 activity as needed/u);
+  assert.match(request.text, /Each target carries its own complete toolInputs/u);
+  assert.match(request.text, /Each target carries its own complete toolInputs/u);
+  assert.match(request.text, /Read workflow_read view instructions once for version/u);
   assert.match(request.text, /a retry after uncertainty reuses the complete identical arguments/u);
   assert.doesNotMatch(request.text, /locatorBases|locator base/u);
   // a monitor review carries the concise helper core, not a second copy of the full role
-  assert.match(request.text, /the full helper instructions from your readiness check still apply/u);
+  assert.match(request.text, /Read workflow_read view instructions once for version/u);
   assert.doesNotMatch(request.text, /Use link_child only when the assigned target has no workflow document/u);
   const archivedToolInputs = archivedEnvelope.toolInputs as Record<string, {input: Record<string, unknown>}>;
   assert.deepEqual(Object.keys(archivedToolInputs), ["workflow_read"]);
@@ -1093,8 +1094,8 @@ it.effect("a check-in whose exact webhook body would exceed T3's 64 KiB delivery
   assert.ok(request);
   assertDeliverableCheckin(request, "check-in with wide notes");
   const ids = checkinTargetIds(request.text);
-  // the rendered bound alone would admit three targets; the exact body bytes admit fewer
-  assert.ok(ids.length >= 1 && ids.length < 3, `the body budget limits the packing (${ids.length})`);
+  // the shorter core admits more targets, while both original hard bounds still apply
+  assert.ok(ids.length >= 1 && ids.length < 6, `the body budget limits the packing (${ids.length})`);
 }));
 
 it.effect("a target too large on its own is neither sent nor acknowledged and raises a policy-specific attention event", () => Effect.gen(function* () {
@@ -1447,7 +1448,7 @@ const recoveryFixture = Effect.gen(function* () {
     const runId = `native-run:${notice.id}:${notice.deliveryAttempt}`;
     const delivery = transport.sent.get(`supervisor-team-notice:${notice.id}:attempt:${notice.deliveryAttempt}`)!;
     assert.ok(delivery, "the notice must actually have been sent through the existing transport");
-    assert.match(delivery.text, /the full helper instructions from your readiness check still apply/u);
+    assert.match(delivery.text, /Read workflow_read view instructions once for version/u);
     assert.doesNotMatch(delivery.text, /Use link_child only when the assigned target has no workflow document/u, "a notification never repeats the full helper role");
     assert.ok(delivery.text.length < 5_000, `notification ${delivery.text.length}`);
     if (!projection.messages.some(value => value.id === messageId)) projection.messages.push({id: messageId, threadId: member.threadId, runId,

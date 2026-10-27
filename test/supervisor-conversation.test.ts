@@ -1348,11 +1348,11 @@ it.effect("helper provider isolation is opt-in in root roles and uses the curren
   const standard = yield* makeFixture(clock, {teamEnabled: true});
   const roleFor = (conversation: Fixture["conversation"], binding: BindingRecord) => conversation.roleFor(binding);
   const standardRole = yield* roleFor(standard.conversation, standard.binding);
-  assert.doesNotMatch(standardRole, /t3_thread_configuration|target\.providerInstanceId/u);
+  assert.doesNotMatch(standardRole, /t3_thread_configure|target\.providerInstanceId/u);
 
   const isolated = yield* makeFixture(clock, {helperProviderInstanceId: "supervisor-helpers-20348", teamEnabled: true});
   const isolatedRole = yield* roleFor(isolated.conversation, isolated.binding);
-  assert.match(isolatedRole, /t3_thread_configuration/u);
+  assert.match(isolatedRole, /t3_thread_configure/u);
   assert.match(isolatedRole, /target\.providerInstanceId to "supervisor-helpers-20348"/u);
   assert.match(isolatedRole, /use native delegate_task for a short bootstrap as your direct child/u);
   assert.doesNotMatch(isolatedRole, /inherit this root's model unless a configured T3 override is selected/u);

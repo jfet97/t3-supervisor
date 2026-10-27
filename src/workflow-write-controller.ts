@@ -1,4 +1,5 @@
 import { conversationAuthorityCurrent, conversationMayContact, taskScopeRevision } from "./supervision-conversation.js";
+import {helperInstructions, helperInstructionsVersion} from "./supervisor-helper-instructions.js";
 import { conversationOriginAllowed, projectRequesterPolicy } from "./task-requester.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, Layer, Option, Schema } from "effect";
 import { ConversationDecision } from "./supervision-conversation-contract.js";
@@ -1998,8 +1999,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
           pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
             targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))}))};
     }
-    const binding = yield* resolveBinding(parsed.value, false, parsed.value.view === "context" ? "status" : "read");
+    const binding = yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" ? "status" : "read");
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
+    if (parsed.value.view === "instructions" && parsed.value.supervisorThreadId !== binding.threadId)
+      return {status: "ok", view: "instructions", version: helperInstructionsVersion, instructions: helperInstructions};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};
     const {view, definitionIds, includeSources, record: viewRecord} = parsed.value;
     // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal

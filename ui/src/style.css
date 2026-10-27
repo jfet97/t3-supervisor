@@ -754,3 +754,17 @@ select { max-width: 36rem; }
 .orphan-marker { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; margin-block: 6px; color: var(--quiet); }
 .orphan-marker > strong { color: var(--ink); }
 .orphan-marker > code { overflow-wrap: anywhere; font-weight: 400; }
+
+/* task history keeps record order while the plan can revisit an earlier step */
+.task-view-switch { gap: 0; inline-size: fit-content; }
+.task-view-switch button { border-radius: 0; min-inline-size: 88px; }
+.task-view-switch button:first-child { border-start-start-radius: 7px; border-end-start-radius: 7px; }
+.task-view-switch button:last-child { border-start-end-radius: 7px; border-end-end-radius: 7px; margin-inline-start: -1px; }
+.task-view-switch button[aria-pressed="true"] { background: var(--soft); border-color: var(--teal); font-weight: 700; position: relative; }
+.workflow-history-list { list-style: none; margin: 0; padding: 0; }
+.workflow-history-list > li { display: grid; gap: 10px; padding-block: 22px; border-block-start: 1px solid var(--line); }
+.workflow-history-list > li:first-child { padding-block-start: 0; border-block-start: 0; }
+.workflow-history-list p { margin: 0; max-inline-size: 75ch; }
+.workflow-history-list h3 { margin: 0; font-size: 16px; }
+.activity-awareness code, .workflow-history code { overflow-wrap: anywhere; }
+.planning-status { padding-block-end: 22px; border-block-end: 1px solid var(--line); }

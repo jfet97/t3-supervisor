@@ -346,8 +346,12 @@ const makeConversationStore = Effect.gen(function* () {
       const next = attempt.targets.find(target => target.threadId === previous.threadId);
       return !next || deliveryChanged(previous.hold, next.hold) || deliveryChanged(previous.release, next.release);
     });
-    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !mayAdvance && current.state !== attempt.state ||
-      current.draft && current.draft.threadId !== attempt.draft?.threadId))
+    const draftChanged = current?.draft && (!attempt.draft || current.draft.threadId !== attempt.draft.threadId || current.draft.taskId !== attempt.draft.taskId ||
+      deliveryChanged(current.draft.ownerNotice, attempt.draft.ownerNotice) || current.draft.cleanup?.some((entry, index) => {
+        const next = attempt.draft?.cleanup?.[index];
+        return !next || entry.type !== next.type || entry.runId !== next.runId || deliveryChanged(entry.receipt, next.receipt);
+      }));
+    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !mayAdvance && current.state !== attempt.state || draftChanged))
       return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt_identity", sqlReason: null});
     yield* db`INSERT INTO supervisor_planning_attempts VALUES(${attempt.id},${attempt.projectId},${JSON.stringify(attempt)},${attempt.createdAt})
       ON CONFLICT(id) DO UPDATE SET document=excluded.document`;

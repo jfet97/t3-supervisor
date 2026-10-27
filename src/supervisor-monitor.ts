@@ -20,7 +20,7 @@ export const activeWatchInstructions = "Watch covered work continuously: read T3
   "After catching up, pace with local t3_thread_wait (about five seconds): it waits for run completion, not activity. " +
   "Obey next/end-turn; the service continues active work. Otherwise end only on completion, standby or context rotation, with outcome and marker. " +
   "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.";
-export const activeWatchReminder = "Watch active work: read forward after bounded T3 waits, separate read/assessment, obey yields; the service continues. Stay quiet for routine work.";
+export const activeWatchReminder = "Watch active work: read forward after bounded T3 waits, distinguish reads from assessments and obey yields. Routine work stays quiet.";
 
 export type SupervisorMonitorPriority =
   | "user_instruction"

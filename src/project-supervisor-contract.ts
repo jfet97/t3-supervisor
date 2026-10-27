@@ -379,7 +379,7 @@ export const MonitoringStatus = Schema.Struct({
   review: Schema.optionalKey(MonitoringReview),
   awareness: Schema.optionalKey(Schema.Struct({
     reads: Schema.Array(NativeActivityRead),
-    assessments: Schema.Array(Schema.Struct({actorThreadId: Schema.String, targetThreadId: Schema.String, at: Schema.Number, throughObservedAt: Schema.Number, itemIds: Schema.Array(Schema.String)})),
+    assessments: Schema.Array(Schema.Struct({actorThreadId: Schema.String, targetThreadId: Schema.String, at: Schema.Number, throughObservedAt: Schema.NullOr(Schema.Number), itemIds: Schema.Array(Schema.String)})),
   })),
 });
 export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;

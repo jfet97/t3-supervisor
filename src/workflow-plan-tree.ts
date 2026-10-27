@@ -382,12 +382,14 @@ export const notApplicableSubtrees = (plan: WorkflowPlanGroupInfo | null, select
  * The occurrences whose latest status record is a not-applicable assessment made in the current task scope; an assessment from an earlier
  * scope, or one followed by a status change, no longer counts. Pending entries of the apply being validated belong to the current scope.
  */
-export const notApplicableNodeIds = (stored: ReadonlyArray<{kind: string; targetNodeId: string | null; scopeRevision?: string}>, scope: string | null,
+export const notApplicableNodeIds = (stored: ReadonlyArray<{kind: string; targetNodeId: string | null; scopeRevision?: string; return?: {regionNodeIds?: readonly string[]}}>, scope: string | null,
   pending: ReadonlyArray<{kind: string; targetNodeId?: string | null}> = []): Set<string> => {
   const latest = new Map<string, boolean>();
-  for (const item of stored)
+  for (const item of stored) {
+    if (item.kind === "return_applied") for (const id of item.return?.regionNodeIds ?? []) latest.delete(id);
     if (item.targetNodeId && (item.kind === "status_changed" || item.kind === "not_applicable"))
       latest.set(item.targetNodeId, item.kind === "not_applicable" && scope !== null && item.scopeRevision === scope);
+  }
   for (const item of pending)
     if (item.targetNodeId && (item.kind === "status_changed" || item.kind === "not_applicable")) latest.set(item.targetNodeId, item.kind === "not_applicable");
   return new Set([...latest].flatMap(([nodeId, current]) => current ? [nodeId] : []));

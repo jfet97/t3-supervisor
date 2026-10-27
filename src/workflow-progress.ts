@@ -25,6 +25,29 @@ export const WorkflowProgressObservationSchema = Schema.Struct({
 });
 export type WorkflowProgressObservation = typeof WorkflowProgressObservationSchema.Type;
 
+export const WorkflowHistoryEventSchema = Schema.Struct({
+  id: Schema.String, sequence: Schema.Number, kind: Schema.String, recordedAt: Schema.Number,
+  targetNodeId: NullableText, targetNodeName: NullableText, attempt: Schema.NullOr(Schema.Number),
+  statusFrom: Schema.NullOr(WorkflowExecutionStatus), statusTo: Schema.NullOr(WorkflowExecutionStatus),
+  sourceThreadId: NullableText, sourceMessageId: NullableText, sourceItemId: NullableText, note: Schema.String,
+});
+export type WorkflowHistoryEvent = typeof WorkflowHistoryEventSchema.Type;
+
+/** Stored append order is authoritative even when several events share a timestamp. */
+export const progressHistory = (document: WorkflowStateDocument): WorkflowHistoryEvent[] => {
+  const attempts = new Map<string, number>();
+  return document.evidence.map((item, index) => {
+    if (item.kind === "return_applied" && item.return) {
+      const returned = document.returns.find(returned => returned.returnId === item.return!.returnId && returned.state === "applied");
+      for (const id of returned?.regionNodeIds ?? []) attempts.set(id, (attempts.get(id) ?? 1) + 1);
+    }
+    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: item.recordedAt, targetNodeId: item.targetNodeId,
+      targetNodeName: item.targetNodeName, attempt: item.targetNodeId ? attempts.get(item.targetNodeId) ?? 1 : null,
+      statusFrom: item.statusFrom, statusTo: item.statusTo, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
+      sourceItemId: item.sourceItemId ?? null, note: item.note};
+  });
+};
+
 // a main-reported external contribution; its text is untrusted and its execution was not observed
 export const WorkflowProgressContributionSchema = Schema.Struct({
   contributionId: Schema.String,
@@ -128,6 +151,8 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
     nodeName: Schema.String,
   })),
   observations: Schema.Array(WorkflowProgressObservationSchema),
+  history: Schema.optionalKey(Schema.Array(WorkflowHistoryEventSchema)),
+  historyComplete: Schema.optionalKey(Schema.Boolean),
   contributions: Schema.Array(WorkflowProgressContributionSchema),
   branchSelections: Schema.optionalKey(Schema.Array(WorkflowProgressBranchSelectionSchema)),
   branchEvents: Schema.optionalKey(Schema.Array(WorkflowProgressBranchEventSchema)),
@@ -288,6 +313,13 @@ const progressReturns = (document: WorkflowStateDocument): WorkflowProgressRetur
     retiredRuns: item.retiredRuns.map(run => ({threadId: run.threadId, runId: run.runId})), note: item.resolution?.note ?? null}));
 };
 
+/** Previous attempts stay in History, while the current Plan gets only this attempt's assessments. */
+const currentAttemptObservations = (document: WorkflowStateDocument): WorkflowStateEvidence[] => {
+  const current = occurrenceAttempts(document.returns);
+  const ids = new Set(progressHistory(document).filter(item => !item.targetNodeId || item.attempt === (current.get(item.targetNodeId) ?? 1)).map(item => item.id));
+  return document.evidence.filter(item => observationKinds.has(item.kind) && ids.has(item.id));
+};
+
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
   projectId: document.projectId,
@@ -301,7 +333,9 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   plan: document.plan,
   updatedAt: document.updatedAt,
   parentNodeReferences: [...parentNodeReferences],
-  observations: document.evidence.filter(item => observationKinds.has(item.kind))
+  history: progressHistory(document),
+  historyComplete: true,
+  observations: currentAttemptObservations(document)
     .sort((left, right) => right.recordedAt - left.recordedAt).slice(0, 20).map(item => ({
       id: item.id,
       // a not-applicable assessment from an earlier task scope stays as history, not as a current disposition

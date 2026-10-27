@@ -363,20 +363,21 @@ advisory conversation, not filesystem prevention or a dashboard approval gate.
 
 ## Monitoring, recovery and lifecycle
 
-Ongoing checks observe the main and its verified native and delegated descendants,
-using the project age/count thresholds (ten finalized activities by default, or the
-oldest finished activity after at most two minutes: one or two minutes can be chosen,
-two is the default and the upper bound), one shared 30-second per-main cooldown and
-one service check-in in flight per Supervisor. These bound when a check-in becomes
-due, not when the model answers: a check-in still in flight, a busy root, Stop or
-unavailable native access still defers the wake. Forks remain separate scopes. Native child lifecycle comes from its
-direct parent's child record; an idle child mirror with no AppRun is not completion.
-Bounded activity batches identify their source and show incomplete reads explicitly.
-Completed, failed, interrupted and cancelled runs have terminal priority. Verified
-native-child terminal changes use the exact direct-parent record and are routed to
-the current root/helper responsible for that child. Priority bypasses age/count,
-while the existing cooldown and acknowledgement rules still apply. Repeated reads
-of the same terminal version do not create another review.
+Active work is followed through native T3 reads across the main and its verified
+children. The owner reads forward from each target's cursor, completes cut-off
+text and fetches plans or details only as needed. Child lists are metadata, not
+transcript reads. A bounded `t3_thread_wait` waits for run completion, not new
+activity; when T3 requires a yield, the service promptly continues verified active
+work. Active following bypasses the idle age/count thresholds and cooldown, and
+never steers into a Supervisor's ongoing thinking. One model turn runs per owner.
+
+Idle work retains the project age/count thresholds and 30-second fallback cooldown.
+Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;
+forks remain separate scopes. Native child lifecycle comes from its direct parent,
+not an idle mirror. Finished, failed, interrupted and cancelled runs have priority.
+Read coverage records successful native pages separately from explicit assessments;
+neither a read nor an assessment proves operative execution. Missing or cut-off
+coverage stays visible, and a helper report does not invent an exact read watermark.
 
 Each root monitoring check-in names its request and is pinned when it is prepared: the
 binding generation and, per included task, its revision and its main workflow (or the
@@ -401,6 +402,36 @@ so the next one follows the cooldown and the third consecutive miss requires Ret
 The dashboard's monitoring status shows the last confirmed outcome and the current one
 that is recorded, unconfirmed or missing. Recording sends nothing, and an outcome or
 guidance is the Supervisor's assessment, not evidence that the operative acted on it.
+
+### Planning pauses
+
+When planning changes what affected actors do next, `supervision_planning pause`
+requests a bounded hold for those actors. Each actor must acknowledge its own pause
+or be verified quiet; a parent acknowledgement holds its dispatch only. Native or
+idle children use a verified parent relay. Unrelated siblings keep working.
+
+One project-configurable deadline (default five minutes, ten seconds to one hour)
+starts at the first delivery attempt and covers acknowledgement, drafting and
+negotiation. Progress and later settings changes do not renew it. An independent
+service watchdog releases possibly delivered unresolved holds at expiry, including
+when an owner or original send is stuck. No-plan and explicit continue also release
+the wait. Human Stops, pauses, limits and approvals remain binding.
+
+The owner may start one new read-only app-owned drafting task alongside the pause,
+then register its actual task/thread IDs with `attach_draft`. This worker writes
+content only and has no monitoring, workflow-write, guidance or delegation authority.
+Its result queues an owner notification without steering its thinking. The owner
+re-reads current work before adoption; adoption waits for the relevant actors.
+Ending the attempt cleans up its registered drafting task while retaining unknown
+native command outcomes. Late content never renews the pause or publishes itself.
+
+A reached `back_to` is applied through `supervision_planning apply_return` after
+current pause/quiescence checks. It preserves agreement and starts a new attempt;
+real commitment changes still require a revised proposal. Old child runs are fenced
+using actual execution IDs. When a native child exposes no independent run ID, the
+return is refused rather than treating its shared parent run as an execution ID.
+Use supported ordinary reviewer continuations or fresh app-owned delegated passes
+carrying previous findings when execution provenance is needed.
 
 Fresh native request state controls waiting: resolved, expired or cancelled requests
 clear matching stale waiting summaries, while missing or mismatched evidence stays

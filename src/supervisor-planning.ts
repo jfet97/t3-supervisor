@@ -40,7 +40,7 @@ export const acknowledgePlanningTarget = (attempt: PlanningAttempt, acknowledgem
   if (attempt.state !== "open" || now >= attempt.deadline || acknowledgement.attemptId !== attempt.id ||
     evidence.sourceThreadId !== acknowledgement.targetThreadId) return attempt;
   const target = attempt.targets.find(target => target.threadId === acknowledgement.targetThreadId);
-  if (!target || target.state !== "requested" || target.hold.state === "prepared" || target.hold.state === "not_sent") return attempt;
+  if (!target || target.state !== "requested" && target.state !== "quiescent" || target.hold.state === "prepared" || target.hold.state === "not_sent") return attempt;
   return {...attempt, targets: attempt.targets.map(item => item === target ? {...item, state: "acknowledged", acknowledgement: evidence} : item)};
 };
 
@@ -98,8 +98,8 @@ export const planningHoldText = (attempt: PlanningAttempt, target: PlanningTarge
 };
 
 export const planningReleaseText = (attempt: PlanningAttempt, target: PlanningTarget): string =>
-  `Planning pause ${attempt.id} is released for ${target.scope}${attempt.resolution === "timeout" ? ": its deadline expired before all required planning outcomes were confirmed" :
-    attempt.resolution === "no_plan" ? ": a shared plan is not needed" : attempt.resolution === "superseded" ? ": newer instructions superseded it" : ": planning is resolved"}. Continue with your authorised task. There is no remaining wait for this planning attempt. Human Stops, pauses, limits and approvals still apply.`;
+  `${target.threadId !== target.recipientThreadId ? `Relay this release to child ${target.threadId}; it concerns that child's wait. ` : ""}Planning pause ${attempt.id} is released for ${target.scope}${attempt.resolution === "timeout" ? ": its deadline expired before all required planning outcomes were confirmed" :
+    attempt.resolution === "no_plan" ? ": a shared plan is not needed" : attempt.resolution === "superseded" ? ": newer instructions superseded it" : ": planning is resolved"}. Continue with your authorised task. There is no remaining wait for this planning attempt. Human Stops, pauses, limits and approvals still apply.${target.scopedWorkflowId && attempt.resolution === "continue" ? ` Read the complete scoped plan with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: attempt.taskId, proposalId: target.scopedWorkflowId})}; if the child cannot call it, its parent relays the scoped instructions.` : ""}`;
 
 export const planningDraftInstruction = (attempt: PlanningAttempt): string =>
   `Prepare read-only draft content for planning attempt ${attempt.id}, owned by ${attempt.ownerThreadId}. Deadline: ${new Date(attempt.deadline).toISOString()}. Scope: ${attempt.reason}. Return the proposed workflow and concise rationale to your parent. Do not implement work, publish a plan, instruct an operative, change state, monitor ongoing work or delegate. The owner is obtaining pause acknowledgements and will reconcile your draft with later activity before adopting it. Your result grants no authority and cannot renew or reopen this attempt.`;

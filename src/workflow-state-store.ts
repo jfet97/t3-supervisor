@@ -1062,7 +1062,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     return makeEvidence({operationId, owner, kind: event.kind, now, targetNodeId: event.entry.targetNodeId, targetNodeName: target?.name ?? null,
       statusFrom: event.kind === "return_applied" ? target?.status ?? null : null, statusTo: event.kind === "return_applied" ? "planned" : null,
       sourceThreadId: event.entry.sourceThreadId, sourceRunId: event.entry.sourceRunId, sourceMessageId: event.entry.sourceMessageId, sourceItemId: null,
-      agreementKey: null, note: note.slice(0, workflowMutationLimits.maxTextLength), return: {returnId: event.entry.returnId}});
+      agreementKey: null, note: note.slice(0, workflowMutationLimits.maxTextLength), return: {returnId: event.entry.returnId, ...(event.kind === "return_applied" ? {regionNodeIds: [...event.entry.regionNodeIds]} : {})}});
   };
 
   const getState = (projectId: string, mainThreadId: string, threadId = mainThreadId) => run(Effect.gen(function* () {
@@ -1548,13 +1548,16 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const branchSelections = current.branchSelections.map(item => item.state === "current" && region.has(item.nodeId)
       ? {...item, state: "invalidated" as const, invalidatedAt: at} : item);
     const evidence = [...current.evidence, yield* returnEvidence(owner, operationId, {kind: "return_applied", entry: applied, note: input.note}, plan, at)];
+    evidence.push(yield* makeEvidence({operationId, owner, kind: "status_changed", now: at, targetNodeId: null, targetNodeName: null,
+      statusFrom: current.status, statusTo: "underway", sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null,
+      agreementKey: null, note: `Attempt ${entry.attempt + 1} starts after returning to earlier work. ${input.note}`.slice(0, workflowMutationLimits.maxTextLength)}));
     // the reopened region holds nothing back: a return pending inside it is no longer reached
     const synced = syncedReturns({...current, plan: replanned.plan, branchSelections, evidence,
       returns: current.returns.map(item => item.returnId === applied.returnId ? applied : item)}, at);
     for (const event of synced.events) evidence.push(yield* returnEvidence(owner, operationId, event, replanned.plan, at));
     if (evidence.length > workflowMutationLimits.maxEvidence) return {status: "invalid", operationId, reason: "evidence_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (synced.returns.length > workflowMutationLimits.maxReturns) return {status: "invalid", operationId, reason: "return_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
-    const next: WorkflowStateDocument = {...current, revision: current.revision + 1, plan: replanned.plan, branchSelections, returns: synced.returns, evidence, updatedAt: at};
+    const next: WorkflowStateDocument = {...current, status: "underway", revision: current.revision + 1, plan: replanned.plan, branchSelections, returns: synced.returns, evidence, updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision)))

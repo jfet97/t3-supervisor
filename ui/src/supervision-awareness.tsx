@@ -12,12 +12,13 @@ export function ActivityAwareness({awareness, threadId}: {awareness: Awareness; 
   return <div className="activity-awareness text-group small">
     <p><strong>Last native read:</strong> {read ? <>{time(read.at)}{read.partial ? " · text cut off" : ""}</> : "Not reported"}</p>
     <p><strong>Last recorded assessment:</strong> {assessment ? time(assessment.at) : "Not reported"}</p>
-    {read && (!assessment || read.at > assessment.throughObservedAt) && <p className="muted">The latest read goes beyond the last recorded assessment. Reading alone does not assess the work.</p>}
+    {read && (!assessment || assessment.throughObservedAt !== null && read.at > assessment.throughObservedAt) && <p className="muted">The latest read goes beyond the last recorded assessment. Reading alone does not assess the work.</p>}
     {read && <EntityDetails title="Read coverage"><div className="text-group">
       <p>Read by <a href={threadLink(read.actorThreadId)}>this Supervisor</a>{read.itemId && <> · latest returned item <code>{read.itemId}</code></>}.</p>
       <p>{read.partial ? "This read contains cut-off text. It does not establish complete coverage." : read.snapshotEndReached
         ? "This activity page reached the end of its snapshot. Earlier gaps and later activity are not established by that fact." : "This is an item or partial-page read. Complete transcript coverage is not established."}</p>
-      {assessment && <p>The recorded assessment covers the check-in activity collected through {time(assessment.throughObservedAt)}.</p>}
+      {assessment && <p>{assessment.throughObservedAt === null ? "The helper recorded an assessment; its exact activity coverage is not established by that report." :
+        `The recorded assessment covers the check-in activity collected through ${time(assessment.throughObservedAt)}.`}</p>}
     </div></EntityDetails>}
   </div>;
 }

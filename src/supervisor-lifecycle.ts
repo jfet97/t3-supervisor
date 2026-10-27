@@ -199,6 +199,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
       if (!document) return false;
       const unsettled = unsettledOccurrences(document.plan, documentBranchSelections(document),
         notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null));
+      if (document.returns.some(item => item.state === "pending")) return true;
       if (document.status === "completed" && unsettled.length === 0) return false;
       // an open external result can coexist with the operative's own unfinished work, so only an explicit wait acknowledges the blocker
       const latest = owned.filter(request => request.kind === "review" && request.reviewPins).at(-1);
@@ -524,7 +525,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
     if (!(task.supervision === "not_needed" && conversationMayObserve(task))) {
       if (!workflows || task.agreement?.status !== "agreed") return;
       const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
-      if (!document || document.sourceBinding?.taskId !== task.id || document.sourceBinding.sourceHash !== taskScopeRevision(task) || document.status !== "completed" || unsettledOccurrences(document.plan, documentBranchSelections(document),
+      if (!document || document.sourceBinding?.taskId !== task.id || document.sourceBinding.sourceHash !== taskScopeRevision(task) || document.status !== "completed" || document.returns.some(item => item.state === "pending") || unsettledOccurrences(document.plan, documentBranchSelections(document),
         notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)).length !== 0) return;
     }
     const read = yield* attempt(readMain(binding));

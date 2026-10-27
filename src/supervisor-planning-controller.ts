@@ -1,10 +1,12 @@
-import { Cause, Clock, Context, Effect, Exit, FiberMap, Layer, Option, Schedule, Schema } from "effect";
+import { WorkflowStateStore } from "./workflow-state-store.js";
+import { planEntities } from "./workflow-plan-tree.js";
+import { Cause, Clock, Context, Effect, Exit, FiberMap, Layer, Option, Schedule, Schema, Semaphore } from "effect";
 import { GuidanceDb } from "./db.js";
 import { mainRunNodeReader, projectionHasOngoingWork } from "./domain.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
 import { projectRequesterPolicy } from "./task-requester.js";
-import { requesterSources } from "./supervision-conversation.js";
+import { conversationAuthorityCurrent, requesterSources } from "./supervision-conversation.js";
 import { SupervisorIds } from "./ids.js";
 import { ProjectSupervisorStore, type BindingRecord } from "./project-supervisor-store.js";
 import { taskScopeRevision } from "./supervision-conversation.js";
@@ -32,25 +34,27 @@ const Arguments = Schema.Struct({
   supervisorThreadId: Id, bindingGeneration: Epoch, memberEpoch: Schema.optional(Epoch),
   assignmentRootThreadId: Schema.optional(Id), assignmentEpoch: Schema.optional(Epoch),
   taskId: Id, taskRevision: Id,
-  action: Schema.Literals(["read", "pause", "attach_draft", "release"]),
+  action: Schema.Literals(["read", "pause", "attach_draft", "release", "apply_return"]),
   operationId: Schema.optional(Id), attemptId: Schema.optional(Id),
   targetThreadIds: Schema.optional(Schema.mutable(Schema.Array(Id).check(Schema.isMinLength(1), Schema.isMaxLength(100)))),
   reason: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4000))),
   draftThreadId: Schema.optional(Id), draftTaskId: Schema.optional(Id),
   resolution: Schema.optional(Schema.Literals(["continue", "no_plan"])),
+  workflowThreadId: Schema.optional(Id), workflowId: Schema.optional(Id), expectedRevision: Schema.optional(Epoch), returnId: Schema.optional(Id),
 });
 type PlanningArguments = typeof Arguments.Type;
 
 export const supervisionPlanningToolDefinition = {
   name: "supervision_planning",
-  description: "Request a bounded planning pause for affected operational actors, read ACK/draft state, attach one read-only drafting child, or explicitly release the planning wait. Uses the caller's exact native tool evidence and current source/ownership. A parent ACK never confirms an active child. The service owns delivery and the fixed deadline. Drafting may begin immediately; adoption waits for the relevant ACKs and a fresh owner assessment. This never changes human Stops, pauses or approvals.",
+  description: "Request a bounded planning pause for affected operational actors, read ACK/draft state, attach one read-only drafting child, or explicitly release the planning wait. Uses the caller's exact native tool evidence and current source/ownership. A parent ACK never confirms an active child. The service owns delivery and the fixed deadline. Drafting may begin immediately with local T3 delegate_task (one read-only app-owned child, record its taskId and childThreadId and attach_draft); adoption waits for the relevant ACKs and a fresh owner assessment. apply_return requires workflowId, workflowThreadId, expectedRevision, returnId, reason and an open attemptId; the service verifies current pauses/quiescence and captures retired child runs. This never changes human Stops, pauses or approvals.",
   inputSchema: {type: "object", additionalProperties: false,
     required: ["supervisorThreadId", "bindingGeneration", "taskId", "taskRevision", "action"],
     properties: {
       supervisorThreadId: {type: "string"}, bindingGeneration: {type: "integer", minimum: 1}, memberEpoch: {type: "integer", minimum: 1},
       assignmentRootThreadId: {type: "string"}, assignmentEpoch: {type: "integer", minimum: 1}, taskId: {type: "string"}, taskRevision: {type: "string"},
-      action: {type: "string", enum: ["read", "pause", "attach_draft", "release"]}, operationId: {type: "string"}, attemptId: {type: "string"},
+      action: {type: "string", enum: ["read", "pause", "attach_draft", "release", "apply_return"]}, operationId: {type: "string"}, attemptId: {type: "string"},
       targetThreadIds: {type: "array", minItems: 1, maxItems: 100, items: {type: "string"}}, reason: {type: "string", maxLength: 4000},
+      workflowThreadId: {type: "string"}, workflowId: {type: "string"}, expectedRevision: {type: "integer", minimum: 1}, returnId: {type: "string"},
       draftThreadId: {type: "string"}, draftTaskId: {type: "string"}, resolution: {type: "string", enum: ["continue", "no_plan"]},
     }},
 } as const;
@@ -61,7 +65,7 @@ const attempt = <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<Attempt<A>> =
     cause => Effect.succeed<Attempt<A>>({ok: false, cause: Cause.squash(cause)})) as Effect.Effect<Attempt<A>>;
 const terminal = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ownReplies = (projection: Projection): MessageInfo[] => projection.messages.filter(message => {
-  if (message.role !== "assistant" || message.streaming || !message.runId || !message.nodeId) return false;
+  if (message.threadId !== projection.thread.id || message.role !== "assistant" || message.streaming || !message.runId || !message.nodeId) return false;
   const run = projection.runs.find(run => run.id === message.runId && run.status !== "rolled_back");
   const node = run ? mainRunNodeReader(projection, run)(message.nodeId) : undefined;
   return node?.kind === "assistant_message" && node.status === "completed";
@@ -75,6 +79,7 @@ export interface SupervisorPlanningControllerShape {
 /** Planning state and recovery share the existing guidance database and native admission boundary. */
 const make = Effect.gen(function* () {
   const workflows = yield* WorkflowWriteController;
+  const states = yield* WorkflowStateStore;
   const native = yield* WorkflowNativeAccess;
   const supervisors = yield* ProjectSupervisorStore;
   const requests = yield* SupervisorConversationStore;
@@ -85,6 +90,9 @@ const make = Effect.gen(function* () {
   const rpc = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
   const inFlight = yield* FiberMap.make<string, void>();
   const reconciliations = yield* FiberMap.make<string, void>();
+  const releaseSlots = yield* Semaphore.make(8);
+  const cleanupSlots = yield* Semaphore.make(4);
+  const observationSlots = yield* Semaphore.make(4);
   const clock = yield* Clock.Clock;
   const denied = (reason: string) => ({status: "denied", reason});
   const currentOwner = (payload: PlanningArguments, binding: BindingRecord, guard: GateGuard) => Effect.gen(function* () {
@@ -122,6 +130,7 @@ const make = Effect.gen(function* () {
     if (payload.action === "read") return {status: "ready", attempts: existing.filter(row => row.taskId === task.id).map(view)};
     if (!payload.operationId) return {status: "invalid", reason: "operation_id_required"};
     const clockNow = yield* Clock.currentTimeMillis;
+    if (payload.action === "apply_return") return yield* applyReturn(payload, binding, cancel);
     if (payload.action !== "pause") {
       const selected = existing.find(row => row.id === payload.attemptId && row.taskId === task.id);
       if (!selected) return denied("planning_attempt_unknown");
@@ -134,6 +143,13 @@ const make = Effect.gen(function* () {
           !draft.ok || draft.value.thread.lineage.parentThreadId !== payload.supervisorThreadId ||
           draft.value.thread.lineage.relationshipToParent !== "subagent" ||
           (yield* team.snapshot(binding)).members.some(member => member.threadId === payload.draftThreadId)) return denied("planning_draft_not_owned_child");
+        const taskRecord = owner.value.subagents!.find(item => item.id === payload.draftTaskId)!;
+        const created = typeof taskRecord.startedAt === "string" ? Date.parse(taskRecord.startedAt) : Number.NaN;
+        const freshRun = draft.value.runs.some(run => run.delegatedTaskId === payload.draftTaskId && Date.parse(run.requestedAt) >= selected.createdAt &&
+          Date.parse(run.requestedAt) < selected.deadline);
+        if (!(Number.isFinite(created) && created >= selected.createdAt && created < selected.deadline) && !freshRun ||
+          (yield* requests.planningAttempts(binding.projectId)).some(row => row.id !== selected.id && row.draft?.taskId === payload.draftTaskId))
+          return denied("planning_draft_not_new_for_attempt");
         const attached = yield* gate.admit(guard => transaction(Effect.gen(function* () {
           if (!(yield* currentOwner(payload, binding, guard))) return null;
           return yield* update(binding.projectId, selected.id, current => current.state === "open" && clock.currentTimeMillisUnsafe() < current.deadline && !current.draft
@@ -144,7 +160,16 @@ const make = Effect.gen(function* () {
       if (payload.resolution !== "no_plan" && !planningCanAdopt(selected, clockNow)) return denied("planning_acks_incomplete");
       const released = yield* gate.admit(guard => transaction(Effect.gen(function* () {
         if (!(yield* currentOwner(payload, binding, guard))) return null;
-        return yield* update(binding.projectId, selected.id, current => resolvePlanningAttempt(current, payload.resolution ?? "continue", clockNow));
+        const current = yield* currentAttempt(binding.projectId, selected.id);
+        if (!current || payload.resolution !== "no_plan" && !planningCanAdopt(current, clock.currentTimeMillisUnsafe())) return null;
+        const scopedIds = new Map<string, string>();
+        if (payload.resolution !== "no_plan") for (const target of current.targets.filter(target => target.threadId !== binding.mainThreadId)) {
+          const child = yield* states.getState(binding.projectId, binding.mainThreadId, target.threadId);
+          if (child.status !== "found" || child.document.plan === null || !child.document.parentWorkflowId) return null;
+          scopedIds.set(target.threadId, child.document.workflowId);
+        }
+        return yield* update(binding.projectId, selected.id, row => resolvePlanningAttempt({...row, targets: row.targets.map(target =>
+          scopedIds.has(target.threadId) ? {...target, scopedWorkflowId: scopedIds.get(target.threadId)!} : target)}, payload.resolution ?? "continue", clockNow));
       })));
       return released ? {status: "recorded", attempt: view(released)} : denied("planning_scope_changed");
     }
@@ -203,6 +228,101 @@ const make = Effect.gen(function* () {
         ? {status: "recorded", attempt: view(concurrent)} : denied("planning_attempt_inflight");
       yield* requests.savePlanningAttempt(created);
       return {status: "recorded", attempt: view(created)};
+    })));
+  });
+
+  const applyReturn = (payload: PlanningArguments, binding: BindingRecord, cancel?: WorkflowCallCancel) => Effect.gen(function* () {
+    if (!payload.workflowId || !payload.expectedRevision || !payload.returnId || !payload.reason || !payload.operationId || !payload.attemptId)
+      return {status: "invalid", reason: "return_coordinates_required"};
+    const targetId = payload.workflowThreadId ?? binding.mainThreadId;
+    const document = yield* states.getState(binding.projectId, binding.mainThreadId, targetId);
+    if (document.status !== "found" || document.document.workflowId !== payload.workflowId) return denied("return_workflow_unknown");
+    const entry = document.document.returns.find(entry => entry.returnId === payload.returnId);
+    if (!entry) return denied("return_unknown");
+    const listed = yield* attempt(native.listThreads(cancel));
+    if (!listed.ok) return denied("return_scope_unavailable");
+    const scope = resolveSupervisorScope(listed.value, binding.projectId, binding.mainThreadId, supervisors.ownedIds);
+    const parents = new Map(listed.value.map(thread => [thread.id, thread.lineage.parentThreadId]));
+    if (!scope.complete || !scope.allowedIds.has(targetId)) return denied("return_scope_unavailable");
+    const owner = {projectId: binding.projectId, mainThreadId: binding.mainThreadId, supervisorThreadId: binding.threadId, bindingGeneration: binding.generation};
+    const expected = {...(payload.memberEpoch === undefined ? {} : {memberEpoch: payload.memberEpoch}),
+      ...(payload.assignmentRootThreadId === undefined ? {} : {assignmentRootThreadId: payload.assignmentRootThreadId}),
+      ...(payload.assignmentEpoch === undefined ? {} : {assignmentEpoch: payload.assignmentEpoch})};
+    if (!(yield* team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, expected))) return denied("return_not_assigned");
+    if (entry.state === "applied" && entry.resolution?.operationId === payload.operationId)
+      return yield* states.applyReturn(owner, {operationId: payload.operationId, workflowId: payload.workflowId, expectedRevision: payload.expectedRevision,
+        returnId: payload.returnId, note: payload.reason, retiredRuns: entry.retiredRuns});
+    if (entry.state !== "pending") return denied("return_not_pending");
+    const region = new Set(entry.regionNodeIds);
+    const required = new Set([targetId, ...planEntities(document.document.plan).filter(node => region.has(node.nodeId)).flatMap(node => node.contributorThreadIds)]);
+    const projections = new Map<string, Projection>();
+    const main = yield* attempt(native.projection(binding.mainThreadId, cancel));
+    const task = yield* supervisors.task(binding.mainThreadId);
+    if (!main.ok || !task || !conversationAuthorityCurrent(task, main.value, yield* projectRequesterPolicy(supervisors, binding.projectId)))
+      return denied("return_task_not_authorised");
+    projections.set(binding.mainThreadId, main.value);
+    const source = main.value.messages.find(message => message.id === task.sourceMessageId);
+    if (!source) return denied("return_source_unavailable");
+    for (const id of required) {
+      if (!scope.allowedIds.has(id)) return denied("return_contributor_outside_scope");
+      const observed = yield* attempt(native.projection(id, cancel));
+      if (!observed.ok || observed.value.thread.id !== id) return denied("return_actor_unavailable");
+      projections.set(id, observed.value);
+      const parentId = parents.get(id);
+      if (id !== binding.mainThreadId && parentId && !projections.has(parentId)) {
+        const parent = yield* attempt(native.projection(parentId, cancel));
+        if (!parent.ok) return denied("return_parent_unavailable");
+        projections.set(parentId, parent.value);
+      }
+    }
+    const retiredRuns: Array<{threadId: string; runId: string}> = [];
+    for (const id of required) if (id !== binding.mainThreadId && id !== targetId) {
+      const projection = projections.get(id)!;
+      const latest = [...projection.runs].filter(run => run.status !== "rolled_back").sort((a, b) => b.ordinal - a.ordinal)[0];
+      for (const run of projection.runs.filter(run => run === latest || ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)))
+        retiredRuns.push({threadId: id, runId: run.id});
+      // a native child's shared parent run cannot identify a retired child execution
+      if (!projection.runs.length) return denied("return_contributor_run_unavailable");
+    }
+    if (retiredRuns.length > 50) return denied("return_run_capacity");
+    return yield* gate.admit(guard => transaction(Effect.gen(function* () {
+      if (!(yield* currentOwner(payload, binding, guard)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, expected)))
+        return denied("planning_scope_changed");
+      const now = yield* Clock.currentTimeMillis;
+      const pauses = (yield* requests.planningAttempts(binding.projectId)).filter(row => row.mainThreadId === binding.mainThreadId && row.taskId === payload.taskId &&
+        row.bindingGeneration === binding.generation && row.state === "open" && now < row.deadline &&
+        (row.requestSource ? row.requestSource.messageId === task.sourceMessageId && row.requestSource.hash === fingerprint(source.text) : row.taskRevision === payload.taskRevision));
+      if (!pauses.some(row => row.id === payload.attemptId && row.ownerThreadId === payload.supervisorThreadId)) return denied("return_pause_not_open");
+      const held = new Set<string>();
+      for (const pause of pauses) for (const target of pause.targets) {
+        const observed = projections.get(target.threadId);
+        if (!observed) continue;
+        if (target.state === "quiescent" && !projectionHasOngoingWork(observed) && !observed.runs.some(run => run.status === "queued")) held.add(target.threadId);
+        if (target.state !== "acknowledged" || !target.acknowledgement) continue;
+        const acknowledgment = target.acknowledgement;
+        const message = ownReplies(observed).find(message => message.id === acknowledgment.messageId && message.runId === acknowledgment.runId);
+        if (message && exactFenceRecords(message.text, "planning-pause-ack", 2, true).some(record => {
+          const parsed = Schema.decodeUnknownExit(PlanningAcknowledgement)(record.value, {onExcessProperty: "error"});
+          return Exit.isSuccess(parsed) && parsed.value.attemptId === pause.id && parsed.value.targetThreadId === target.threadId;
+        })) held.add(target.threadId);
+      }
+      if (!held.has(targetId)) return denied("return_owner_not_paused");
+      for (const id of required) {
+        const projection = projections.get(id)!;
+        if (held.has(id)) {
+          const acknowledgment = pauses.flatMap(row => row.targets).find(target => target.threadId === id && target.state === "acknowledged")?.acknowledgement;
+          if (projection.thread.activeRunId && acknowledgment && projection.thread.activeRunId !== acknowledgment.runId) return denied("return_actor_changed_run");
+          continue;
+        }
+        const parentId = parents.get(id);
+        const parent = parentId ? projections.get(parentId) : null;
+        const lifecycle = parent ? directParentChildLifecycle(parent, id) : null;
+        const quiet = !projectionHasOngoingWork(projection) && !projection.runs.some(run => run.status === "queued") &&
+          (projection.runs.some(run => terminal.has(run.status)) || lifecycle && terminal.has(lifecycle.status));
+        if (!quiet || !parentId || !held.has(parentId)) return denied("return_actor_not_quiescent");
+      }
+      return yield* states.applyReturn(owner, {operationId: payload.operationId!, workflowId: payload.workflowId!, expectedRevision: payload.expectedRevision!,
+        returnId: payload.returnId!, note: payload.reason!, retiredRuns}, now);
     })));
   });
 
@@ -426,7 +546,7 @@ const make = Effect.gen(function* () {
           ? (yield* update(projectId, row.id, current => expirePlanningAttempt(current, now)))! : row;
         const binding = bindings.find(binding => binding.projectId === projectId && binding.mainThreadId === row.mainThreadId);
         if (binding && current.state !== "open" && current.draft?.taskId && current.draft.cleanupConfirmedAt === undefined)
-          yield* FiberMap.run(reconciliations, `draft-cleanup:${current.id}`, cleanupDraft(binding, current).pipe(
+          yield* FiberMap.run(reconciliations, `draft-cleanup:${current.id}`, cleanupDraft(binding, current).pipe(Semaphore.withPermits(cleanupSlots, 1),
             Effect.catchCauseIf(cause => !Cause.hasInterruptsOnly(cause), () => Effect.void)), {onlyIfMissing: true});
         if (binding) for (const target of current.targets) if (target.state === "release_pending" && target.release?.state === "prepared")
           releases.push({binding, row: current, target});
@@ -434,11 +554,11 @@ const make = Effect.gen(function* () {
     }
     // releasing a hold never waits behind its original send or the owner's ordinary observation pass
     for (const release of releases) yield* FiberMap.run(reconciliations, release.target.release!.commandId,
-      deliver(release.binding, release.row, release.target, "release").pipe(
+      deliver(release.binding, release.row, release.target, "release").pipe(Semaphore.withPermits(releaseSlots, 1),
         Effect.catchCauseIf(cause => !Cause.hasInterruptsOnly(cause), () => Effect.void)), {onlyIfMissing: true});
     for (const binding of bindings) if (pendingMains.has(binding.mainThreadId))
       yield* FiberMap.run(reconciliations, binding.threadId,
-        reconcile(binding).pipe(Effect.catchCauseIf(cause => !Cause.hasInterruptsOnly(cause), () => Effect.void)), {onlyIfMissing: true});
+        reconcile(binding).pipe(Semaphore.withPermits(observationSlots, 1), Effect.catchCauseIf(cause => !Cause.hasInterruptsOnly(cause), () => Effect.void)), {onlyIfMissing: true});
   }).pipe(Effect.catchCauseIf(cause => !Cause.hasInterruptsOnly(cause), () => Effect.void));
   yield* Effect.forkScoped(Effect.repeat(deadlines, Schedule.spaced("1 second")));
   return SupervisorPlanningController.of({call, reconcile});

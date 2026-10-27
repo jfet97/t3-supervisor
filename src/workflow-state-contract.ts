@@ -259,7 +259,7 @@ export type WorkflowStateEvidence = {
   // or invalidated choice
   branch?: {revision: number; path: BranchSelectionPath; changed: boolean; condition?: string};
   // present only on return evidence; the region, attempt and closed state stay on the return entry
-  return?: {returnId: string};
+  return?: {returnId: string; regionNodeIds?: string[]};
 };
 
 export type WorkflowStateEvidenceInput = {
@@ -551,7 +551,7 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   })),
   branch: Schema.optionalKey(Schema.Struct({revision: Schema.Number, path: Schema.Literals(branchSelectionPaths), changed: Schema.Boolean,
     condition: Schema.optionalKey(Schema.String)})),
-  return: Schema.optionalKey(Schema.Struct({returnId: Schema.String})),
+  return: Schema.optionalKey(Schema.Struct({returnId: Schema.String, regionNodeIds: Schema.optionalKey(mutableArray(Schema.String))})),
 });
 
 export const WorkflowReturnRunSchema = Schema.Struct({threadId: Schema.String, runId: Schema.String});

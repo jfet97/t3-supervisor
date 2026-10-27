@@ -2,11 +2,11 @@ import { Schema } from "effect";
 
 export const defaultPlanningTimeoutMs = 5 * 60_000;
 export const planningTimeoutBounds = {min: 10_000, max: 60 * 60_000} as const;
-export const planningInstructions = "For needed planning, supervision_planning pause takes current task/binding pins, operationId, reason and affected targetThreadIds. " +
-  "Wait for each actor's ACK or verified quiescence; a parent confirms dispatch only. Root/helpers may immediately delegate one bounded read-only writer and attach its thread/task, using draftInstruction and current model/isolation rules. " +
-  "Writers cannot guide, edit, publish, monitor or delegate. Read ACKs/results and reconcile current work before adoption. Main acceptance and child scoped plans remain. " +
-  "Release with continue/no_plan; receipt is not delivery. The fixed deadline covers ACK, drafting and negotiation. Late results never re-pause; human Stops, pauses, limits and approvals remain.";
-export const planningReminder = "Use supervision_planning for affected-scope pause/ACK, an optional parallel read-only drafter and explicit release. Reconcile actual work before adoption; the fixed deadline and human limits remain.";
+export const planningInstructions = "Use supervision_planning pause with current task/binding pins, operationId, reason and affected targetThreadIds. " +
+  "Require each actor's ACK or verified quiescence; parent ACK holds dispatch only. Root/helpers may use local orchestrator_capabilities/delegate_task for one read-only writer created for this attempt; attach_draft uses its childThreadId/taskId as draftThreadId/draftTaskId. Follow draftInstruction and model/isolation rules. Writers cannot guide, edit, publish, monitor or delegate. " +
+  "Reconcile ACKs, results and fresh work before adoption. For pending back_to, apply_return takes workflowId, workflowThreadId, expectedRevision, returnId, reason and open attemptId; it verifies pauses and retires old child runs. Main acceptance and child scoped plans remain. " +
+  "Release with continue/no_plan. The fixed deadline covers ACK, drafting and negotiation; late results never re-pause. Preserve human Stops, limits and approvals.";
+export const planningReminder = "Use supervision_planning for scoped pause/ACK, optional drafting and release; reconcile fresh work before adoption. Deadlines and human limits remain.";
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
 const Time = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4000));
@@ -30,6 +30,7 @@ export const PlanningTarget = Schema.Struct({
   assignmentRootThreadId: Schema.optional(Schema.NullOr(Id)),
   assignmentEpoch: Schema.optional(Schema.NullOr(Schema.Number)),
   scope: Text,
+  scopedWorkflowId: Schema.optional(Id),
   state: Schema.Literals(["requested", "acknowledged", "quiescent", "release_pending", "closed", "released"]),
   hold: PlanningDelivery,
   release: Schema.optional(PlanningDelivery),

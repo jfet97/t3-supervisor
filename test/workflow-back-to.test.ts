@@ -13,7 +13,7 @@ import {canonicalizeProposalDraft, manifestMembers, prepareWorkflowRequest, prop
   validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {preserveOccurrenceIds} from "../src/supervision-conversation.js";
 import {workflowAssessment} from "../src/workflow-assessment.js";
-import {branchSelectionImportDecision, documentBranchSelections} from "../src/workflow-state-store.js";
+import {branchSelectionImportDecision, documentBranchSelections, notApplicableNodeIds} from "../src/workflow-state-store.js";
 import type {BranchSelectionImport, WorkflowAgreementImport, WorkflowApplyInput, WorkflowExecutionStatus, WorkflowOwner, WorkflowStateDocument,
   WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
 import {isPlanGroup, occurrenceAttempts, planBackTos, planBranches, planEntities, planNodes, planStatusOutline, reachedBackTos, resolveBackTo, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
@@ -35,7 +35,7 @@ const snapshot = (): ProjectDefinitionSnapshot => {
   const steps = stepIds.map(id => ({id, name: id, description: `Complete ${id}.`, summary: testSummary(id), origin: "project" as const, path: `.t3-supervisor/steps/${id}.md`, sourceId: id}));
   const workflow = (id: string, source: string) => ({...parseDefinitionWorkflow(id, source), summary: testSummary(id), origin: "project" as const,
     path: `.t3-supervisor/workflows/${id}.yaml`, sourceId: id});
-  const workflows = [workflow("fix-and-return", fixAndReturn), workflow("delivery-flow", deliveryFlow), workflow("review-loop", reviewLoop)];
+  const workflows = [workflow("fix-and-return", fixAndReturn), workflow("delivery-flow", deliveryFlow), workflow("fixed-delivery", deliveryFlow.replace("sequence:", "fixed: true\nsequence:")), workflow("review-loop", reviewLoop)];
   const index = {steps: stepIds, workflows: workflows.map(item => item.id), required: []};
   return {projectId: "project-a", threadId: "main-a", workspaceRoot: "/workspace/project-a", globalOnly: false, globalRevision: null, revision: "definitions-1",
     editingAvailable: true, status: "ready", steps, workflows, config: effectiveIndex({steps, workflows}, []), projectConfig: projectIndex(index), definitionFiles: [],
@@ -416,3 +416,53 @@ it("a child's scoped workflow text names each occurrence with its status, attemp
   assert.ok(text.includes(`  - return to review [${returning.nodeId}] (then path, awaiting decision)`), text);
   assert.ok(text.includes(`Return pending since attempt 2: back to [${ids.review}]; your Supervisor starts the next attempt.`), text);
 });
+
+
+it.live("returning clears a prior attempt's not-applicable assessment and retains it in forward history", () => Effect.gen(function* () {
+  const {stores, owner, main, select} = yield* storeFixture([{kind: "workflow", definitionId: "fixed-delivery", reason: "Deliver the change."},
+    branch("Repeat the review.", [backTo("fixed-delivery")])]);
+  let document = yield* main();
+  const review = localNode(document.plan, "review").nodeId;
+  const workflow = planEntities(document.plan).find(node => node.kind === "workflow")!;
+  const statuses = withOccurrenceStatuses(document.plan!, planEntities(document.plan).map(node => ({nodeId: node.nodeId,
+    status: node.nodeId === review ? "planned" as const : "completed" as const})));
+  assert.ok("plan" in statuses);
+  // a valid retained fixed-member disposition is seeded so this regression exercises return application, not disposition creation
+  const firstAttempt: WorkflowStateDocument = {...document, status: "underway", plan: statuses.plan, evidence: [...document.evidence,
+    {id: randomUUID(), operationId: "first-attempt-skip", kind: "not_applicable", targetNodeId: review, targetNodeName: "review",
+      actorSupervisorThreadId: owner.supervisorThreadId, recordedAt: 1000, sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null,
+      scopeRevision: document.sourceBinding!.sourceHash, agreementKey: null, statusFrom: null, statusTo: null, note: "The first attempt needed no review."}]};
+  assert.equal(workflow.kind, "workflow");
+  yield* execute(stores.sql, "UPDATE supervisor_workflow_state SET document=? WHERE workflow_id=?", JSON.stringify(firstAttempt), document.workflowId);
+  const decision = planBranches(document.plan)[0]!;
+  assert.equal((yield* select(decision.nodeId, 1, "then", 1000, 1000)).status, "applied");
+  document = yield* main();
+  const pending = document.returns.find(item => item.state === "pending")!;
+  assert.ok(pending);
+  assert.equal(notApplicableNodeIds(document.evidence, document.sourceBinding!.sourceHash).has(review), true);
+  assert.equal((yield* stores.workflows.applyReturn(owner, {operationId: "return-after-skipping", workflowId: document.workflowId,
+    expectedRevision: document.revision, returnId: pending.returnId, note: "A changed result now requires the review."}, 1000)).status, "applied");
+  document = yield* main();
+  assert.equal(notApplicableNodeIds(document.evidence, document.sourceBinding!.sourceHash).has(review), false);
+  const progress = progressWorkflow(document, []);
+  assert.equal(progress.observations.some(item => item.targetNodeId === review && item.kind === "not_applicable"), false);
+  assert.equal(progress.history?.find(item => item.kind === "not_applicable")?.attempt, 1);
+  assert.equal(progress.history?.find(item => item.kind === "return_applied")?.attempt, 2, "append order distinguishes the new attempt even at the same timestamp");
+  assert.match(workflowAssessment(document)!.summary, /Attempt 2 starts/);
+  assert.equal(document.status, "underway");
+}));
+
+it.live("forward history includes the old records beyond the current-step preview", () => Effect.gen(function* () {
+  const {main, advance} = yield* storeFixture([local("review")]);
+  const document = yield* main();
+  const review = localNode(document.plan, "review").nodeId;
+  assert.equal((yield* advance(document, "many-observations", 1000, {}, {evidence: Array.from({length: 30}, (_, index) =>
+    ({kind: "observation" as const, targetNodeId: review, note: `Observation ${index + 1}`}))})).status, "applied");
+  const progress = progressWorkflow(yield* main(), []);
+  assert.equal(progress.observations.length, 20);
+  assert.equal(progress.historyComplete, true);
+  assert.equal(progress.history?.filter(item => item.kind === "observation").length, 30);
+  assert.ok(progress.history?.some(item => item.note === "Observation 1"));
+  assert.ok(progress.history?.some(item => item.note === "Observation 30"));
+  assert.deepEqual(progress.history?.map(item => item.sequence), Array.from({length: progress.history!.length}, (_, index) => index + 1));
+}));
