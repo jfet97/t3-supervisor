@@ -666,9 +666,12 @@ const makeSupervisorConversation = Effect.gen(function* () {
     const view = input.view;
     if (view === "interpretation") return {status: "ok", view, instructions: readerWorkflowInstruction};
     // a stopped pair contacts nobody; the current resume action is named here, since the conversation may carry an older role
-    if (view === "context" && (yield* supervisionStopped(binding.mainThreadId))) return {status: "ok", view, supervision: "stopped", mainThreadId: binding.mainThreadId,
+    if (view === "context" && (yield* supervisionStopped(binding.mainThreadId))) {
+      const pending = yield* store.task(binding.mainThreadId);
+      if (!pending || !taskPendingStart(pending, yield* store.start(binding.mainThreadId))) return {status: "ok", view, supervision: "stopped", mainThreadId: binding.mainThreadId,
       resume: `Contact nobody while stopped. Only when a genuine human in your own conversation now directly asks you to resume, call t3-supervisor-workflows supervision_start with ${
         JSON.stringify({callerThreadId: binding.threadId, userMessageId: "<that message's ID>", operationId: "<unique to that message>"})}; this current action is allowed even if older instructions omit it.`};
+    }
     if (view === "instructions") {
       const teamPolicy = yield* teamPolicyOf(binding);
       return {status: "ok", view, version: roleVersion(binding, teamPolicy),
@@ -687,7 +690,7 @@ const makeSupervisorConversation = Effect.gen(function* () {
       const submission = attempt && attempt.key.bindingGeneration === binding.generation && attempt.key.taskId === task.id ? {
         tool: "supervision_interpretation_submit", arguments: {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
           taskId: task.id, attemptId: attempt.attemptId, sourcePin: attempt.key.source}, startVerdict} : null;
-      return {status: "ok", view, supervision: "enabled", task: {...(yield* taskContextSummary(task)), status: task.status,
+      return {status: "ok", view, supervision: startVerdict ? "pending_start" : "enabled", task: {...(yield* taskContextSummary(task)), status: task.status,
         sourceMessageId: task.sourceMessageId, contextMessageIds: task.contextMessageIds ?? []},
         submission, definitions: definitionState, requirements: task.workflow?.requirements ?? [],
         outline: task.workflow?.plan ? renderPlan(task.workflow.plan) : null};

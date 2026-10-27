@@ -4935,7 +4935,7 @@ it.effect("the instructions version covers the full reference, so a reference-on
   // publication, read, contact and resume guidance
   for (const view of [shared, isolated]) {
     const occurrences = (part: string) => view.instructions.split(part).length - 1;
-    assert.equal(occurrences("Thread tools:"), 1, "one copy of the shared rules");
+    assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "one copy of the shared rules");
     assert.equal(occurrences("Read forward and small"), 1);
     assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 1);
     assert.match(view.instructions, /Publishing is the delivery: once your completed answer is recorded/u);
@@ -6363,7 +6363,7 @@ it.effect("the interpretation request's standing role carries no final-chat inte
 // history: native mcpx tool calls only, no exec), then refused to submit, reading "never through a script or code-mode wrapper" as
 // forbidding that same call. The rendered request (role and request as the project supervisor composes them), the interpretation
 // instructions and the tool description name that native call with its exact {name, arguments} object and suggest no code
-it.effect("the submission route names the native MCPX call used for workflow_read and suggests no code, in the rendered request and the tool description", () => Effect.gen(function* () {
+it.effect("the submission route uses advertised tools without assuming a gateway or suggesting code", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const role = yield* fixture.conversation.interpretationRole(fixture.binding);
   assert.ok(role);
@@ -6376,16 +6376,14 @@ it.effect("the submission route names the native MCPX call used for workflow_rea
   const instructions = String((yield* fixture.conversation.readContextView(fixture.binding, {view: "interpretation"})).instructions);
   const description = supervisionInterpretationSubmitToolDefinition.description;
   for (const [label, text] of [["request", requestText], ["instructions", instructions], ["tool description", description]] as const) {
-    assert.match(text, /native MCPX tool mcpx_call_tool/u, label);
+    assert.match(text, /advertised|directly exposed/u, label);
+    assert.doesNotMatch(text, /native MCPX tool mcpx_call_tool/u, label);
     // nothing suggests or forbids code, a wrapper or a gateway any more
-    assert.doesNotMatch(text, /\b(wrappers?|code-mode|gateway|functions\.exec|scripts?)\b/iu, label);
+    assert.doesNotMatch(text, /\b(code-mode|functions\.exec|scripts?)\b/iu, label);
   }
-  for (const [label, text] of [["request", requestText], ["tool description", description]] as const) {
-    assert.match(text, /name: ?"t3-supervisor-workflows__supervision_interpretation_submit", ?arguments:/u, label);
-    assert.match(text, /Only (that|the) executed tool call (T3 records )?counts/u, label);
-  }
-  assert.match(requestText, /If it is not listed, call the native MCPX tool mcpx_call_tool, as for workflow_read, with \{name:/u);
-  assert.match(role.text, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
+  for (const text of [instructions, description]) assert.match(text, /executed call/u);
+  assert.doesNotMatch(requestText, /SUBMISSION:|sourcePin/u, "submission details are fetched, never pushed");
+  assert.match(role.text, /Do not assume a particular gateway/u);
 }));
 
 it.effect("a direct stop cites the freshly read latest human message with its own operationId, in the standing role and the tool description", () => Effect.gen(function* () {
@@ -6393,7 +6391,7 @@ it.effect("a direct stop cites the freshly read latest human message with its ow
   const standing = (yield* fixture.conversation.interpretationRole(fixture.binding))!.text;
   assert.match(standing, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
   assert.match(standing, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
-  assert.match(standing, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
+  assert.match(standing, /Do not assume a particular gateway/u);
   assert.match(supervisionStopToolDefinition.description, /Cite the latest genuine human message that asks to stop, freshly read, with an operationId unique to it; never reuse an earlier stop's message ID or operationId/u);
 }));
 

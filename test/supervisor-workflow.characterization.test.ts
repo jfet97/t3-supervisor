@@ -48,26 +48,26 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   const taskText = "Check this task. token=github_pat_12345678901234567890";
   const prepared = prepareWorkflowRequest("thread-a", "message-a", taskText, goldenSnapshot);
   assert.ok(prepared.context);
-  // interpretation describes separate reference and skill string lists and the proportionate planning rule
-  assert.equal(prepared.requestText.length, 12415);
-  assert.equal(sha256(prepared.requestText), "0c2ef8537a414359832d737087fa6733e5eab822d8f2f23ecc813a08a86cf019");
+  // notifications contain lookup handles; canonical policy and plan hashes remain unchanged
+  assert.equal(prepared.requestText.length, 137);
+  assert.equal(sha256(prepared.requestText), "e7fbbde1cd92be664469b565c073f1e745a2310f2ab4855d5f292e4d39f0e0e1");
   assert.equal(prepared.requestText.includes("github_pat_12345678901234567890"), false);
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");
 
-  // lifecycle authority and local-reader routing are rendered once; the typed variant adds the source-bound submission envelope.
+  // reader coordinates and task identity are handles; submission pins and source bodies remain on demand.
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}]});
-  assert.equal(reader.requestText.length, 1148);
-  assert.equal(sha256(reader.requestText), "780d7be708b9ba46bfb375211976a10763be3ce6b6698693bf21fc2dbd1f146b");
+  assert.equal(reader.requestText.length, 206);
+  assert.equal(sha256(reader.requestText), "eb43953379e962c15a0e699d7b718ba7edf2f9e121befca569a8e5a8a37a9a88");
   assert.deepEqual(reader.context, prepared.context);
   assert.deepEqual(reader.workflow, prepared.workflow);
   const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}],
       submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
         sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
-  assert.equal(typed.requestText.length, 2520);
-  assert.equal(sha256(typed.requestText), "d5104feb899fa8fb8e1be566c5728bf49f5f1d19932c2d50e53a50f226a908e6");
+  assert.equal(typed.requestText.length, 224);
+  assert.equal(sha256(typed.requestText), "2e52831e622663daa37b497c37c237488e3490e5ca18f456be003da32efc6b74");
   assert.deepEqual(typed.context, prepared.context);
   assert.deepEqual(typed.workflow, prepared.workflow);
 
