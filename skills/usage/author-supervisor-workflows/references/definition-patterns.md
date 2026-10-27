@@ -79,9 +79,10 @@ sequence:
   - step: account-for-findings
 ```
 
-A caller includes `workflow: review` before its governed action. Iteration is an
-instruction in the workflow description, not a self-reference, recursive child workflow,
-wrapper step or execution-policy keyword. The sequence describes work within each round;
+A caller includes `workflow: review` before its governed action. Iteration within one
+occurrence is an instruction in the workflow description, not a self-reference, recursive
+child workflow, wrapper step or execution-policy keyword; a [return](#returns-for-repeated-rounds)
+repeats earlier members as a visible new attempt. The sequence describes work within each round;
 completed reports are evidence, not automatic completion of the persistent occurrences.
 Supervisor observes and assesses; it does not run a scheduler or launch those reviewers
 from the YAML.
@@ -143,17 +144,18 @@ sequence:
       then:
         - workflow: single-review
       else:
-        - workflow: iterative-review
+        - workflow: paired-review
   - step: account-for-findings
 ```
 
-`account-for-findings` follows the whole branch on either path. Define `single-review`
-and `iterative-review` as ordinary workflows whose descriptions own their reviewer,
-model and repetition rules; the branch only chooses between them. Leave out `else`
+`account-for-findings` follows the whole branch on either path. A reviewer pass
+describes one reviewer and one artifact. `paired-review` composes two such passes
+with `parallel`; the caller coordinates findings and any conditional `back_to`
+after they join. Reviewer count and repetition belong to that caller. Leave out `else`
 when a false condition simply skips the extra work. Each path needs at least one
 member, the condition is one line of at most 300 characters, and a path can hold
-groups, workflow references or a further branch. There is no `elif`, jump, loop or
-`goto`, and step files never contain branches.
+groups, workflow references, a further branch or a final return. There is no `elif`,
+jump or `goto`, and step files never contain branches or returns.
 
 The operative records its choice with a short concrete reason in a `branch-selection`
 record; the Supervisor does not approve it and objects only to a concrete contradiction
@@ -164,6 +166,44 @@ to count, so keep always-required duties outside the branch or in both paths. A
 required workflow containing a branch is included as a whole. `fixed: true` keeps the
 branch's condition, its paths and member placement, while supporting work may be added
 inside a path.
+
+## Returns for repeated rounds
+
+When each round should be agreed and visible, such as review, fix and review again, a
+return repeats the earlier members as a new attempt instead of only describing the
+repetition:
+
+```yaml
+name: Reviewed delivery
+description: |
+  Implement, review the frozen change and address material findings until the
+  reviewers confirm none remain. A finding is material when it affects correctness,
+  safety, data, security or the agreed outcome. Style preferences, optional
+  refactors and speculative concerns are reported once; they never justify another
+  round on their own.
+sequence:
+  - step: implement
+  - workflow: review
+  - branch:
+      if: The review left material findings.
+      then:
+        - step: address-findings
+        - back_to: review
+  - step: deliver
+```
+
+`back_to` names the ID of an earlier step, local step or workflow in the same sequential
+lane and ends its path. Put it in a branch path so the work can also continue; a return
+with no way out is rejected. When the operative reaches it, the region from `review`
+through the branch waits, the Supervisor applies the return at a safe point, and the next
+attempt runs `review` and the branch again with the same reviewer conversations; the
+branch decision is recorded again for each attempt. A reusable workflow may return to a
+member of the workflow that includes it. From inside a parallel lane, return only within
+that lane; to repeat work before a parallel group, place the return after the group.
+
+Write the condition so the loop ends. Name what makes a finding material and let
+reviewers report everything else once without reopening the round. A return is not a
+retry for flaky checks or a way to collect more opinions.
 
 ## Completion and reviewer identity
 
@@ -184,6 +224,12 @@ supported conversation or session APIs; copied context in a new task is not conv
 persistence. Respect orchestrator lifecycle rules, including any requirement to create
 new delegated tasks instead of resuming completed backing threads. Choose a supported
 persistent route when the project requires identity.
+
+Native children whose provider publishes separate review-turn identities can continue
+in the same conversation after a return. If no per-execution identity is available,
+replace only that reviewer slot with a managed task, carry its findings forward and
+record the reason and old/new identities. Earlier results remain history and cannot
+satisfy the repeated review. Do not invent a child run from its parent's run.
 
 Define intentional new-cycle boundaries for substantial intervening work or a material
 scope change, carrying forward unresolved findings. Recover temporary interruptions in

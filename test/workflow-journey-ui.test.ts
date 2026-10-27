@@ -93,7 +93,7 @@ it("plan changes match occurrences by ID, so a renamed step is changed rather th
 type PlanNode = WorkflowPlanGroupInfo["nodes"][number];
 const mapPlan = (plan: WorkflowPlanGroupInfo, change: (node: Extract<PlanNode, {kind: "step" | "workflow"}>) => PlanNode): WorkflowPlanGroupInfo => ({...plan, nodes: plan.nodes.map(node =>
   "nodes" in node ? mapPlan(node, change) : node.kind === "branch" ? {...node, then: mapPlan(node.then, change), else: node.else ? mapPlan(node.else, change) : null}
-    : change(node.kind === "workflow" && node.plan ? {...node, plan: mapPlan(node.plan, change)} : node))});
+    : node.kind === "back_to" ? node : change(node.kind === "workflow" && node.plan ? {...node, plan: mapPlan(node.plan, change)} : node))});
 
 const accepted = () => example("agreed").task.agreement!.workflow.plan!;
 const changed = (before: WorkflowPlanGroupInfo, after: WorkflowPlanGroupInfo) =>

@@ -1,3 +1,5 @@
+import { NativeActivityRead } from "./supervisor-awareness-contract.js";
+import { PlanningAttempt } from "./supervisor-planning-contract.js";
 import {SupportingReferences, SupportingSkills, type SupportingReference} from "./definition-references.js";
 import { Schema } from "effect";
 import { ConversationEngagement, ConversationFacts } from "./supervision-conversation-contract.js";
@@ -98,6 +100,8 @@ export const ProjectSupervisorBinding = Schema.Struct({
   keptActive: Schema.optionalKey(Schema.Boolean),
   /** First lifecycle gate that kept the service-owned Supervisor active at its latest check, or null. */
   settlementBlockedBy: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  mainSettlementBlockedBy: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  mainSettlementState: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type SupervisorBinding = typeof ProjectSupervisorBinding.Type;
 export const WorkflowExecutionStatus = Schema.Literals(["planned", "underway", "completed", "needs_attention"]);
@@ -203,7 +207,20 @@ export type WorkflowPlanBranchInfo = {
   then: WorkflowPlanGroupInfo;
   else: WorkflowPlanGroupInfo | null;
 };
-export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanBranchInfo | WorkflowPlanGroupInfo;
+/**
+ * A return to a fixed earlier occurrence of the same sequential lane, named by its step or workflow ID. Reaching it ends the current
+ * forward path and opens another runtime attempt of the region from the target through the member holding it; it has no status of
+ * its own. targetNodeId is resolved in every composed plan and is null only inside a definition's own template expansion.
+ */
+export type WorkflowPlanBackToInfo = {
+  kind: "back_to";
+  nodeId: string;
+  templatePath: string | null;
+  target: string;
+  targetNodeId: string | null;
+  reason: string;
+};
+export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanBranchInfo | WorkflowPlanBackToInfo | WorkflowPlanGroupInfo;
 const WorkflowPlanStep = Schema.Struct({
   kind: Schema.Literal("step"),
   nodeId: Schema.String,
@@ -219,10 +236,19 @@ const WorkflowPlanStep = Schema.Struct({
   status: WorkflowExecutionStatus,
   contributorThreadIds: Schema.Array(Schema.String),
 });
+const WorkflowPlanBackTo = Schema.Struct({
+  kind: Schema.Literal("back_to"),
+  nodeId: Schema.String,
+  templatePath: Schema.NullOr(Schema.String),
+  target: Schema.String,
+  targetNodeId: Schema.NullOr(Schema.String),
+  reason: Schema.String,
+});
 const workflowPlanNodeSchema = (): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.suspend((): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.Union([
   WorkflowPlanStep,
   WorkflowPlanWorkflow,
   WorkflowPlanBranch,
+  WorkflowPlanBackTo,
   WorkflowPlanGroup,
 ]));
 const WorkflowPlanGroup: Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> = Schema.suspend((): Schema.Codec<WorkflowPlanGroupInfo, WorkflowPlanGroupInfo, never, never> => Schema.Struct({
@@ -351,6 +377,10 @@ export const MonitoringStatus = Schema.Struct({
   lastNoticeAt: Schema.NullOr(Schema.Number),
   retryable: Schema.optionalKey(Schema.Boolean),
   review: Schema.optionalKey(MonitoringReview),
+  awareness: Schema.optionalKey(Schema.Struct({
+    reads: Schema.Array(NativeActivityRead),
+    assessments: Schema.Array(Schema.Struct({actorThreadId: Schema.String, targetThreadId: Schema.String, at: Schema.Number, throughObservedAt: Schema.NullOr(Schema.Number), itemIds: Schema.Array(Schema.String)})),
+  })),
 });
 export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;
 export const TaskInterpretation = Schema.Struct({
@@ -379,7 +409,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   projectId: Schema.String,
   mainThreadId: Schema.NullOr(Schema.String),
   modelApplication: Schema.NullOr(Schema.Struct({pending: Schema.Boolean, attempts: Schema.Number, message: Schema.NullOr(Schema.String)})),
-  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), teamSettings: Schema.optionalKey(SupervisorTeamSettings),
+  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), planningTimeoutMs: Schema.optionalKey(Schema.Number), teamSettings: Schema.optionalKey(SupervisorTeamSettings),
     superviseAgentCreatedThreads: Schema.optionalKey(Schema.Boolean)}),
   binding: Schema.NullOr(ProjectSupervisorBinding),
   modelSelection: Schema.NullOr(ModelSelection),
@@ -389,6 +419,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   message: Schema.String,
   tasks: Schema.Array(TaskInterpretation),
   team: Schema.optionalKey(Schema.NullOr(ProjectSupervisorTeamSnapshot)),
+  planning: Schema.optionalKey(Schema.Array(PlanningAttempt)),
   /** Durable per-chat stop for the selected main, backed by the instance thread policy. */
   chatSupervision: Schema.optionalKey(Schema.NullOr(Schema.Struct({
     stopped: Schema.Boolean,
@@ -412,6 +443,7 @@ export const ProjectSupervisorSave = Schema.Struct({
   expectedGeneration: Schema.Number,
   modelSelection: ModelSelection,
   monitoring: Schema.optionalKey(MonitoringSettings),
+  planningTimeoutMs: Schema.optionalKey(Schema.Number),
   teamSettings: Schema.optionalKey(SupervisorTeamSettings),
   /** Whether ordinary conversations launched by an agent are eligible for supervision of the launching agent's requests; absent keeps the saved value. */
   superviseAgentCreatedThreads: Schema.optionalKey(Schema.Boolean),

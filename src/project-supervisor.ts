@@ -1,5 +1,5 @@
 import { completelyQuotedEarlierMessageIds, localThreadToolRules, redact } from "./supervisor-workflow.js";
-import { emptyConversation } from "./supervision-conversation-contract.js";
+import { emptyConversation, taskScopeRevision } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { posix, resolve } from "node:path";
@@ -1024,7 +1024,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       stoppedCallerThreadId: stop?.callerThreadId ?? null, stoppedUserMessageId: stop?.userMessageId ?? null,
       effectiveEnabled: yield* scope.scopeEnabled(projectId, mainThreadId), activation: (yield* scope.isNoProject(projectId)) ? (yield* store.start(mainThreadId))?.status ?? "not_started" : "automatic"} : null;
     const monitoringStatus = yield* conversation.status(projectId, binding?.threadId ?? null);
-    return {projectId, mainThreadId, ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus, binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
+    return {projectId, mainThreadId, planning: binding ? (yield* requests.planningAttempts(projectId)).filter(row => row.mainThreadId === binding.mainThreadId) : [], ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, planningTimeoutMs: current.planningTimeoutMs ?? 300_000, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus, binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, mainSettlementState: binding.mainSettlement?.state ?? null, mainSettlementBlockedBy: binding.mainSettlementBlockedBy ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
       tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic,conversation,supervision}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt, ...(supervision ? {supervision} : {}), ...(conversation ? {conversation} : {}), engagement: deriveConversationEngagement({task: {status, sourceHash, conversation}, enabled: chatSupervision?.effectiveEnabled ?? false, available, monitoringState: monitoringStatus.state, bindingState: binding?.state, stale: !catalog.projects.find(item => item.project.id === projectId)?.available}), workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
@@ -1035,7 +1035,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       yield* project(input.projectId);
       if (input.mainThreadId) yield* snapshot(input.projectId, input.mainThreadId);
       // the settings save inside the caller's section and transaction; null when it committed
-      const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings, input.superviseAgentCreatedThreads)), (saved): ProjectSupervisorSaveOutcome | null => {
+      const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings, input.superviseAgentCreatedThreads, input.planningTimeoutMs)), (saved): ProjectSupervisorSaveOutcome | null => {
         if (saved.ok) return null;
         const cause = saved.cause;
         if (cause instanceof Error && cause.message === "invalid_team_settings") return {status: "invalid", message: "Choose a whole-number helper limit from 0 to 20.", snapshot: null};return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–2 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};
@@ -1514,9 +1514,13 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             (source.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= preparing.sourceOrdinal &&
             (source.runs.find(run => run.id === item.runId)?.ordinal ?? -1) > (contextFloor ?? Infinity)).slice(-6)
             .map(item => ({messageId: item.id, runId: item.runId, text: redact(item.text).slice(0, 1600)}));
-          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages, conversationContext: {facts: preparing.conversation, requesterMessages, operativeMessages},
+          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages,
+            conversationContext: reader ? {facts: {readView: "context"}, requesterMessages: requesterMessages.map(item => ({messageId: item.messageId,
+              requester: item.requester, ...("quoted" in item ? {quoted: item.quoted} : {})})),
+              operativeMessages: operativeMessages.map(item => ({messageId: item.messageId}))} : {facts: preparing.conversation, requesterMessages, operativeMessages},
             ...(requester?.kind === "agent" ? {requester: {kind: "agent" as const, threadId: requester.threadId}} : {}),
-            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
+            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation},
+              planning: {taskId: preparing.id, taskRevision: taskScopeRevision(preparing)}} : {}),
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
           const requestText = role ? `${role.text}\n${request.requestText.startsWith(`${localThreadToolRules}\n`)

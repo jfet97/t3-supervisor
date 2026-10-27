@@ -1425,6 +1425,68 @@ it.effect("activity references are scoped and stored as navigation evidence with
   } finally {yield* fixture.close;}
 }));
 
+it.effect("a run-less native reference records the provider turn T3 publishes with strong provenance behind it, never one it cannot verify", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const create = ensureArgs(fixture, "turn-evidence-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = yield* fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    // a native child's work has no AppRun: T3 publishes its provider turns, the nodes of its messages and run-less items
+    const main = fixture.projections.get(fixture.mainThreadId)!;
+    const startedAt = "2026-10-14T21:00:00.000Z";
+    const turn = (id: string, extra: Record<string, unknown> = {}) => ({id, providerThreadId: "child-provider-thread", nodeId: `${id}-root`, runAttemptId: null,
+      nativeTurnRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}, ordinal: 1, status: "completed", startedAt,
+      completedAt: "2026-10-14T21:01:00.000Z", ...extra});
+    main.providerTurns = [turn("turn-strong"), turn("turn-weak", {nativeTurnRef: {driver: "codex", nativeId: "native-weak", strength: "weak"}}),
+      turn("turn-unstarted", {status: "pending", startedAt: null}), turn("turn-elsewhere", {providerThreadId: "another-provider-thread"})];
+    main.nodes = [...(main.nodes as unknown[]), {id: "turn-strong-message", threadId: fixture.mainThreadId, runId: null, rootNodeId: "turn-strong-root",
+      kind: "assistant_message", status: "completed", providerThreadId: "child-provider-thread", providerTurnId: "turn-strong"}];
+    main.messages.push({id: "turn-message", threadId: fixture.mainThreadId, runId: null, nodeId: "turn-strong-message", role: "assistant", streaming: false,
+      text: "The review found nothing material.", createdAt: startedAt, updatedAt: startedAt});
+    const item = (id: string, providerTurnId: string) => ({id, type: "command_execution", threadId: fixture.mainThreadId, runId: null, status: "completed",
+      providerThreadId: "child-provider-thread", providerTurnId});
+    for (const [id, providerTurnId] of [["item-strong", "turn-strong"], ["item-weak", "turn-weak"], ["item-unpublished", "turn-missing"],
+      ["item-unstarted", "turn-unstarted"]]) fixture.details.set(id!, item(id!, providerTurnId!));
+    const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const observe = (note: string, reference: Record<string, string>) => ({kind: "observation" as const, note, ...reference});
+    const apply = yield* applyArgs(fixture, {operationId: "turn-evidence-apply", workflowId: created.workflowId, expectedRevision: current.revision,
+      status: "planned", objective: "Keep native turns verifiable.", note: "The Supervisor assessed the child's native work.",
+      plan: sequencePlan([localStep("Check evidence", "Assess the child's output semantically.", [fixture.mainThreadId])]),
+      evidence: [observe("A strongly published turn.", {sourceItemId: "item-strong"}), observe("The message's node names it.", {sourceMessageId: "turn-message"}),
+        observe("A weak turn.", {sourceItemId: "item-weak"}), observe("An unpublished turn.", {sourceItemId: "item-unpublished"}),
+        observe("A turn that has not started.", {sourceItemId: "item-unstarted"})]});
+    installEvidence(fixture, apply);
+    assert.equal((yield* fixture.controller.write(apply)).status, "applied");
+    const updated = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    assert.deepEqual(updated.evidence.filter(entry => entry.kind === "observation").map(entry =>
+      [entry.sourceItemId ?? entry.sourceMessageId, entry.sourceRunId, entry.sourceProviderTurnId ?? null, entry.sourceProviderTurnStartedAt ?? null]), [
+      ["item-strong", null, "turn-strong", Date.parse(startedAt)], ["turn-message", null, "turn-strong", Date.parse(startedAt)],
+      ["item-weak", null, null, null], ["item-unpublished", null, null, null], ["item-unstarted", null, null, null],
+    ]);
+
+    // an item and a message naming different turns, or a turn of another provider thread, disagree; nobody can name a turn for the service
+    fixture.details.set("item-elsewhere", item("item-elsewhere", "turn-elsewhere"));
+    const write = (operationId: string, evidence: unknown[]) => Effect.gen(function* () {
+      const latest = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+      const args = yield* applyArgs(fixture, {operationId, workflowId: latest.workflowId, expectedRevision: latest.revision, status: latest.status,
+        objective: latest.objective, plan: latest.plan, note: "Link more native work.", evidence: evidence as never});
+      installEvidence(fixture, args);
+      return yield* fixture.controller.write(args);
+    });
+    fixture.details.set("item-weak-again", item("item-weak-again", "turn-weak"));
+    assert.deepEqual(yield* write("turn-disagreement", [observe("Two turns.", {sourceMessageId: "turn-message", sourceItemId: "item-weak-again"})]),
+      {status: "invalid", operationId: "turn-disagreement", reason: "activity_reference_turn_mismatch"});
+    assert.deepEqual(yield* write("turn-elsewhere", [observe("Another provider thread.", {sourceItemId: "item-elsewhere"})]),
+      {status: "invalid", operationId: "turn-elsewhere", reason: "activity_reference_turn_mismatch"});
+    const invented = yield* write("turn-invented", [{...observe("An invented turn.", {sourceItemId: "item-weak"}), sourceProviderTurnId: "turn-strong",
+      sourceProviderTurnStartedAt: Date.parse(startedAt)}]);
+    assert.deepEqual([invented.status, (invented as {reason?: string}).reason, (invented as {diagnostic?: {code: string; path: string}}).diagnostic?.code,
+      (invented as {diagnostic?: {code: string; path: string}}).diagnostic?.path], ["invalid", "invalid_apply_input", "evidence_entry_invalid", "/input/evidence/0"]);
+  } finally {yield* fixture.close;}
+}));
+
 it.effect("activity references fail closed when their workflow target is absent", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {

@@ -194,7 +194,7 @@ export const definitionStepSource = (id: string) => Schema.String.pipe(
 const parseNode = (value: unknown, depth: number, budget: {count: number}): DefinitionNode => {
   if (depth > workflowDefinitionExpansionLimits.maxDepth || ++budget.count > workflowDefinitionExpansionLimits.maxNodes)
     throw new Error("Workflow structure exceeds the nesting or expanded-node limit.");
-  if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence, parallel or branch key.");
+  if (!record(value) || Object.keys(value).length !== 1) throw new Error("Each workflow node must contain exactly one step, workflow, sequence, parallel, branch or back_to key.");
   if (Object.hasOwn(value, "step")) {
     if (typeof value.step === "string" && definitionId.test(value.step)) return {step: value.step};
     if (record(value.step) && withOptionalGuidance(value.step, ["id", "name", "description"]) && typeof value.step.id === "string" &&
@@ -208,6 +208,10 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
     if (typeof value.workflow === "string" && definitionId.test(value.workflow)) return {workflow: value.workflow};
     throw new Error("workflow must name a reusable workflow identifier.");
   }
+  if (Object.hasOwn(value, "back_to")) {
+    if (typeof value.back_to === "string" && definitionId.test(value.back_to)) return {back_to: value.back_to};
+    throw new Error("back_to must name the step, local step or workflow ID of an earlier member.");
+  }
   if (Object.hasOwn(value, "branch")) {
     const branch = value.branch;
     const condition = record(branch) ? branchConditionText(branch.if) : null;
@@ -218,19 +222,28 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
     // each path is a sequence one level below the branch, counted like a group
     const path = (members: unknown[]) => {
       if (++budget.count > workflowDefinitionExpansionLimits.maxNodes) throw new Error("Workflow structure exceeds the nesting or expanded-node limit.");
-      return members.map(child => parseNode(child, depth + 2, budget));
+      return placedReturns("sequence", members.map(child => parseNode(child, depth + 2, budget)));
     };
     const then = path(branch.then);
     return {branch: {if: condition, then, ...(Object.hasOwn(branch, "else") ? {else: path(branch.else as unknown[])} : {})}};
   }
   if (!Object.hasOwn(value, "sequence") && !Object.hasOwn(value, "parallel"))
-    throw new Error("Each workflow node must contain exactly one step, workflow, sequence, parallel or branch key.");
+    throw new Error("Each workflow node must contain exactly one step, workflow, sequence, parallel, branch or back_to key.");
   const key = Object.hasOwn(value, "sequence") ? "sequence" : "parallel";
   const children = value[key];
   if (!Array.isArray(children) || children.length === 0) throw new Error(`${key} must contain at least one workflow node.`);
   return key === "sequence"
-    ? {sequence: children.map(child => parseNode(child, depth + 1, budget))}
-    : {parallel: children.map(child => parseNode(child, depth + 1, budget))};
+    ? {sequence: placedReturns("sequence", children.map(child => parseNode(child, depth + 1, budget)))}
+    : {parallel: placedReturns("parallel", children.map(child => parseNode(child, depth + 1, budget)))};
+};
+
+// a return ends its sequence or branch path and only returns along a sequential lane; its target resolves in the composed plan, where a
+// reusable workflow may also return to an earlier member of its caller
+const placedReturns = (kind: "sequence" | "parallel", members: DefinitionNode[]): DefinitionNode[] => {
+  const index = members.findIndex(member => "back_to" in member);
+  if (index >= 0 && kind === "parallel") throw new Error("back_to cannot be a direct parallel member; place it after the parallel group.");
+  if (index >= 0 && index < members.length - 1) throw new Error("back_to must be the last member of its sequence or branch path.");
+  return members;
 };
 
 const collectLocalStepIds = (nodes: readonly DefinitionNode[], into: string[] = []): string[] => {
@@ -344,21 +357,27 @@ const namespaceGlobal = (global: DefinitionScopeRead, project: DefinitionScopeRe
   };
   const stepMap = makeMap(stepRefs, usedSteps, "global-step");
   const workflowMap = makeMap(workflowRefs, usedWorkflows, "global-workflow");
-  const rewriteNode = (node: DefinitionNode): DefinitionNode => {
+  // a return to one of the workflow's own local steps keeps that ID; one to a reusable step or workflow follows its namespaced ID
+  const rewriteNode = (locals: ReadonlySet<string>) => (node: DefinitionNode): DefinitionNode => {
+    const rewrite = rewriteNode(locals);
     if ("step" in node) return typeof node.step === "string" ? {step: stepMap.get(node.step)!} : node;
     if ("workflow" in node) return {workflow: workflowMap.get(node.workflow)!};
-    if ("sequence" in node) return {sequence: node.sequence.map(rewriteNode)};
-    if ("branch" in node) return {branch: {if: node.branch.if, then: node.branch.then.map(rewriteNode),
-      ...(node.branch.else ? {else: node.branch.else.map(rewriteNode)} : {})}};
-    return {parallel: node.parallel.map(rewriteNode)};
+    if ("back_to" in node) return {back_to: locals.has(node.back_to) ? node.back_to : stepMap.get(node.back_to) ?? workflowMap.get(node.back_to) ?? node.back_to};
+    if ("sequence" in node) return {sequence: node.sequence.map(rewrite)};
+    if ("branch" in node) return {branch: {if: node.branch.if, then: node.branch.then.map(rewrite),
+      ...(node.branch.else ? {else: node.branch.else.map(rewrite)} : {})}};
+    return {parallel: node.parallel.map(rewrite)};
   };
   global.steps = global.steps.map(step => ({...step, id: stepMap.get(step.sourceId ?? step.id)!}));
-  global.workflows = global.workflows.map(workflow => ({
-    ...workflow,
-    id: workflowMap.get(workflow.sourceId ?? workflow.id)!,
-    ...(workflow.sequence ? {sequence: workflow.sequence.map(rewriteNode)} : {}),
-    ...(workflow.parallel ? {parallel: workflow.parallel.map(rewriteNode)} : {}),
-  }));
+  global.workflows = global.workflows.map(workflow => {
+    const rewrite = rewriteNode(new Set(collectLocalStepIds(workflow.sequence ?? workflow.parallel ?? [])));
+    return {
+      ...workflow,
+      id: workflowMap.get(workflow.sourceId ?? workflow.id)!,
+      ...(workflow.sequence ? {sequence: workflow.sequence.map(rewrite)} : {}),
+      ...(workflow.parallel ? {parallel: workflow.parallel.map(rewrite)} : {}),
+    };
+  });
   global.config = {
     workflows: global.config.workflows.map(entry => ({...entry, id: workflowMap.get(entry.sourceId)!})),
     steps: global.config.steps.map(entry => ({...entry, id: stepMap.get(entry.sourceId)!})),

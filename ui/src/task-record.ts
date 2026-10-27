@@ -6,10 +6,12 @@ import { branchPathGroups, isPlanGroup, planChildGroups } from "../../src/workfl
 // workflow bound to the task. Statuses only ever come from the live workflow; plan notes and step-level Supervisor records are
 // matched to its steps by occurrence ID (nodeId), never by name, and nothing here derives or merges a status.
 
-// a step, workflow or branch occurrence; a branch is a commitment to its condition and both paths, not a step with a status
+// a step, workflow, branch or return occurrence; a branch is a commitment to its condition and both paths and a return to repeating
+// earlier work, neither a step with a status
 export type PlanOccurrence = Exclude<WorkflowPlanNodeInfo, WorkflowPlanGroupInfo>;
-/** How an occurrence is named in change lists: a branch by its condition. */
-export const occurrenceName = (node: PlanOccurrence): string => node.kind === "branch" ? `Branch: ${node.condition}` : node.name;
+/** How an occurrence is named in change lists: a branch by its condition, a return by its target. */
+export const occurrenceName = (node: PlanOccurrence): string => node.kind === "branch" ? `Branch: ${node.condition}`
+  : node.kind === "back_to" ? `Return to ${node.target}` : node.name;
 export type OccurrenceIndex = ReadonlyMap<string, {node: PlanOccurrence; parent: string}>;
 
 const ended = (task: TaskInterpretationInfo | undefined) => !task || ["expired", "not_supervised"].includes(task.status);
@@ -84,7 +86,7 @@ function keptInOrder(before: readonly string[], after: readonly string[]): Reado
   return kept;
 }
 
-export type PlanChangeField = "name" | "description" | "note" | "definition" | "references" | "skills" | "fixed" | "omissions" | "condition" | "paths" | "grouping" | "order";
+export type PlanChangeField = "name" | "description" | "note" | "definition" | "references" | "skills" | "fixed" | "omissions" | "condition" | "paths" | "target" | "grouping" | "order";
 export type PlanChange =
   | {kind: "added"; nodeId: string; name: string; note: string}
   | {kind: "removed"; nodeId: string; name: string}
@@ -110,12 +112,12 @@ export function planChanges(accepted: WorkflowPlanGroupInfo | null | undefined, 
     if (!prior) { changes.push({kind: "added", nodeId, name: occurrenceName(node), note: node.reason}); continue; }
     const was = prior.node;
     const fields: PlanChangeField[] = [];
-    if (was.kind === "branch" || node.kind === "branch") {
+    if (was.kind === "branch" || node.kind === "branch" || was.kind === "back_to" || node.kind === "back_to") {
       if (was.kind !== node.kind) fields.push("definition");
       else if (was.kind === "branch" && node.kind === "branch") {
         if (was.condition !== node.condition) fields.push("condition");
         if ((was.else === null) !== (node.else === null)) fields.push("paths");
-      }
+      } else if (was.kind === "back_to" && node.kind === "back_to" && was.targetNodeId !== node.targetNodeId) fields.push("target");
       if (was.reason !== node.reason) fields.push("note");
       if (regrouped(nodeId)) fields.push("grouping");
       else if (!kept.has(nodeId)) fields.push("order");

@@ -78,6 +78,7 @@ export const teamControllers = (stores: SupervisionStores, policy: ThreadPolicyS
         Layer.succeed(ThreadPolicyStore, policy), Layer.succeedContext(stores.context))));
     const context = yield* Layer.build(controllers).pipe(Effect.orDie);
     return {
+      context,
       controller: Context.get(context, SupervisorTeamController),
       workflows: Context.get(context, WorkflowWriteController),
       team: Context.get(context, SupervisorTeamStore),

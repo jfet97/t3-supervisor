@@ -160,13 +160,14 @@ export const retainedInterpretationAttempt = (current: InterpretationAttempt | n
 
 // arguments (item 2): no target thread, run, dispatch mode, delivery body, model or provider, acceptance or callback field
 
-// a model-authored plan node: a reusable step, a task-local step, a workflow reference or a nested group
+// a model-authored plan node: a reusable step, a task-local step, a workflow reference, a branch, a return or a nested group
 export type InterpretationPlanNode =
   | {readonly kind: "step"; readonly definitionId: string; readonly reason: string}
   | {readonly kind: "step"; readonly definitionId: null; readonly localId: string; readonly name: string; readonly description: string;
     readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>; readonly skills?: ReadonlyArray<string>}
   | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string; readonly omit?: ReadonlyArray<InterpretationOmission>}
   | {readonly kind: "branch"; readonly condition: string; readonly reason: string; readonly then: InterpretationPlanGroup; readonly else?: InterpretationPlanGroup | null}
+  | {readonly kind: "back_to"; readonly target: string; readonly reason: string}
   | InterpretationPlanGroup;
 export type InterpretationPlanGroup = {readonly kind: "sequence" | "parallel"; readonly nodes: ReadonlyArray<InterpretationPlanNode>};
 /** A member of a referenced flexible workflow that does not apply to this task, named by its definitionId or localId. */
@@ -184,6 +185,7 @@ const PlanNode: Schema.Codec<InterpretationPlanNode> = Schema.suspend((): Schema
     omit: Schema.optionalKey(Schema.Array(Schema.Struct({member: DefinitionId, reason: Reason})).check(Schema.isMinLength(1), maxLength(limits.maxExpandedNodes)))}),
   Schema.Struct({kind: Schema.Literal("branch"), condition: Schema.String.check(maxLength(branchConditionMaxLength)), reason: Reason,
     then: PlanGroup, else: Schema.optionalKey(Schema.NullOr(PlanGroup))}),
+  Schema.Struct({kind: Schema.Literal("back_to"), target: DefinitionId, reason: Reason}),
   PlanGroup,
 ]));
 const PlanGroup: Schema.Codec<InterpretationPlanGroup> = Schema.Struct({

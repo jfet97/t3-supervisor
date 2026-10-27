@@ -139,8 +139,64 @@
             },
             {
               "$ref": "#/$defs/branch"
+            },
+            {
+              "$ref": "#/$defs/back_to"
             }
           ]
+        },
+        "back_to": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "target",
+            "reason"
+          ],
+          "description": "A return to the earlier step or workflow member of the same sequential lane whose definitionId or localId is target; it ends its path. Keep nodeId and templatePath of an existing return; the service resolves targetNodeId.",
+          "properties": {
+            "kind": {
+              "const": "back_to"
+            },
+            "nodeId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "templatePath": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "targetNodeId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 64
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1000
+            }
+          }
         },
         "branch": {
           "type": "object",

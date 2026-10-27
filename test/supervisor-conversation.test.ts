@@ -350,7 +350,7 @@ const completeRun = (projection: Projection, run: RunInfo, response: string, now
 };
 
 const addCommandActivity = (projection: Projection, id: string, input: string, now: number): void => {
-  const run = projection.runs.find(candidate => candidate.id === projection.thread.activeRunId);
+  const run = projection.runs.find(candidate => candidate.id === projection.thread.activeRunId) ?? [...projection.runs].reverse().find(candidate => candidate.status === "completed");
   assert.ok(run?.rootNodeId);
   const nodeId = `${id}-node`;
   const providerThreadId = String(run.providerThreadId);
@@ -1033,10 +1033,10 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   // the rendered check-in names how to read the supplied handles forward and small, and what a message to the operative may carry
   const prompt = request!.text;
   assert.match(prompt, /"readItemId":"[^"]+"/u, "the envelope supplies exact native item handles");
-  assert.match(prompt, /open an envelope readItemId \(view activity\) or sourceMessageId with t3_thread_read itemId; continue cut-off text with textOffset=nextTextOffset and newer items with afterPosition=nextPosition from your last read/u);
-  assert.match(prompt, /never from a conversation's start or in maximum pages by default/u);
+  assert.match(prompt, /open exact itemId\/sourceMessageId handles; continue cut-off text with textOffset=nextTextOffset and newer items with afterPosition=nextPosition/u);
+  assert.match(prompt, /Use about 5 items and 2000 characters/u);
   assert.match(prompt, /Contact the operative only with one brief actionable delta or question citing message or item IDs/u);
-  assert.match(prompt, /never paste plans, definitions, protocol or service notices \(it reads its proposal with supervision_plan, definitions from \.t3-supervisor\/project\.yaml\)/u);
+  assert.match(prompt, /Never paste plans, definitions, protocol or service notices; use supervision_plan/u);
   assert.doesNotMatch(prompt, /only as needed|fresh-read|a fresh read of the relevant/u, "no vague or rereading instruction remains");
   for (const rule of ["Read forward and small", "Contact the operative only", "Only a workflow-proposal block"]) assert.equal(prompt.split(rule).length - 1, 1, `${rule} once`);
   const context = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
@@ -1080,7 +1080,8 @@ const appendNoticeForTask = Effect.fnUntraced(function* (fixture: Fixture,
     error: null,
   };
   yield* fixture.conversation.requests.saveIntroduction(introduction);
-  const run = projection.runs.find(candidate => candidate.id === introduction.targetRunId);
+  const run = projection.runs.find(candidate => candidate.id === introduction.targetRunId) ??
+    [...projection.runs].reverse().find(candidate => candidate.status === "completed");
   assert.ok(run);
   appendMessageToRun(projection, run, {
     id: introduction.messageId,
@@ -1253,21 +1254,23 @@ it.effect("an unanswered root human turn holds service contact before any check-
   assert.ok(fixture.calls.length > 0, "a terminal human turn releases the held service contact");
 }));
 
-it.effect("following holds an unsent check-in and only reconciles an already uncertain receipt", () => Effect.gen(function* () {
+it.effect("quiet following may run a prepared observation without contacting the operative", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const task = (yield* fixture.projectStore.task(operativeThreadId))!;
   yield* fixture.projectStore.saveTask({...task, conversation: {...task.conversation!, authorization: null}});
   const request = yield* fixture.conversation.requests.prepare({projectId, supervisorThreadId: fixture.binding.threadId,
     kind: "review", taskId: task.id, text: "An earlier unsent review.", batch: null, completionMarker: "held review completed"}, baseTime);
   yield* fixture.run();
-  assert.equal(fixture.calls.length, 0, "quiet following never dispatches a prepared routine review");
-  assert.deepEqual(yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId), request);
-  yield* fixture.conversation.requests.saveRequest({...request, sentAt: baseTime});
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, "following grants no operative contact");
+  const watching = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
+  assert.equal(watching.id, request.id);
+  assert.equal(watching.state, "waiting");
+  yield* fixture.conversation.requests.saveRequest({...watching, state: "uncertain", sentAt: baseTime});
   yield* fixture.run();
   const retained = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(retained?.state, "uncertain");
   assert.equal(retained?.messageId, request.messageId);
-  assert.equal(fixture.calls.length, 0, "reconciliation sends nothing");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, "reconciliation never contacts the operative");
 }));
 
 it.effect("a newer human pause during agreement proof prevents accepting the older scope", () => Effect.gen(function* () {
@@ -1321,7 +1324,7 @@ const appendOperativeAcceptance = Effect.fnUntraced(function* (fixture: Fixture,
   nodeKind?: string;
   run?: RunInfo;
 } = {}) {
-  const run = options.run ?? fixture.operative.runs.find(item => item.id === fixture.operative.thread.activeRunId);
+  const run = options.run ?? fixture.operative.runs.find(item => item.id === fixture.operative.thread.activeRunId) ?? [...fixture.operative.runs].reverse().find(item => item.status === "completed");
   assert.ok(run);
   const task = (yield* fixture.projectStore.task(fixture.task.threadId)) ?? fixture.task;
   const record = isFullRecord(value) ? acceptanceReference(task, value) : value;
@@ -1345,11 +1348,11 @@ it.effect("helper provider isolation is opt-in in root roles and uses the curren
   const standard = yield* makeFixture(clock, {teamEnabled: true});
   const roleFor = (conversation: Fixture["conversation"], binding: BindingRecord) => conversation.roleFor(binding);
   const standardRole = yield* roleFor(standard.conversation, standard.binding);
-  assert.doesNotMatch(standardRole, /t3_thread_configuration|target\.providerInstanceId/u);
+  assert.doesNotMatch(standardRole, /t3_thread_configure|target\.providerInstanceId/u);
 
   const isolated = yield* makeFixture(clock, {helperProviderInstanceId: "supervisor-helpers-20348", teamEnabled: true});
   const isolatedRole = yield* roleFor(isolated.conversation, isolated.binding);
-  assert.match(isolatedRole, /t3_thread_configuration/u);
+  assert.match(isolatedRole, /t3_thread_configure/u);
   assert.match(isolatedRole, /target\.providerInstanceId to "supervisor-helpers-20348"/u);
   assert.match(isolatedRole, /use native delegate_task for a short bootstrap as your direct child/u);
   assert.doesNotMatch(isolatedRole, /inherit this root's model unless a configured T3 override is selected/u);
@@ -2189,7 +2192,7 @@ it.effect("a review that records no outcome stays visibly unconfirmed: nothing i
   // the check-in names its request and carries the review duty with the standing instructions
   assert.ok(request.text.includes(`record_review, requestId ${JSON.stringify(request.id)}`));
   assert.ok(request.text.includes("give corrective guidance only for a concrete, actionable operative mistake or deviation"));
-  assert.ok(request.text.includes("decided from the evidence you read and the current workflow"));
+  assert.ok(request.text.includes("from the evidence assessed"));
   assert.ok(request.text.includes(`"reviewRequestId":${JSON.stringify(request.id)}`));
   completeRun(fixture.supervisor, run, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
@@ -2399,7 +2402,8 @@ it.effect("completed activity first observed on new and reused children is batch
 
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request?.kind === "review" && request.batch);
-  assert.deepEqual(request.batch.threads.map(item => item.threadId).sort(), [child.thread.id, nested.thread.id, delegated.thread.id, reused.thread.id, routeTarget.thread.id].sort());
+  assert.deepEqual(request.batch.threads.map(item => item.threadId).sort(), [child.thread.id, nested.thread.id, delegated.thread.id, reused.thread.id, routeParent.thread.id, routeTarget.thread.id].sort());
+  assert.equal(request.batch.threads.find(item => item.threadId === routeParent.thread.id)?.trigger, "active_watch");
   assert.equal(request.batch.threads.find(item => item.threadId === child.thread.id)?.items.length, 3);
   assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-current-command"), true);
   assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-old-command"), false);
@@ -2749,9 +2753,9 @@ it.effect("prepared requests retain their native identity when monitoring settin
     [[operativeThreadId, (yield* fixture.conversation.requests.introduction(fixture.task.id))!.messageId]]);
 }));
 
-it.effect("monitoring-only API saves update the live threshold without losing pending activity", () => Effect.gen(function* () {
+it.effect("monitoring-only API saves update the idle fallback threshold without losing pending activity", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock, { settings: { intervalMinutes: 2, activityThreshold: 3 } });
+  const fixture = yield* makeFixture(clock, { operativeActive: false, settings: { intervalMinutes: 2, activityThreshold: 3 } });
   const saveMonitoring = Effect.fnUntraced(function* (monitoring: { intervalMinutes: number; activityThreshold: number }) {
     const settings = yield* fixture.projectStore.settings(projectId);
     const outcome = yield* fixture.makeProjectSupervisor().save({
@@ -3921,7 +3925,7 @@ it.effect("source or definitions changes and edited native evidence make an agre
 
 it.effect("changed definitions stay unapproved, trigger one bounded recovery review, and can recover in the same chats after restoration", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
   yield* appendNoticeToOperative(fixture);
   const originalDefinitions = definitions();
   const original = workflowRecord(fixture.task, fixture.task.id);
@@ -4085,7 +4089,7 @@ it.effect("a dashboard config save never approves unrelated catalog edits or an 
   assert.equal(yield* fixture.projectStore.definitionUserSave(configOnly, configOnly, clock.now + 1), false);
 }));
 
-describe("blocked startup stays dormant across definition changes, restoration and service reopen until explicit retry", () => {
+describe("blocked startup preserves proposal and definition authority while observation follows continued work", () => {
   for (const restored of [false, true]) it.effect(restored ? "restored definitions" : "changed definitions", () => Effect.gen(function* () {
     const clock = new TestWallClock(baseTime);const fixture = yield* makeFixture(clock);
     yield* clock.pin;
@@ -4109,7 +4113,9 @@ describe("blocked startup stays dormant across definition changes, restoration a
     yield* clock.advance(65_000);
     yield* (yield* fixture.makeRestartedConversation()).observe(fixture.threadList, clock.now);
     yield* fixture.run();
-    assert.equal(fixture.calls.length, 0, "blocked startup cannot dispatch a definition or activity check-in");
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, "blocked startup cannot resend an introduction or contact the operative");
+    const observation = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+    assert.equal(observation?.kind, "review", "real activity still reaches the Supervisor while publication is blocked");
     assert.deepEqual(yield* fixture.projectStore.task(operativeThreadId), task, "definition restoration cannot renew the blocked task");
     assert.deepEqual(yield* fixture.conversation.requests.introduction(task.id), introduction);
     assert.deepEqual(yield* fixture.conversation.monitor.pending(projectId, operativeThreadId), pending);
@@ -5130,7 +5136,7 @@ it.effect("re-enabling a settled, completed pair never wakes it to repair old re
 
 it.effect("a rejected Supervisor proposal gets one focused repair wake per rejection and a visible blocker after three", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
   const anchorRequest = yield* prepareTaskContext(fixture, {text: "The current task context.", completionMarker: "anchored context completed"}, clock.now - 2);
   const anchorRun = appendRun({projection: fixture.supervisor, id: "anchored-context-run", ordinal: 1, status: "completed",
     messageId: anchorRequest.messageId, text: anchorRequest.text, now: clock.now - 2});
@@ -5209,7 +5215,7 @@ it.effect("wake budgets: the concise standing role once per version, then a shor
   }
   assert.equal(yield* versionOf(), version, "the version is stable across helper settings");
   const [first, second, third] = texts.map(text => text.length);
-  assert.ok(first! < 9_000 && second! < 4_000 && third! < 4_000, `wake sizes ${texts.map(text => text.length).join(", ")}`);
+  assert.ok(first! < 6_500 && second! < 4_000 && third! < 4_000, `wake sizes ${texts.map(text => text.length).join(", ")}`);
   const instructions = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"});
   assert.match(String(instructions.instructions), /Root team coordination/u, "the full reference stays retrievable on demand");
 }));
@@ -6348,6 +6354,8 @@ it.effect("the interpretation request's standing role carries no final-chat inte
   assert.ok(role);
   assert.doesNotMatch(role.text, /follow only the interpretation instructions|use no tool except the workflow_read reader/u);
   assert.match(role.text, /supervision_interpretation_submit when an interpretation request asks for it/u);
+  assert.ok(role.text.length < 3_000, `root bootstrap ${role.text.length}`);
+  assert.match(role.text, /Routine record_review needs no full workflow manual/u);
   assert.match(role.text, /Standing instructions version [0-9a-f]{16}\. They govern your later check-ins and dialogue, not the request below\.$/u);
 }));
 
@@ -6377,15 +6385,15 @@ it.effect("the submission route names the native MCPX call used for workflow_rea
     assert.match(text, /Only (that|the) executed tool call (T3 records )?counts/u, label);
   }
   assert.match(requestText, /If it is not listed, call the native MCPX tool mcpx_call_tool, as for workflow_read, with \{name:/u);
-  assert.match(role.text, /if one is not listed, use mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool \(native calls\)\./u);
+  assert.match(role.text, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
 }));
 
 it.effect("a direct stop cites the freshly read latest human message with its own operationId, in the standing role and the tool description", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const standing = (yield* fixture.conversation.interpretationRole(fixture.binding))!.text;
-  assert.match(standing, /freshly read and cite the latest genuine human message \(here, or the bound main's original one for an agent-relayed Stop, never the relay\) with an operationId unique to it/u);
-  assert.match(standing, /Never reuse an earlier ID, act on quoted text or treat task cancellation as Stop/u);
-  assert.match(standing, /if one is not listed, use mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool/u);
+  assert.match(standing, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
+  assert.match(standing, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
+  assert.match(standing, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
   assert.match(supervisionStopToolDefinition.description, /Cite the latest genuine human message that asks to stop, freshly read, with an operationId unique to it; never reuse an earlier stop's message ID or operationId/u);
 }));
 
@@ -6744,4 +6752,59 @@ it.effect("an archived child's revised final selection is reconciled although no
   assert.equal(fixture.calls.slice(callsBefore).some(call => JSON.stringify(call).includes("child-revising")), false, "reconciliation reads; it never contacts the archived child");
   yield* observeAgreement(fixture, clock.now + 80_000);
   assert.deepEqual((yield* branchSelectionsOf(fixture, "child-revising")).filter(item => item[3] === "current"), current);
+}));
+
+
+it.effect("active work continues immediately after a confirmed check-in without waiting for new items or the cooldown", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  yield* appendNoticeToOperative(fixture);
+  yield* fixture.conversation.observe(fixture.threadList);
+  yield* fixture.run();
+  const first = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
+  assert.equal(first.batch?.trigger, "active_watch");
+  assert.equal((yield* recordOutcome(fixture, first)).status, "recorded");
+  const run = fixture.supervisor.runs.find(run => run.id === first.runId || fixture.supervisor.messages.some(message => message.id === first.messageId && message.runId === run.id))!;
+  assert.ok(run);
+  completeRun(fixture.supervisor, run, `Caught up. ${first.completionMarker}`, clock.now + 1);
+  yield* clock.advance(1);
+  yield* fixture.run();
+  assert.equal((yield* storedReview(fixture, first.id))?.reviewOutcome?.state, "confirmed");
+  yield* fixture.run();
+  const continued = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
+  assert.ok(continued && continued.id !== first.id);
+  assert.equal(continued.batch?.trigger, "active_watch");
+  assert.equal(continued.batch?.pendingItemCount, 0);
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
+}));
+
+it.effect("a no-plan conversation watches real work silently without gaining operative contact authority", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  const current = (yield* fixture.projectStore.task(operativeThreadId))!;
+  yield* fixture.projectStore.saveTask({...current, supervision: "not_needed", workflow: null, conversation: {...current.conversation!, authorization: null}});
+  yield* fixture.conversation.observe(fixture.threadList);
+  yield* fixture.run();
+  const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request, "Active work retains an observation request.");
+  assert.equal(request?.batch?.trigger, "active_watch");
+  assert.match(request!.text, /"engagement":"following"/);
+  assert.match(request!.text, /Observe only/);
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
+  assert.equal(yield* fixture.conversation.requests.introduction(current.id), null);
+}));
+
+it.effect("a blocked proposal introduction does not stop following active work or resend the blocked notice", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  yield* appendNoticeToOperative(fixture);
+  const introduction = (yield* fixture.conversation.requests.introduction(fixture.task.id))!;
+  yield* fixture.conversation.requests.saveIntroduction({...introduction, state: "blocked", error: "The proposal source needs correction."});
+  yield* fixture.conversation.observe(fixture.threadList);
+  yield* fixture.run();
+  const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request, "Active work retains an observation request.");
+  assert.equal(request?.batch?.trigger, "active_watch");
+  assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "blocked");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 }));

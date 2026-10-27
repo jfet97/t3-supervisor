@@ -1,4 +1,6 @@
 import { Schema } from "effect";
+import {projectionHasOngoingWork} from "./domain.js";
+import {readNativeProviderTurns} from "./workflow-native-turns.js";
 import type { SupervisorMonitorActivity } from "./supervisor-monitor.js";
 import type { Projection, ThreadInfo } from "./types.js";
 
@@ -32,6 +34,8 @@ export const ProjectSupervisorScopeThreadSchema = Schema.Struct({
   origin: SupervisorScopeOrigin,
   lifecycle: SupervisorScopeLifecycle,
   lifecycleDetail: Schema.NullOr(Schema.String),
+  observedRunId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  observedProviderTurnId: Schema.optionalKey(Schema.NullOr(Schema.String)),
   archivedAt: Schema.NullOr(Schema.String),
   deletedAt: Schema.NullOr(Schema.String),
   activityRefs: Schema.Array(SupervisorActivityReferenceSchema),
@@ -180,7 +184,13 @@ export const observeScopeThread = (input: {
   if (origin === "native_child") {
     const record = input.parentProjection ? directParentChildLifecycle(input.parentProjection, thread.id) : null;
     current = record ? normalizeLifecycle(record.status) : current;
+    if (projection && projectionHasOngoingWork(projection)) current = {lifecycle: "running", detail: "native_work_active"};
   } else if ((origin === "delegated_child" || origin === "main") && projection) current = delegatedLifecycle(thread, projection);
+  const turns = origin === "native_child" && projection ? readNativeProviderTurns(projection) : [];
+  const activeTurns = turns?.filter(turn => turn.status === "running" || turn.status === "pending") ?? [];
+  const latestStart = Math.max(...(turns ?? []).flatMap(turn => turn.startedAt === null ? [] : [turn.startedAt]));
+  const latestTurns = projection && projectionHasOngoingWork(projection) ? activeTurns : turns?.filter(turn => turn.startedAt === latestStart) ?? [];
+  const observedProviderTurnId = latestTurns.length === 1 ? latestTurns[0]!.id : null;
   return {
     threadId: thread.id,
     title: thread.title,
@@ -189,6 +199,9 @@ export const observeScopeThread = (input: {
     origin,
     lifecycle: current.lifecycle,
     lifecycleDetail: current.detail,
+    ...(projection?.runs.length ? {observedRunId: (projection.runs.find(run => run.id === projection.thread.activeRunId) ??
+      [...projection.runs].filter(run => run.status !== "rolled_back").sort((a, b) => b.ordinal - a.ordinal)[0])?.id ?? null} : {}),
+    ...(origin === "native_child" ? {observedProviderTurnId} : {}),
     archivedAt,
     deletedAt,
     activityRefs: input.lineageVerified === false ? [] : input.activityRefs.slice(0, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS),

@@ -171,6 +171,22 @@ archive or delete the
 helper's native T3 conversation or any turn already running there. Retiring the
 helper is a separate action and also does not claim to stop its T3 conversation.
 
+## Active following and concise context
+
+Helpers follow actual activity in their assigned subtrees, including children,
+through local T3 tools. Their startup supplies scope, essential boundaries and
+`workflow_read view instructions` coordinates. The versioned helper reference,
+plans, status and activity are read on demand; routine envelopes carry the current
+assignment and activity references rather than repeating the operating manual.
+Helpers receive their own instructions, never the root's recruitment authority.
+A registering helper can read its reference before readiness but gains no assignment.
+
+An assigned helper may request affected-scope planning pauses and create one bounded
+read-only drafting task for that attempt. A drafter is content-only, distinct from
+a monitoring helper. The same actor acknowledgements, current assignment checks,
+fixed deadline, release and cleanup rules apply as for the root. See
+[planning pauses](project-supervision.md#planning-pauses).
+
 ## Native check-in delivery
 
 Each registered helper has one genuine T3 webhook task bound to its existing child

@@ -62,7 +62,7 @@ export type TaskInterpretationFields = typeof TaskInterpretationFields.Type;
 
 // the one digest of an interpretation's plan, for interpretation_submission.planDigest, the converted
 // supervisor_message.planDigest and every digest comparison: sha256 of the JSON of the plan fields in this order with every
-// nodeId omitted (node ids are minted per attempt and never part of the plan's identity, as today's interpretation match
+// nodeId and its resolved back_to targetNodeId omitted (occurrence ids are minted per attempt and never part of the plan's identity, as today's interpretation match
 // compares shapes); null without a workflow
 export const interpretationPlanDigest = (workflow: WorkflowPlanValue | null | undefined): string | null =>
   workflow ? createHash("sha256").update(JSON.stringify({
@@ -72,4 +72,4 @@ export const interpretationPlanDigest = (workflow: WorkflowPlanValue | null | un
     requirements: workflow.requirements,
     issues: workflow.issues,
     plan: workflow.plan,
-  }, (key, item: unknown) => key === "nodeId" ? undefined : item)).digest("hex") : null;
+  }, (key, item: unknown) => key === "nodeId" || key === "targetNodeId" ? undefined : item)).digest("hex") : null;

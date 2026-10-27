@@ -46,6 +46,7 @@ const document = (): WorkflowStateDocument => ({
   acceptedAgreements: [],
   contributions: [],
   branchSelections: [],
+  returns: [],
   evidence: [],
   createdAt: 1,
   updatedAt: 2,

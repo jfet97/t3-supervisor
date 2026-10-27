@@ -286,6 +286,28 @@ it.effect("ten finalized activities or one priority event wakes a chat, while co
     assert.deepEqual(priority.threads[0]?.priorityKinds, ["user_instruction"]);
   })));
 
+it.effect("active covered work starts and continues a watch without the fallback batch threshold or cooldown", () =>
+  withStore((monitor) => Effect.gen(function* () {
+    yield* monitor.observe({projectId, threadId, sourceOrdinal: 1, projection: makeProjection({events: [event("first-edit")]}), now});
+    assert.equal(yield* monitor.select(projectId, defaultMonitoringSettings, now, now), null);
+    const options = {eligibleThreadIds: new Set([threadId]), activeThreadIds: new Set([threadId])};
+    const first = yield* monitor.select(projectId, defaultMonitoringSettings, now, now, options);
+    assert.ok(first);
+    assert.equal(first.trigger, "active_watch");
+    assert.equal(first.threads[0]?.pendingItemCount, 1);
+    yield* monitor.acknowledge(first, now);
+
+    const continued = yield* monitor.select(projectId, defaultMonitoringSettings, now + 1, now, options);
+    assert.ok(continued);
+    assert.equal(continued.trigger, "active_watch");
+    assert.equal(continued.threads[0]?.pendingItemCount, 0);
+    assert.equal(continued.threads[0]?.threadId, threadId);
+    assert.equal(yield* monitor.select(projectId, defaultMonitoringSettings, now + 1, now,
+      {...options, activeThreadIds: new Set<string>()}), null);
+    assert.equal(yield* monitor.select(projectId, defaultMonitoringSettings, now + 1, now,
+      {...options, eligibleThreadIds: new Set(["unrelated-thread"])}), null);
+  })));
+
 it("a sparse finalized activity is due after at most two minutes, and waiting input coalesces as priority", () => {
   // one finished ordinary activity of the given age, against a chosen age bound and the default count of ten
   const decide = (ageMs: number, intervalMinutes: number) =>

@@ -231,6 +231,8 @@ const runIsBusy = (projection: Projection, run: RunInfo, shell?: Record<string, 
 /** Checks native activity that can keep a conversation from being considered idle. */
 export const projectionHasOngoingWork = (projection: Projection, shell?: ThreadInfo): boolean => {
   if (projection.runs.some(run => activeRunStates.has(run.status))) return true;
+  if (projection.providerTurns !== undefined && (!Array.isArray(projection.providerTurns) || projection.providerTurns.some(turn =>
+    !isRecord(turn) || !["completed", "interrupted", "failed", "cancelled"].includes(String(turn.status))))) return true;
   if (Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some(request => runtimeRequestMayBePending(projection, request))) return true;
   const latest = projection.runs.reduce<RunInfo | undefined>((old, run) => !old || run.ordinal > old.ordinal ? run : old, undefined);
   if (latest && runIsBusy(projection, latest, shell)) return true;

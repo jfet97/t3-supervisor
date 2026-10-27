@@ -11,7 +11,7 @@ import {canonicalStoredJson} from "./canonical-json.js";
 import {SupervisorIds} from "./ids.js";
 import {ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
-import {branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceFacts, pendingDecisionsOutside, planBranches, planEntities, planReach, planStatusPointer as planNodeStatusPointer, unsettledOccurrences, wholeOccurrencePlanned, type PlanEntityInfo} from "./workflow-plan-tree.js";
+import {backToContext, branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceAttempts, occurrenceFacts, pendingDecisionsOutside, planBranches, planEntities, planReach, planStatusPointer as planNodeStatusPointer, reachedBackTos, resolveBackTo, unsettledOccurrences, wholeOccurrencePlanned, withOccurrenceStatuses, type PlanEntityInfo} from "./workflow-plan-tree.js";
 import {
   branchSelectionLimits,
   branchSelectionPaths,
@@ -19,6 +19,7 @@ import {
   externalContributionLimits,
   externalContributionReferenceKinds,
   externalContributionStates,
+  workflowEvidenceKinds,
   workflowExecutionStatuses,
   storedPlanJsonDepth,
   workflowMutationLimits,
@@ -44,6 +45,9 @@ import {
   type WorkflowMutationReceipt,
   type WorkflowMutationResult,
   type WorkflowOwner,
+  type WorkflowReturn,
+  type WorkflowReturnApplyInput,
+  type WorkflowReturnRun,
   type WorkflowStateDocument,
   type WorkflowStateEvidence,
   type WorkflowStateEvidenceInput,
@@ -286,6 +290,14 @@ const validPlan = (value: unknown): value is WorkflowStatePlan => {
         budget.nodeIds.add(node.nodeId);
         continue;
       }
+      if (node.kind === "back_to") {
+        budget.nodes++;
+        if (budget.nodes > workflowMutationLimits.maxPlanNodes || !validNodeId(node.nodeId) || budget.nodeIds.has(node.nodeId) ||
+          !validPlanText(node.templatePath, true) && node.templatePath !== null || !validId(node.target) ||
+          !(node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason)) return false;
+        budget.nodeIds.add(node.nodeId);
+        continue;
+      }
       budget.nodes++;
       if (budget.nodes > workflowMutationLimits.maxPlanNodes || !validNodeId(node.nodeId) || budget.nodeIds.has(node.nodeId) ||
         !validPlanText(node.templatePath, true) && node.templatePath !== null || !validPlanText(node.name) || !validPlanText(node.description, true) ||
@@ -334,6 +346,15 @@ const validApplyPlan = (value: unknown): boolean => {
         if (validNodeId(node.nodeId)) budget.nodeIds.add(node.nodeId);
         continue;
       }
+      if (node.kind === "back_to") {
+        budget.nodes++;
+        if (budget.nodes > workflowMutationLimits.maxPlanNodes ||
+          !(node.nodeId === undefined || validNodeId(node.nodeId) && !budget.nodeIds.has(node.nodeId)) ||
+          !(node.templatePath === undefined || node.templatePath === null || validPlanText(node.templatePath, true)) || !validId(node.target) ||
+          !(node.targetNodeId === undefined || node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason)) return false;
+        if (validNodeId(node.nodeId)) budget.nodeIds.add(node.nodeId);
+        continue;
+      }
       budget.nodes++;
       if (budget.nodes > workflowMutationLimits.maxPlanNodes ||
         !(node.nodeId === undefined || validNodeId(node.nodeId) && !budget.nodeIds.has(node.nodeId)) ||
@@ -362,6 +383,11 @@ const validApplyPlan = (value: unknown): boolean => {
   return value === null || visit(value, 0);
 };
 
+// a resolved native turn carries both its ID and its start time, or neither
+const validProviderTurnReference = (item: Record<string, unknown>): boolean =>
+  (item.sourceProviderTurnId === undefined || item.sourceProviderTurnId === null)
+    ? item.sourceProviderTurnStartedAt === undefined || item.sourceProviderTurnStartedAt === null
+    : validNativeReference(item.sourceProviderTurnId) && typeof item.sourceProviderTurnStartedAt === "number" && Number.isFinite(item.sourceProviderTurnStartedAt);
 const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowStateEvidenceInput[] =>
   evidence === undefined || Array.isArray(evidence) && evidence.length <= workflowMutationLimits.maxEvidencePerApply && evidence.every(item => item !== null &&
     typeof item === "object" && ["status_changed", "note", "observation", "not_applicable"].includes((item as Record<string, unknown>).kind as string) &&
@@ -370,13 +396,14 @@ const validEvidenceInput = (evidence: unknown): evidence is readonly WorkflowSta
     nativeReferenceFields.every(field => {
       const reference = (item as Record<string, unknown>)[field];
       return reference === undefined || reference === null || validNativeReference(reference);
-    }));
+    }) && validProviderTurnReference(item as Record<string, unknown>));
 
 export const workflowPlanEntities = collectPlanEntities;
 
 const copyPlanNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
   if (isPlanGroup(node)) return {...node, nodes: node.nodes.map(copyPlanNode)};
   if (node.kind === "branch") return {...node, then: copyPlanNode(node.then) as WorkflowPlanGroupInfo, else: node.else ? copyPlanNode(node.else) as WorkflowPlanGroupInfo : null};
+  if (node.kind === "back_to") return {...node};
   if (node.kind === "step") return {...node, ...definitionGuidanceFields(node), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds]};
   return {...node, ...definitionGuidanceFields(node), source: node.source ? {...node.source} : null, contributorThreadIds: [...node.contributorThreadIds],
     omissions: node.omissions.map(item => ({...item, source: item.source ? {...item.source} : null})),
@@ -393,6 +420,7 @@ const staticPlan = (plan: WorkflowStatePlan): unknown => {
   return {kind: plan.kind, templatePath: plan.templatePath, nodes: plan.nodes.map(node => {
     if (isPlanGroup(node)) return staticPlan(node);
     if (node.kind === "branch") return {...node, then: staticPlan(node.then), else: staticPlan(node.else)};
+    if (node.kind === "back_to") return {...node};
     if (node.kind === "step") {
       const content = {...node} as Record<string, unknown>;
       delete content.status;
@@ -480,10 +508,37 @@ const validEvidenceBranch = (value: unknown): boolean => value === undefined || 
   typeof value.path === "string" && branchPathSet.has(value.path) && typeof value.changed === "boolean" &&
   (value.condition === undefined || branchConditionText(value.condition) === value.condition);
 
-/** When a plan edit last added, removed or changed the identity of a branch occurrence, or null when no edit ever did. */
-export const branchChangedAt = (document: Pick<WorkflowStateDocument, "evidence">, nodeId: string): number | null =>
-  document.evidence.reduce<number | null>((latest, item) => item.kind === "branch_changed" && item.targetNodeId === nodeId &&
+/**
+ * When a plan edit last added, removed or changed the identity of a branch occurrence, or an applied return reopened it for a new attempt,
+ * or null when neither ever did.
+ */
+export const branchChangedAt = (document: Pick<WorkflowStateDocument, "evidence" | "returns">, nodeId: string): number | null => {
+  const edited = document.evidence.reduce<number | null>((latest, item) => item.kind === "branch_changed" && item.targetNodeId === nodeId &&
     (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null);
+  return document.returns.reduce<number | null>((latest, item) => item.state === "applied" && item.resolvedAt !== null && item.regionNodeIds.includes(nodeId) &&
+    (latest === null || item.resolvedAt > latest) ? item.resolvedAt : latest, edited);
+};
+
+/** What a reference rests on: its native thread and, when known, its AppRun or the published native turn behind it and that turn's start. */
+export type RetirementSource = {threadId?: string | null; runId?: string | null; providerTurnId?: string | null; providerTurnStartedAt?: number | null};
+
+/**
+ * The applied return whose retired executions cover a reference, or null. A retired AppRun covers references to that run about an
+ * occurrence the return reopened. Retired native turns cover every reference from that child about a reopened occurrence unless it rests on
+ * an identifiable fresh turn: one outside the retired turns that started after the return was applied. A wholly retired native child
+ * covers every reference from it, whatever it concerns.
+ */
+export const retiredRunReturn = (document: Pick<WorkflowStateDocument, "returns">, nodeId: string | null, source: RetirementSource): WorkflowReturn | null =>
+  document.returns.find(item => item.state === "applied" && item.resolvedAt !== null && item.retiredRuns.some(retired => {
+    const reopened = nodeId !== null && item.regionNodeIds.includes(nodeId);
+    switch (retired.kind) {
+      case "run": return reopened && source.runId === retired.runId && (!source.threadId || source.threadId === retired.threadId);
+      case "provider_turns": return reopened && source.threadId === retired.threadId &&
+        !(typeof source.providerTurnId === "string" && !retired.providerTurnIds.includes(source.providerTurnId) &&
+          typeof source.providerTurnStartedAt === "number" && source.providerTurnStartedAt > item.resolvedAt!);
+      case "thread": return source.threadId === retired.threadId;
+    }
+  })) ?? null;
 
 // the branch occurrences an edit added, removed or changed in condition, else path or enclosing position
 const changedBranches = (previous: WorkflowStatePlan, next: WorkflowStatePlan): Array<{nodeId: string; condition: string | null}> => {
@@ -500,7 +555,8 @@ const changedBranches = (previous: WorkflowStatePlan, next: WorkflowStatePlan): 
  * and a record from a message created before the latest edit that added, removed or changed that branch never selects it, whether or
  * not a selection existed then.
  */
-export const branchSelectionImportDecision = (document: WorkflowStateDocument, input: Omit<BranchSelectionImport, "sourceThreadId" | "sourceRunId" | "sourceMessageId">):
+export const branchSelectionImportDecision = (document: WorkflowStateDocument, input: Omit<BranchSelectionImport, "sourceThreadId" | "sourceRunId" | "sourceMessageId"> &
+  Partial<Pick<BranchSelectionImport, "sourceThreadId" | "sourceRunId">>):
   | {kind: "unchanged"}
   | {kind: "rejected"; code: BranchSelectionDiagnosticCode}
   | {kind: "record"; existing: BranchSelection | null; branch: WorkflowPlanBranchInfo; branchKey: string} => {
@@ -512,6 +568,7 @@ export const branchSelectionImportDecision = (document: WorkflowStateDocument, i
   if (input.revision !== (existing?.revision ?? 0) + 1) return reject("branch_revision_gap");
   const changedAt = branchChangedAt(document, input.nodeId);
   if (changedAt !== null && (input.sourceCreatedAt === null || input.sourceCreatedAt < changedAt)) return reject("branch_record_outdated");
+  if (retiredRunReturn(document, input.nodeId, {threadId: input.sourceThreadId ?? null, runId: input.sourceRunId ?? null})) return reject("branch_record_outdated");
   const branch = planBranches(document.plan).find(item => item.nodeId === input.nodeId);
   const identity = branchIdentityKeys(document.plan).get(input.nodeId);
   if (!branch || identity === undefined) return reject("branch_node_unknown");
@@ -554,6 +611,123 @@ const pendingDecisionProblem = (current: WorkflowStateDocument, input: WorkflowA
   }
   return null;
 };
+
+const returnPendingExpected = "wait until the Supervisor applies the pending return, which starts the new attempt; record findings meanwhile as observations, " +
+  "or have the operative select another path so the return is no longer reached.";
+const retiredRunExpected = "cite work of the current attempt: an AppRun or native turn a return retired, or a native child it retired whole, stays with the " +
+  "closed attempt; a retired child's fresh turn counts only once it started after the return was applied.";
+type ReturnEvent = {kind: "return_requested" | "return_dismissed"; entry: WorkflowReturn};
+const unconditionalReturnReason = "Reached on every path once the members before it were settled.";
+
+/**
+ * The returns as the document now stands: a back_to newly reached on the active path requests one pending return of its current
+ * attempt, citing the selection that led there; a pending return follows its back_to's current target and region, and is dismissed
+ * once its back_to is no longer reached or left the plan. Applied and dismissed returns never change.
+ */
+const syncedReturns = (document: Pick<WorkflowStateDocument, "workflowId" | "plan" | "branchSelections" | "returns" | "evidence" | "sourceBinding">,
+  at: number): {returns: WorkflowReturn[]; events: ReturnEvent[]} => {
+  const selected = effectiveBranchSelections(document.plan, document.branchSelections);
+  const notApplicable = notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null);
+  const reached = new Set(reachedBackTos(document.plan, selected, notApplicable).map(node => node.nodeId));
+  const attempts = occurrenceAttempts(document.returns);
+  const events: ReturnEvent[] = [];
+  const returns = document.returns.map(entry => {
+    if (entry.state !== "pending") return entry;
+    const resolved = document.plan && reached.has(entry.backToNodeId) ? resolveBackTo(document.plan, entry.backToNodeId) : null;
+    if (resolved?.ok) return {...entry, targetNodeId: resolved.targetNodeId, regionNodeIds: resolved.regionNodeIds};
+    const dismissed: WorkflowReturn = {...entry, state: "dismissed", resolvedAt: at};
+    events.push({kind: "return_dismissed", entry: dismissed});
+    return dismissed;
+  });
+  for (const backToNodeId of reached) {
+    if (!document.plan || returns.some(entry => entry.state === "pending" && entry.backToNodeId === backToNodeId)) continue;
+    const resolved = resolveBackTo(document.plan, backToNodeId);
+    if (!resolved.ok) continue;
+    const attempt = attempts.get(backToNodeId) ?? 1;
+    const leading = backToContext(document.plan, backToNodeId).branches.at(-1);
+    const selection = leading ? document.branchSelections.find(item => item.nodeId === leading.nodeId && item.state === "current") : undefined;
+    const entry: WorkflowReturn = {returnId: fingerprint(["return", document.workflowId, backToNodeId, attempt, returns.filter(item => item.backToNodeId === backToNodeId).length]),
+      backToNodeId, targetNodeId: resolved.targetNodeId, regionNodeIds: resolved.regionNodeIds, attempt, state: "pending",
+      reason: selection?.reason ?? unconditionalReturnReason, sourceThreadId: selection?.sourceThreadId ?? null, sourceRunId: selection?.sourceRunId ?? null,
+      sourceMessageId: selection?.sourceMessageId ?? null, requestedAt: at, resolvedAt: null, closed: null, closedSelections: null, retiredRuns: [], resolution: null};
+    returns.push(entry);
+    events.push({kind: "return_requested", entry});
+  }
+  return {returns, events};
+};
+
+/**
+ * While a return waits for the Supervisor, the work it closes and the work after it stay as they are: no status inside the region of a
+ * return already pending changes, even one that would leave its back_to unreached, nothing that follows a pending back_to is entered,
+ * and neither an enclosing workflow nor the task completes. A return this very change reached guards only what follows it, since the
+ * change that reached it settled its region.
+ */
+const pendingReturnProblem = (current: WorkflowStateDocument, input: Pick<WorkflowApplyInput, "status">, nextPlan: WorkflowStatePlan,
+  returns: readonly WorkflowReturn[]): WorkflowApplyDiagnostic | null => {
+  if (!nextPlan) return null;
+  const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
+  const changed = collectPlanEntities(nextPlan).filter(node => previous.has(node.nodeId) && previous.get(node.nodeId) !== node.status);
+  const problem = (node: PlanEntity | null): WorkflowApplyDiagnostic =>
+    ({code: "return_pending", path: node ? planStatusPointer(nextPlan, node) ?? "/plan" : "/status", expected: returnPendingExpected});
+  const waitingRegions = new Set(current.returns.flatMap(entry => entry.state === "pending" ? entry.regionNodeIds : []));
+  const reopened = changed.find(node => waitingRegions.has(node.nodeId));
+  if (reopened) return problem(reopened);
+  for (const entry of returns) {
+    if (entry.state !== "pending") continue;
+    const held = backToContext(nextPlan, entry.backToNodeId);
+    const blocked = changed.find(node => held.downstream.has(node.nodeId) || held.enclosing.has(node.nodeId) && node.status === "completed");
+    if (blocked) return problem(blocked);
+    if (input.status === "completed" && current.status !== "completed") return problem(null);
+  }
+  return null;
+};
+
+// a status or applicability assertion never rests on an execution a return retired; a reference without a thread cites the workflow's own
+const retiredRunProblem = (current: WorkflowStateDocument, evidence: readonly WorkflowStateEvidenceInput[]): WorkflowApplyDiagnostic | null => {
+  const index = evidence.findIndex(item => (item.kind === "status_changed" || item.kind === "not_applicable") &&
+    retiredRunReturn(current, item.targetNodeId ?? null, {
+      threadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
+      runId: item.sourceRunId ?? null, providerTurnId: item.sourceProviderTurnId ?? null, providerTurnStartedAt: item.sourceProviderTurnStartedAt ?? null,
+    }) !== null);
+  return index < 0 ? null : {code: "retired_run_evidence", path: `/evidence/${index}`, expected: retiredRunExpected};
+};
+
+// one retired execution: an AppRun, a native child's published turns (at most maxRetiredRuns of them) or a whole native child with a reason
+const validRetiredRun = (item: unknown): item is WorkflowReturnRun => {
+  if (!isRecord(item) || !validNativeReference(item.threadId)) return false;
+  switch (item.kind) {
+    case "run": return exactRecordKeys(item, ["kind", "threadId", "runId"]) && validNativeReference(item.runId);
+    case "provider_turns": return exactRecordKeys(item, ["kind", "threadId", "providerThreadId", "providerTurnIds"]) && validNativeReference(item.providerThreadId) &&
+      Array.isArray(item.providerTurnIds) && item.providerTurnIds.length >= 1 && item.providerTurnIds.length <= workflowMutationLimits.maxRetiredRuns &&
+      item.providerTurnIds.every(validNativeReference) && new Set(item.providerTurnIds).size === item.providerTurnIds.length;
+    case "thread": return exactRecordKeys(item, ["kind", "threadId", "reason"]) && validText(item.reason);
+    default: return false;
+  }
+};
+const retiredRunKey = (item: WorkflowReturnRun): string => json(item.kind === "run" ? [item.kind, item.threadId, item.runId]
+  : item.kind === "provider_turns" ? [item.kind, item.threadId, item.providerThreadId] : [item.kind, item.threadId]);
+const validRetiredRuns = (value: unknown): value is WorkflowReturnRun[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxRetiredRuns &&
+  value.every(validRetiredRun) && new Set(value.map(retiredRunKey)).size === value.length;
+const copyRetiredRun = (item: WorkflowReturnRun): WorkflowReturnRun => item.kind === "provider_turns" ? {...item, providerTurnIds: [...item.providerTurnIds]} : {...item};
+const validReturnApplyInput = (value: unknown): value is WorkflowReturnApplyInput => isRecord(value) && validId(value.operationId) && validId(value.workflowId) &&
+  Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 && validId(value.returnId) && validText(value.note) &&
+  (value.retiredRuns === undefined || validRetiredRuns(value.retiredRuns));
+const validReturns = (value: unknown): value is WorkflowReturn[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxReturns &&
+  new Set(value.map(item => isRecord(item) ? item.returnId : null)).size === value.length &&
+  new Set(value.flatMap(item => isRecord(item) && item.state === "pending" ? [item.backToNodeId] : [])).size === value.filter(item => isRecord(item) && item.state === "pending").length &&
+  value.every(item => isRecord(item) && validId(item.returnId) && validNodeId(item.backToNodeId) && validNodeId(item.targetNodeId) &&
+    Array.isArray(item.regionNodeIds) && item.regionNodeIds.length >= 1 && item.regionNodeIds.length <= workflowMutationLimits.maxPlanNodes && item.regionNodeIds.every(validNodeId) &&
+    Number.isSafeInteger(item.attempt) && Number(item.attempt) >= 1 && validPlanReason(item.reason) &&
+    (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) && (item.sourceRunId === null || validNativeReference(item.sourceRunId)) &&
+    (item.sourceMessageId === null || validNativeReference(item.sourceMessageId)) && Number.isFinite(item.requestedAt) && validRetiredRuns(item.retiredRuns) &&
+    (item.state === "pending" ? item.resolvedAt === null && item.closed === null && item.closedSelections === null && item.resolution === null && item.retiredRuns.length === 0
+      : item.state === "dismissed" ? Number.isFinite(item.resolvedAt) && item.closed === null && item.closedSelections === null && item.resolution === null && item.retiredRuns.length === 0
+      : item.state === "applied" && Number.isFinite(item.resolvedAt) && Array.isArray(item.closed) && item.closed.length <= workflowMutationLimits.maxPlanNodes &&
+        item.closed.every(closed => isRecord(closed) && validNodeId(closed.nodeId) && isStatus(closed.status) && validContributorIds(closed.contributorThreadIds)) &&
+        Array.isArray(item.closedSelections) && item.closedSelections.length <= branchSelectionLimits.maxSelections &&
+        item.closedSelections.every(closed => isRecord(closed) && validNodeId(closed.nodeId) && validBranchRevision(closed.revision) && typeof closed.path === "string" && branchPathSet.has(closed.path)) &&
+        isRecord(item.resolution) && validId(item.resolution.operationId) && validId(item.resolution.actorSupervisorThreadId) && validText(item.resolution.note)));
+const validEvidenceReturn = (value: unknown): boolean => value === undefined || isRecord(value) && validId(value.returnId);
 
 const statusUnchangedExpected = "record status_changed only for a status that changes in this apply; record supporting evidence as an observation.";
 const sequenceOrderExpected = "in this sequence, record a member as underway or completed only after every earlier applicable member is completed " +
@@ -698,15 +872,15 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
     isRecord(item.agreement.workflow) && validPlan(item.agreement.workflow.plan)) &&
   (value.contributions === undefined || validContributions(value.contributions)) &&
   (value.branchSelections === undefined || validBranchSelections(value.branchSelections)) &&
+  (value.returns === undefined || validReturns(value.returns)) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
-    validId(item.id) && validId(item.operationId) && ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation", "not_applicable",
-      "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed"].includes(String(item.kind)) &&
-    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) &&
+    validId(item.id) && validId(item.operationId) && (workflowEvidenceKinds as readonly string[]).includes(String(item.kind)) &&
+    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
     (item.sourceRunId === null || validNativeReference(item.sourceRunId)) && (item.sourceMessageId === null || validNativeReference(item.sourceMessageId)) &&
-    (item.sourceItemId === undefined || item.sourceItemId === null || validNativeReference(item.sourceItemId)) &&
+    (item.sourceItemId === undefined || item.sourceItemId === null || validNativeReference(item.sourceItemId)) && validProviderTurnReference(item) &&
     (item.agreementKey === null || validText(item.agreementKey)) && validText(item.note) &&
     (item.scopeRevision === undefined || validText(item.scopeRevision))) &&
   Number.isFinite(value.createdAt) && Number.isFinite(value.updatedAt);
@@ -743,6 +917,7 @@ export interface WorkflowStateStoreShape {
   readonly recordContribution: (owner: WorkflowOwner, input: ExternalContributionImport, now?: number) => WorkflowEffect<ExternalContributionImportResult>;
   readonly assessContribution: (owner: WorkflowOwner, input: WorkflowContributionAssessmentInput, now?: number) => WorkflowEffect<WorkflowMutationResult>;
   readonly recordBranchSelection: (owner: WorkflowOwner, input: BranchSelectionImport, now?: number) => WorkflowEffect<BranchSelectionImportResult>;
+  readonly applyReturn: (owner: WorkflowOwner, input: WorkflowReturnApplyInput, now?: number) => WorkflowEffect<WorkflowMutationResult>;
 }
 
 const workflowColumns = "workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document";
@@ -764,7 +939,7 @@ const classifyWorkflowRow = (row: WorkflowRow): WorkflowStateDecode => {
     value.revision !== row.revision || value.parentWorkflowId !== row.parent_workflow_id || value.parentThreadId !== row.parent_thread_id)
     return {status: "incompatible", workflowId: row.workflow_id,
       formatVersion: isRecord(value) && Number.isSafeInteger(value.formatVersion) ? Number(value.formatVersion) : null};
-  return {status: "found", document: {...value, contributions: value.contributions ?? [], branchSelections: value.branchSelections ?? []} as unknown as WorkflowStateDocument};
+  return {status: "found", document: {...value, contributions: value.contributions ?? [], branchSelections: value.branchSelections ?? [], returns: value.returns ?? []} as unknown as WorkflowStateDocument};
 };
 
 // a stored receipt replays only when it decodes with the receipt schema; anything else is reported incompatible, never as a write
@@ -909,12 +1084,25 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
   const emptyDocument = Effect.fnUntraced(function* (owner: WorkflowOwner, threadId: string, parentWorkflowId: string | null, parentThreadId: string | null, revision: number, now: number) {
     return {formatVersion: 2, workflowId: yield* ids.uuid, projectId: owner.projectId, mainThreadId: owner.mainThreadId, threadId,
       parentWorkflowId, parentThreadId, revision, status: "planned", objective: null, sourceBinding: null, requirements: [], issues: [], plan: null,
-      currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], evidence: [], createdAt: now, updatedAt: now} satisfies WorkflowStateDocument as WorkflowStateDocument;
+      currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], returns: [], evidence: [], createdAt: now, updatedAt: now} satisfies WorkflowStateDocument as WorkflowStateDocument;
   });
   const makeEvidence = Effect.fnUntraced(function* (input: Omit<WorkflowStateEvidence, "id" | "recordedAt" | "actorSupervisorThreadId"> & {owner: WorkflowOwner; now: number}) {
     const {owner, now, ...rest} = input;
     return {...rest, sourceItemId: rest.sourceItemId ?? null, id: yield* ids.uuid, recordedAt: now, actorSupervisorThreadId: owner.supervisorThreadId} satisfies WorkflowStateEvidence as WorkflowStateEvidence;
   });
+  // a return's history entry names the occurrence it returns to and cites the selection that led there
+  const returnEvidence = (owner: WorkflowOwner, operationId: string, event: ReturnEvent | {kind: "return_applied"; entry: WorkflowReturn; note: string},
+    plan: WorkflowStatePlan, now: number) => {
+    const target = collectPlanEntities(plan).find(node => node.nodeId === event.entry.targetNodeId) ?? null;
+    const name = target?.name ?? "its target";
+    const note = event.kind === "return_applied" ? event.note : event.kind === "return_requested"
+      ? `Attempt ${event.entry.attempt} reached its return to ${name}; the Supervisor applies it at a safe point to start attempt ${event.entry.attempt + 1}.`
+      : `The return to ${name} is no longer reached; attempt ${event.entry.attempt} continues without it.`;
+    return makeEvidence({operationId, owner, kind: event.kind, now, targetNodeId: event.entry.targetNodeId, targetNodeName: target?.name ?? null,
+      statusFrom: event.kind === "return_applied" ? target?.status ?? null : null, statusTo: event.kind === "return_applied" ? "planned" : null,
+      sourceThreadId: event.entry.sourceThreadId, sourceRunId: event.entry.sourceRunId, sourceMessageId: event.entry.sourceMessageId, sourceItemId: null,
+      agreementKey: null, note: note.slice(0, workflowMutationLimits.maxTextLength), return: {returnId: event.entry.returnId, ...(event.kind === "return_applied" ? {regionNodeIds: [...event.entry.regionNodeIds]} : {})}});
+  };
 
   const getState = (projectId: string, mainThreadId: string, threadId = mainThreadId) => run(Effect.gen(function* () {
     const row = yield* workflowByThread({projectId, mainThreadId}, threadId);
@@ -1027,6 +1215,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     if (evidenceProblem) return {status: "invalid", operationId: input.operationId,
       reason: evidenceProblem === "generic" ? "invalid_plan_or_missing_status_evidence" : evidenceProblem.code,
       ...(evidenceProblem === "generic" ? {} : {diagnostic: evidenceProblem})} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const retiredProblem = retiredRunProblem(current, validatedInput.evidence ?? []);
+    if (retiredProblem) return {status: "invalid", operationId: input.operationId, reason: retiredProblem.code, diagnostic: retiredProblem} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const nextPlan = normalized.plan;
     const branchState = invalidatedSelections(current.branchSelections, nextPlan, at);
     const notApplicable = notApplicableNodeIds(current.evidence, validatedInput.sourceBinding?.sourceHash ?? null, validatedInput.evidence ?? []);
@@ -1059,6 +1249,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceThreadId: item.sourceThreadId ?? ((item.sourceRunId ?? item.sourceMessageId ?? item.sourceItemId) ? current.threadId : null),
         sourceRunId: item.sourceRunId ?? null,
         sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note,
+        ...(typeof item.sourceProviderTurnId === "string"
+          ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1084,12 +1276,18 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
       targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: validatedInput.status,
       sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
+    const synced = syncedReturns({workflowId: current.workflowId, plan: nextPlan, branchSelections: branchState.selections, returns: current.returns, evidence,
+      sourceBinding: validatedInput.sourceBinding}, at);
+    const returnProblem = pendingReturnProblem(current, validatedInput, nextPlan, synced.returns);
+    if (returnProblem) return {status: "invalid", operationId: input.operationId, reason: returnProblem.code, diagnostic: returnProblem} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    for (const event of synced.events) evidence.push(yield* returnEvidence(owner, input.operationId, event, nextPlan, at));
     if (evidence.length > workflowMutationLimits.maxEvidence) return {status: "invalid", operationId: input.operationId, reason: "evidence_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    if (synced.returns.length > workflowMutationLimits.maxReturns) return {status: "invalid", operationId: input.operationId, reason: "return_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
 
     const next: WorkflowStateDocument = {...current, revision: current.revision + 1, status: validatedInput.status, objective: validatedInput.objective,
       sourceBinding: copyBinding(validatedInput.sourceBinding), requirements: copyRequirements(validatedInput.requirements), issues: copyIssues(validatedInput.issues),
       plan: nextPlan, currentAgreementKey: oldPlanHash === newPlanHash ? current.currentAgreementKey : null,
-      branchSelections: branchState.selections, evidence, updatedAt: at};
+      branchSelections: branchState.selections, returns: synced.returns, evidence, updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId: input.operationId, reason: "document_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision))) {
@@ -1293,9 +1491,14 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       targetNodeId: input.nodeId, targetNodeName: null, statusFrom: null, statusTo: null,
       sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, agreementKey: null,
       note: input.reason, branch: {revision: input.revision, path: input.path, changed, condition: branch.condition}});
-    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
-      branchSelections: existing ? current.branchSelections.map(item => item.nodeId === entry.nodeId ? entry : item) : [...current.branchSelections, entry],
-      evidence: [...current.evidence, evidence], updatedAt: at};
+    const branchSelections = existing ? current.branchSelections.map(item => item.nodeId === entry.nodeId ? entry : item) : [...current.branchSelections, entry];
+    const history = [...current.evidence, evidence];
+    // a selection can reach a return, or take the path that held one away from it
+    const synced = syncedReturns({...current, branchSelections, evidence: history}, at);
+    for (const event of synced.events) history.push(yield* returnEvidence(owner, evidence.operationId, event, current.plan, at));
+    if (history.length > workflowMutationLimits.maxEvidence || synced.returns.length > workflowMutationLimits.maxReturns)
+      return {status: "rejected", code: "branch_capacity"} satisfies BranchSelectionImportResult as BranchSelectionImportResult;
+    const next: WorkflowStateDocument = {...current, revision: current.revision + 1, branchSelections, returns: synced.returns, evidence: history, updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "rejected", code: "branch_capacity"} satisfies BranchSelectionImportResult as BranchSelectionImportResult;
     if (!(yield* casUpdate(owner, next.workflowId, next.revision, serialized, at, row.revision)))
@@ -1346,6 +1549,65 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     return receipt;
   }));
 
+  /**
+   * Starts the new attempt a pending return asks for, at the safe point the Supervisor chose; joins the caller's transaction. The return
+   * keeps the closed attempt's statuses, contributors and current branch selections and the child runs it retires; every occurrence in
+   * its region is planned again with its contributors still linked, and every selection there is invalidated so the operative decides
+   * again with the next revision. The plan and the agreement are unchanged.
+   */
+  const applyReturn = (owner: WorkflowOwner, input: WorkflowReturnApplyInput, now?: number) => write(Effect.gen(function* () {
+    const operationId = isRecord(input) && validId(input.operationId) ? input.operationId : "";
+    if (!validReturnApplyInput(input)) return {status: "invalid", operationId, reason: "invalid_return_apply"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const requestHash = requestFingerprint({kind: "apply-return", owner, input});
+    const replay = yield* operationReplay(owner, "edit", operationId, requestHash);
+    if (replay) return replay;
+    const row = yield* workflowById(owner, input.workflowId);
+    if (!row) return {status: "not_found", operationId} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const decoded = classifyWorkflowRow(row);
+    if (decoded.status === "incompatible") return {...decoded, operationId};
+    const current = decoded.document;
+    if (current.revision !== input.expectedRevision) return {status: "conflict", operationId, reason: "revision", currentRevision: current.revision} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const entry = current.returns.find(item => item.returnId === input.returnId);
+    if (!entry || entry.state !== "pending") return {status: "invalid", operationId, reason: "return_not_pending"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const plan = current.plan;
+    const reached = plan !== null && reachedBackTos(plan, documentBranchSelections(current), notApplicableNodeIds(current.evidence, current.sourceBinding?.sourceHash ?? null))
+      .some(node => node.nodeId === entry.backToNodeId);
+    const resolved = plan && reached ? resolveBackTo(plan, entry.backToNodeId) : null;
+    if (!plan || !resolved?.ok) return {status: "invalid", operationId, reason: "return_not_reached"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const region = new Set(resolved.regionNodeIds);
+    const reopened = collectPlanEntities(plan).filter(node => region.has(node.nodeId));
+    const replanned = withOccurrenceStatuses(plan, reopened.map(node => ({nodeId: node.nodeId, status: "planned" as const})));
+    if (!("plan" in replanned)) return {status: "invalid", operationId, reason: "return_not_reached"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const applied: WorkflowReturn = {...entry, targetNodeId: resolved.targetNodeId, regionNodeIds: resolved.regionNodeIds, state: "applied", resolvedAt: at,
+      closed: reopened.map(node => ({nodeId: node.nodeId, status: node.status, contributorThreadIds: [...node.contributorThreadIds]})),
+      closedSelections: current.branchSelections.filter(item => item.state === "current" && region.has(item.nodeId))
+        .map(item => ({nodeId: item.nodeId, revision: item.revision, path: item.path})),
+      retiredRuns: (input.retiredRuns ?? []).map(copyRetiredRun),
+      resolution: {operationId, actorSupervisorThreadId: owner.supervisorThreadId, note: input.note}};
+    const branchSelections = current.branchSelections.map(item => item.state === "current" && region.has(item.nodeId)
+      ? {...item, state: "invalidated" as const, invalidatedAt: at} : item);
+    const evidence = [...current.evidence, yield* returnEvidence(owner, operationId, {kind: "return_applied", entry: applied, note: input.note}, plan, at)];
+    evidence.push(yield* makeEvidence({operationId, owner, kind: "status_changed", now: at, targetNodeId: null, targetNodeName: null,
+      statusFrom: current.status, statusTo: "underway", sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null,
+      agreementKey: null, note: `Attempt ${entry.attempt + 1} starts after returning to earlier work. ${input.note}`.slice(0, workflowMutationLimits.maxTextLength)}));
+    // the reopened region holds nothing back: a return pending inside it is no longer reached
+    const synced = syncedReturns({...current, plan: replanned.plan, branchSelections, evidence,
+      returns: current.returns.map(item => item.returnId === applied.returnId ? applied : item)}, at);
+    for (const event of synced.events) evidence.push(yield* returnEvidence(owner, operationId, event, replanned.plan, at));
+    if (evidence.length > workflowMutationLimits.maxEvidence) return {status: "invalid", operationId, reason: "evidence_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (synced.returns.length > workflowMutationLimits.maxReturns) return {status: "invalid", operationId, reason: "return_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const next: WorkflowStateDocument = {...current, status: "underway", revision: current.revision + 1, plan: replanned.plan, branchSelections, returns: synced.returns, evidence, updatedAt: at};
+    const serialized = json(next);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision)))
+      return {status: "conflict", operationId, reason: "revision", currentRevision: yield* currentRevision(owner, current.workflowId)} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const receipt = workflowReceipt("applied", operationId, next);
+    yield* recordOperation(owner, "edit", operationId, requestHash, receipt, at);
+    return receipt;
+  }));
+
   // acquisition: the workflow schema, statement for statement as the baseline constructor wrote it
   yield* run(Effect.gen(function* () {
     yield* sql.unsafe("CREATE TABLE IF NOT EXISTS supervisor_workflow_state (" +
@@ -1360,7 +1622,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
   }));
 
   return {get, getState, getByIdForOwner, listResult, list, hasNeedsAttention, apply, ensureMain, linkChild, importAcceptedAgreement,
-    recordContribution, assessContribution, recordBranchSelection} satisfies WorkflowStateStoreShape;
+    recordContribution, assessContribution, recordBranchSelection, applyReturn} satisfies WorkflowStateStoreShape;
 });
 
 // effect/sql spans carry statement text, so the construction and every operation run untraced

@@ -1,5 +1,6 @@
 import { Effect, Layer } from "effect";
 import { SupervisorIds } from "./ids.js";
+import { SupervisorPlanningController } from "./supervisor-planning-controller.js";
 import { InterpretationWake } from "./interpretation-wake.js";
 import { ProjectSupervisorStore } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
@@ -59,7 +60,8 @@ export const SupervisionTeamLive = (run: Pick<SupervisionRun, "baseUrl">) => Sup
 // the Start/Stop control, the workflow proof and scope reads on the read credential, and the workflow write and team
 // controllers over the team services
 export const SupervisionControllersLive = (run: Pick<SupervisionRun, "helperProviderInstanceId">) =>
-  SupervisorTeamController.layer(run.helperProviderInstanceId ? {helperProviderInstanceId: run.helperProviderInstanceId} : {}).pipe(
+  SupervisorPlanningController.layer.pipe(
+    Layer.provideMerge(SupervisorTeamController.layer(run.helperProviderInstanceId ? {helperProviderInstanceId: run.helperProviderInstanceId} : {})),
     Layer.provideMerge(WorkflowWriteController.layer()),
     Layer.provideMerge(Layer.mergeAll(SupervisionControl.layer, WorkflowNativeAccess.layer)),
   );

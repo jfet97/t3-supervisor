@@ -13,6 +13,7 @@ import {
 } from "../src/supervisor-conversation-store.js";
 import { seedAgreementCandidates, storedCandidateCounts } from "./support/agreement-candidates.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
+import { createPlanningAttempt, defaultPlanningTimeoutMs, expirePlanningAttempt } from "../src/supervisor-planning.js";
 
 // target regressions of the SupervisorConversationStore effect service on a temporary guidance.sqlite3 through the
 // production layers: CT-CSTORE-01..04 at service level, the CC-GDB-IMPLICIT read-modify-writes in one transaction under
@@ -42,6 +43,29 @@ const candidate = (taskId: string, proposalId: string, at: number): WorkflowAgre
 const forcedYields = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, Scheduler.MaxOpsBeforeYield, 8);
 
 describe("SupervisorConversationStore", () => {
+  it.live("planning deadlines and unknown delivery survive restart, and closed attempts cannot be reopened", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    const initial = createPlanningAttempt({id: "pause-a", operationId: "pause-operation-a", projectId, mainThreadId: "main-a",
+      ownerThreadId: "supervisor-a", bindingGeneration: 1, taskId: "task-a", taskRevision: "source-a", reason: "Prepare the revised plan",
+      createdAt: baseTime, timeoutMs: defaultPlanningTimeoutMs,
+      targets: [{threadId: "main-a", recipientThreadId: "main-a", scope: "implementation"}]});
+    const attempt = {...initial, targets: initial.targets.map(target => ({...target,
+      hold: {...target.hold, state: "uncertain" as const, attemptedAt: baseTime}}))};
+    yield* withStore(directory, store => store.savePlanningAttempt(attempt));
+    yield* withStore(directory, store => Effect.gen(function* () {
+      const [restored] = yield* store.planningAttempts(projectId, "supervisor-a");
+      assert.deepEqual(restored, attempt);
+      assert.deepEqual(yield* store.planningAttempts(projectId, "other-supervisor"), []);
+      const renewed = yield* Effect.flip(store.savePlanningAttempt({...attempt, deadline: attempt.deadline + 60_000}));
+      assert.ok(renewed instanceof GuidanceStoreError);
+      const expired = expirePlanningAttempt(attempt, attempt.deadline);
+      yield* store.savePlanningAttempt(expired);
+      const reopened = yield* Effect.flip(store.savePlanningAttempt({...expired, state: "open", resolution: null, closedAt: null}));
+      assert.ok(reopened instanceof GuidanceStoreError);
+      assert.deepEqual(yield* store.planningAttempts(projectId), [expired]);
+    }));
+  }), {timeout: 10_000});
+
   it.live("CT-CSTORE-01: prepare() beside a pending request throws supervisor_request_inflight before pruning or inserting", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* withStore(directory, (store, db) => Effect.gen(function* () {

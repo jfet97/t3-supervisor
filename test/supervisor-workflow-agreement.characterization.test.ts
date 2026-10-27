@@ -6,8 +6,9 @@ import { goldenDraft, goldenPins, goldenProposalId, goldenSeed, goldenSnapshot }
 
 // the digest and the plan hash are pure functions of a fixed fixture proposal: a plain test of their golden values
 
-const digest = "80f74bf9526d4e8080e9d46d56ddb38ac1212ce61d95b73a155f3e67d4935352";
-const planHash = "795daa05bf4d60fa1474a2f02696f51f88d2e3d758f84338af42b92bec074134";
+// re-recorded when workflow template members began deriving their IDs from their occurrence; the plan is otherwise unchanged
+const digest = "dee7fb6683a1c2577db2854e1081d48e65512a73ee169566f54a6c3a84fd1d72";
+const planHash = "0a24d526a93b40faf3ccfbcc11036242a70d1156b7daab62ecb09f21167a5673";
 
 it("CT-SWA-01: compactProposalDigest and workflowAgreementPlanHash are golden hex values for a fixture proposal", {timeout: 10_000}, () => {
   const context = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot).context;

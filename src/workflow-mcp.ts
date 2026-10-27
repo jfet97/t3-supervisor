@@ -1,4 +1,5 @@
 import {SupervisorTeamController, supervisionTeamToolDefinition, supervisionGuideToolDefinition} from "./supervisor-team-controller.js";
+import {SupervisorPlanningController, supervisionPlanningToolDefinition} from "./supervisor-planning-controller.js";
 import { Cause, Context, Data, Deferred, Effect, Exit, Fiber, FiberSet, Layer, MutableRef, Option, Scope } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -87,9 +88,10 @@ export interface WorkflowMcpShape {
   readonly close: Effect.Effect<void>;
 }
 
-const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["Service"], team?: SupervisorTeamController["Service"]) {
+const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["Service"], team?: SupervisorTeamController["Service"], planning?: SupervisorPlanningController["Service"]) {
   const tools = [workflowReadToolDefinition, workflowWriteToolDefinition, supervisionStartToolDefinition, supervisionStopToolDefinition,
-    supervisionPlanToolDefinition, supervisionInterpretationSubmitToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : [])] as unknown as Tool[];
+    supervisionPlanToolDefinition, supervisionInterpretationSubmitToolDefinition, ...(team ? [supervisionTeamToolDefinition, supervisionGuideToolDefinition] : []),
+    ...(planning ? [supervisionPlanningToolDefinition] : [])] as unknown as Tool[];
   // the endpoint's hold on every admitted request, and every started controller call, which outlives its request after an
   // outcome-unknown answer until it settles or close()
   const requests = yield* FiberSet.make<void, never>();
@@ -115,6 +117,7 @@ const make = Effect.fnUntraced(function* (controller: WorkflowWriteController["S
       return {start: cancel => controller.submitInterpretation(args, cancel), unknown: interpretationOutcomeUnknown, errors: interpretationErrorStatuses};
     if (name === "supervision_team" && team) return routed(cancel => team.call(args, cancel));
     if (name === "supervision_guide" && team) return routed(cancel => team.guide(args, cancel));
+    if (name === "supervision_planning" && planning) return routed(cancel => planning.call(args, cancel));
     return undefined;
   };
 
@@ -208,7 +211,8 @@ export class WorkflowMcp extends Context.Service<WorkflowMcp, WorkflowMcpShape>(
   // the endpoint over the supervision run's write and team controllers; releasing the layer closes it
   static readonly layer: Layer.Layer<WorkflowMcp, never, WorkflowWriteController | SupervisorTeamController> = Layer.effect(WorkflowMcp,
     Effect.gen(function* () {
-      return yield* make(yield* WorkflowWriteController, yield* SupervisorTeamController);
+      const planning = Option.getOrUndefined(yield* Effect.serviceOption(SupervisorPlanningController));
+      return yield* make(yield* WorkflowWriteController, yield* SupervisorTeamController, planning);
     }));
 }
 

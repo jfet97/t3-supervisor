@@ -199,6 +199,67 @@ removes it to tidy progress, and it never records or approves a selection itself
 When a child's connected workflow contains a branch, the Supervisor tells that child
 its branch node ID, condition and paths, the task ID and this record format.
 
+## Returns and attempts
+
+A plan return is `{kind: "back_to", nodeId, templatePath, target, targetNodeId,
+reason}`; like a branch it has no status or contributors. `target` is the step, local
+step or workflow ID of an earlier member in the same sequential lane, and the service
+resolves `targetNodeId` in the composed plan, so drafts and applies omit it. A plan
+that cannot resolve a return is rejected with `back_to_target_not_found`,
+`back_to_target_ambiguous`, `back_to_unreachable_member` (a member follows it) or
+`back_to_no_exit_cycle`, and a pointer to the return.
+
+A return's region is every occurrence from its target through the member that holds
+it, nested ones included. When a return is reached, on the active path with every
+earlier member settled, the workflow document appends a pending entry to `returns`
+with `return_requested` evidence. It carries `returnId`, `backToNodeId`,
+`targetNodeId`, `regionNodeIds`, the `attempt` it closes, and the reason and source
+of the selection that led to it. While it is pending, an `apply` is rejected with
+`return_pending` when it changes a status in its region, enters an occurrence after
+the return, or completes the task or a workflow enclosing it. Observations remain
+possible. A pending entry whose return is no longer reached, or has left the plan, is
+dismissed with `return_dismissed` evidence. Entries are never removed, and a workflow
+holds at most 100.
+
+The Supervisor applies a pending, still reached return at a safe point. Applying it
+records `return_applied` evidence and keeps the closed attempt on the entry: `closed`
+holds each region occurrence's status and contributors, `closedSelections` the branch
+selections that were current, and `retiredRuns` the child runs `{threadId, runId}`
+that belonged to the closed attempt, at most 50. Every occurrence in the region
+returns to `planned` with its contributors still linked, and each selection in the
+region is invalidated, so the operative decides again with the next revision. The
+plan and the agreement pointer are unchanged. The operation is idempotent by its
+operation ID and checks the expected revision.
+
+An occurrence's attempt is one more than the number of applied returns whose region
+holds it. View `status` adds `attempt` to reopened occurrences and lists each
+workflow's `pendingReturns`; the progress snapshot adds `returns` and `attempts`.
+Output of a closed attempt never counts for the next one. A branch-selection record
+from a message created before an applied return reopened its branch, or from a run
+that return retired, is `branch_record_outdated`. A `status_changed` or
+`not_applicable` entry about a reopened occurrence that cites a retired run is
+rejected with `retired_run_evidence`; it can still be recorded as an observation. When
+evidence cites a native message or item without its run, the service records the run
+that produced it, so the fence holds however the evidence cites it.
+
+Native reviewer children with published, strongly identified provider turns keep the
+same conversation across passes. Applying the return requires a terminal child and
+provider turns, no pending work, and its parent's dispatch ACK. It retires the exact
+earlier turn IDs. A new pass must cite a different turn started after the return;
+the service resolves this identity from native evidence rather than caller input.
+When a native provider exposes no per-execution identity, the return retires that
+whole child. Use a fresh managed reviewer carrying its earlier findings and record
+the replacement reason. Connected work and History show this distinction. Neither
+case removes the earlier reports or turns a failed review into a missing report.
+
+A revision keeps the identity of every occurrence it keeps. A proposal draft is
+canonicalized against the live plan, or the latest proposal before any plan is live:
+an occurrence without `nodeId` that matches exactly one existing occurrence keeps its
+ID, and a referenced workflow keeps the actual IDs of its existing members. A member
+new to an occurrence, such as one a revision includes again, gets an ID derived from
+the occurrence and the member's template path, the same in every proposal and apply.
+An `apply` still names each existing occurrence by its `nodeId`.
+
 ## MCP interface
 
 The service provides a stateless Streamable HTTP MCP route at `/mcp/workflows`.
@@ -277,6 +338,16 @@ candidate, before or after its agreement. A notice names only an already recorde
 proposal, so `pending` means only that the caller's own call is not visible yet. Any other
 call, such as a forged, foreign, outdated or obsolete one, gets one refusal that names
 nothing; the read writes nothing and grants no Supervisor, helper or write authority.
+
+A native child of a supervised main reads its own scoped workflow with the same tool and
+the same proof of its own executed call: `taskId` is the main's current task and
+`proposalId` is the ID of the child's own workflow document, both from its notice. It
+answers only while the child is a live descendant on a complete subagent path of a main
+whose binding is ready, enabled and not stopped, under that main's current supervised
+task, and only for the child's own linked document under its native parent. The text names
+each occurrence with its node ID, status, attempt and branch reach, then the returns
+pending. A child accepts nothing: its scoped plan is its Supervisor's to write, and every
+other call gets the same refusal.
 
 `supervision_stop` durably stops supervision of one chat on a genuine human request.
 Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and

@@ -1,3 +1,4 @@
+import { NativeActivityRead } from "./supervisor-awareness-contract.js";
 import { dashboardInvalidation } from "./dashboard-updates.js";
 import { projectKeys } from "./dashboard-events.js";
 import { Context, Data, Effect, Layer, Schema } from "effect";
@@ -8,6 +9,7 @@ import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
 import { ReviewWait, reviewOutcomes, WorkflowProposal, type ReviewWaitInfo, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
 import { InterpretationEvidence } from "./interpretation-evidence.js";
+import { PlanningAttempt } from "./supervisor-planning.js";
 
 export {reviewOutcomes};
 export type ReviewOutcomeKind = typeof reviewOutcomes[number];
@@ -51,6 +53,8 @@ export type ConversationRequest = {
   messageId: string;
   state: "prepared" | "sending" | "waiting" | "uncertain" | "completed" | "failed";
   batch: SupervisorMonitorBatch | null;
+  nativeReads?: NativeActivityRead[];
+  nativeReadCallIds?: string[];
   createdAt: number;
   sentAt: number | null;
   runId: string | null;
@@ -122,7 +126,7 @@ export class RequestInflight extends Data.TaggedError("RequestInflight") {
 // stored document schemas: every field the writers set, optional fields optional, unknown keys tolerated; a row is
 // checked against its schema and the parsed document is kept whole, so a document written back keeps its bytes
 const MonitorPriority = Schema.Literals(["user_instruction", "run_finished", "run_failed", "waiting_input"]);
-const MonitorTrigger = Schema.Literals(["priority", "activity_threshold", "activity_age", "saturated"]);
+const MonitorTrigger = Schema.Literals(["active_watch", "priority", "activity_threshold", "activity_age", "saturated"]);
 const MonitorActivity = Schema.Struct({
   id: Schema.String, readItemId: Schema.NullOr(Schema.String), type: Schema.String, status: Schema.String, ordinal: Schema.Number,
   detectedAt: Schema.Number, version: Schema.String, priority: Schema.NullOr(MonitorPriority),
@@ -181,6 +185,8 @@ const ConversationRequestDocument = Schema.Struct({
   messageId: Schema.String,
   state: Schema.Literals(["prepared", "sending", "waiting", "uncertain", "completed", "failed"]),
   batch: Schema.NullOr(MonitorBatch),
+  nativeReads: Schema.optionalKey(Schema.mutable(Schema.Array(NativeActivityRead))),
+  nativeReadCallIds: Schema.optionalKey(Schema.mutable(Schema.Array(Schema.String))),
   createdAt: Schema.Number,
   sentAt: Schema.NullOr(Schema.Number),
   runId: Schema.NullOr(Schema.String),
@@ -246,6 +252,7 @@ const storedDocument = <T>(is: (value: unknown) => value is T, row: string) => (
 const decodeRequestRow = storedDocument(isConversationRequest, "conversation_request");
 const decodeIntroductionRow = storedDocument(isWorkflowIntroduction, "workflow_introduction");
 const decodeCandidateRow = storedDocument(isWorkflowAgreementCandidate, "agreement_candidate");
+const decodePlanningRow = storedDocument(Schema.is(PlanningAttempt), "planning_attempt");
 const decodeStoredRequestRow = decodeGuidanceRow(Schema.Struct({ id: Schema.String }), "conversation_request");
 const decodeCountRow = decodeGuidanceRow(Schema.Struct({ n: Schema.Number }), "agreement_candidate_count");
 const decodeNoticeClockRow = decodeGuidanceRow(Schema.Struct({ last_notice_at: Schema.Number }), "notice_clock");
@@ -256,8 +263,11 @@ type PrepareInput = Pick<ConversationRequest, "projectId" | "supervisorThreadId"
 
 /** The conversation store: the durable Supervisor requests, workflow introductions, agreement candidates and notice clocks. */
 export interface SupervisorConversationStoreShape {
+  readonly planningAttempts: (projectId: string, ownerThreadId?: string) => Effect.Effect<PlanningAttempt[], GuidanceStoreError>;
+  readonly savePlanningAttempt: (attempt: PlanningAttempt) => Effect.Effect<void, GuidanceStoreError>;
   readonly requests: (projectId: string, supervisorThreadId?: string) => Effect.Effect<ConversationRequest[], GuidanceStoreError>;
   readonly pending: (projectId: string, supervisorThreadId: string) => Effect.Effect<ConversationRequest | null, GuidanceStoreError>;
+  readonly recordNativeReads: (projectId: string, requestId: string, reads: readonly NativeActivityRead[]) => Effect.Effect<void, GuidanceStoreError>;
   readonly saveRequest: (request: ConversationRequest) => Effect.Effect<void, GuidanceStoreError>;
   readonly prepare: (input: PrepareInput, now: number) => Effect.Effect<ConversationRequest, RequestInflight | GuidanceStoreError>;
   readonly introduction: (taskId: string) => Effect.Effect<WorkflowIntroduction | null, GuidanceStoreError>;
@@ -280,6 +290,8 @@ export interface SupervisorConversationStoreShape {
 }
 
 const schema = [
+  "CREATE TABLE IF NOT EXISTS supervisor_planning_attempts(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL)",
+  "CREATE INDEX IF NOT EXISTS supervisor_planning_project ON supervisor_planning_attempts(project_id)",
   "CREATE TABLE IF NOT EXISTS supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS supervisor_conversation_project ON supervisor_conversation_requests(project_id)",
   "CREATE TABLE IF NOT EXISTS supervisor_workflow_introductions(task_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL)",
@@ -308,10 +320,67 @@ const makeConversationStore = Effect.gen(function* () {
     db`SELECT document FROM supervisor_conversation_requests WHERE project_id=${projectId} ORDER BY created_at`.pipe(
       Effect.flatMap(Effect.forEach((row) => decodeRequestRow(row))),
       Effect.map((requests) => requests.filter((request) => !supervisorThreadId || request.supervisorThreadId === supervisorThreadId)));
+  const planningAttempts = (projectId: string, ownerThreadId?: string) => guidanceSql(
+    db`SELECT document FROM supervisor_planning_attempts WHERE project_id=${projectId} ORDER BY created_at`.pipe(
+      Effect.flatMap(Effect.forEach(decodePlanningRow)),
+      Effect.map(attempts => attempts.filter(attempt => !ownerThreadId || attempt.ownerThreadId === ownerThreadId))));
+  const planningIdentity = (attempt: PlanningAttempt) => JSON.stringify({id: attempt.id, operationId: attempt.operationId, requestHash: attempt.requestHash,
+    projectId: attempt.projectId, mainThreadId: attempt.mainThreadId, ownerThreadId: attempt.ownerThreadId,
+    bindingGeneration: attempt.bindingGeneration, memberEpoch: attempt.memberEpoch, taskId: attempt.taskId,
+    taskRevision: attempt.taskRevision, requestSource: attempt.requestSource, baselineAgreementId: attempt.baselineAgreementId,
+    createdAt: attempt.createdAt,
+    targets: attempt.targets.map(target => [target.threadId, target.recipientThreadId, target.scope, target.assignmentRootThreadId, target.assignmentEpoch, target.hold.messageId, target.hold.commandId])});
+  const savePlanningAttempt = (attempt: PlanningAttempt) => guidanceSql(db.withTransaction(Effect.gen(function* () {
+    if (!Schema.is(PlanningAttempt)(attempt)) return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt", sqlReason: null});
+    const [row] = yield* db`SELECT document FROM supervisor_planning_attempts WHERE id=${attempt.id}`;
+    const current = row === undefined ? null : yield* decodePlanningRow(row);
+    const mayAdvance = current?.state === "open" || current?.state === "releasing" && attempt.state !== "open";
+    const deadlineUnchanged = !current || current.deadline === attempt.deadline && current.startedAt === attempt.startedAt;
+    const firstDelivery = current?.state === "open" && current.startedAt === null && attempt.startedAt !== null &&
+      attempt.deadline === attempt.startedAt + (current.deadline - current.createdAt) &&
+      attempt.targets.some(target => target.hold.state === "sending" && target.hold.attemptedAt === attempt.startedAt);
+    const deliveryChanged = (previous: PlanningAttempt["targets"][number]["hold"] | undefined, next: PlanningAttempt["targets"][number]["hold"] | undefined) =>
+      previous !== undefined && (next === undefined || previous.messageId !== next.messageId || previous.commandId !== next.commandId ||
+        previous.attemptedAt !== null && (previous.attemptedAt !== next.attemptedAt || previous.runId !== next.runId || previous.text !== next.text));
+    const attemptedBytesChanged = current?.targets.some(previous => {
+      const next = attempt.targets.find(target => target.threadId === previous.threadId);
+      return !next || deliveryChanged(previous.hold, next.hold) || deliveryChanged(previous.release, next.release);
+    });
+    const draftChanged = current?.draft && (!attempt.draft || current.draft.threadId !== attempt.draft.threadId || current.draft.taskId !== attempt.draft.taskId ||
+      deliveryChanged(current.draft.ownerNotice, attempt.draft.ownerNotice) || current.draft.cleanup?.some((entry, index) => {
+        const next = attempt.draft?.cleanup?.[index];
+        return !next || entry.type !== next.type || entry.runId !== next.runId || deliveryChanged(entry.receipt, next.receipt);
+      }));
+    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !mayAdvance && current.state !== attempt.state || draftChanged))
+      return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt_identity", sqlReason: null});
+    yield* db`INSERT INTO supervisor_planning_attempts VALUES(${attempt.id},${attempt.projectId},${JSON.stringify(attempt)},${attempt.createdAt})
+      ON CONFLICT(id) DO UPDATE SET document=excluded.document`;
+    yield* invalidate(projectKeys(attempt.projectId), current, attempt);
+  })));
   const readPending = (projectId: string, supervisorThreadId: string) => Effect.map(readRequests(projectId, supervisorThreadId),
     (requests) => requests.find((request) => pendingStates.includes(request.state)) ?? null);
+  const recordNativeReads = (projectId: string, requestId: string, reads: readonly NativeActivityRead[]) => guidanceSql(db.withTransaction(Effect.gen(function* () {
+    if (!reads.length) return;
+    const current = (yield* readRequests(projectId)).find(request => request.id === requestId);
+    if (!current) return;
+    const combined = [...(current.nativeReads ?? []), ...reads];
+    const byTarget = new Map<string, NativeActivityRead>();
+    for (const read of combined) if (read.actorThreadId === current.supervisorThreadId &&
+      current.batch?.threads.some(thread => thread.threadId === read.targetThreadId) &&
+      read.at >= (byTarget.get(read.targetThreadId)?.at ?? -1)) byTarget.set(read.targetThreadId, read);
+    yield* writeRequest({...current, nativeReads: [...byTarget.values()].slice(-100), nativeReadCallIds: [...new Set([...(current.nativeReadCallIds ?? []), ...reads.map(read => read.callItemId)])].slice(-500)});
+  })));
   const writeRequest = (request: ConversationRequest) => Effect.gen(function* () {
     const [old] = yield* db`SELECT document FROM supervisor_conversation_requests WHERE id=${request.id}`;
+    if (old !== undefined) {
+      const previous = yield* decodeRequestRow(old);
+      if (previous.nativeReads?.length) {
+        const byTarget = new Map<string, NativeActivityRead>();
+        for (const read of [...previous.nativeReads, ...(request.nativeReads ?? [])]) if (read.at >= (byTarget.get(read.targetThreadId)?.at ?? -1)) byTarget.set(read.targetThreadId, read);
+        request = {...request, nativeReads: [...byTarget.values()].slice(-100),
+          nativeReadCallIds: [...new Set([...(previous.nativeReadCallIds ?? []), ...(request.nativeReadCallIds ?? [])])].slice(-500)};
+      }
+    }
     yield* db`INSERT INTO supervisor_conversation_requests VALUES(${request.id},${request.projectId},${JSON.stringify(request)},${request.createdAt}) ON CONFLICT(id) DO UPDATE SET document=excluded.document`;
     yield* invalidate(projectKeys(request.projectId), old?.document ?? null, request);
   });
@@ -422,6 +491,7 @@ const makeConversationStore = Effect.gen(function* () {
   const prune = (now: number) => guidanceSql(db.withTransaction(prunePass(now)));
 
   return SupervisorConversationStore.of({
+    planningAttempts, savePlanningAttempt, recordNativeReads,
     requests, pending, saveRequest, prepare, introduction, introductions, saveIntroduction, removeUnsentIntroduction, deleteIntroduction, agreementCandidates,
     agreementCandidate, saveAgreementCandidate, saveAgreementEvidence, clearAgreementCandidates, pruneAgreementCandidates, lastNotice,
     noticeSent, reviewMisses, missedReview, prune,
@@ -447,12 +517,14 @@ export class SupervisorConversationStore extends Context.Service<SupervisorConve
 export const checkConversationRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
   const db = yield* GuidanceDb;
   const changes = [
-    ...(yield* Effect.forEach(["supervisor_conversation_requests", "supervisor_workflow_introductions", "supervisor_workflow_agreement_candidates"],
+    ...(yield* Effect.forEach(["supervisor_conversation_requests", "supervisor_workflow_introductions", "supervisor_workflow_agreement_candidates", "supervisor_planning_attempts"],
       (table) => schemaChanges(db, table))).flat(),
     ...yield* schemaChanges(db, "supervisor_monitor_binding_clock", ["review_misses"]),
   ];
   const cycle = { problem: "undecodable", read: "cycle" } as const;
   const findings = [
+    ...yield* rowFindings(yield* rowsOf(db, "supervisor_planning_attempts", "SELECT id,document FROM supervisor_planning_attempts"),
+      {...cycle, table: "supervisor_planning_attempts", kind: "planning attempt"}, row => rowKey(row, ["id"]), decodePlanningRow),
     ...yield* rowFindings(yield* rowsOf(db, "supervisor_conversation_requests", "SELECT id,document FROM supervisor_conversation_requests"),
       { ...cycle, table: "supervisor_conversation_requests", kind: "request" }, (row) => rowKey(row, ["id"]), decodeRequestRow),
     ...yield* rowFindings(yield* rowsOf(db, "supervisor_workflow_introductions", "SELECT task_id,document FROM supervisor_workflow_introductions"),
