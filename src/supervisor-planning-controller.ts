@@ -262,6 +262,8 @@ const make = Effect.gen(function* () {
     const task = yield* supervisors.task(binding.mainThreadId);
     if (!main.ok || !task || !conversationAuthorityCurrent(task, main.value, yield* projectRequesterPolicy(supervisors, binding.projectId)))
       return denied("return_task_not_authorised");
+    if (!document.document.sourceBinding || document.document.sourceBinding.taskId !== task.id ||
+      document.document.sourceBinding.sourceHash !== taskScopeRevision(task)) return denied("return_workflow_scope_changed");
     projections.set(binding.mainThreadId, main.value);
     const source = main.value.messages.find(message => message.id === task.sourceMessageId);
     if (!source) return denied("return_source_unavailable");
@@ -305,7 +307,7 @@ const make = Effect.gen(function* () {
         }
       }
       if (!held.has(targetId)) return denied("return_owner_not_paused");
-      for (const id of required) {
+      for (const id of new Set([...required, ...held])) {
         const projection = projections.get(id)!;
         const turns = readNativeProviderTurns(projection);
         if (turns === null) return denied("return_contributor_identity_unavailable");
