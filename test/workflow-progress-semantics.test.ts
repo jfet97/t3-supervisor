@@ -306,7 +306,7 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
     // the operative starts at the project.yaml index and reads each member's file, which carries its own references and skills
     assert.equal(full.match(/AGENTS\.md|wiki\/how-we-build\.md/gu), null, "no definition's supporting pointer is copied into the introduction");
     assert.match(full, /\.t3-supervisor\/project\.yaml; read the full steps\/<id>\.md and workflows\/<id>\.yaml files it lists that apply\./u);
-    assert.match(full, /Each member's contract, references and skills are in its definition file; read the ones that apply, progressively\./u);
+    assert.match(full, /Defined members' contracts, references and skills are in their definition files; read the ones that apply, progressively\./u);
     assert.match(full, /Single review \[workflow:single-review; fixed; members in its definition\]/u);
     assert.match(full, /- branch \[branch:[^\]]+\] if: The frozen artifact is a contained, low-risk change\./u, "the operative still sees the branch it decides");
     const outline = full.slice(full.indexOf("Plan outline"), full.indexOf("\nBranches:"));
@@ -460,11 +460,11 @@ it.effect("fixed sequences keep their order, and a fixed workflow that does not 
     assert.deepEqual(live.pending, [], "the decision inside the assessed Review is not asked for");
     const html = renderToStaticMarkup(createElement(PlanJourney, {node: document.plan!, mode: "live", notApplicable: settled, selections: progress.branchSelections,
       completions: new Map((progress.completions ?? []).map(item => [item.nodeId, item.completedAt] as const))}));
-    assert.match(html, /Review<small>Workflow<\/small><\/span><span class="step-state">Not applicable/u);
+    assert.match(html, /Review<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Not applicable/u);
     assert.match(html, /Account for findings[\s\S]*?<span class="step-state">Not applicable/u);
     assert.doesNotMatch(html, /needs reassessment/u, "Release's completion stands although the assessed Review never decided its branch");
     assert.doesNotMatch(html, /Decision pending|Awaiting decision/u, "nothing inside an assessed Review is waiting for a decision");
-    assert.match(html, /Single review<small>Workflow<\/small><\/span><span class="step-state">Not applicable/u, "a member on an undecided path inside it is not applicable");
+    assert.match(html, /Single review<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Not applicable/u, "a member on an undecided path inside it is not applicable");
     // outside an assessed occurrence an undecided branch keeps its usual labels
     const undecidedHtml = renderToStaticMarkup(createElement(PlanJourney, {node: document.plan!, mode: "live", selections: progress.branchSelections}));
     assert.match(undecidedHtml, /Decision pending/u);
