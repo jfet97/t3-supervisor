@@ -1036,7 +1036,7 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   assert.match(prompt, /open exact itemId\/sourceMessageId handles; continue cut-off text with textOffset=nextTextOffset and newer items with afterPosition=nextPosition/u);
   assert.match(prompt, /Use about 5 items and 2000 characters/u);
   assert.match(prompt, /Contact the operative only with one brief actionable delta or question citing message or item IDs/u);
-  assert.match(prompt, /never paste plans, definitions, protocol or service notices \(it reads its proposal with supervision_plan, definitions from \.t3-supervisor\/project\.yaml\)/u);
+  assert.match(prompt, /Never paste plans, definitions, protocol or service notices; use supervision_plan/u);
   assert.doesNotMatch(prompt, /only as needed|fresh-read|a fresh read of the relevant/u, "no vague or rereading instruction remains");
   for (const rule of ["Read forward and small", "Contact the operative only", "Only a workflow-proposal block"]) assert.equal(prompt.split(rule).length - 1, 1, `${rule} once`);
   const context = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
@@ -5213,7 +5213,7 @@ it.effect("wake budgets: the concise standing role once per version, then a shor
   }
   assert.equal(yield* versionOf(), version, "the version is stable across helper settings");
   const [first, second, third] = texts.map(text => text.length);
-  assert.ok(first! < 9_000 && second! < 4_000 && third! < 4_000, `wake sizes ${texts.map(text => text.length).join(", ")}`);
+  assert.ok(first! < 6_500 && second! < 4_000 && third! < 4_000, `wake sizes ${texts.map(text => text.length).join(", ")}`);
   const instructions = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"});
   assert.match(String(instructions.instructions), /Root team coordination/u, "the full reference stays retrievable on demand");
 }));
@@ -6352,6 +6352,8 @@ it.effect("the interpretation request's standing role carries no final-chat inte
   assert.ok(role);
   assert.doesNotMatch(role.text, /follow only the interpretation instructions|use no tool except the workflow_read reader/u);
   assert.match(role.text, /supervision_interpretation_submit when an interpretation request asks for it/u);
+  assert.ok(role.text.length < 3_000, `root bootstrap ${role.text.length}`);
+  assert.match(role.text, /Routine record_review needs no full workflow manual/u);
   assert.match(role.text, /Standing instructions version [0-9a-f]{16}\. They govern your later check-ins and dialogue, not the request below\.$/u);
 }));
 
