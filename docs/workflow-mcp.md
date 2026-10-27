@@ -242,6 +242,16 @@ rejected with `retired_run_evidence`; it can still be recorded as an observation
 evidence cites a native message or item without its run, the service records the run
 that produced it, so the fence holds however the evidence cites it.
 
+Native reviewer children with published, strongly identified provider turns keep the
+same conversation across passes. Applying the return requires a terminal child and
+provider turns, no pending work, and its parent's dispatch ACK. It retires the exact
+earlier turn IDs. A new pass must cite a different turn started after the return;
+the service resolves this identity from native evidence rather than caller input.
+When a native provider exposes no per-execution identity, the return retires that
+whole child. Use a fresh managed reviewer carrying its earlier findings and record
+the replacement reason. Connected work and History show this distinction. Neither
+case removes the earlier reports or turns a failed review into a missing report.
+
 A revision keeps the identity of every occurrence it keeps. A proposal draft is
 canonicalized against the live plan, or the latest proposal before any plan is live:
 an occurrence without `nodeId` that matches exactly one existing occurrence keeps its

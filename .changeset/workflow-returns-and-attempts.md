@@ -2,7 +2,9 @@
 "@jfet97/t3-supervisor": patch
 ---
 
-Workflows can now repeat earlier work as a visible new attempt. A `back_to:` member at the end of a branch path names an earlier step or workflow, for example to review again after material findings were fixed. Supervisor checks the composed plan and rejects a return whose target is missing, ambiguous, later in the plan or beyond a parallel group, and one that leaves no way to continue. When the agent reaches the return, everything after it waits and the region from the target to the return keeps its recorded state until the Supervisor applies the return at a safe point. The new attempt then plans that work again with the same reviewer conversations, and the branch is decided again. The closed attempt stays as history: its statuses, contributors, decisions and retired child runs. A late result or decision from the closed attempt never counts for the new one. The status view, the progress data and the plan show each reopened step's attempt. A return the agent no longer reaches, because it chose the other path, is dismissed and kept as history.
+Workflows can repeat earlier work as a visible new attempt with `back_to`. The destination must resolve to one earlier occurrence in the same sequential lane, and the plan must retain an exit. The Supervisor confirms affected work is paused or quiet before applying the return. The main Plan moves back while History keeps prior statuses, contributors, decisions and results in forward order.
+
+Reviewers continue in the same conversation when their separate executions can be identified. Late results from an earlier pass cannot satisfy repeated work. Native reviewers without separate execution identities require an explicit replacement carrying their earlier findings. Connected work and History explain which case applies.
 
 A conversation started inside a supervised chat can now read its own scoped plan through the same plan read the main uses; it still accepts nothing itself.
 

@@ -1,6 +1,6 @@
 import { Exit, Schema } from "effect";
 
-// T3 publishes a provider turn for every native turn, including each turn of a native child that has no AppRun of its own; observation,
+// t3 publishes a provider turn for each identifiable native child execution; observation,
 // planning and the write controller read them through this one decoder
 
 export const nativeProviderTurnStatuses = ["pending", "running", "completed", "interrupted", "failed", "cancelled"] as const;

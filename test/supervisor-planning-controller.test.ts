@@ -190,7 +190,8 @@ it.effect("an edited requester source cannot receive the earlier planning hold",
   assert.equal((yield* f.stores.requests.planningAttempts("project"))[0]?.targets[0]?.hold.attemptedAt, null);
 }));
 
-it.effect("a return requires the operative's real ACK and quiet contributors, retires their runs and replays once", () => Effect.gen(function* () {
+for (const execution of ["app_run", "native_turn", "unversioned_native"] as const)
+it.effect(`a return requires the operative's real ACK and quiet ${execution} contributors, retires their work and replays once`, () => Effect.gen(function* () {
   const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: () =>
     Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: 1})})};
   const f = yield* fixture(rpc);
@@ -225,10 +226,17 @@ it.effect("a return requires the operative's real ACK and quiet contributors, re
     reason: "The report requires corrections.", sourceThreadId: "main", sourceRunId: "source-run", sourceMessageId: "decision-message", sourceCreatedAt: now + 2}, now + 2)).status, "applied");
   document = (yield* f.states.get("project", "main"))!;
   assert.equal(document.returns.length, 1);
-  const child: ThreadInfo = {id: "reviewer", title: "Reviewer", projectId: "project", lineage: {parentThreadId: "main", relationshipToParent: "subagent"}, runtimeMode: "full-access", interactionMode: "default"};
+  const child: ThreadInfo = {id: "reviewer", title: "Reviewer", projectId: "project", creationSource: execution === "app_run" ? "mcp" : "provider",
+    lineage: {parentThreadId: "main", relationshipToParent: "subagent"}, runtimeMode: "full-access", interactionMode: "default"};
   f.threads.push(child);
   const childRun = {id: "old-review-run", ordinal: 1, status: "running", requestedAt: new Date(now).toISOString(), startedAt: new Date(now).toISOString(), completedAt: null, rootNodeId: null};
-  f.projections.set(child.id, {thread: child, runs: [childRun], nodes: [], messages: [], turnItems: [], runtimeRequests: []});
+  const nativeTurn = {id: "old-native-turn", providerThreadId: "provider-reviewer", nodeId: "native-review-root", status: "running",
+    startedAt: new Date(now).toISOString(), nativeTurnRef: {driver: "codex", nativeId: "native-turn-1", strength: "strong"}};
+  const lifecycle = {id: "native-review-task", childThreadId: child.id, origin: "provider_native", providerThreadId: "provider-reviewer", status: "running"};
+  f.projections.set(child.id, {thread: child, runs: execution === "app_run" ? [childRun] : [], nodes: execution === "native_turn" ? [{id: nativeTurn.nodeId,
+    threadId: child.id, providerThreadId: nativeTurn.providerThreadId, providerTurnId: nativeTurn.id}] : [],
+    providerTurns: execution === "native_turn" ? [nativeTurn] : [], messages: [], turnItems: [], runtimeRequests: []});
+  if (execution !== "app_run") f.projections.get("main")!.subagents = [lifecycle];
   f.proof(f.args);
   const paused = (yield* f.controller.call(f.args)) as {attempt: {id: string}};
   const input = {...f.args, action: "apply_return", operationId: "return-a", attemptId: paused.attempt.id, workflowId: document.workflowId,
@@ -243,11 +251,21 @@ it.effect("a return requires the operative's real ACK and quiet contributors, re
   (main.nodes as Record<string, unknown>[]).push({id: "return-ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
   yield* f.controller.reconcile(f.binding);
   assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_not_quiescent", "a parent ACK cannot pause a running reviewer");
+  if (execution === "native_turn") {
+    nativeTurn.nativeTurnRef.strength = "weak";
+    assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_not_quiescent", "a weakly identified running turn still prevents quiescence");
+    nativeTurn.nativeTurnRef.strength = "strong";
+    nativeTurn.status = "completed";
+    assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "return_actor_not_quiescent", "a completed turn cannot override a still-running parent lifecycle");
+  }
   childRun.status = "completed";
+  lifecycle.status = "completed";
   const result = yield* f.controller.call(input);
   assert.equal((result as {status: string}).status, "applied");
   const returned = (yield* f.states.get("project", "main"))!;
-  assert.deepEqual(returned.returns[0]!.retiredRuns, [{threadId: "reviewer", runId: "old-review-run"}]);
+  assert.deepEqual(returned.returns[0]!.retiredRuns, execution === "app_run" ? [{kind: "run", threadId: "reviewer", runId: "old-review-run"}]
+    : execution === "native_turn" ? [{kind: "provider_turns", threadId: "reviewer", providerThreadId: "provider-reviewer", providerTurnIds: [nativeTurn.id]}]
+      : [{kind: "thread", threadId: "reviewer", reason: "No published per-execution identity; replace this reviewer and carry forward its findings."}]);
   assert.deepEqual(returned.sourceBinding, document.sourceBinding);
   assert.equal(returned.currentAgreementKey, document.currentAgreementKey);
   assert.deepEqual(yield* f.controller.call(input), result, "identical retry returns the original receipt");

@@ -3,6 +3,7 @@ import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { workflowReadToolDefinition } from "../src/workflow-write-controller.js";
+import {taskScopeRevision} from "../src/supervision-conversation-contract.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { appendSourceMessage, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete } from "./support/ctl-workflow.js";
 
@@ -70,17 +71,27 @@ it.effect("an interpretation envelope quotes each request body once and keeps ev
   yield* submitAndComplete(fixture, supervisor, (yield* fixture.task())!, {objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
     supervision: "needed", workflow: null});
   yield* supervisor.cycle;
+  const previousReply = "PRIOR_OPERATIVE_DETAILS ".repeat(300);
+  source.messages.push({...source.messages[0]!, id: "prior-operative-reply", role: "assistant", text: previousReply, creationSource: "provider"});
   const request = "Recover the failed worktree manually with Nix, then continue with the retry fix from that issue.";
   appendSourceMessage(source, "bootstrap-message", 2, request);
   yield* supervisor.cycle;
   const dispatched = String(fixture.dispatches().at(-1)?.payload.text);
   const envelope = JSON.parse(dispatched.slice(dispatched.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n") + "UNTRUSTED_WORKFLOW_ENVELOPE\n".length,
     dispatched.indexOf("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE"))) as {text: string; earlierMessages: Array<{messageId: string; text: string}>;
-      conversation: {requesterMessages: Array<{messageId: string; requester: string; text?: string; quoted?: string}>}};
+      planning: {taskId: string; taskRevision: string};
+      conversation: {facts: {readView: string}; requesterMessages: Array<{messageId: string; requester: string; text?: string; quoted?: string}>;
+        operativeMessages: Array<{messageId: string; text?: string}>}};
   assert.equal(count(dispatched, request), 1, "the request text is quoted once");
   assert.equal(count(dispatched, link), 1, "the earlier unresolved request is quoted once");
   assert.equal(envelope.text, request);
   assert.deepEqual(envelope.earlierMessages, [{messageId: sourceMessageId, text: link}]);
   assert.deepEqual(envelope.conversation.requesterMessages.map(item => [item.messageId, item.requester, item.quoted ?? null, item.text ?? null]),
     [[sourceMessageId, "human", "earlierMessages", null], ["bootstrap-message", "human", "text", null]], "each requester keeps its identity and relationship");
+  assert.doesNotMatch(dispatched, /PRIOR_OPERATIVE_DETAILS/u, "prior replies are read on demand rather than copied into the wake");
+  assert.deepEqual(envelope.conversation.facts, {readView: "context"});
+  assert.deepEqual(envelope.conversation.operativeMessages, [{messageId: "prior-operative-reply"}]);
+  assert.ok(dispatched.length < 6_500, `changed-request wake ${dispatched.length}`);
+  const pending = (yield* fixture.task())!;
+  assert.deepEqual(envelope.planning, {taskId: pending.id, taskRevision: taskScopeRevision(pending)}, "planning pins name the current scope, never a guessed source-body hash");
 }));

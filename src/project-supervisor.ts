@@ -1,5 +1,5 @@
 import { completelyQuotedEarlierMessageIds, localThreadToolRules, redact } from "./supervisor-workflow.js";
-import { emptyConversation } from "./supervision-conversation-contract.js";
+import { emptyConversation, taskScopeRevision } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { posix, resolve } from "node:path";
@@ -1514,9 +1514,13 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             (source.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= preparing.sourceOrdinal &&
             (source.runs.find(run => run.id === item.runId)?.ordinal ?? -1) > (contextFloor ?? Infinity)).slice(-6)
             .map(item => ({messageId: item.id, runId: item.runId, text: redact(item.text).slice(0, 1600)}));
-          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages, conversationContext: {facts: preparing.conversation, requesterMessages, operativeMessages},
+          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages,
+            conversationContext: reader ? {facts: {readView: "context"}, requesterMessages: requesterMessages.map(item => ({messageId: item.messageId,
+              requester: item.requester, ...("quoted" in item ? {quoted: item.quoted} : {})})),
+              operativeMessages: operativeMessages.map(item => ({messageId: item.messageId}))} : {facts: preparing.conversation, requesterMessages, operativeMessages},
             ...(requester?.kind === "agent" ? {requester: {kind: "agent" as const, threadId: requester.threadId}} : {}),
-            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
+            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation},
+              planning: {taskId: preparing.id, taskRevision: taskScopeRevision(preparing)}} : {}),
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
           const requestText = role ? `${role.text}\n${request.requestText.startsWith(`${localThreadToolRules}\n`)

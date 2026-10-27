@@ -857,14 +857,14 @@ ${activeWatchReminder} ${planningReminder} Unsolicited wakes: read context/plann
       if (!(yield* eligible(agent.thread, threads)) || agent.thread.projectId !== task.projectId) {
         yield* markWorkflowStale(task, "The operative conversation is no longer eligible for this workflow agreement.", now);return false;
       }
-      if (introduction?.state === "sent" || !conversationMayContact(task)) yield* monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection: agent, now,
+      if (conversationMayObserve(task)) yield* monitor.observe({projectId: task.projectId, threadId: task.threadId, sourceOrdinal: task.sourceOrdinal, projection: agent, now,
         excludedIds: new Set(introduction ? [introduction.messageId] : [])});
       return true;
     }));
     if (!observedAgent) return;
     // verified native descendants observed in this cycle; each may record branch selections for its own workflow
     const verifiedChildren: Array<{projection: Projection; archivedMarker?: string}> = [];
-    if (introduction?.state === "sent" || !conversationMayContact(task)) {
+    if (conversationMayObserve(task)) {
       const scope = resolveSupervisorScope(threads, task.projectId, task.threadId, store.ownedIds);
       const liveDescendants = scope.main && scope.allowedIds.has(scope.main.id) ? scope.descendants.filter(child => scope.allowedIds.has(child.id) && scope.liveIds.has(child.id)) : [];
       const offsets = yield* Ref.get(descendantOffsets);
@@ -972,6 +972,7 @@ ${activeWatchReminder} ${planningReminder} Unsolicited wakes: read context/plann
         if (read.ok && read.value) {verifiedChildren.push(read.value);reconciled++;}
       }
     }
+    if (introduction?.state === "blocked") return;
     let supervisor = cycle.supervisorProjections.get(task.supervisorThreadId);
     if (supervisor === undefined) {
       const read = yield* attempt(projection(task.supervisorThreadId));
@@ -1022,8 +1023,7 @@ ${activeWatchReminder} ${planningReminder} Unsolicited wakes: read context/plann
       const all = (yield* Effect.forEach(yield* store.bindings(), (binding) => store.tasksFor(binding))).flat();
       return yield* Effect.filter(all, (task) => Effect.gen(function* () {
         return (yield* enabled(task.projectId, task.threadId)) && !(yield* supervisionStopped(task.threadId)) && conversationMayObserve(task) &&
-          task.supervisorThreadId === (yield* store.bindingForSupervisor(task.supervisorThreadId))?.threadId &&
-          ((yield* requests.introduction(task.id))?.state === "sent" || (yield* introductionUnsent(task.id)));
+          task.supervisorThreadId === (yield* store.bindingForSupervisor(task.supervisorThreadId))?.threadId;
       }));
     }));
     const offset = yield* Ref.modify(observeOffset, (current): [number, number] => [current, tasks.length ? (current + 20) % tasks.length : 0]);
@@ -2135,7 +2135,7 @@ ${activeWatchReminder} ${planningReminder} Unsolicited wakes: read context/plann
     // the task scopes, the monitoring settings and the frozen batch are one block
     const {tasks, taskScopes, fullBatch} = yield* transaction(Effect.gen(function* () {
       const tasks = yield* Effect.filter(yield* store.tasks(binding.projectId), (task) => Effect.gen(function* () {
-        return conversationMayObserve(task) && (!conversationMayContact(task) || (yield* requests.introduction(task.id))?.state !== "blocked" &&
+        return conversationMayObserve(task) && (!conversationMayContact(task) ||
           (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale")) && task.supervisorThreadId === binding.threadId;
       }));
       const taskScopes = new Map<string, {task: TaskRecord; scope: ReturnType<typeof resolveSupervisorScope>}>();
@@ -2318,12 +2318,13 @@ ${activeWatchReminder} ${planningReminder} Unsolicited wakes: read context/plann
     }
     if (inflight) {yield* reconcile(inflight, supervisor, threads);return;}
     if ((yield* requests.requests(binding.projectId, binding.threadId)).some(item => item.state === "failed" && item.kind === "review" && !item.failureAcknowledged)) return;
-    if (!settled && !(yield* isResting) && (yield* runDefinitionRecovery(binding, supervisor, tasks, threads, restDecisionCurrent))) return;
+    const recoveryTasks = yield* Effect.filter(tasks, task => Effect.map(requests.introduction(task.id), introduction => introduction?.state !== "blocked"));
+    if (!settled && !(yield* isResting) && (yield* runDefinitionRecovery(binding, supervisor, recoveryTasks, threads, restDecisionCurrent))) return;
     if (busy(supervisor)) return;
     // without due activity a rejected proposal still gets one focused repair wake; a due batch carries it in its task context
-    if (!batch && !rootEvents.length) {if (!settled && !(yield* isResting)) yield* runProtocolRepair(binding, tasks, restDecisionCurrent);return;}
+    if (!batch && !rootEvents.length) {if (!settled && !(yield* isResting)) yield* runProtocolRepair(binding, recoveryTasks, restDecisionCurrent);return;}
     if (batch?.trigger === "active_watch" && batch.pendingItemCount === 0 && !rootEvents.length && !settled && !(yield* isResting) &&
-      (yield* runProtocolRepair(binding, tasks, restDecisionCurrent))) return;
+      (yield* runProtocolRepair(binding, recoveryTasks, restDecisionCurrent))) return;
     const included: Array<SupervisorMonitorThreadBatch & {proposalId: string; taskContext: Effect.Success<ReturnType<typeof taskContextSummary>>; staleRecovery: boolean;
       parentThreadId: string | null; depth: number; origin: string; lifecycle: string; lifecycleDetail: string | null; contactLimit: string;
       fallbackAncestors: Array<{threadId: string; main: boolean; eligible: boolean; contactable: boolean}>; scopeComplete: boolean;

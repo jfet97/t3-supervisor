@@ -225,6 +225,12 @@ persistence. Respect orchestrator lifecycle rules, including any requirement to 
 new delegated tasks instead of resuming completed backing threads. Choose a supported
 persistent route when the project requires identity.
 
+Native children whose provider publishes separate review-turn identities can continue
+in the same conversation after a return. If no per-execution identity is available,
+replace only that reviewer slot with a managed task, carry its findings forward and
+record the reason and old/new identities. Earlier results remain history and cannot
+satisfy the repeated review. Do not invent a child run from its parent's run.
+
 Define intentional new-cycle boundaries for substantial intervening work or a material
 scope change, carrying forward unresolved findings. Recover temporary interruptions in
 the same chats. A permanently unusable chat or unavailable model may justify replacing

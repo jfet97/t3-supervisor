@@ -531,6 +531,11 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
       const lifecycle = lifecyclePresentation(thread);
       const workflow = workflows.get(thread.threadId);
       const notes = workflow ? stepNotes(task, {kind: "live", workflow, plan: workflow.plan ?? {kind: "sequence", templatePath: null, nodes: []}}) : null;
+      const retired = workflow?.parentNodeReferences.flatMap(reference => workflows.get(reference.parentThreadId)?.returns?.flatMap(returned =>
+        returned.state === "applied" ? returned.retiredRuns.filter(item => item.threadId === thread.threadId) : []) ?? []) ?? [];
+      const replaced = retired.some(item => item.kind === "thread");
+      const closedExecution = retired.some(item => item.kind === "run" ? item.runId === thread.observedRunId
+        : item.kind === "provider_turns" && thread.observedProviderTurnId ? item.providerTurnIds.includes(thread.observedProviderTurnId) : false);
       return <li key={thread.threadId} className="workflow-progress-thread">
         <div className="row between">
           <div className="text-group"><strong>{thread.title || workflow?.objective || `Conversation ${thread.threadId}`}</strong><p className="muted small">{childOriginText[thread.origin]}{workflow ? ` · Workflow: ${workflowStatusLabel(workflow)}` : ""}</p></div>
@@ -541,9 +546,8 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
           const attempt = parent?.attempts?.find(item => item.nodeId === reference.nodeId)?.attempt ?? 1;
           return `${reference.nodeName} · Attempt ${attempt}`;
         }).join("; ")}</> : "No recorded contribution to a parent step"}</p>
-        {workflow?.parentNodeReferences.some(reference => workflows.get(reference.parentThreadId)?.returns?.some(returned => returned.state === "applied" &&
-          returned.retiredRuns.some(run => run.threadId === thread.threadId && run.runId === thread.observedRunId))) &&
-          <p className="notice">This conversation’s latest observed run belongs to a closed attempt. Its result stays in history and does not satisfy the repeated work.</p>}
+        {replaced ? <p className="notice">This reviewer must be replaced for the repeated work because its separate review rounds cannot be identified. Carry its earlier findings to the replacement; this conversation stays in history.</p>
+          : closedExecution && <p className="notice">This conversation’s latest observed {thread.observedRunId ? "run" : "review turn"} belongs to a closed attempt. Its result stays in history and does not satisfy the repeated work.</p>}
 <div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>
         <ActivityAwareness awareness={awareness} threadId={thread.threadId}/>
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">

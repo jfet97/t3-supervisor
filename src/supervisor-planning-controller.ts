@@ -1,4 +1,6 @@
 import { WorkflowStateStore } from "./workflow-state-store.js";
+import type {WorkflowReturnRun} from "./workflow-state-contract.js";
+import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.js";
 import { planEntities } from "./workflow-plan-tree.js";
 import { Cause, Clock, Context, Effect, Exit, FiberMap, Layer, Option, Schedule, Schema, Semaphore } from "effect";
 import { GuidanceDb } from "./db.js";
@@ -275,16 +277,6 @@ const make = Effect.gen(function* () {
         projections.set(parentId, parent.value);
       }
     }
-    const retiredRuns: Array<{threadId: string; runId: string}> = [];
-    for (const id of required) if (id !== binding.mainThreadId && id !== targetId) {
-      const projection = projections.get(id)!;
-      const latest = [...projection.runs].filter(run => run.status !== "rolled_back").sort((a, b) => b.ordinal - a.ordinal)[0];
-      for (const run of projection.runs.filter(run => run === latest || ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)))
-        retiredRuns.push({threadId: id, runId: run.id});
-      // a native child's shared parent run cannot identify a retired child execution
-      if (!projection.runs.length) return denied("return_contributor_run_unavailable");
-    }
-    if (retiredRuns.length > 50) return denied("return_run_capacity");
     return yield* gate.admit(guard => transaction(Effect.gen(function* () {
       if (!(yield* currentOwner(payload, binding, guard)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, expected)))
         return denied("planning_scope_changed");
@@ -309,6 +301,9 @@ const make = Effect.gen(function* () {
       if (!held.has(targetId)) return denied("return_owner_not_paused");
       for (const id of required) {
         const projection = projections.get(id)!;
+        const turns = readNativeProviderTurns(projection);
+        if (turns === null) return denied("return_contributor_identity_unavailable");
+        if (turns.some(turn => !terminal.has(turn.status))) return denied("return_actor_not_quiescent");
         if (held.has(id)) {
           const acknowledgment = pauses.flatMap(row => row.targets).find(target => target.threadId === id && target.state === "acknowledged")?.acknowledgement;
           if (projection.thread.activeRunId && acknowledgment && projection.thread.activeRunId !== acknowledgment.runId) return denied("return_actor_changed_run");
@@ -321,6 +316,30 @@ const make = Effect.gen(function* () {
           (projection.runs.some(run => terminal.has(run.status)) || lifecycle && terminal.has(lifecycle.status));
         if (!quiet || !parentId || !held.has(parentId)) return denied("return_actor_not_quiescent");
       }
+      const retiredRuns: WorkflowReturnRun[] = [];
+      for (const id of required) if (id !== binding.mainThreadId && id !== targetId) {
+        const projection = projections.get(id)!;
+        if (projection.runs.length) {
+          const latest = [...projection.runs].filter(run => run.status !== "rolled_back").sort((a, b) => b.ordinal - a.ordinal)[0];
+          for (const run of projection.runs.filter(run => run === latest || ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)))
+            retiredRuns.push({kind: "run", threadId: id, runId: run.id});
+          continue;
+        }
+        const parentId = parents.get(id);
+        const nativeChildren = (parentId ? projections.get(parentId)?.subagents : [])?.filter(child => child.childThreadId === id && child.origin === "provider_native") ?? [];
+        if (!nativeChildren.length) return denied("return_contributor_identity_unavailable");
+        const turns = readNativeProviderTurns(projection);
+        if (turns === null) return denied("return_contributor_identity_unavailable");
+        if (turns.length) {
+          const providers = new Set(nativeChildren.map(child => child.providerThreadId));
+          if (providers.size !== 1 || turns.some(turn => {
+            const node = nativeNodeTurn(projection, turn.nodeId, id);
+            return !providers.has(turn.providerThreadId) || !node || node.providerTurnId !== turn.id || node.providerThreadId !== turn.providerThreadId;
+          })) return denied("return_contributor_identity_unavailable");
+          retiredRuns.push({kind: "provider_turns", threadId: id, providerThreadId: turns[0]!.providerThreadId, providerTurnIds: turns.map(turn => turn.id)});
+        } else retiredRuns.push({kind: "thread", threadId: id, reason: "No published per-execution identity; replace this reviewer and carry forward its findings."});
+      }
+      if (retiredRuns.length > 50 || retiredRuns.some(entry => entry.kind === "provider_turns" && entry.providerTurnIds.length > 50)) return denied("return_run_capacity");
       return yield* states.applyReturn(owner, {operationId: payload.operationId!, workflowId: payload.workflowId!, expectedRevision: payload.expectedRevision!,
         returnId: payload.returnId!, note: payload.reason!, retiredRuns}, now);
     })));

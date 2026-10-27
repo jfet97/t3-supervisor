@@ -168,6 +168,25 @@ const renderConnected = (pages: WorkflowProgressSnapshot[]) => {
   return renderToStaticMarkup(createElement(ConnectedWork, {threads: [...view.threadById.values()], mainThreadId: "task-thread", workflows: view.workflowByThreadId, coverage: view.coverageByThreadId, task: undefined, complete: view.complete}));
 };
 
+it("native reviewer turns remain in history while the same reviewer can start a fresh attempt", () => {
+  const returned = {returnId: "return-1", backToNodeId: "back-review", targetNodeId: "step-inspect", targetName: "Review", regionNodeIds: ["step-inspect"],
+    attempt: 1, state: "applied" as const, reason: "Material findings require another pass.", sourceThreadId: "task-thread", sourceMessageId: "decision-1",
+    requestedAt: 10, resolvedAt: 20, closed: [], note: "The affected work is quiet.",
+    retiredRuns: [{kind: "provider_turns" as const, threadId: "child-one", providerThreadId: "provider-child", providerTurnIds: ["old-turn"]}]};
+  const page: WorkflowProgressSnapshot = {...progressSnapshot, scope: {...progressSnapshot.scope!, threads: progressSnapshot.scope!.threads.map(thread =>
+    thread.threadId === "child-one" ? {...thread, observedProviderTurnId: "old-turn"} : thread)}, workflows: progressSnapshot.workflows.map(workflow =>
+    workflow.threadId === "task-thread" ? {...workflow, returns: [returned], attempts: [{nodeId: "step-inspect", attempt: 2}], history: [], historyComplete: true} : workflow)};
+  assert.match(renderConnected([page]), /latest observed review turn belongs to a closed attempt/);
+  assert.match(renderConnected([page]), /Attempt 2/);
+  assert.match(renderWorkspace([page], undefined, "history"), /this reviewer can continue in the same conversation/);
+  const fresh = {...page, scope: {...page.scope!, threads: page.scope!.threads.map(thread => thread.threadId === "child-one" ? {...thread, observedProviderTurnId: "fresh-turn"} : thread)}};
+  assert.doesNotMatch(renderConnected([fresh]), /latest observed review turn belongs to a closed attempt/);
+  const replaced = {...page, workflows: page.workflows.map(workflow => workflow.threadId === "task-thread" ? {...workflow, returns: [{...returned,
+    retiredRuns: [{kind: "thread" as const, threadId: "child-one", reason: "Separate review rounds cannot be identified."}]}]} : workflow)};
+  assert.match(renderConnected([replaced]), /reviewer must be replaced.*Carry its earlier findings/su);
+  assert.match(renderWorkspace([replaced], undefined, "history"), /a replacement reviewer is required; carry forward the earlier findings/);
+});
+
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
   snapshot: {...snapshot, tasks: [task]}, selection, monitoring, threadId: task.threadId, connected: true,

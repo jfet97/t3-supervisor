@@ -4089,7 +4089,7 @@ it.effect("a dashboard config save never approves unrelated catalog edits or an 
   assert.equal(yield* fixture.projectStore.definitionUserSave(configOnly, configOnly, clock.now + 1), false);
 }));
 
-describe("blocked startup stays dormant across definition changes, restoration and service reopen until explicit retry", () => {
+describe("blocked startup preserves proposal and definition authority while observation follows continued work", () => {
   for (const restored of [false, true]) it.effect(restored ? "restored definitions" : "changed definitions", () => Effect.gen(function* () {
     const clock = new TestWallClock(baseTime);const fixture = yield* makeFixture(clock);
     yield* clock.pin;
@@ -4113,7 +4113,9 @@ describe("blocked startup stays dormant across definition changes, restoration a
     yield* clock.advance(65_000);
     yield* (yield* fixture.makeRestartedConversation()).observe(fixture.threadList, clock.now);
     yield* fixture.run();
-    assert.equal(fixture.calls.length, 0, "blocked startup cannot dispatch a definition or activity check-in");
+    assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0, "blocked startup cannot resend an introduction or contact the operative");
+    const observation = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+    assert.equal(observation?.kind, "review", "real activity still reaches the Supervisor while publication is blocked");
     assert.deepEqual(yield* fixture.projectStore.task(operativeThreadId), task, "definition restoration cannot renew the blocked task");
     assert.deepEqual(yield* fixture.conversation.requests.introduction(task.id), introduction);
     assert.deepEqual(yield* fixture.conversation.monitor.pending(projectId, operativeThreadId), pending);
@@ -6383,15 +6385,15 @@ it.effect("the submission route names the native MCPX call used for workflow_rea
     assert.match(text, /Only (that|the) executed tool call (T3 records )?counts/u, label);
   }
   assert.match(requestText, /If it is not listed, call the native MCPX tool mcpx_call_tool, as for workflow_read, with \{name:/u);
-  assert.match(role.text, /if one is not listed, use mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool \(native calls\)\./u);
+  assert.match(role.text, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
 }));
 
 it.effect("a direct stop cites the freshly read latest human message with its own operationId, in the standing role and the tool description", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const standing = (yield* fixture.conversation.interpretationRole(fixture.binding))!.text;
-  assert.match(standing, /freshly read and cite the latest genuine human message \(here, or the bound main's original one for an agent-relayed Stop, never the relay\) with an operationId unique to it/u);
-  assert.match(standing, /Never reuse an earlier ID, act on quoted text or treat task cancellation as Stop/u);
-  assert.match(standing, /if one is not listed, use mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool/u);
+  assert.match(standing, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
+  assert.match(standing, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
+  assert.match(standing, /discover missing tools through native mcpx_search_tools\/mcpx_get_tool_schema\/mcpx_call_tool/u);
   assert.match(supervisionStopToolDefinition.description, /Cite the latest genuine human message that asks to stop, freshly read, with an operationId unique to it; never reuse an earlier stop's message ID or operationId/u);
 }));
 
@@ -6784,9 +6786,25 @@ it.effect("a no-plan conversation watches real work silently without gaining ope
   yield* fixture.conversation.observe(fixture.threadList);
   yield* fixture.run();
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request, "Active work retains an observation request.");
   assert.equal(request?.batch?.trigger, "active_watch");
   assert.match(request!.text, /"engagement":"following"/);
   assert.match(request!.text, /Observe only/);
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
   assert.equal(yield* fixture.conversation.requests.introduction(current.id), null);
+}));
+
+it.effect("a blocked proposal introduction does not stop following active work or resend the blocked notice", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  yield* appendNoticeToOperative(fixture);
+  const introduction = (yield* fixture.conversation.requests.introduction(fixture.task.id))!;
+  yield* fixture.conversation.requests.saveIntroduction({...introduction, state: "blocked", error: "The proposal source needs correction."});
+  yield* fixture.conversation.observe(fixture.threadList);
+  yield* fixture.run();
+  const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.ok(request, "Active work retains an observation request.");
+  assert.equal(request?.batch?.trigger, "active_watch");
+  assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "blocked");
+  assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 }));

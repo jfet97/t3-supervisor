@@ -84,6 +84,25 @@ const makeDetachedChildProjection = (thread: ThreadInfo, events: readonly Detach
   return {thread, runs: [], messages, turnItems};
 };
 
+it("native observations distinguish successive review turns and never hide active work behind a terminal parent record", () => {
+  const child = makeDetachedChildProjection(nativeChild, []);
+  const turn = (id: string, at: number, status = "completed") => ({id, providerThreadId: "provider-child", nodeId: `node-${id}`,
+    status, startedAt: new Date(at).toISOString(), nativeTurnRef: {driver: "codex", nativeId: id, strength: "strong"}});
+  const first = turn("old-review", now - 1000), next = turn("new-review", now, "running");
+  child.providerTurns = [first, next];
+  const parent: Projection = {thread: mainThread, runs: [], messages: [], subagents: [{childThreadId: nativeChild.id, status: "completed"}]};
+  const read = () => observeScopeThread({thread: nativeChild, mainThreadId: mainThread.id, depth: 1, projection: child, parentProjection: parent, activityRefs: []});
+  assert.equal(read().lifecycle, "running");
+  assert.equal(read().observedProviderTurnId, next.id);
+  next.status = "completed";
+  assert.equal(read().lifecycle, "completed");
+  assert.equal(read().observedProviderTurnId, next.id);
+  next.nativeTurnRef.strength = "weak";
+  next.status = "pending";
+  assert.equal(read().lifecycle, "running");
+  assert.equal(read().observedProviderTurnId, null, "an unidentified active turn is never presented as an earlier completed turn");
+});
+
 const makeRunChildProjection = (thread: ThreadInfo, eventIds: readonly string[]): Projection => {
   const runId = `run-${thread.id}`;
   const rootNodeId = `root-${thread.id}`;
