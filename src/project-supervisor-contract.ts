@@ -1,3 +1,5 @@
+import { NativeActivityRead } from "./supervisor-awareness-contract.js";
+import { PlanningAttempt } from "./supervisor-planning-contract.js";
 import {SupportingReferences, SupportingSkills, type SupportingReference} from "./definition-references.js";
 import { Schema } from "effect";
 import { ConversationEngagement, ConversationFacts } from "./supervision-conversation-contract.js";
@@ -98,6 +100,8 @@ export const ProjectSupervisorBinding = Schema.Struct({
   keptActive: Schema.optionalKey(Schema.Boolean),
   /** First lifecycle gate that kept the service-owned Supervisor active at its latest check, or null. */
   settlementBlockedBy: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  mainSettlementBlockedBy: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  mainSettlementState: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 export type SupervisorBinding = typeof ProjectSupervisorBinding.Type;
 export const WorkflowExecutionStatus = Schema.Literals(["planned", "underway", "completed", "needs_attention"]);
@@ -351,6 +355,10 @@ export const MonitoringStatus = Schema.Struct({
   lastNoticeAt: Schema.NullOr(Schema.Number),
   retryable: Schema.optionalKey(Schema.Boolean),
   review: Schema.optionalKey(MonitoringReview),
+  awareness: Schema.optionalKey(Schema.Struct({
+    reads: Schema.Array(NativeActivityRead),
+    assessments: Schema.Array(Schema.Struct({actorThreadId: Schema.String, targetThreadId: Schema.String, at: Schema.Number, throughObservedAt: Schema.Number, itemIds: Schema.Array(Schema.String)})),
+  })),
 });
 export type SupervisorMonitoringStatus = typeof MonitoringStatus.Type;
 export const TaskInterpretation = Schema.Struct({
@@ -379,7 +387,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   projectId: Schema.String,
   mainThreadId: Schema.NullOr(Schema.String),
   modelApplication: Schema.NullOr(Schema.Struct({pending: Schema.Boolean, attempts: Schema.Number, message: Schema.NullOr(Schema.String)})),
-  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), teamSettings: Schema.optionalKey(SupervisorTeamSettings),
+  settings: Schema.Struct({generation: Schema.Number, modelSelection: ModelSelection, pending: Schema.Boolean, monitoring: Schema.optionalKey(MonitoringSettings), planningTimeoutMs: Schema.optionalKey(Schema.Number), teamSettings: Schema.optionalKey(SupervisorTeamSettings),
     superviseAgentCreatedThreads: Schema.optionalKey(Schema.Boolean)}),
   binding: Schema.NullOr(ProjectSupervisorBinding),
   modelSelection: Schema.NullOr(ModelSelection),
@@ -389,6 +397,7 @@ export const ProjectSupervisorSnapshot = Schema.Struct({
   message: Schema.String,
   tasks: Schema.Array(TaskInterpretation),
   team: Schema.optionalKey(Schema.NullOr(ProjectSupervisorTeamSnapshot)),
+  planning: Schema.optionalKey(Schema.Array(PlanningAttempt)),
   /** Durable per-chat stop for the selected main, backed by the instance thread policy. */
   chatSupervision: Schema.optionalKey(Schema.NullOr(Schema.Struct({
     stopped: Schema.Boolean,
@@ -412,6 +421,7 @@ export const ProjectSupervisorSave = Schema.Struct({
   expectedGeneration: Schema.Number,
   modelSelection: ModelSelection,
   monitoring: Schema.optionalKey(MonitoringSettings),
+  planningTimeoutMs: Schema.optionalKey(Schema.Number),
   teamSettings: Schema.optionalKey(SupervisorTeamSettings),
   /** Whether ordinary conversations launched by an agent are eligible for supervision of the launching agent's requests; absent keeps the saved value. */
   superviseAgentCreatedThreads: Schema.optionalKey(Schema.Boolean),

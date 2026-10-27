@@ -49,6 +49,11 @@ export type ConversationTask = {sourceHash?: string; status: string; supervision
 export const taskScopeRevision = (task: ConversationTask): string => task.conversation?.authorization?.scopeRevision ?? task.sourceHash ?? "";
 export const conversationEngaged = (task: ConversationTask): boolean => task.conversation?.authorization?.state === "authorized";
 
+/** Observation needs current requester context, never permission to act or a shared plan. */
+export const conversationMayObserve = (task: ConversationTask): boolean => task.status === "inferred" && task.conversation?.authorization?.state !== "paused" &&
+  Boolean(task.conversation?.considered && task.conversation.considered.ordinal === task.conversation.observed?.ordinal &&
+    task.conversation.considered.messageId === task.conversation.observed.messageId && task.conversation.considered.hash === task.conversation.observed.hash);
+
 export const conversationMayContact = (task: ConversationTask): boolean => conversationEngaged(task) && task.supervision !== "not_needed" && task.status === "inferred" &&
   Boolean(task.conversation?.considered && task.conversation.considered.ordinal === task.conversation.observed?.ordinal &&
     task.conversation.considered.messageId === task.conversation.observed.messageId && task.conversation.considered.hash === task.conversation.observed.hash);

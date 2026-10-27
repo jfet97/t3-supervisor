@@ -1,3 +1,5 @@
+import { defaultPlanningTimeoutMs, planningTimeoutBounds } from "../../src/supervisor-planning-contract.js";
+import { ActivityAwareness, PlanningStatus } from "./supervision-awareness.js";
 import {RefreshAction} from "./refresh-action.js";
 import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
@@ -24,6 +26,7 @@ import type {
   SupervisorModelInfo,
   SupervisorModelSelection,
   SupervisorMonitoringReview,
+  SupervisorMonitoringStatus,
   SupervisorMonitoringSettings,
   SupervisorTeamSettingsInfo,
   WorkflowProtocolDiagnostic,
@@ -35,6 +38,7 @@ import { admit, admittedMutation, authEpochAtom, draftFamily, environmentAtom, r
 import { idleControlActivity, SupervisionControlPanel, supervisionControlKey, supervisionSetupSelection } from "./supervisor-control.js";
 
 type MonitoringDraft = {
+  planningTimeoutSeconds?: string;
   intervalMinutes: string;
   activityThreshold: string;
 };
@@ -62,16 +66,17 @@ const copySelection = (selection: SupervisorModelSelection): SupervisorModelSele
 });
 const copyMonitoringDraft = (monitoring: MonitoringDraft): MonitoringDraft => ({...monitoring});
 const copyTeamSettingsDraft = (settings: TeamSettingsDraft): TeamSettingsDraft => ({...settings});
-const monitoringDraft = (monitoring: SupervisorMonitoringSettings): MonitoringDraft => ({
+const monitoringDraft = (monitoring: SupervisorMonitoringSettings, timeoutMs = defaultPlanningTimeoutMs): MonitoringDraft => ({
+  planningTimeoutSeconds: String(timeoutMs / 1000),
   intervalMinutes: String(monitoring.intervalMinutes),
   activityThreshold: String(monitoring.activityThreshold),
 });
 const copyMonitoringSettings = (monitoring: SupervisorMonitoringSettings): SupervisorMonitoringSettings => ({...monitoring});
 const sameMonitoring = (left: MonitoringDraft, right: MonitoringDraft) =>
-  left.intervalMinutes === right.intervalMinutes && left.activityThreshold === right.activityThreshold;
+  left.intervalMinutes === right.intervalMinutes && left.activityThreshold === right.activityThreshold && (left.planningTimeoutSeconds ?? "300") === (right.planningTimeoutSeconds ?? "300");
 const sameTeamSettings = (left: TeamSettingsDraft, right: TeamSettingsDraft) => left.maxHelpersPerRoot === right.maxHelpersPerRoot;
 const readMonitoring = (snapshot: ProjectSupervisorInfo) => copyMonitoringSettings(snapshot.settings.monitoring ?? defaultMonitoringSettings);
-const readMonitoringDraft = (snapshot: ProjectSupervisorInfo) => monitoringDraft(readMonitoring(snapshot));
+const readMonitoringDraft = (snapshot: ProjectSupervisorInfo) => monitoringDraft(readMonitoring(snapshot), snapshot.settings.planningTimeoutMs);
 const readTeamSettings = (snapshot: ProjectSupervisorInfo): SupervisorTeamSettingsInfo => ({...(snapshot.settings.teamSettings ?? defaultSupervisorTeamSettings)});
 const teamSettingsDraft = (settings: SupervisorTeamSettingsInfo): TeamSettingsDraft => ({maxHelpersPerRoot: String(settings.maxHelpersPerRoot)});
 const readTeamSettingsDraft = (snapshot: ProjectSupervisorInfo) => teamSettingsDraft(readTeamSettings(snapshot));
@@ -98,7 +103,8 @@ const monitoringError = (value: string, minimum: number, maximum: number, field:
 };
 const parseMonitoringDraft = (value: MonitoringDraft): SupervisorMonitoringSettings | null => {
   if (monitoringError(value.intervalMinutes, monitoringIntervalMinutes.min, monitoringIntervalMinutes.max, "maximum pending activity age in minutes") ||
-    monitoringError(value.activityThreshold, 3, 100, "finalized activity threshold")) return null;
+    monitoringError(value.activityThreshold, 3, 100, "finalized activity threshold") ||
+    monitoringError(value.planningTimeoutSeconds ?? "300", planningTimeoutBounds.min / 1000, planningTimeoutBounds.max / 1000, "planning timeout in seconds")) return null;
   return {intervalMinutes: Number(value.intervalMinutes), activityThreshold: Number(value.activityThreshold)};
 };
 const parseTeamSettingsDraft = (value: TeamSettingsDraft): SupervisorTeamSettingsInfo | null => {
@@ -512,8 +518,8 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
 const unfinishedWorkStandby = "The main chat is idle, but its agreed workflow is unfinished and no current wait for the requester or another party is recorded. The Supervisor stays out of standby without new check-ins; new activity or a message in the main chat resumes its reviews, or you can stop supervision.";
 const settlementText = {pending: "Parking this idle Supervisor is pending.", uncertain: "It is not confirmed whether this idle Supervisor was parked.", settled: "This idle Supervisor is parked.", superseded: "The earlier parking request no longer applies."} as const;
 
-export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
-  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode}) {
+export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata, awareness}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
+  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode; awareness?: SupervisorMonitoringStatus["awareness"]}) {
   const children = threads.filter(thread => thread.threadId !== mainThreadId);
   const mainCoverage = coverage.get(mainThreadId);
 
@@ -530,6 +536,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
           <span className={`pill ${lifecycle.tone}`}>Conversation: {lifecycle.label}</span>
         </div>
         <p className="small">{workflow?.parentNodeReferences.length ? <>Contributes to: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</> : "No recorded contribution to a parent step"}</p><div className="conversation-meta"><WorkflowAssignee coverage={coverage.get(thread.threadId)}/>{!thread.deletedAt && <a href={threadHref(thread.threadId)}>Open in T3 →</a>}</div>
+        <ActivityAwareness awareness={awareness} threadId={thread.threadId}/>
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
           {workflow?.objective && <p>{workflow.objective}</p>}
           {workflow?.parentNodeReferences.length ? <p className="small">Contributes to parent steps: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</p> : null}
@@ -751,6 +758,7 @@ export function ProjectSupervisorView({
     .filter(reason => !shownElsewhere.has(reason));
   const fieldsDisabled = !connected || !snapshot.available || fieldsBusy || blocked;
   const intervalError = monitoringError(monitoring.intervalMinutes, monitoringIntervalMinutes.min, monitoringIntervalMinutes.max, "maximum pending activity age in minutes");
+  const timeoutError = monitoringError(monitoring.planningTimeoutSeconds ?? "300", planningTimeoutBounds.min / 1000, planningTimeoutBounds.max / 1000, "planning timeout in seconds");
   const thresholdError = monitoringError(monitoring.activityThreshold, 3, 100, "finalized activity threshold");
   const teamSettingsError = monitoringError(teamSettings.maxHelpersPerRoot, 0, 20, "maximum helpers per root");
   const modelCanChange = !fieldsDisabled;
@@ -763,7 +771,7 @@ export function ProjectSupervisorView({
       onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}/>}
     {section === "connected" && threadId && (() => {
       const view = progressView(workflowProgress?.pages ?? []);
-      return <div className="stack"><ConnectedWork metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
+      return <div className="stack"><ConnectedWork awareness={snapshot.monitoringStatus?.awareness} metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
     })()}
     {(section === "supervision" || section === "connected") && <ConversationStatus engagement={selectedTask?.engagement} fresh={connected && snapshot.available && currentRead} explicitlyStopped={Boolean(snapshot.chatSupervision?.stopped)}/>}
     {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
@@ -797,6 +805,10 @@ export function ProjectSupervisorView({
 
 
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
+        <PlanningStatus snapshot={snapshot}/>
+        {snapshot.mainThreadId && <ActivityAwareness awareness={snapshot.monitoringStatus?.awareness} threadId={snapshot.mainThreadId}/>}
+        {snapshot.binding?.mainSettlementBlockedBy && <p className="small muted">Main conversation remains active: {snapshot.binding.mainSettlementBlockedBy.replaceAll("_", " ")}.</p>}
+        {snapshot.binding?.mainSettlementState === "settled" && <p className="small">The service settled the completed main conversation.</p>}
         {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
           <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><p className="small"><GuideLink topic="monitoring">About pending activity and check-ins</GuideLink></p><EntityDetails title={<>Monitoring details and check-ins</>} ><div className="stack">
           <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
@@ -846,14 +858,14 @@ export function ProjectSupervisorView({
       </fieldset>
       <fieldset disabled={fieldsDisabled} className="settings-section">
         <legend>Ongoing monitoring</legend><div className="settings-fields">
-        <p className="muted">Monitoring asks each conversation’s Supervisor to review finished activity records when they reach the age or count limit. Defaults apply to new task workflows. Earlier records containing only a task objective are retained without being reprocessed.</p>
+        <p className="muted">The Supervisor follows active work through native T3 reads, including covered children. These age and count settings are the fallback for idle activity; they do not delay an active watch.</p>
         <div className="field-group">
           <label htmlFor="supervisor-monitoring-interval">Maximum pending activity age (minutes)</label>
           <input id="supervisor-monitoring-interval" name="intervalMinutes" type="number" min={monitoringIntervalMinutes.min} max={monitoringIntervalMinutes.max} step={1} required
             value={monitoring.intervalMinutes} aria-invalid={intervalError ? true : undefined}
             aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"
             onChange={event => onMonitoringChange({...monitoring, intervalMinutes: event.target.value})} />
-          <span id="supervisor-monitoring-interval-help" className="small muted">Enter 1 or 2 minutes; 2 is the default and the upper bound. A check-in also waits for the pause between reviews and any review already running.</span>
+          <span id="supervisor-monitoring-interval-help" className="small muted">Enter 1 or 2 minutes; 2 is the default and the upper bound. Idle fallback check-ins also wait for the pause between reviews. Active watching continues as soon as its current turn finishes.</span>
           <span id="supervisor-monitoring-interval-error" className="small" aria-live="polite">{intervalError}</span>
         </div>
         <div className="field-group">
@@ -865,7 +877,16 @@ export function ProjectSupervisorView({
           <span id="supervisor-monitoring-threshold-help" className="small muted">Enter a whole number from 3 to 100 finished activity records. <GuideLink topic="monitoring">How monitoring thresholds and check-ins work</GuideLink>.</span>
           <span id="supervisor-monitoring-threshold-error" className="small" aria-live="polite">{thresholdError}</span>
         </div>
-        <HelpDisclosure title="Fixed monitoring limits"><p><strong>Supervisor cooldown:</strong> 30 seconds between monitoring sends.</p><p><strong>Model review limit:</strong> one review at a time per Supervisor.</p></HelpDisclosure></div>
+        <div className="field-group">
+          <label htmlFor="supervisor-planning-timeout">Planning timeout (seconds)</label>
+          <input id="supervisor-planning-timeout" name="planningTimeoutSeconds" type="number" min={10} max={3600} step={1} required
+            value={monitoring.planningTimeoutSeconds ?? "300"} aria-invalid={timeoutError ? true : undefined}
+            aria-describedby="supervisor-planning-timeout-help supervisor-planning-timeout-error"
+            onChange={event => onMonitoringChange({...monitoring, planningTimeoutSeconds: event.target.value})}/>
+          <span id="supervisor-planning-timeout-help" className="small muted">Default 300 seconds. One fixed deadline covers pause acknowledgements, drafting and agreement. Changing this setting affects future attempts; it does not renew a current pause.</span>
+          <span id="supervisor-planning-timeout-error" className="small" aria-live="polite">{timeoutError}</span>
+        </div>
+        <HelpDisclosure title="Monitoring limits"><p>Idle fallback sends have a 30-second cooldown. Active watch continuations bypass it. Each Supervisor runs one model turn at a time and follows T3’s required yields; new activity does not interrupt its thinking.</p></HelpDisclosure></div>
       </fieldset>
       <fieldset disabled={fieldsDisabled} className="settings-section">
         <legend>Supervisor team</legend><div className="settings-fields">
@@ -971,7 +992,7 @@ export const settleSave = ({view, draft}: SettingsState, scope: string, input: P
       view: withMessage({...view, snapshot: result.snapshot, blocked: false}, scope, result.message, false)};
     return {
       draft: draft ? {...draft, modelValue: copySelection(input.modelSelection), modelBaseline: copySelection(input.modelSelection),
-        monitoringValue: monitoringDraft(input.monitoring ?? defaultMonitoringSettings), monitoringBaseline: monitoringDraft(input.monitoring ?? defaultMonitoringSettings),
+        monitoringValue: monitoringDraft(input.monitoring ?? defaultMonitoringSettings, input.planningTimeoutMs), monitoringBaseline: monitoringDraft(input.monitoring ?? defaultMonitoringSettings, input.planningTimeoutMs),
         teamSettingsValue: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings), teamSettingsBaseline: teamSettingsDraft(input.teamSettings ?? defaultSupervisorTeamSettings),
         agentThreadsValue: input.superviseAgentCreatedThreads ?? draft.agentThreadsBaseline, agentThreadsBaseline: input.superviseAgentCreatedThreads ?? draft.agentThreadsBaseline} : draft,
       view: withMessage({...view, blocked: true}, scope, `${result.message} Refresh Supervisor status before making another change.`, false),
@@ -1344,6 +1365,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
       expectedGeneration: activeDraft.expectedGeneration,
       modelSelection: copySelection(activeDraft.modelValue),
       monitoring: copyMonitoringSettings(validMonitoring),
+      planningTimeoutMs: Number(activeDraft.monitoringValue.planningTimeoutSeconds ?? "300") * 1000,
       teamSettings: {...validTeamSettings},
       superviseAgentCreatedThreads: activeDraft.agentThreadsValue,
     }});

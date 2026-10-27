@@ -54,6 +54,8 @@ export interface SupervisorMonitorSelectOptions {
   maxThreads?: number;
   maxFrozenItems?: number;
   eligibleThreadIds?: ReadonlySet<string>;
+  /** Verified covered live work continues its watch even after all observed items were assessed. */
+  activeThreadIds?: ReadonlySet<string>;
 }
 
 export type SupervisorMonitorScopePendingScan =
@@ -478,7 +480,10 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
         if (options.eligibleThreadIds && !options.eligibleThreadIds.has(row.thread_id)) continue;
         const state = yield* readState(projectId, row.thread_id);
         const reviewable = state.activities.filter(isReviewable);
-        const decision = evaluateSupervisorMonitoring(reviewable, settings, now, lastProjectNoticeAt, false);
+        const fallback = evaluateSupervisorMonitoring(reviewable, settings, now, lastProjectNoticeAt, false);
+        const decision = options.activeThreadIds?.has(row.thread_id)
+          ? {...fallback, due: true, trigger: "active_watch" as const, cooldownUntil: null}
+          : fallback;
         candidates.push({ ...state, decision, reviewable: reviewable.sort(compareMonitorPriority) });
       }
       const due = candidates.filter((candidate) => candidate.decision.due).sort(threadSort);

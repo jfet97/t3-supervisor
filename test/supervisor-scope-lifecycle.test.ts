@@ -1,3 +1,5 @@
+import { Context } from "effect";
+import { SupervisionScopeService } from "../src/supervision-gate.js";
 import { engagedTask } from "./support/engaged-task.js";
 import { makeSourceProjection } from "./support/psx-submission.js";
 import assert from "node:assert/strict";
@@ -128,7 +130,7 @@ const fixture = Effect.gen(function* () {
   const project: ProjectionRead = (id) => Effect.suspend(() => {projectionReads++;const failure = failures.get(id);if (failure) return Effect.fail(failure);const p = projections.get(id);
     return p ? Effect.succeed(p) : Effect.fail(new T3TransportError("T3 thread projection is unavailable"));});
   // T3 accepts the settle and shows the Supervisor settled; with an uncertain receipt the accepted call's reply is lost
-  const rpc: OperateCall = (_tag, payload) => {calls.push(payload);if (uncertain) return Effect.fail(new SupervisorRpcError("uncertain"));settledTarget!.thread.settledAt = "2026-10-14T10:02:00Z";settledTarget!.thread.settledOverride = "settled";return Effect.succeed({sequence: 11});};
+  const rpc: OperateCall = (_tag, payload) => {calls.push(payload);if (uncertain) return Effect.fail(new SupervisorRpcError("uncertain"));const target = projections.get(String(payload.threadId)) ?? settledTarget!;target.thread.settledAt = "2026-10-14T10:02:00Z";target.thread.settledOverride = "settled";return Effect.succeed({sequence: 11});};
   const process = yield* openLifecycleProcess(directory, {read: project, rpc});
   const {store, requests, monitor, workflows, conversation, lifecycle, sql} = process;
   yield* store.baseline({snapshotSequence: 10, threads: []});
@@ -816,3 +818,33 @@ it.effect("a later human stop supersedes every earlier keep-active choice for th
   yield* observed.check(firstSeen + SUPERVISOR_SETTLE_QUIET_MS);
   assert.deepEqual(observed.calls.map(call => [call.type, call.threadId]), [["thread.settle", observed.binding.threadId]]);
 }), { timeout: 60_000 });
+
+
+it.effect("completed source-bound work settles its main independently of a pinned Supervisor", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const task = (yield* f.store.task("main"))!;
+  yield* Context.get(f.process.context, SupervisionScopeService).rememberCatalog([{id: "p", workspaceRoot: "/workspace"}], f.threads);
+  yield* unfinishedAgreedTask(f, "completed", "completed", {sourceBinding: {workspaceRoot: "/workspace", revision: "definitions-1", globalRevision: null,
+    definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId: "proposal", sourceHash: taskScopeRevision(task)}});
+  f.supervisor.thread.pinnedAt = "2026-10-27T10:00:00Z";
+  yield* f.check(10);
+  yield* f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", "main"]], "the main settles while its pinned Supervisor remains available");
+  const binding = (yield* f.store.binding("p", "main"))!;
+  assert.equal(binding.mainSettlement?.state, "settled");
+  assert.equal(binding.settlement, undefined);
+  assert.equal(f.supervisor.thread.settledAt, undefined);
+}));
+
+it.effect("a pinned main remains active while its completed Supervisor can settle", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const task = (yield* f.store.task("main"))!;
+  yield* Context.get(f.process.context, SupervisionScopeService).rememberCatalog([{id: "p", workspaceRoot: "/workspace"}], f.threads);
+  yield* unfinishedAgreedTask(f, "completed", "completed", {sourceBinding: {workspaceRoot: "/workspace", revision: "definitions-1", globalRevision: null,
+    definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId: "proposal", sourceHash: taskScopeRevision(task)}});
+  f.main.thread.pinnedAt = "2026-10-27T10:00:00Z";
+  yield* f.check(10);
+  yield* f.check(10 + SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual(f.calls.map(call => [call.type, call.threadId]), [["thread.settle", f.binding.threadId]]);
+  assert.equal(f.main.thread.settledAt, undefined);
+}));

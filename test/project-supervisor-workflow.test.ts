@@ -535,7 +535,7 @@ it.effect("the interpretation request carries the concise standing role once, pe
   assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 1);
   assert.equal(occurrences("Thread tools: load this environment"), 1, "the standing role carries the local routing rule once");
   assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
-  assert.match(text, /Only those local thread tools and t3-supervisor-workflows workflow_read\/workflow_write\/supervision_stop/u);
+  assert.match(text, /Only those local thread tools, t3_thread_list\/t3_thread_wait and t3-supervisor-workflows workflow_read\/workflow_write\/supervision_stop\/supervision_planning/u);
   assert.match(text, /if one is not listed, use mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool \(native calls\)/u);
   assert.match(text, /Decide relevance before definitions/u);
   assert.match(text, /freshly read and cite the latest genuine human message \(here, or the bound main's original one for an agent-relayed Stop, never the relay\) with an operationId unique to it/u);

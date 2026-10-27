@@ -3,11 +3,11 @@ import { fingerprint } from "./guidance-store.js";
 import { taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import type { Projection } from "./types.js";
 import { emptyConversation, type ConversationDecision, type ConversationFacts, type RequesterSource } from "./supervision-conversation-contract.js";
-import { conversationMayContact, type ConversationTask } from "./supervision-conversation-contract.js";
+import { conversationMayContact, conversationMayObserve, type ConversationTask } from "./supervision-conversation-contract.js";
 import type { WorkflowPlanGroupInfo, WorkflowPlanNodeInfo } from "./project-supervisor-contract.js";
 import { isPlanGroup, planChildGroups } from "./workflow-plan-tree.js";
 
-export { taskScopeRevision, conversationEngaged, conversationMayContact, deriveConversationEngagement } from "./supervision-conversation-contract.js";
+export { taskScopeRevision, conversationEngaged, conversationMayContact, conversationMayObserve, deriveConversationEngagement } from "./supervision-conversation-contract.js";
 export const requesterSources = (main: Projection, policy: TaskRequesterPolicy, floor = -1, enabledAt: number | null = null): RequesterSource[] =>
   main.messages.flatMap(message => {
     const run = main.runs.find(run => run.id === message.runId);
@@ -24,6 +24,13 @@ export const conversationAuthorityCurrent = (task: ConversationTask, main: Proje
   return latest?.messageId === facts.considered?.messageId && latest?.hash === facts.considered?.hash &&
     [...facts.authorization!.scopeSources, facts.authorization!.stateSource].every(pin =>
       sources.some(source => source.messageId === pin.messageId && source.runId === pin.runId && source.hash === pin.hash && source.requester === pin.requester));
+};
+
+/** Quiet following verifies the current requester watermark without granting contact authority. */
+export const conversationObservationCurrent = (task: ConversationTask, main: Projection, policy: TaskRequesterPolicy): boolean => {
+  if (!conversationMayObserve(task)) return false;
+  const latest = requesterSources(main, policy).at(-1), considered = task.conversation!.considered;
+  return latest?.messageId === considered?.messageId && latest?.hash === considered?.hash && latest?.runId === considered?.runId;
 };
 
 /** The last native projection is checked after proof reads and again inside admission before the facts are saved. */
