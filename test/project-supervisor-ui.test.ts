@@ -1288,6 +1288,14 @@ it("an earlier workflow cannot borrow the current task's agreement panel", () =>
   assert.doesNotMatch(historical.slice(history), /Current task acceptance only|Agent and Supervisor/);
 });
 
+it("a returned task shows reopened implementation as current work, keeping future review choices out of Now", () => {
+  const journey = fixtureJourney("returned", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const html = renderWorkspace([journey.progress], journey.task);
+  assert.match(html, /Now: Implement within scope<\/p>/);
+  assert.doesNotMatch(html, /Now: [^<]*Decide:/);
+  assert.match(html, /1 branch decision pending/);
+});
+
 it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {
   const journey = (phase: "branch-pending" | "branch-selected") => fixtureJourney(phase, "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
   const pending = journey("branch-pending");

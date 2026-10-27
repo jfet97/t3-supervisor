@@ -105,7 +105,9 @@ names, stating what it omitted.
 The existing task document retains a bounded understanding: objective, constraints,
 open questions, findings with actual conversation references and draft high-level
 duties. This quiet draft is separate from the operative proposal. Following sends
-no routine introduction, acceptance chatter or check-ins. A temporary `not_needed`
+no routine introduction or acceptance chatter to the operative. Internal observe-only
+check-ins follow actual work, including the final activity needed to assess completion.
+A temporary `not_needed`
 assessment does not close the task; later eligible requester messages are interpreted
 on the same task. Operative activity supplies bounded context rather than a model
 turn for each tool event.
@@ -536,10 +538,11 @@ no check-in or message is sent for it. Following, stopped and closed scopes keep
 parking rules. A request cancelled before it started executed nothing, so the
 latest executed run decides whether the main finished. The binding records the first
 gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown in Supervision.
-A not-needed or unresolved request gets no check-ins, so unreviewed activity retained from
-an earlier request, or a replaced request's known-unsent draft, does not keep its Supervisor
-open; both stay as history. An incomplete activity scan or an introduction with an unknown
-outcome still does.
+A following scope may stay open until its new activity is assessed, even when no plan
+is needed. An unresolved interpretation starts no check-ins. Activity retained from an
+earlier request, or a replaced request's known-unsent draft, stays as history and does
+not alone keep its Supervisor open. An incomplete activity scan or an introduction
+with an unknown outcome still does.
 An idle main's old lifecycle-unknown child can also permit
 standby after the quiet period when no known activity, attention issue or pending
 input requires action. Unknown work stays unresolved. Background monitoring

@@ -97,13 +97,14 @@ it.live("CT-ISUB-04: concurrent, replayed, conflicting and retried submissions o
   yield* f.runOnce();
   const finalized = yield* f.task();
   assert.equal(finalized.status, "inferred");
-  const sends = f.commands.length;
+  const operativeEffects = () => f.commands.filter(command => command.threadId !== task.supervisorThreadId).length;
+  const sends = operativeEffects();
   assert.deepEqual(yield* f.submit(task, args, {install: false}), duplicate(task));
   yield* f.runOnce();
   const again = yield* f.task();
   assert.deepEqual([again.status, again.objective, again.attempt, again.interpretationEvidence, again.workflow],
     [finalized.status, finalized.objective, finalized.attempt, finalized.interpretationEvidence, finalized.workflow], "no re-finalization");
-  assert.equal(f.commands.length, sends, "a replay never sends");
+  assert.equal(operativeEffects(), sends, "a replay never duplicates operative effects; active observation may continue in the root");
   assert.equal(f.interpretationDispatches().length, 1);
 }), {timeout: 60_000});
 

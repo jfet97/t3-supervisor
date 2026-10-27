@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
+import { TestClock } from "effect/testing";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { preparedAcceptanceRecord } from "../src/supervisor-conversation.js";
 import { T3TransportError } from "../src/t3.js";
@@ -82,6 +83,7 @@ it.effect("the operative gets a short pinned notice, reads its own complete prop
 
   // the operative copies the record from what it read into its own reply after the notice
   completeSupervisorRequest(operative, String(notice.payload.messageId), `\`\`\`workflow-acceptance\n${JSON.stringify(acceptance)}\n\`\`\``);
+  yield* TestClock.adjust("5 seconds");
   yield* supervisor.cycle;
   yield* supervisor.cycle;
   assert.deepEqual([(yield* fixture.task())?.agreement?.status, (yield* fixture.task())?.agreement?.proposalId], ["agreed", proposalId]);

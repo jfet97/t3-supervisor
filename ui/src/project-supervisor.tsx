@@ -10,6 +10,7 @@ import {alignmentLabel, completionTimes, currentBranchPaths, liveProgress, PlanC
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
+import { reachedPendingBranchDecisions } from "../../src/workflow-plan-tree.js";
 import { planStatusAttention, protocolDiagnosticAttention, staleAgreementAttention, workAttention } from "../../src/dashboard-overview.js";
 import React, { useContext, useEffect, useState, type FormEvent } from "react";
 import { Cause, Clock, Effect, Exit, Option, Result } from "effect";
@@ -589,8 +590,9 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const notApplicable = record.kind === "live" ? new Set(record.workflow.notApplicable ?? []) : undefined;
   const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow), notApplicable) : null;
   const steps = live?.steps ?? (record.kind === "none" ? [] : planSteps(record.plan));
+  const reachedDecisions = record.kind === "live" ? reachedPendingBranchDecisions(record.plan, currentBranchPaths(record.workflow), notApplicable ?? new Set()) : [];
   const current = live ? [...steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name),
-    ...live.pending.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
+    ...reachedDecisions.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
   const latestObservation = record.kind === "live" ? [...record.workflow.observations].sort((a, b) => b.recordedAt - a.recordedAt)[0] : undefined;
   const retained = mainWorkflow && record.kind !== "live" ? [mainWorkflow] : [];
   const staleAgreement = task?.agreement?.status === "stale" ? task.agreement : null;

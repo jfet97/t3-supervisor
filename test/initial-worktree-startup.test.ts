@@ -61,6 +61,12 @@ for (const variant of ["identical", "retained", "changed", "stopped"] as const) 
     }
     yield* f.restart();
     yield* f.runOnce();
+    if (variant === "retained") {
+      const checkIn = yield* f.core.requests.pending(task.projectId, task.supervisorThreadId);
+      assert.ok(checkIn);
+      f.endRun({...task, messageId: checkIn.messageId}, "completed", checkIn.completionMarker);
+      yield* f.runOnce();
+    }
     yield* f.runOnce();
     if (variant === "identical" || variant === "retained") {
       const renewed = yield* f.task();
@@ -78,7 +84,7 @@ for (const variant of ["identical", "retained", "changed", "stopped"] as const) 
       assert.equal(current.id, task.id);
       assert.equal(f.binding.threadId, task.supervisorThreadId);
       assert.equal(current.definitionReview, undefined);
-      assert.equal(f.rootSends().length, 2);
+      assert.equal(f.rootSends().filter(command => !String(command.text).includes("UNTRUSTED_MONITOR_ENVELOPE")).length, 2);
       yield* f.core.requests.noticeSent(f.binding.threadId, 0);
       yield* f.runOnce();
       yield* f.runOnce();

@@ -29,11 +29,12 @@ const thread = (id: string, parentThreadId: string | null, relationshipToParent:
   lineage: {parentThreadId, relationshipToParent, rootThreadId},
 });
 
-it.live("dashboard snapshot uses the native catalog and excludes owned roots and descendants", () => Effect.gen(function* () {
+it.live("dashboard snapshot preserves native creation order and excludes owned roots and descendants", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("supervisor-snapshot-");
   const settings = config(directory);
   const nativeThreads = [
-    thread("main", null, null),
+    {...thread("main", null, null), createdAt: "2026-10-01T09:00:00Z", updatedAt: "2026-10-27T09:00:00Z"},
+    {...thread("z-newer", null, null), createdAt: "2026-10-26T09:00:00Z", updatedAt: "2026-10-26T09:00:00Z"},
     thread("supervisor-root:root-id", null, null),
     thread("helper", "supervisor-root:root-id", "subagent", "supervisor-root:root-id"),
     thread("child", "main", "subagent", "main"),
@@ -44,7 +45,7 @@ it.live("dashboard snapshot uses the native catalog and excludes owned roots and
     threads: nativeThreads,
   })}).pipe(Effect.provide(stores));
   const snapshot = yield* runtime.snapshot;
-  assert.deepEqual(snapshot.threads.map(value => value.id), ["main"]);
+  assert.deepEqual(snapshot.threads.map(value => value.id), ["z-newer", "main"]);
   assert.equal("history" in snapshot, false);
   assert.deepEqual(snapshot.threadPolicy.excludedThreadIds, []);
 }));
