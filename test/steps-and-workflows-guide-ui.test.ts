@@ -38,7 +38,10 @@ it("steps and workflows guide documents the approved layout, syntax and planning
   assert.match(html, /implementation[\s\S]*e2e-testing[\s\S]*deployment/);
   assert.match(html, /including nested commitments/);
   assert.match(html, /total expanded-node and depth bounds/);
-  assert.match(html, /The main agent must assign this entire workflow to one or more independent/);
+  assert.match(html, /One assigned reviewer performs one independent pass/);
+  assert.match(html, /- parallel:\n      - workflow: reviewer\n      - workflow: reviewer/);
+  assert.match(html, /if: At least one review reports unresolved material findings\.[\s\S]*back_to: implementation/);
+  assert.doesNotMatch(html, /one or more independent|requests further review after/);
   assert.match(html, /Requirements apply once to the current main task/);
   assert.match(html, /Direct and indirect workflow cycles are errors/);
   assert.match(html, /A <code>complete<\/code> read means the service finished reading the relevant files; it does not mean those definitions are valid/);
