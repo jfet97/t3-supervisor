@@ -46,7 +46,9 @@ export function returnedJourney(input: {task: TaskInterpretationInfo; progress: 
     ...(accepted && input.task.agreement ? {agreement: {...input.task.agreement, workflow: {...accepted, plan: returnPlan(accepted.plan!)}}} : {})};
   const children: WorkflowProgressWorkflow[] = childIds.map((threadId, index) => {
     const parent = planEntities(main.plan).find(node => node.nodeId === (index === 0 ? "packing-correctness" : "packing-fit"))!;
-    return {...main, workflowId: `fixture-review-workflow-${index}`, threadId, parentThreadId: mainId, status: "completed", assessment: null,
+    return {...main, workflowId: `fixture-review-workflow-${index}`, threadId, parentThreadId: mainId, status: "completed",
+      assessment: {taskId: input.task.id!, sourceHash: input.task.sourceHash!, status: "completed", updatedAt: now - 180_000,
+        summary: "Reconstructed example: the reviewer completed the first pass; its findings remain part of the earlier attempt."},
       objective: `Reconstructed example: ${parent.name}, first attempt.`,
       plan: {kind: "sequence", templatePath: null, nodes: [{...parent, nodeId: `fixture-review-pass-${index}`, status: "completed"}]},
       parentNodeReferences: [{parentWorkflowId: main.workflowId, parentThreadId: mainId, nodeId: parent.nodeId, nodeKind: parent.kind, nodeName: parent.name}],
