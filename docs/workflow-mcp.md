@@ -350,8 +350,10 @@ the same proof of its own executed call: `taskId` is the main's current task and
 `proposalId` is the ID of the child's own workflow document, both from its notice. It
 answers only while the child is a live descendant on a complete subagent path of a main
 whose binding is ready, enabled and not stopped, under that main's current supervised
-task, and only for the child's own linked document under its native parent. The text names
-each occurrence with its node ID, status, attempt and branch reach, then the returns
+task, after a fresh main read confirms that its requester messages remain unchanged and
+current. The child's linked document must be bound to that task's current scope under its
+native parent. The text includes each applicable member's full recorded duty, references
+and skills, relative to the named checkout root. It names each occurrence with its node ID, status, attempt and branch reach, then the returns
 pending. A child accepts nothing: its scoped plan is its Supervisor's to write, and every
 other call gets the same refusal.
 
