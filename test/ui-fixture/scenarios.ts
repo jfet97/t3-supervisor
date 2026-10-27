@@ -1,6 +1,7 @@
 import { checkoutObservation, type CheckoutObservationInfo } from "../../src/checkout-observation.js";
 import {definitionGuidanceFields, type DefinitionGuidance} from "../../src/definition-references.js";
 import {fixtureJourney, journeyTitle, type JourneyCase} from "./journey.js";
+import {returnedSupervision} from "./returned.js";
 import {assessmentForTask} from "../../src/workflow-assessment.js";
 import {workAttention} from "../../src/dashboard-overview.js";
 import { createHash } from "node:crypto";
@@ -472,6 +473,7 @@ export class FixtureModel {
       projectId, mainThreadId, modelApplication: null, settings: project.settings,
       binding: thread?.binding ?? null, modelSelection: thread?.binding ? thread.selectedModel : null, models,
       monitoringStatus: {state: "idle", message: "Fixture: monitoring is idle; synthetic status.", pendingItems: 0, nextReviewAt: null, lastNoticeAt: null},
+      ...(this.journey === "returned" && thread?.binding ? returnedSupervision(projectId, thread.id, thread.binding.threadId, this.now()) : {}),
       available: true, message: "Fixture: synthetic Supervisor status; no T3 connection is used.",
       tasks: this.data.threads.flatMap(item => item.projectId === projectId && item.task ? [journeyTask && item.id === fixtureIds.threadA1 ? journeyTask : item.task] : []),
       ...(thread ? {chatSupervision: {
@@ -627,6 +629,7 @@ export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
   "journey-branch-proposal", "journey-branch-pending", "journey-branch-selected", "journey-branch-changed",
+  "journey-returned",
   "orphaned-attention", "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -674,6 +677,7 @@ export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (
   "journey-branch-pending": {description: "reconstructed packing example: verified; the review-depth decision is pending", plan: () => plan([])},
   "journey-branch-selected": {description: "reconstructed packing example: the agent selected one review; a child reviewer selected its own path", plan: () => plan([])},
   "journey-branch-changed": {description: "reconstructed packing example: completed, then the review decision changed, so completion needs reassessment", plan: () => plan([])},
+  "journey-returned": {description: "reconstructed packing example: return to implementation, forward history, prior reviewer turns and released planning waits", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
   "session-expiry-next-call": {description: "the next /api/ call with a valid session revokes that session and answers 401", plan: () => plan([{kind: "session-expiry"}])},
   "signout-other-tab": {description: "revokes every fixture session now, as a sign-out in another tab does server-side", plan: () => plan([], true)},

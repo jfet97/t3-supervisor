@@ -1270,6 +1270,9 @@ it.effect("No Project defaults to On request and shared definitions never activa
   assert.equal((yield* f.fixture.store.bindings()).length, 0);
   assert.equal(yield* f.supervisor.scopeEnabled("project-a", "manual"), false);
   assert.equal(yield* f.supervisor.scopeEnabled("project-b", "ordinary"), true);
+  Object.assign(f.fixture.projections.get("manual")!.thread, {createdAt: "2026-10-01T09:00:00Z", updatedAt: "2026-10-27T09:00:00Z"});
+  Object.assign(f.fixture.projections.get("other")!.thread, {createdAt: "2026-10-26T09:00:00Z", updatedAt: "2026-10-26T09:00:00Z"});
+  assert.deepEqual((yield* f.supervisor.candidates()).candidates.map(item => item.id), ["other", "manual"], "chat selection follows creation time, even when the older chat was active later");
 }));
 
 it.effect("native Start runs one intent interpretation, grants only that chat and survives restart", () => Effect.gen(function* () {

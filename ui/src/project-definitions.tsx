@@ -248,7 +248,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
   const projects = data.projects.filter(project => project.available);
   const projectId = projects.some(project => project.id === selection.projectId) ? selection.projectId : "";
-  const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId).sort((a, b) => a.id.localeCompare(b.id));
+  const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId);
   const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
   const threadId = selection.threadId;
   const epoch = useAtomValue(authEpochAtom, epochOf);

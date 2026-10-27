@@ -26,10 +26,12 @@ import {
 const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.threadId === fixture.binding.threadId;
 
 // a fixture with a sent introduction and three due command activities, observed into the monitor
-const dueCheckIn = (clock: FixtureClock) => Effect.gen(function* () {
+const dueCheckIn = (clock: FixtureClock, idle = false) => Effect.gen(function* () {
   yield* setNow(clock, clock.now);
   const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 2, activityThreshold: 3}});
   yield* appendNoticeToOperative(fixture);
+  if (idle) for (const run of fixture.operative.runs.filter(run => run.status === "running")) completeRun(fixture.operative, run, "The operative work is quiet.", clock.now - 1);
+  if (idle) fixture.operative.thread.activityRunStatus = "completed";
   for (let index = 1; index <= 3; index++) addCommandActivity(fixture.operative, `command-${index}`, `PRIVATE_COMMAND_BODY_${index}`, clock.now - index * 1_000);
   yield* fixture.conversation.observe(fixture.threadList).pipe(atWallTime(clock.now));
   return fixture;
@@ -325,6 +327,9 @@ it.effect("CT-CONV-06: interleaved cycles of two bindings keep request identitie
   const second = yield* fixture.addBoundOperative("operative-b", "proposal-b");
   yield* appendNoticeToOperative(fixture);
   yield* introduceBound(fixture, second);
+  for (const projection of [fixture.operative, second.projection])
+    for (const run of projection.runs.filter(run => run.status === "running")) completeRun(projection, run, "The operative work is quiet.", clock.now - 1);
+  for (const projection of [fixture.operative, second.projection]) projection.thread.activityRunStatus = "completed";
   for (let index = 1; index <= 3; index++) {
     addCommandActivity(fixture.operative, `a-command-${index}`, `A_BODY_${index}`, clock.now - index * 1_000);
     addCommandActivity(second.projection, `b-command-${index}`, `B_BODY_${index}`, clock.now - index * 1_000);
@@ -433,10 +438,10 @@ it.effect("CT-CONV-07: an enabled binding without an inferred task or activity m
   assert.equal(yield* tableDigest(fixture.sql), digest);
 }), {timeout: 10_000});
 
-it.effect("CT-CONV-08: a check-in is withheld at lastNotice+29999 ms and dispatched at lastNotice+30000 ms", () => Effect.gen(function* () {
+it.effect("CT-CONV-08: an idle check-in is withheld at lastNotice+29999 ms and dispatched at lastNotice+30000 ms", () => Effect.gen(function* () {
   const start = baseTime;
   const clock = {now: start};
-  const fixture = yield* dueCheckIn(clock);
+  const fixture = yield* dueCheckIn(clock, true);
   yield* fixture.run;
   const first = yield* fixture.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(first);

@@ -58,16 +58,16 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   // lifecycle authority and local-reader routing are rendered once; the typed variant adds the source-bound submission envelope.
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}]});
-  assert.equal(reader.requestText.length, 2304);
-  assert.equal(sha256(reader.requestText), "c059a4d6ed148620e9722bace62ef653542f3c63b6d11a726814f95580d6e3d7");
+  assert.equal(reader.requestText.length, 1148);
+  assert.equal(sha256(reader.requestText), "780d7be708b9ba46bfb375211976a10763be3ce6b6698693bf21fc2dbd1f146b");
   assert.deepEqual(reader.context, prepared.context);
   assert.deepEqual(reader.workflow, prepared.workflow);
   const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}],
       submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
         sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
-  assert.equal(typed.requestText.length, 3676);
-  assert.equal(sha256(typed.requestText), "b5d5631b4c0ef8b57274252fec401a7bea3603f81ff4cef0b636a197bd84c2f4");
+  assert.equal(typed.requestText.length, 2520);
+  assert.equal(sha256(typed.requestText), "d5104feb899fa8fb8e1be566c5728bf49f5f1d19932c2d50e53a50f226a908e6");
   assert.deepEqual(typed.context, prepared.context);
   assert.deepEqual(typed.workflow, prepared.workflow);
 

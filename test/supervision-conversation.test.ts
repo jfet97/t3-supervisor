@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { deriveConversationEngagement } from "../src/supervision-conversation.js";
-import { appendSourceMessage, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete } from "./support/ctl-workflow.js";
+import { appendSourceMessage, completeSupervisorRequest, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete } from "./support/ctl-workflow.js";
 import type { ConversationDecision } from "../src/supervision-conversation-contract.js";
 import { interpretationSubmitter } from "./support/g1a-conversation.js";
 import { submissionArguments } from "./support/interpretation-submit.js";
@@ -54,7 +54,11 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.deepEqual(deriveConversationEngagement({task: following, enabled: true, available: true}), {mode: "following", availability: "current", consideredAt: following.conversation!.updatedAt});
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 0);
   yield* controller.cycle;
-  assert.equal(f.dispatches().length, 1, "quiet activity creates no routine check-in");
+  const quietCheckIn = yield* controller.conversation.requests.pending(following.projectId, first.supervisorThreadId);
+  assert.ok(quietCheckIn, "following real activity is assessed within the Supervisor");
+  assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 0, "following stays quiet toward the operative");
+  completeSupervisorRequest(root, quietCheckIn.messageId, quietCheckIn.completionMarker);
+  yield* controller.cycle;
   appendSourceMessage(source, "research-request", 2, "Investigate this incident and report the cause; do not fix it.");
   yield* controller.cycle;
   const pending = (yield* f.task())!;
@@ -84,7 +88,7 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.equal(paused.conversation!.authorization!.state, "paused");
   assert.equal(paused.conversation!.authorization!.scopeRevision, oldRevision);
   assert.equal(paused.workflowProposalId, oldProposal);
-  const rootDispatches = f.dispatches().filter(call => call.payload.threadId === first.supervisorThreadId);
+  const rootDispatches = f.dispatches().filter(call => call.payload.threadId === first.supervisorThreadId && !String(call.payload.text).includes("UNTRUSTED_MONITOR_ENVELOPE"));
   assert.equal(new Set(rootDispatches.map(call => call.payload.commandId)).size, 3, "each interpretation has its own stable native command identity");
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1);
   appendSourceMessage(source, "resume-request", 4, "Resume that same investigation and report; still do not fix or deploy.");
@@ -96,7 +100,7 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.equal((yield* f.task())!.conversation!.authorization!.state, "authorized");
   assert.equal((yield* f.task())!.workflowProposalId, oldProposal);
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1, "same-scope resume never reintroduces the plan");
-  assert.equal(f.dispatches().length, 5, "four requester interpretations and one introduction; no repeated operative contact or routine check-ins");
+  assert.equal(f.dispatches().filter(call => !String(call.payload.text).includes("UNTRUSTED_MONITOR_ENVELOPE")).length, 5, "four requester interpretations and one introduction; observe-only check-ins stay internal");
 }));
 
 const heldPlan = Effect.gen(function* () {
@@ -161,6 +165,10 @@ it.effect("retained first-contact proof rejects another scope, missing revision,
       const changed = (yield* f.task())!;
       assert.notEqual(changed.conversation!.authorization!.scopeRevision, retained.conversation!.authorization!.scopeRevision);
       assert.deepEqual(changed.interpretationEvidence, retained.interpretationEvidence, "the historical plan remains reviewable");
+      const checkIn = yield* controller.conversation.requests.pending(changed.projectId, changed.supervisorThreadId);
+      assert.ok(checkIn);
+      completeSupervisorRequest(root, checkIn.messageId, checkIn.completionMarker);
+      yield* controller.cycle;
       appendSourceMessage(source, "resume-changed-scope", 3, "Proceed with that deployment report; do not fix or deploy.");
       yield* controller.cycle;
       yield* submitAndComplete(f, controller, (yield* f.task())!, {...research("resume-changed-scope"), objective: "Report deployment health", workflow: null,

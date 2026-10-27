@@ -516,6 +516,16 @@ export const backToContext = (plan: WorkflowPlanGroupInfo, backToNodeId: string)
   return context;
 };
 
+const sequencePredecessorsSettled = (plan: WorkflowPlanGroupInfo, nodeId: string, selected: ReadonlyMap<string, BranchPath>, notApplicable: ReadonlySet<string>): boolean => {
+  const frames = framesTo(plan, nodeId);
+  return frames !== null && frames.every(frame => {
+    if (frame.group.kind === "parallel") return true;
+    const earlier: WorkflowPlanGroupInfo = {kind: "sequence", templatePath: null, nodes: frame.group.nodes.slice(0, frame.index)};
+    return unsettledOccurrences(earlier, selected, notApplicable, frame.fixedOwner).length === 0 &&
+      pendingDecisionsOutside(earlier, selected, notApplicable, frame.fixedOwner).length === 0;
+  });
+};
+
 /**
  * The returns reached in the current attempt: on the active path, with every earlier member of each enclosing sequence settled and no
  * decision pending among them. Other lanes of an enclosing parallel group never hold a return back, while a return reached inside an
@@ -528,19 +538,18 @@ export const reachedBackTos = (plan: WorkflowPlanGroupInfo | null, selected: Rea
   const candidates = planBackTos(plan).filter(backTo => {
     const position = reach.get(backTo);
     if (position !== "unconditional" && position !== "selected") return false;
-    const frames = framesTo(plan, backTo.nodeId);
-    return frames !== null && frames.every(frame => {
-      if (frame.group.kind === "parallel") return true;
-      const earlier: WorkflowPlanGroupInfo = {kind: "sequence", templatePath: null, nodes: frame.group.nodes.slice(0, frame.index)};
-      return unsettledOccurrences(earlier, selected, notApplicable, frame.fixedOwner).length === 0 &&
-        pendingDecisionsOutside(earlier, selected, notApplicable, frame.fixedOwner).length === 0;
-    });
+    return sequencePredecessorsSettled(plan, backTo.nodeId, selected, notApplicable);
   });
   return candidates.filter(backTo => {
     const {earlier} = backToContext(plan, backTo.nodeId);
     return !candidates.some(other => other !== backTo && earlier.has(other.nodeId));
   });
 };
+
+/** Pending choices whose earlier sequential work is settled; choices in another parallel lane remain independent. */
+export const reachedPendingBranchDecisions = (plan: WorkflowPlanGroupInfo | null, selected: ReadonlyMap<string, BranchPath>,
+  notApplicable: ReadonlySet<string>): WorkflowPlanBranchInfo[] => !plan ? [] : pendingDecisionsOutside(plan, selected, notApplicable)
+    .filter(branch => sequencePredecessorsSettled(plan, branch.nodeId, selected, notApplicable));
 
 /** The current runtime attempt of every occurrence a return reopened: one more than before for each applied return whose region holds it. */
 export const occurrenceAttempts = (returns: ReadonlyArray<{readonly state: string; readonly regionNodeIds: readonly string[]}>): Map<string, number> => {

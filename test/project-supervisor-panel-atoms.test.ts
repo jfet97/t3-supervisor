@@ -62,19 +62,19 @@ const showSnapshot = (registry: AtomRegistry.AtomRegistry) => {
   const shown = ps.settleRead({view: registry.get(ps.projectSupervisorView(projectKey())), draft: null}, "project", scopeA(), {snapshot, readAt: 1}, false);
   registry.set(ps.projectSupervisorView(projectKey()), {...shown.view, scope: scopeA()});
   assert.ok(shown.draft);
-  registry.set(ps.projectSupervisorDraft(projectKey()), {...shown.draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10"}});
+  registry.set(ps.projectSupervisorDraft(projectKey()), {...shown.draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10", planningTimeoutSeconds: "120"}});
 };
 
 it("a read keeps every dirty draft field, moves only clean fields and the expected generation, and only an explicit refresh reads over a dirty shown draft", {timeout: 10_000}, () => {
   const first = ps.mergeLoadedDraft(null, "project", snapshot);
   assert.equal(first.keptDirty, false);
   assert.equal(first.draft.expectedGeneration, 7);
-  const edited = {...first.draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10"}};
+  const edited = {...first.draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10", planningTimeoutSeconds: "120"}};
   const newer = {...snapshot, settings: {...snapshot.settings, generation: 8, modelSelection: {instanceId: "provider-one", model: "steady-model", options: []},
-    monitoring: {intervalMinutes: 2, activityThreshold: 20}}};
+    monitoring: {intervalMinutes: 2, activityThreshold: 20}, planningTimeoutMs: 600_000}};
   const merged = ps.mergeLoadedDraft(edited, "project", newer);
-  assert.deepEqual(merged.draft.monitoringValue, {intervalMinutes: "12", activityThreshold: "10"}, "the dirty field keeps the user's value");
-  assert.deepEqual(merged.draft.monitoringBaseline, {intervalMinutes: "2", activityThreshold: "20"});
+  assert.deepEqual(merged.draft.monitoringValue, {intervalMinutes: "12", activityThreshold: "10", planningTimeoutSeconds: "120"}, "the dirty field keeps the user's value");
+  assert.deepEqual(merged.draft.monitoringBaseline, {intervalMinutes: "2", activityThreshold: "20", planningTimeoutSeconds: "600"});
   assert.deepEqual(merged.draft.modelValue, newer.settings.modelSelection, "a clean field takes the new saved value");
   assert.equal(merged.draft.expectedGeneration, 8);
   assert.equal(merged.keptDirty, true);
@@ -152,7 +152,7 @@ it.effect("an unconfirmed save keeps the draft and blocks until a read, a refuse
   }
   storage.set("supervisor-session", "session-1");
 
-  const draft = {...ps.mergeLoadedDraft(null, "project", snapshot).draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10"}};
+  const draft = {...ps.mergeLoadedDraft(null, "project", snapshot).draft, monitoringValue: {intervalMinutes: "12", activityThreshold: "10", planningTimeoutSeconds: "120"}};
   const view = {scope: "s", snapshot, readAt: 1, message: null, blocked: false, operation: null, chat: null, chatMessage: null};
   const newer = {...snapshot, settings: {...snapshot.settings, generation: 9}};
   const conflict = ps.settleSave({view, draft}, "s", saveInput(7), Result.succeed({status: "conflict", message: "Settings changed elsewhere.", snapshot: newer}));

@@ -1,12 +1,13 @@
 import type { TaskInterpretationInfo, WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowPlanStepInfo, WorkflowPlanWorkflowInfo, WorkflowProposalInfo, WorkflowRequirementInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressBranchEvent, WorkflowProgressBranchSelection, WorkflowProgressObservation, WorkflowProgressSnapshot } from "../../src/workflow-progress.js";
 import {emptyConversation} from "../../src/supervision-conversation-contract.js";
+import { returnedJourney } from "./returned.js";
 
 // A reconstructed example of a warehouse packing change: a GTIN scan selects an article and quantity-label scans add pieces.
 // Every text is labelled; none of it records Supervisor work, native messages or a run. The plan follows a project's
 // high-level change workflow; occurrence IDs stay the same across proposals and the live plan.
 export const journeyCases = ["request", "following", "catching-up", "paused", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained",
-  "branch-proposal", "branch-pending", "branch-selected", "branch-changed"] as const;
+  "branch-proposal", "branch-pending", "branch-selected", "branch-changed", "returned"] as const;
 export type JourneyCase = typeof journeyCases[number];
 
 export const journeyTitle = "Packing quantity scans (reconstructed example)";
@@ -140,7 +141,8 @@ function history(phase: typeof order[number], now: number) {
 }
 
 /** The reconstructed packing journey through the production API contracts, with no native work or conversation messages. */
-export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: string, supervisorThreadId: string, now: number) {
+export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: string, supervisorThreadId: string, now: number): {task: TaskInterpretationInfo; progress: WorkflowProgressSnapshot} {
+  if (phase === "returned") return returnedJourney(fixtureJourney("nested-attention", projectId, threadId, supervisorThreadId, now), now);
   const revisedOrLater = ["revised", "reagreed", "verified", "nested", "nested-attention", "completed"].includes(phase);
   const v2Accepted = revisedOrLater && phase !== "revised";
   const proposalV1 = proposal(notes.verify, "Reconstructed example: the Supervisor proposed the project’s change workflow for this task.");

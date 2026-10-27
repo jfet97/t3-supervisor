@@ -829,12 +829,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         !catalog.projects.some(item => item.available && item.project.id === thread.projectId)) return false;
       if (purpose === "start" ? !(yield* scope.isNoProject(thread.projectId)) : !(yield* relevant(thread.projectId, thread.id))) return false;
       return !search || thread.id.toLowerCase() === search || thread.title.toLowerCase().includes(search);
-    }))).sort((a,b) => (timestampMs(b.updatedAt) ?? 0) - (timestampMs(a.updatedAt) ?? 0) || a.id.localeCompare(b.id)).slice(0, 8);
+    }))).sort((a,b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0) || a.id.localeCompare(b.id)).slice(0, 8);
     return {exceptions, candidates: yield* Effect.forEach(rows, thread => Effect.gen(function* () {
       return {id: thread.id, projectId: thread.projectId!, title: thread.title,
         updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : null, active: (yield* store.start(thread.id))?.status === "active" && !(yield* scope.supervisionStopped(thread.id)),
         excluded: yield* scope.supervisionStopped(thread.id)};
-    })), message: rows.length ? "Choose a chat. At most eight matches are shown." : "No matching available chat. Paste its native T3 link or change the search."};
+    })), message: rows.length ? "Choose a chat. Newest by creation time first; at most eight matches are shown." : "No matching available chat. Paste its native T3 link or change the search."};
   });
   const ensureBinding = (projectId: string, mainThreadId: string, title: string): Effect.Effect<BindingRecord, EnsureBindingError> => Effect.gen(function* () {
     if (!(yield* projectEnabled(projectId, mainThreadId))) return yield* new SupervisionDisabled();
