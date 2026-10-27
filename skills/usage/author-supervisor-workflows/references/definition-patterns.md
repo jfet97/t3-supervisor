@@ -42,50 +42,54 @@ entry before claiming a valid catalog.
 
 ## Short descriptions with complete contracts
 
-Keep the local work and its evidence in the step. Keep round coordination and completion
-in the workflow that owns them. In the review example below, each lens reports its
-checks and findings; the main accounts for them; Review decides when the whole process is
-finished. Each member need not repeat that full explanation.
+Keep the local work and its evidence in the step. A reviewer workflow owns one pass;
+its caller owns reviewer count, findings accounting, acceptance and any return. Each
+member need not repeat that full explanation.
 
 Preserve decision-critical conditions inline. Link a shared procedure for mechanics,
 with an explicit instruction to read it. Compare every original obligation against its
 retained wording or canonical home before declaring a shorter version complete.
 
-## Workflow-owned iteration
+## One review pass and caller-owned coordination
 
-When the project requires adversarial review, a useful shape is the following. Define
-the three referenced steps separately, including the main-owned accounting contract; do
-not hand the accounting step to independent reviewers.
+A reusable reviewer workflow describes one reviewer assessing one frozen artifact.
+Define its referenced steps separately:
 
 ```yaml
-name: Review
+name: Single review
 description: |
-  The main owns review coordination and findings accounting. Assign correctness
-  and fit assessment to independent reviewers under the project's model policy;
-  if that policy requires two models, each covers both lenses independently.
-  Freeze one artifact and base per round and wait for all complete reports before
-  edits or accounting. Pin every report and accounting record to that artifact.
-  After relevant fixes, verify affected behavior and request another round in
-  the same reviewer conversations. Keep the workflow and member occurrences
-  underway across rounds until the requested outcome's completion rule holds.
-  Reporting-only work may finish with unresolved findings clearly returned.
-  Acceptance work stays open until important findings have reviewer-confirmed
-  resolution on the final artifact, or the requester explicitly decides them.
-fixed: true
+  One assigned reviewer assesses correctness and fit independently, then reports
+  material findings, coverage limits and a verdict for the frozen artifact and base.
+  On another pass, retain prior findings and responses. Do not reopen settled issues
+  without new evidence or repeat optional preferences as blockers.
 sequence:
-  - parallel:
-      - step: review-correctness
-      - step: review-fit
-  - step: account-for-findings
+  - step: review-correctness
+  - step: review-fit
+  - step: report-findings
 ```
 
-A caller includes `workflow: review` before its governed action. Iteration within one
-occurrence is an instruction in the workflow description, not a self-reference, recursive
-child workflow, wrapper step or execution-policy keyword; a [return](#returns-for-repeated-rounds)
-repeats earlier members as a visible new attempt. The sequence describes work within each round;
-completed reports are evidence, not automatic completion of the persistent occurrences.
-Supervisor observes and assesses; it does not run a scheduler or launch those reviewers
-from the YAML.
+When the project requires two reviewers, a caller composes two complete passes:
+
+```yaml
+name: Paired review
+description: |
+  The main assigns each occurrence to an independent reviewer under the project's
+  model and reasoning policy. Each reviewer covers both lenses. Freeze one artifact
+  and base, wait for both complete reports before edits or findings accounting,
+  and pin every report to that artifact. Preserve each reviewer's attribution.
+parallel:
+  - workflow: single-review
+  - workflow: single-review
+```
+
+The main owns findings accounting; do not hand that duty to the independent reviewers.
+The surrounding Review workflow can select single or paired review and then account
+for findings, as below. The caller of Review decides whether the requested outcome
+needs another pass and uses a [return](#returns-for-repeated-rounds) to repeat earlier
+members. No reviewer description restarts an outer process. A completed review pass
+can have a negative verdict; missing reports remain unfinished. Acceptance and report
+completion are distinct, and a completed child never completes a parent's work.
+Supervisor observes and assesses; YAML does not launch those reviewers.
 
 Choose `fixed: true` only when the original members, descriptions, references, order and
 parallel relationships must survive adaptation. It permits added support work.
@@ -115,6 +119,10 @@ workflows:
   - path: workflows/review.yaml
     summary: Use to independently assess a frozen change or plan, and to account for the findings before the governed action.
     required: true
+  - path: workflows/single-review.yaml
+    summary: One independent reviewer assesses the frozen artifact.
+  - path: workflows/paired-review.yaml
+    summary: Two independent complete reviewer passes.
 steps: []
 ```
 
@@ -169,9 +177,9 @@ inside a path.
 
 ## Returns for repeated rounds
 
-When each round should be agreed and visible, such as review, fix and review again, a
-return repeats the earlier members as a new attempt instead of only describing the
-repetition:
+When the caller requires earlier work again, such as corrections, verification and
+another review, a return repeats those members as a new attempt under the agreed
+plan. The return itself does not require a new agreement:
 
 ```yaml
 name: Reviewed delivery
@@ -183,20 +191,20 @@ description: |
   round on their own.
 sequence:
   - step: implement
+  - step: verify
   - workflow: review
   - branch:
       if: The review left material findings.
       then:
-        - step: address-findings
-        - back_to: review
+        - back_to: implement
   - step: deliver
 ```
 
 `back_to` names the ID of an earlier step, local step or workflow in the same sequential
 lane and ends its path. Put it in a branch path so the work can also continue; a return
-with no way out is rejected. When the operative reaches it, the region from `review`
-through the branch waits, the Supervisor applies the return at a safe point, and the next
-attempt runs `review` and the branch again with the same reviewer conversations; the
+with no way out is rejected. When the operative reaches it, the region from `implement`
+through verification, Review and the branch waits. The Supervisor applies the return at
+a safe point, and the next attempt repeats that region with the same reviewer conversations; the
 branch decision is recorded again for each attempt. A reusable workflow may return to a
 member of the workflow that includes it. From inside a parallel lane, return only within
 that lane; to repeat work before a parallel group, place the return after the group.
@@ -216,6 +224,10 @@ requester decision, not a way to close the gate. Demonstrated regressions in beh
 promised preserved cannot be dismissed as minor or out of scope. Earlier reports and
 pre-fix checks do not certify later changes; a changed base invalidates affected
 evidence.
+
+A review pass and findings accounting can finish with a negative verdict. Delivery
+acceptance still needs reviewer-confirmed resolution on the final artifact, or the
+requester's explicit decision on the remaining findings.
 
 For repeated rounds, strongly prefer the same exact persistent reviewer chats per
 main-owned cycle. Record IDs, actual models and reasoning, artifact and base, rounds,
