@@ -14,6 +14,7 @@ import { SupervisionControl } from "../../src/supervision-control.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { SupervisionTeamLive } from "../../src/supervision-live.js";
 import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError } from "../../src/supervisor-native.js";
+import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorTeamStore, type TeamBinding } from "../../src/supervisor-team-store.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
@@ -272,6 +273,7 @@ export interface PsSupervisor {
   readonly cycle: ProjectSupervisor["Service"]["cycle"];
   readonly scope: SupervisionScope;
   readonly gate: SupervisionGate["Service"];
+  readonly conversation: SupervisorConversation["Service"];
   readonly control: SupervisionControl["Service"];
   readonly team: SupervisorTeamStore["Service"];
   readonly requests: ConversationStores["requests"];
@@ -500,7 +502,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     const gate = yield* makeSupervisionGate(scope).pipe(Effect.provide(clients));
     const runOnce = Effect.asVoid(Effect.timeoutOption(service.cycle, "120 seconds"));
     return {
-      runOnce, cycle: service.cycle, scope, gate, control, team: current.team, requests: current.requests, workflows, stores: current,
+      runOnce, cycle: service.cycle, scope, gate, conversation: Context.get(clients, SupervisorConversation), control, team: current.team, requests: current.requests, workflows, stores: current,
       scopeEnabled: scope.scopeEnabled.bind(scope), workflowEditingEnabled: scope.workflowEditingEnabled.bind(scope),
       startSupervision: control.startSupervision, dashboardStart: control.dashboardStart, stopSupervision: control.stopSupervision,
       noProjectControl: service.noProjectControl, workflowLocator: service.workflowLocator, scopeSnapshot: service.scopeSnapshot,

@@ -40,3 +40,14 @@ it("a child listing, foreign namespace, failed read or out-of-scope target provi
     {...detail(), toolNonExecutionKind: "denied"}]) assert.equal(nativeActivityRead(projection, value, allowed, 100), null);
   assert.equal(nativeActivityRead(projection, detail(), new Set(["other-child"]), 100), null);
 });
+
+it("a read through a recognised MCP call tool counts on every recognised route, and an unrecognised wrapper or equal arguments alone never do", () => {
+  const routed = (toolName: string, input: unknown) => nativeActivityRead(projection, {...detail(), toolName, input}, allowed, 100);
+  const call = {name: "t3-code__t3_thread_read", arguments: detail().input};
+  for (const toolName of ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"])
+    assert.equal(routed(toolName, call)?.itemId, "actual-child-item", toolName);
+  assert.equal(routed("mcpx.mcpx_call_tool", JSON.stringify(call))?.itemId, "actual-child-item", "an input recorded as JSON text");
+  for (const [toolName, input] of [["gateway.call_tool", call], ["mcpx.mcpx_call_tool", {...call, name: "t3-code__t3_thread_send"}],
+    ["mcpx.mcpx_call_tool", {...call, extra: true}], ["other_server.read", detail().input]] as const)
+    assert.equal(routed(toolName, input), null, `${toolName}: not a recognised read route`);
+});

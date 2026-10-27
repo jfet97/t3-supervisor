@@ -52,7 +52,16 @@ export type SupervisionFolderPresence = {status: "present" | "missing" | "unavai
 /** Native positions from which workflow protocol records belong to a task source revision: the service prompt that gave the
  * Supervisor this revision (and its own native run once observed) and, after a source edit, the last main run and turn item seen with the edit. */
 export type ProtocolAnchor = {supervisorThreadId: string; sourceHash: string; promptMessageId: string; promptRun?: {id: string; ordinal: number}; editedAfter?: {runOrdinal: number; itemOrdinal: number | null} | null};
-export type TaskRecord = TaskInterpretationInfo & TaskInterpretationFields & {id: string; sourceHash: string; /** Earlier unresolved genuine requests in the same main that this task continues. */ contextMessageIds?: string[]; /** observedAt of the Supervisor protocol diagnostic last sent as a focused repair request. */ protocolRepairNoticeAt?: number; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null; protocolAnchor?: ProtocolAnchor; /** Version of the standing instructions the interpretation request carried; its completed run delivers them. */ roleVersion?: string};
+export type TaskRecord = TaskInterpretationInfo & TaskInterpretationFields & {id: string; sourceHash: string; /** Earlier unresolved genuine requests in the same main that this task continues. */ contextMessageIds?: string[]; /** observedAt of the Supervisor protocol diagnostic last sent as a focused repair request. */ protocolRepairNoticeAt?: number; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null; protocolAnchor?: ProtocolAnchor; /** The conversation handles the current interpretation reads on demand, prepared with its request. */ interpretationSources?: InterpretationSources};
+/**
+ * Who asked for the current interpretation, and the handles of the genuine requester messages and operative replies since the activation
+ * floor that its root reads natively: identities and requester kinds only, never bodies.
+ */
+export type InterpretationSources = {
+  readonly requestedBy: {readonly kind: "human"} | {readonly kind: "launching_agent"; readonly threadId: string};
+  readonly requesterMessages: ReadonlyArray<{readonly messageId: string; readonly requester: "human" | "launching_agent"}>;
+  readonly operativeMessageIds: readonly string[];
+};
 
 // the permanent root and helper ownership of the process: each supervision run's store layer adds the stored ids when it is
 // acquired, before that run filters the catalog, and adds a newly owned id after the commit that recorded it (cc-ownership)

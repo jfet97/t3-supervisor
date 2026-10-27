@@ -26,7 +26,12 @@ it.live("CT-ISUB-01: a valid submission in the exact request run is submitted, f
   const request = f.interpretationDispatches();
   assert.equal(request.length, 1);
   const text = String(request[0]!.text);
-  assert.ok(text.includes(task.attempt!.attemptId) && text.includes(JSON.stringify(task.attempt!.key.source)), "the request quotes its attempt and source pin");
+  // the request names the task and its source message; its attempt and source pin are read through the authenticated context view
+  assert.ok(text.includes(`"taskId":"${task.id}"`) && text.includes(`"sourceMessageId":"${task.sourceMessageId}"`), "the request names its task and source");
+  assert.ok(!text.includes(task.attempt!.attemptId) && !text.includes(JSON.stringify(task.attempt!.key.source)), "pins are read, never pushed");
+  const context = yield* f.read({view: "context"});
+  assert.deepEqual((context.submission as {arguments: Record<string, unknown>}).arguments, {supervisorThreadId: f.binding.threadId,
+    bindingGeneration: f.binding.generation, taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source}, "the request's attempt and source pin");
   const reply = yield* f.submitFields(task, planFields(task));
   assert.deepEqual(reply, {httpStatus: 200, isError: false, value: {status: "submitted", attemptId: task.attempt!.attemptId, retry: "none"}});
   assert.equal((yield* f.task()).status, "waiting", "the submission records the result; it never finalizes before its run ends");

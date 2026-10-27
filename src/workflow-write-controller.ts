@@ -41,12 +41,15 @@ import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.j
 import {
   canonicalJson,
   isRecord,
+  providerTurnEvidenceCandidates,
+  verifyProviderTurnToolEvidence,
   verifyWorkflowToolEvidence,
   workflowEvidenceCandidates,
   workflowRequestHash,
   workflowTurnItemDetailMaxBytes,
   workflowToolInputMaxBytes,
   workflowToolInputSize,
+  type WorkflowEvidenceCandidate,
   type WorkflowEvidenceTool,
   type WorkflowEvidenceMatch,
 } from "./workflow-write-evidence.js";
@@ -148,8 +151,10 @@ export type WorkflowWritePayload = WorkflowLocator & (
 );
 
 export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check";
-export type SupervisorContextViewInput = {view: SupervisorContextViewName; definitionIds?: string[]; includeSources?: boolean; record?: unknown};
+export type SupervisorContextViewInput = {view: SupervisorContextViewName; section?: string; definitionIds?: string[]; includeSources?: boolean; record?: unknown};
 export type SupervisorContextViewResult = {status: string; view: SupervisorContextViewName; [key: string]: unknown};
+// the views an interpretation request needs: its current pins, its rules, the root's instructions and the definitions it plans from
+const interpretationViews: ReadonlySet<string> = new Set<SupervisorContextViewName>(["context", "interpretation", "instructions", "definitions"]);
 /** The compact current status of each workflow in the verified scope, for reconciling statuses without full documents. */
 export type WorkflowStatusViewResult = {status: "ok"; view: "status"; mainTaskAgreementStatus: "agreed" | "stale" | null; statusNote: string;
   workflowOffset: number; workflowHasMore: boolean; workflows: Array<{workflowId: string; threadId: string; parentWorkflowId: string | null;
@@ -166,6 +171,7 @@ export type SupervisionStopResult =
   | {status: "denied" | "invalid" | "unavailable" | "pending"; reason: string; retryable?: boolean};
 export type WorkflowReadPayload = WorkflowLocator & {
   view?: SupervisorContextViewName | "status";
+  section?: string;
   definitionIds?: string[];
   includeSources?: boolean;
   record?: unknown;
@@ -705,12 +711,12 @@ const parseWritePayload = (value: unknown): ParsedInput => {
 
 const parseReadPayload = (value: unknown): ParsedReadInput => {
   if (!isRecord(value) || !hasExactKeys(value, ["supervisorThreadId", "bindingGeneration"],
-    ["view", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
+    ["view", "section", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
   // the compact status view pages the same workflows as a document read
   if (value.view === "status") {
     const documents = parseReadPayload(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "view")));
-    return documents.ok && ["lineageOffset", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined)
+    return documents.ok && ["lineageOffset", "section", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined)
       ? {ok: true, value: {...documents.value, view: "status"}} : {ok: false, reason: "invalid_read_arguments"};
   }
   if (value.view !== undefined) {
@@ -718,13 +724,15 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
       value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(id => isId(id))) ||
       value.includeSources !== undefined && typeof value.includeSources !== "boolean" || value.view !== "check" && value.record !== undefined ||
       value.view === "check" && value.record === undefined || value.workflowId !== undefined || value.workflowOffset !== undefined ||
+      value.section !== undefined && (!["instructions", "interpretation"].includes(String(value.view)) || !isId(value.section)) ||
       value.lineageOffset !== undefined || value.limit !== undefined) return {ok: false, reason: "invalid_read_arguments"};
     return {ok: true, value: {...locator, view: value.view as SupervisorContextViewName,
+      ...(typeof value.section === "string" ? {section: value.section} : {}),
       ...(Array.isArray(value.definitionIds) ? {definitionIds: value.definitionIds as string[]} : {}),
       ...(typeof value.includeSources === "boolean" ? {includeSources: value.includeSources} : {}),
       ...(value.record !== undefined ? {record: value.record} : {})}};
   }
-  if (!locator || value.workflowId !== undefined && !isId(value.workflowId) ||
+  if (!locator || value.section !== undefined || value.workflowId !== undefined && !isId(value.workflowId) ||
     value.workflowOffset !== undefined && (!Number.isSafeInteger(value.workflowOffset) || (value.workflowOffset as number) < 0 || (value.workflowOffset as number) > 10_000) ||
     value.lineageOffset !== undefined && (!Number.isSafeInteger(value.lineageOffset) || (value.lineageOffset as number) < 0 || (value.lineageOffset as number) > 10_000) ||
     value.limit !== undefined && (!Number.isSafeInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > maxWorkflowReadDocs))
@@ -961,7 +969,7 @@ const interpretationPlanDefinitions = {
 };
 export const supervisionInterpretationSubmitToolDefinition = {
   name: interpretationSubmitToolName,
-  description: "Record the current task interpretation through your own executed call. Read current pins from workflow_read context and rules from interpretation. Use advertised tools or the available gateway. A recorded submission is neither delivery nor agreement.",
+  description: "Record the current task interpretation through your own executed call. Read current pins from workflow_read context and rules from interpretation. A recorded submission is neither delivery nor agreement.",
   inputSchema: {
     $defs: interpretationPlanDefinitions,
     type: "object",
@@ -1005,6 +1013,7 @@ export const workflowReadToolDefinition = {
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
       view: {type: "string", enum: ["status", "context", "definitions", "instructions", "interpretation", "check"],
         description: "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: the project.yaml index, or the exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
+      section: {type: "string", description: "With view instructions: one section id from its index. With view interpretation: \"plan\", read only when a plan is needed."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
       includeSources: {type: "boolean", description: "With view definitions: also return raw definition source files, for diagnosing invalid or incomplete definitions."},
       record: {type: "object", description: "With view check: the exact compact workflow-proposal record to validate."},
@@ -1096,6 +1105,12 @@ export interface WorkflowWriteControllerShape {
    * for its own run and answers a redacted typed result
    */
   readonly submitInterpretation: (input: unknown, cancel?: WorkflowCallCancel) => Effect.Effect<InterpretationSubmitResponse>;
+  /**
+   * The caller's own executed call of a Supervisor tool with exactly these arguments, in its own main run or, for a native child
+   * without one (a planning drafter), its own provider turn: provenance only, which grants nothing by itself; the caller decides scope
+   */
+  readonly verifyOwnCall: (callerThreadId: string, projectId: string, args: Readonly<Record<string, unknown>>, tool: WorkflowEvidenceTool,
+    cancel?: WorkflowCallCancel) => Effect.Effect<{status: "verified"} | {status: "pending" | "denied"; reason: string}, SupervisionStoreError>;
   // verified native caller proof for a team or guide effect, rechecked after the evidence read
   readonly authorizeNative: (input: WorkflowLocator & Record<string, unknown>, tool: WorkflowEvidenceTool, allowRegistering?: boolean,
     cancel?: WorkflowCallCancel) => Effect.Effect<WorkflowNativeAuthorization, SupervisionStoreError>;
@@ -1162,6 +1177,23 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     }
     return binding;
   });
+  // the bound root's reads for its own interpretation in flight, admitted by the permission its submission commits under (a pending
+  // Start included) rather than by workflow editing: only the root itself, only while its task's current attempt of this generation is
+  // dispatched, and never a write, a contact, a status or a document read
+  const resolveInterpretationReader = (locator: WorkflowLocator): Effect.Effect<BindingRecord | null, SupervisionStoreError> => Effect.gen(function* () {
+    if (!supervisors.scopeCompatible) return null;
+    const binding = yield* denyOnFailure(supervisors.bindingForSupervisor(locator.supervisorThreadId));
+    if (!binding || binding.threadId !== locator.supervisorThreadId || binding.generation !== locator.bindingGeneration || binding.state !== "ready" ||
+      !supervisors.ownedIds.has(binding.threadId) || !isId(binding.projectId) || !isId(binding.mainThreadId)) return null;
+    const task = yield* denyOnFailure(supervisors.task(binding.mainThreadId));
+    if (!task || task.supervisorThreadId !== binding.threadId || !task.attempt || task.attempt.key.bindingGeneration !== binding.generation ||
+      task.attempt.key.taskId !== task.id || !["dispatching", "waiting", "uncertain"].includes(task.status)) return null;
+    const permitted = yield* denyOnFailure(Effect.gen(function* () {
+      return (!(yield* scopes.supervisionStopped(binding.mainThreadId)) || (yield* scopes.validPendingStartFor(binding.mainThreadId))) &&
+        (yield* scopes.scopeEnabled(binding.projectId, binding.mainThreadId, "interpretation"));
+    }));
+    return permitted === true ? binding : null;
+  });
 
   // a block from a write path's last await through its commit, run as one admission section (plan 3.11): its binding rechecks read
   // the admission guard, its persisted times the wall clock (CC-CLOCK-WALL), and its commit is one guidance transaction
@@ -1175,7 +1207,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
    */
   const searchToolEvidence = <V>(callerThreadId: string, projectId: string, payload: Record<string, unknown>, tool: WorkflowEvidenceTool,
     cancel: WorkflowCallCancel, verify: (projection: Projection, itemId: string, detail: Record<string, unknown>) => CandidateCheck<V>,
-    skipDenied: boolean) => Effect.gen(function* (): Effect.fn.Return<CandidateCheck<V>> {
+    skipDenied: boolean, candidatesOf: (projection: Projection) => WorkflowEvidenceCandidate[] =
+      (projection) => workflowEvidenceCandidates(projection, callerThreadId, tool, payload)) => Effect.gen(function* (): Effect.fn.Return<CandidateCheck<V>> {
     const startedAt = yield* elapsedMillis;
     let lastReason = "native_evidence_not_visible";
     let unrecognizedToolName: string | undefined;
@@ -1196,7 +1229,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       if (projection.thread.id !== callerThreadId || projection.thread.projectId !== projectId ||
         projection.thread.archivedAt != null || projection.thread.deletedAt != null)
         return {status: "denied", reason: "supervisor_projection_not_current"};
-      const candidates = workflowEvidenceCandidates(projection, callerThreadId, tool, payload);
+      const candidates = candidatesOf(projection);
       let passPending = false;
       let passDenied = false;
       for (const candidate of candidates) {
@@ -1274,6 +1307,19 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       const check = verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload});
       return check.status === "verified" ? {status: "verified", value: check.evidence} : check;
     }, false), (result): EvidenceSearch => result.status === "verified" ? {status: "verified", evidence: result.value} : result);
+
+  // a native child's own plan read: through the AppRun that carries its call, or, for a child with no AppRun of its own, through the
+  // provider turn its projection publishes with strong native provenance; every write and the interpretation submission keep the AppRun proof
+  // a native child's own executed call of a Supervisor tool with exactly these arguments, in its own main run or provider turn
+  const findChildReadEvidence = (callerThreadId: string, projectId: string, payload: Record<string, unknown>, cancel: WorkflowCallCancel,
+    tool: WorkflowEvidenceTool = "plan") =>
+    searchToolEvidence<true>(callerThreadId, projectId, payload, tool, cancel, (projection, itemId, detail): CandidateCheck<true> => {
+      const check = typeof detail.runId === "string"
+        ? verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload})
+        : verifyProviderTurnToolEvidence({projection, callerThreadId, itemId, detail, tool, arguments: payload});
+      return check.status === "verified" ? {status: "verified", value: true} : check;
+    }, true, (projection) => [...workflowEvidenceCandidates(projection, callerThreadId, tool, payload),
+      ...providerTurnEvidenceCandidates(projection, callerThreadId, tool, payload)]);
 
   const findEvidence = (payload: WorkflowLocator & Record<string, unknown>, owner: WorkflowOwner, cancel: WorkflowCallCancel,
     tool: WorkflowEvidenceTool = "write") => findToolEvidence(payload.supervisorThreadId, owner.projectId, payload, tool, cancel);
@@ -1797,10 +1843,12 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const caller = read.value;
     if (caller.thread.id !== args.callerThreadId || typeof caller.thread.projectId !== "string" || caller.thread.archivedAt || caller.thread.deletedAt)
       return {status: "denied", reason: "caller_not_current"};
-    const verified = yield* findToolEvidence(args.callerThreadId, caller.thread.projectId, args, "plan", cancel);
+    const child = caller.thread.lineage.relationshipToParent === "subagent";
+    const verified = child ? yield* findChildReadEvidence(args.callerThreadId, caller.thread.projectId, args, cancel)
+      : yield* findToolEvidence(args.callerThreadId, caller.thread.projectId, args, "plan", cancel);
     if (verified.status !== "verified") return {status: verified.status, reason: verified.reason, retryable: verified.status === "pending"};
     // a native child reads its own scoped workflow; the main reads its current proposal
-    if (caller.thread.lineage.relationshipToParent === "subagent") return yield* readOwnScopedWorkflow(args, caller.thread.projectId, cancel);
+    if (child) return yield* readOwnScopedWorkflow(args, caller.thread.projectId, cancel);
     return yield* conversation.operativeProposal({...args, projectId: caller.thread.projectId, caller});
   });
 
@@ -2040,14 +2088,15 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
           pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
             targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))}))};
     }
-    const binding = yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" ? "status" : "read");
+    const binding = (yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" ? "status" : "read")) ??
+      (interpretationViews.has(parsed.value.view) ? yield* resolveInterpretationReader(parsed.value) : null);
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (parsed.value.view === "instructions" && parsed.value.supervisorThreadId !== binding.threadId)
       return {status: "ok", view: "instructions", version: helperInstructionsVersion, instructions: helperInstructions};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};
-    const {view, definitionIds, includeSources, record: viewRecord} = parsed.value;
+    const {view, section, definitionIds, includeSources, record: viewRecord} = parsed.value;
     // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal
-    const result = yield* conversation.readContextView(binding, {view, ...(definitionIds ? {definitionIds} : {}),
+    const result = yield* conversation.readContextView(binding, {view, ...(section !== undefined ? {section} : {}), ...(definitionIds ? {definitionIds} : {}),
       ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {})}, cancel);
     return Buffer.byteLength(JSON.stringify(result), "utf8") > maxWorkflowReadBytes ? {status: "too_large", reason: "workflow_read_exceeds_response_limit"} : result;
   });
@@ -2125,6 +2174,10 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     readOwnProposal: (input, cancel) => withToolDeadline(cancel, (bounded) => readOwnProposal(input, bounded)),
     submitInterpretation: (input, cancel) => withToolDeadline(cancel, (bounded) => submitInterpretation(input, bounded)),
     authorizeNative,
+    verifyOwnCall: (callerThreadId, projectId, args, tool, cancel) => Effect.gen(function* () {
+      const result = yield* findChildReadEvidence(callerThreadId, projectId, {...args}, cancel ?? (yield* Deferred.make<void>()), tool);
+      return result.status === "verified" ? {status: "verified" as const} : {status: result.status, reason: result.reason};
+    }),
     resolveBinding,
   });
 });

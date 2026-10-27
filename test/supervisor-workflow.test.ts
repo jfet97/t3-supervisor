@@ -1082,7 +1082,6 @@ it.effect("interpretation notifications contain only lookup handles even with la
   const inline = prepareWorkflowRequest(threadId, sourceMessageId, "Recover the failed worktree with Nix, then continue.", snapshot);
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Recover the failed worktree with Nix, then continue.", snapshot, {
     reader: {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3},
-    earlierMessages: [{messageId: "m0", text: "https://issues.example/browse/PROJ-1"}],
   });
   assert.ok(prepared.context?.promptComplete, "the complete catalog stays available through the reader");
   assert.ok(prepared.requestText.length < 12_000, `manifest interpretation stays small: ${prepared.requestText.length}`);

@@ -11,6 +11,7 @@ import type { Projection } from "../src/types.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete, type WorkflowFixture } from "./support/ctl-workflow.js";
 import { proposalContextFromDefinitions } from "../src/supervisor-workflow.js";
+import { verifyWorkflowToolEvidence, workflowEvidenceCandidates } from "../src/workflow-write-evidence.js";
 import { writeController } from "./support/g1a-conversation.js";
 import { installSubmission, submissionDetail } from "./support/interpretation-submit.js";
 
@@ -252,4 +253,84 @@ it.effect("a child's read follows its main's requester messages, read fresh, and
   // a newer requester message the task has not considered withdraws it too
   appendSourceMessage(operative, "newer-request", 2, "Stop implementing; let's discuss alternatives first.");
   assert.deepEqual(yield* read(), denied, "a newer request");
+}));
+
+// the child's own read call as a provider-native child records it: no AppRun, its item and node inside one provider turn that its
+// projection publishes with strong native provenance
+const providerNativeCall = (child: Projection, args: Record<string, unknown>) => {
+  const itemId = installSubmission(child, {messageId: child.runs.at(-1)!.userMessageId} as never, args, {tool: "plan", runId: child.runs.at(-1)!.id});
+  const providerThreadId = "child-provider-thread", turnId = "child-provider-turn", rootId = "child-turn-root";
+  child.runs = [];
+  const item = child.turnItems!.find(entry => entry.id === itemId)! as Record<string, unknown>;
+  Object.assign(item, {runId: null, providerThreadId, providerTurnId: turnId});
+  const root: Record<string, unknown> = {id: rootId, threadId: child.thread.id, runId: null, parentNodeId: null, rootNodeId: rootId, kind: "root_turn",
+    providerThreadId, providerTurnId: turnId, status: "running"};
+  const node: Record<string, unknown> = {id: item.nodeId, threadId: child.thread.id, runId: null, parentNodeId: rootId, rootNodeId: rootId, kind: "dynamic_tool",
+    providerThreadId, providerTurnId: turnId, status: "completed"};
+  child.nodes = [root, node];
+  const turn: Record<string, unknown> = {id: turnId, providerThreadId, nodeId: rootId, runAttemptId: null,
+    nativeTurnRef: {driver: "codex", nativeId: "native-child-turn", strength: "strong"}, ordinal: 1, status: "running", startedAt: "2026-10-27T12:00:00.000Z", completedAt: null};
+  child.providerTurns = [turn];
+  return {item, root, node, turn};
+};
+
+it.effect("a provider-native child with no AppRun reads its own bound plan through its strongly published turn, under the same fresh checks", () => Effect.gen(function* () {
+  const {fixture, task, operative, child, native, controller, bind, args} = yield* childScoped;
+  const bound = yield* bind;
+  providerNativeCall(child, args);
+  const read = () => controller.readOwnProposal(args);
+  const ok = yield* read();
+  assert.equal(ok.status, "ok", JSON.stringify(ok));
+  assert.ok(ok.status === "ok" && ok.taskId === task.id && ok.proposal.startsWith(`Your scoped workflow ${bound.workflowId}, revision ${bound.revision},`), JSON.stringify(ok));
+  // the same fresh main authority, lineage and Stop fences hold on this path
+  const request = operative.messages[0]!;
+  const original = request.text;
+  request.text = "Stop implementing the retry fix; let's discuss alternatives first.";
+  assert.deepEqual(yield* read(), denied, "an edited request");
+  request.text = original;
+  assert.equal((yield* read()).status, "ok");
+  native.lineage = [{...operative.thread}, {...child.thread, lineage: {parentThreadId: sourceThreadId, relationshipToParent: "fork"}}];
+  assert.deepEqual(yield* read(), denied, "an independent fork");
+  native.lineage = [{...operative.thread}, {...child.thread}];
+  const policy = yield* fixture.stores.policy.get();
+  yield* fixture.stores.policy.save({...policy, excludedThreadIds: [...policy.excludedThreadIds, sourceThreadId]});
+  assert.deepEqual(yield* read(), denied, "a stopped main");
+}));
+
+it.effect("a run-less child call proves nothing outside a strongly published turn of its own and never stands for an AppRun proof", () => Effect.gen(function* () {
+  type Call = ReturnType<typeof providerNativeCall>;
+  const cases: ReadonlyArray<readonly [string, (call: Call, child: Projection) => void, {status: string; reason: string}]> = [
+    ["a weakly identified turn", ({turn}) => {turn.nativeTurnRef = {driver: "codex", nativeId: "native-child-turn", strength: "weak"};},
+      {status: "denied", reason: "native_provider_turn_not_strong"}],
+    ["an unpublished turn", (_call, child) => {child.providerTurns = [];}, {status: "pending", reason: "native_provider_turn_not_visible"}],
+    ["another provider thread", ({item}) => {item.providerThreadId = "other-provider-thread";}, {status: "denied", reason: "native_provider_turn_mismatch"}],
+    ["a node under a nested subagent", ({root, node}, child) => {
+      (child.nodes as Array<Record<string, unknown>>).push({...node, id: "nested-subagent", kind: "subagent", parentNodeId: root.id});
+      node.parentNodeId = "nested-subagent";
+    }, {status: "denied", reason: "native_item_outside_provider_turn"}],
+    ["a weakly identified item", ({item}) => {item.nativeItemRef = {driver: "codex", nativeId: "native-item", strength: "weak"};},
+      {status: "denied", reason: "native_item_not_turn_strong"}],
+    ["a call that never executed", ({item}) => {item.toolNonExecutionKind = "approval_declined";}, {status: "denied", reason: "native_item_not_executed"}],
+  ];
+  const {child, controller, bind, args} = yield* childScoped;
+  yield* bind;
+  const {item} = providerNativeCall(child, args);
+  const verified = structuredClone({item, nodes: child.nodes, providerTurns: child.providerTurns});
+  for (const [label, change, expected] of cases) {
+    // the verified call again, its item kept as the object the detail read answers
+    for (const key of Object.keys(item)) delete item[key];
+    Object.assign(item, structuredClone(verified.item));
+    child.nodes = structuredClone(verified.nodes);
+    child.providerTurns = structuredClone(verified.providerTurns);
+    const [root, node] = child.nodes as Array<Record<string, unknown>>;
+    const [turn] = child.providerTurns as Array<Record<string, unknown>>;
+    assert.equal((yield* controller.readOwnProposal(args)).status, "ok", `${label}: verified before the change`);
+    change({item, root: root!, node: node!, turn: turn!}, child);
+    const result = yield* controller.readOwnProposal(args);
+    assert.deepEqual({status: result.status, reason: result.status === "ok" ? null : result.reason}, expected, label);
+  }
+  // writes and the interpretation submission search and verify AppRun calls only: the same run-less call is neither listed nor verified
+  assert.deepEqual(workflowEvidenceCandidates(child, child.thread.id, "plan", args), []);
+  assert.equal(verifyWorkflowToolEvidence({projection: child, supervisorThreadId: child.thread.id, itemId: String(item.id), detail: item, tool: "plan",
+    arguments: args}).status, "pending");
 }));

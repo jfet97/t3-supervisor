@@ -1,4 +1,3 @@
-import { localThreadToolRules } from "./supervisor-workflow.js";
 import { emptyConversation } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
@@ -12,7 +11,7 @@ import { GuidanceDb } from "./db.js";
 import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs, workspacePreparationPending } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
-import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
+import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type InterpretationSources, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import { modelSelection, NativeOperateRpc, NativeRpc, NativeShell, sameModel, supervisorModels, validModelSelection, SupervisorRpcError } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
@@ -1170,7 +1169,6 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         return {next: "done"};
       }
       if (job.supervisorRunId !== run.id) {job = {...job, supervisorRunId: run.id};yield* store.saveTask(job);}
-      if (run.status === "completed" && job.roleVersion) yield* conversation.roleDelivered(job.supervisorThreadId, job.roleVersion);
       if (run.status !== "completed") {
         if (["failed","interrupted","cancelled","rolled_back"].includes(run.status)) yield* complete(job, "unavailable", null, "The interpretation run did not complete successfully.");
         else if (run.status !== "queued" && run.status !== "preparing" && timestampMs(run.startedAt) !== null && now() - timestampMs(run.startedAt)! > 300_000) yield* complete(job, "unavailable", null, "The interpretation timed out or requires input. The service does not answer or interrupt Supervisor runs.");
@@ -1483,19 +1481,30 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         }
         const preparing = current;
         const message = source.messages.find(item => item.id === preparing.sourceMessageId)!;
-        const reader = yield* scope.workflowEditingEnabled(preparing.projectId, preparing.threadId, "status");
-        // the root's first message carries its concise standing role once, so no separate initialization turn is needed
-        const role = reader ? yield* conversation.interpretationRole(owner) : null;
+        const sourceRun = source.runs.find(item => item.id === preparing.sourceRunId);
+        const requesters = yield* requesterPolicy(preparing.projectId);
+        // an agent request is introduced to the Supervisor as the launching agent's, never as the human's
+        const requester = sourceRun ? taskRequester(source, sourceRun, message, requesters) : null;
+        // the request carries the root notice: the binding fences and the instructions handle, never the rules themselves
+        const notice = conversation.rootNotice(owner);
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
+        // the genuine requester messages and operative replies since the activation floor, as handles the root reads natively
+        const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
+        const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
+        const ordinalOf = (runId: string | null | undefined) => source.runs.find(run => run.id === runId)?.ordinal;
+        const interpretationSources: InterpretationSources = {
+          requestedBy: requester?.kind === "agent" ? {kind: "launching_agent", threadId: requester.threadId} : {kind: "human"},
+          requesterMessages: requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal)
+            .slice(-12).map(item => ({messageId: item.messageId, requester: item.requester})),
+          operativeMessageIds: source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
+            (ordinalOf(item.runId) ?? Infinity) <= preparing.sourceOrdinal && (ordinalOf(item.runId) ?? -1) > (contextFloor ?? Infinity)).slice(-6).map(item => item.id)};
         // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
         const build = (attemptId: string) => {
           const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {
-            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
-          const requestText = role ? `${role.text}\n${request.requestText.startsWith(`${localThreadToolRules}\n`)
-            ? request.requestText.slice(localThreadToolRules.length + 1) : request.requestText}` : request.requestText;
+          const requestText = notice ? `${notice}\n${request.requestText}` : request.requestText;
           return {request, requestText, key: interpretationAttemptKey({bindingGeneration: owner.generation, task: preparing, requestMessageId: preparing.messageId, requestText})};
         };
         // an identical replay of the request keeps its attempt; a renewal, a source edit or any other request text mints a new one
@@ -1504,7 +1513,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const built = retained && replayed ? replayed : build(interpretationAttemptId(mintedUuid));
         const attempt: InterpretationAttempt = retained ?? {attemptId: interpretationAttemptId(mintedUuid), key: built.key};
         const next: TaskRecord = {...preparing, requestText: built.requestText, definitionContext: built.request.context,
-          definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, ...(role ? {roleVersion: role.roleVersion} : {})};
+          definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, interpretationSources};
         yield* store.saveTask(next);
         return next;
       }));

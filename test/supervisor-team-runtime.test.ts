@@ -10,6 +10,7 @@ import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../
 import type { HelperTransportShape } from "../src/supervisor-helper-transport.js";
 import type { SupervisorTeamStoreShape, TeamBinding, TeamMember, TeamNotification } from "../src/supervisor-team-store.js";
 import { teamNotificationText } from "../src/supervisor-team-runtime.js";
+import { helperInstructions } from "../src/supervisor-helper-instructions.js";
 import { supervisionGuideToolDefinition, supervisionTeamToolDefinition } from "../src/supervisor-team-controller.js";
 import { readTeamViewData, supervisorTeamView as presentTeamView } from "../src/supervisor-team-view.js";
 import { workflowReadToolDefinition, workflowWriteToolDefinition } from "../src/workflow-write-controller.js";
@@ -598,10 +599,9 @@ it.effect("registration readiness uses a finite native check-in and exact member
   assert.doesNotMatch(request.text, /link_child is needed|New steps start planned/u);
   assert.match(request.text, /Read workflow_read view instructions using/u);
   assert.ok(request.text.length < 2_000, `readiness ${request.text.length}`);
-  // the helper reaches its tools as native MCP/MCPX tool calls; nothing suggests code (native proof 2026-10-23)
-  assert.match(request.text, /Native discovery: mcpx_search_tools, mcpx_get_tool_schema, mcpx_call_tool/u);
-  assert.doesNotMatch(request.text, /\b(wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b/iu);
-  assert.ok(request.text.includes("t3-supervisor-workflows__supervision_team"));
+  // the helper calls the tools available to it by name: no gateway, discovery recipe or code is suggested
+  assert.doesNotMatch(request.text, /\b(mcpx\w*|wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b/iu);
+  assert.ok(request.text.includes("t3-supervisor-workflows supervision_team with {\"action\":\"ready\""));
   assert.ok(request.text.includes(`"bindingGeneration":${f.binding.generation}`));
   assert.ok(request.text.includes(`"memberEpoch":${member.epoch}`));
   const operation = JSON.parse(request.text.match(/"operationId":("[^"]+")/u)?.[1] ?? "null") as string;
@@ -839,9 +839,11 @@ it.effect("a stale completed helper check-in settles its request without acknowl
     "an ID beyond the native reference bound is never offered as a reference");
   assert.deepEqual(archivedEnvelope.activityRefs, [], "run-only synthetic activity has no ready reference");
   assert.ok(activityRefs.every(reference => !Object.hasOwn(reference, "sourceRunId")));
-  assert.equal(request.text.includes("Omit sourceRunId"), true);
-  assert.equal(request.text.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
-  assert.match(request.text, /Read workflow_read view instructions once for version/u);
+  // the check-in rules are read once from the helper's instructions, not repeated in every check-in
+  assert.equal(helperInstructions.includes("omit sourceRunId"), true);
+  assert.equal(helperInstructions.includes("Never decode, re-encode, normalize or reconstruct opaque IDs"), true);
+  assert.equal(request.text.includes("Never decode, re-encode"), false);
+  assert.match(request.text, /Your instructions are workflow_read view instructions, version [0-9a-f]+/u);
   assert.doesNotMatch(request.text, /record completion in a separate apply/u, "role and check-in text state one planned-first rule");
   assert.doesNotMatch(request.text, /An apply call has action at the top level/u, "mutation examples live in the reference and tool schema");
   assert.deepEqual({targetThreadId: targetEnvelope.targetThreadId, assignmentRootThreadId: targetEnvelope.assignmentRootThreadId,
@@ -874,14 +876,12 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   assertAdvertisedInput(workflowWriteToolDefinition, applyArguments, false);
   assertAdvertisedInput(supervisionGuideToolDefinition, guideArguments, false);
   assertAdvertisedInput(supervisionTeamToolDefinition, reportArguments, false);
-  assert.match(request.text, /fetch plans\/status and local T3 activity as needed/u);
-  assert.match(request.text, /Each target carries its own complete toolInputs/u);
-  assert.match(request.text, /Each target carries its own complete toolInputs/u);
-  assert.match(request.text, /Read workflow_read view instructions once for version/u);
-  assert.match(request.text, /a retry after uncertainty reuses the complete identical arguments/u);
+  assert.match(helperInstructions, /Each target's toolInputs is its complete argument object/u);
+  assert.match(request.text, /Your instructions are workflow_read view instructions, version [0-9a-f]+/u);
+  assert.match(helperInstructions, /retry an uncertain outcome with the complete identical arguments/u);
   assert.doesNotMatch(request.text, /locatorBases|locator base/u);
   // a monitor review carries the concise helper core, not a second copy of the full role
-  assert.match(request.text, /Read workflow_read view instructions once for version/u);
+  assert.match(request.text, /Your instructions are workflow_read view instructions, version [0-9a-f]+/u);
   assert.doesNotMatch(request.text, /Use link_child only when the assigned target has no workflow document/u);
   const archivedToolInputs = archivedEnvelope.toolInputs as Record<string, {input: Record<string, unknown>}>;
   assert.deepEqual(Object.keys(archivedToolInputs), ["workflow_read"]);
@@ -1080,7 +1080,8 @@ it.effect("mentions T3 neutralizes count against the rendered check-in bound", (
   assert.deepEqual(envelope.notifications, [{id: note.id, kind: "note", assignmentRootThreadId: null, assignmentEpoch: null, deliveryAttempt: 0,
     remainingAssignmentRoots: [], message}], "the note is delivered unchanged");
   const ids = checkinTargetIds(request.text);
-  assert.ok(ids.length >= 1 && ids.length < 5, `the neutralized mentions leave room for fewer targets (${ids.length})`);
+  // a plain note of the same logical length leaves room for seven targets
+  assert.ok(ids.length >= 1 && ids.length < 7, `the neutralized mentions leave room for fewer targets (${ids.length})`);
 }));
 
 it.effect("a check-in whose exact webhook body would exceed T3's 64 KiB delivery log is not built", () => Effect.gen(function* () {
@@ -1448,7 +1449,7 @@ const recoveryFixture = Effect.gen(function* () {
     const runId = `native-run:${notice.id}:${notice.deliveryAttempt}`;
     const delivery = transport.sent.get(`supervisor-team-notice:${notice.id}:attempt:${notice.deliveryAttempt}`)!;
     assert.ok(delivery, "the notice must actually have been sent through the existing transport");
-    assert.match(delivery.text, /Read workflow_read view instructions once for version/u);
+    assert.match(delivery.text, /Your instructions are workflow_read view instructions, version [0-9a-f]+/u);
     assert.doesNotMatch(delivery.text, /Use link_child only when the assigned target has no workflow document/u, "a notification never repeats the full helper role");
     assert.ok(delivery.text.length < 5_000, `notification ${delivery.text.length}`);
     if (!projection.messages.some(value => value.id === messageId)) projection.messages.push({id: messageId, threadId: member.threadId, runId,
