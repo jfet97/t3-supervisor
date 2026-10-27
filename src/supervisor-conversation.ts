@@ -392,6 +392,7 @@ const formalPlanReady = (workflow: WorkflowProposalInfo): boolean => {
       case "step": return node.resolution === "resolved";
       case "workflow": return node.resolution === "resolved" && node.fixed !== null && groupResolved(node.plan);
       case "branch": return groupResolved(node.then) && (node.else === null || groupResolved(node.else));
+      case "back_to": return node.targetNodeId !== null;
     }
   }));
   return workflow.status === "proposed" && workflow.definitionsStatus === "ready" && workflow.definitionsComplete && workflow.revision !== null &&

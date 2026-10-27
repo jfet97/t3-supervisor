@@ -5,7 +5,8 @@ import {Effect} from "effect";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {fingerprint} from "../src/guidance-store.js";
-import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
+import {defaultSupervisorModel, type TaskRecord} from "../src/project-supervisor-store.js";
+import {preparedAcceptanceRecord} from "../src/supervisor-conversation.js";
 import {parseDefinitionWorkflow} from "../src/project-definitions.js";
 import type {DefinitionNode, ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
@@ -56,6 +57,20 @@ const canonical = (value: unknown, seed = "seed-a", base: WorkflowPlanGroupInfo 
 };
 const localNode = (plan: WorkflowPlanGroupInfo | null, id: string) => planEntities(plan).find(node => node.kind === "step" && (node.localId ?? node.definitionId) === id)!;
 const nodeIdsOf = (plan: WorkflowPlanGroupInfo | null): string[] => planNodes(plan).flatMap(node => isPlanGroup(node) ? [] : [node.nodeId]);
+
+it("a resolved back_to can publish a formal acceptance record instead of remaining provisional", () => {
+  const result = canonicalizeProposalDraft(draft(local("work"), local("review"), branch("Material findings remain.", [backTo("work")]), local("deliver")), context, "published-return");
+  assert.ok(result.ok);
+  const task: TaskRecord = {id: "task-a", threadId: "main-a", projectId: "project-a", sourceRunId: "run-a", sourceMessageId: "message-a", sourceOrdinal: 1,
+    sourceHash: fingerprint("Complete the requested work."), requestText: "Complete the requested work.", status: "inferred", objective: "Complete the requested work.",
+    reason: "Requested implementation and review.", updatedAt: 0, supervisorThreadId: "supervisor-a", messageId: "service-request", dispatchedAt: null, replayCount: 0,
+    supervisorRunId: null, definitionContext: context, workflowProposalId: "proposal-with-return",
+    workflow: {status: "proposed", message: "Implement, review and correct material findings.", workspaceRoot: context.workspaceRoot, revision: context.revision,
+      globalRevision: context.globalRevision ?? null, ...result.workflow}};
+  const acceptance = preparedAcceptanceRecord(task);
+  assert.ok(acceptance, "the service must expose acceptance for the same plan its check accepts");
+  assert.equal(acceptance.proposalId, "proposal-with-return");
+});
 // every occurrence ID renamed, as a plan stored before template members derived their IDs would carry arbitrary ones
 const renameIds = (plan: WorkflowPlanGroupInfo, rename: (id: string) => string): WorkflowPlanGroupInfo => {
   const group = (value: WorkflowPlanGroupInfo): WorkflowPlanGroupInfo => ({...value, nodes: value.nodes.map(node)});
