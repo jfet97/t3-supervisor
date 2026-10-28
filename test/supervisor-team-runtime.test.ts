@@ -495,7 +495,7 @@ it.effect("runtime completes a transfer only after both helpers finish their exa
       assertAdvertisedInput(supervisionTeamToolDefinition, read);
       assert.equal(delivery.text.includes(notice!.message), false, "the notice's record is read on demand, never pushed");
       assert.doesNotMatch(delivery.text, /UNTRUSTED|toolInputs|locatorBases|assignmentRootThreadId|"view"/u, "handover notifications carry no envelope or write locators");
-      assert.doesNotMatch(delivery.text, /gateway|mcpx|t3-supervisor-workflows/iu);
+      assert.doesNotMatch(delivery.text, /mcpx|t3-supervisor-workflows/iu);
     }
     for (const [logicalId, delivery] of transport.sent) {
       if (!logicalId.startsWith("supervisor-team-notice:") || completed.has(logicalId)) continue;
@@ -595,16 +595,17 @@ it.effect("registration readiness uses a finite native check-in and exact member
   assert.equal(request.completionMarker, `Supervisor team readiness ${request.id} completed`);
   assert.equal(request.text, `${helperCore}\nReadiness: read them with workflow_read ${JSON.stringify(read)}, then call supervision_team ${JSON.stringify(ready)}.\n` +
     `End with: ${request.completionMarker}`);
-  assert.match(helperCore, /^Supervisor helper rules: workflow_read view instructions, version [0-9a-f]{16}; /u);
+  assert.ok(helperCore.indexOf(toolRouteReminder) < helperCore.indexOf("workflow_read"), "helpers can discover the reader before reading their rules");
+  assert.match(helperCore, /workflow_read view instructions, version [0-9a-f]{16}; /u);
   assertAdvertisedInput(workflowReadToolDefinition, read);
   assertAdvertisedInput(supervisionTeamToolDefinition, ready);
   assert.ok(ready.operationId.length <= 128);
   // the rules, including that readiness grants no assignment, are read once from the instructions
   assert.doesNotMatch(request.text, /link_child is needed|New steps start planned|grants no/u);
   assert.match(helperInstructions, /a readiness turn grants no operational assignment/u);
-  assert.ok(request.text.length < 600, `readiness ${request.text.length}`);
-  // the helper calls the tools available to it by name: no gateway, alias, discovery recipe or code is suggested
-  assert.doesNotMatch(request.text, /\b(mcpx\w*|wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b|t3-supervisor-workflows/iu);
+  assert.ok(request.text.length < 750, `readiness ${request.text.length}`);
+  // helpers receive portable discovery before the reader, without a vendor, alias, recipe or code
+  assert.doesNotMatch(request.text, /\b(mcpx\w*|wrappers?|code-mode|functions\.exec|harness(es)?)\b|t3-supervisor-workflows/iu);
   // the rules name operations by tool name, with the one neutral routing reminder and no gateway recipe
   assert.equal(helperInstructions.split(toolRouteReminder).length - 1, 1);
   assert.equal(helperInstructions.match(/gateway/giu)?.length, 1);
@@ -865,7 +866,7 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   assert.match(helperInstructions, /workflow_read takes the pins alone, without targetThreadId/u);
   assert.match(helperInstructions, /link_child adding operationId, childThreadId \(the target's threadId\) and note/u, "link_child names its child, never targetThreadId");
   assert.match(helperInstructions, /Retry an uncertain outcome only with the complete identical arguments/u);
-  assert.doesNotMatch(request.text, /toolInputs|locatorBases|locator base|UNTRUSTED|Use link_child only when|gateway|mcpx|t3-supervisor-workflows/iu);
+  assert.doesNotMatch(request.text, /toolInputs|locatorBases|locator base|UNTRUSTED|Use link_child only when|mcpx|t3-supervisor-workflows/iu);
   // an archived target is named read-only by its exact eligibility reason
   assert.deepEqual({writable: archived.writable, reason: archived.reason}, {writable: false, reason: "target_archived_or_deleted"});
   assert.match(helperInstructions, /A target with writable false \(target_archived_or_deleted or target_thread_unavailable\) is read-only/u);

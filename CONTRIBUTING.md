@@ -48,13 +48,14 @@ pnpm build
 `pnpm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
 
 Ordinary PR CI runs lint, type checking and build once, the runner harness once,
-and the complete main suite across four native Vitest shards on separate runners.
+the production startup integration once, and the complete main suite across four
+native Vitest shards on separate runners.
 Each shard uses one test worker so database worker startup does not compete with
 another suite in the same runner. Isolation, the leak gate, per-test bounds and
 the 20-minute watchdog stay the same. In full mode, the `check` status requires
 every job to pass, including every shard. A generated version PR can skip only
 the suites after directly proving full baseline validation; its new-version
-static/build/package/container checks still run. Main may reuse an exact checked
+static/build/package/container checks and the startup integration still run. Main may reuse an exact checked
 tree after independently verifying its evidence. The aggregate always requires
 the jobs appropriate to the proved mode; unexpected skips, failures and
 cancellations fail it. See [CI policy](docs/ci.md) for eligibility and fallback.

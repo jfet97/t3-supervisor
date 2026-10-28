@@ -20,9 +20,9 @@ The version PR is reviewed and merged manually; the workflow never enables auto-
 The version PR requests the narrow [release metadata fast track](docs/ci.md#release-metadata-fast-track):
 a generated version/changelog/consumed-note change may reuse directly verified
 full validation of its parent on main. Static checks, build, package and container
-smoke checks still run on the new version, and the required aggregate `check`
-always runs. Any other change or uncertain evidence selects all four main shards
-and the harness too. Manual **Check Supervisor** dispatches default to full checks.
+smoke checks and the production startup integration still run on the new version,
+and the required aggregate `check` always runs. Any other change or uncertain
+evidence selects all four main shards and the harness too. Manual **Check Supervisor** dispatches default to full checks.
 
 ### Version bot authentication
 
