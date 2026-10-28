@@ -37,10 +37,10 @@ const readArguments = (item: Record<string, unknown>): Record<string, unknown> |
 export const nativeActivityRead = (projection: Projection, detail: unknown, allowed: ReadonlySet<string>, now: number): NativeActivityRead | null => {
   if (!record(detail) || detail.type !== "dynamic_tool" || detail.status !== "completed" || detail.threadId !== projection.thread.id ||
     typeof detail.id !== "string" || typeof detail.runId !== "string" || typeof detail.nodeId !== "string" ||
-    detail.toolNonExecutionKind !== null) return null;
+    (detail.toolNonExecutionKind !== undefined && detail.toolNonExecutionKind !== null)) return null;
   const run = projection.runs.find(run => run.id === detail.runId && run.status !== "rolled_back");
   const node = run ? mainRunNodeReader(projection, run)(detail.nodeId) : null;
-  if (!node || node.kind !== "dynamic_tool" || node.status !== "completed") return null;
+  if (!node || (node.kind !== "dynamic_tool" && node.kind !== "tool_call") || node.status !== "completed") return null;
   const input = readArguments(detail);
   if (!input || typeof input.threadId !== "string" || !allowed.has(input.threadId)) return null;
   const result = Schema.decodeUnknownExit(ReadSnapshot)(toolValue(detail.output));

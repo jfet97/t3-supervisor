@@ -3,12 +3,13 @@ import { it } from "@effect/vitest";
 import { nativeActivityRead } from "../src/supervisor-awareness.js";
 import type { Projection } from "../src/types.js";
 
+const nodes = [{id: "root", kind: "root_turn", threadId: "owner", runId: "run", rootNodeId: "root", providerThreadId: "provider", status: "running"},
+  {id: "read-node", kind: "dynamic_tool", threadId: "owner", runId: "run", rootNodeId: "root", providerThreadId: "provider", parentNodeId: "root", status: "completed"}];
 const projection: Projection = {
   thread: {id: "owner", title: "Owner", projectId: "p", lineage: {parentThreadId: null, relationshipToParent: null}},
   runs: [{id: "run", threadId: "owner", ordinal: 1, status: "running", requestedAt: "2026-10-27T12:00:00Z", startedAt: null, completedAt: null,
     rootNodeId: "root", providerThreadId: "provider"}],
-  nodes: [{id: "root", kind: "root_turn", threadId: "owner", runId: "run", rootNodeId: "root", providerThreadId: "provider", status: "running"},
-    {id: "read-node", kind: "dynamic_tool", threadId: "owner", runId: "run", rootNodeId: "root", providerThreadId: "provider", parentNodeId: "root", status: "completed"}],
+  nodes,
   messages: [],
 };
 const detail = (truncated = false) => ({id: "read", type: "dynamic_tool", status: "completed", threadId: "owner", runId: "run", nodeId: "read-node",
@@ -23,6 +24,26 @@ it("a completed native read records the fetched page without inventing an assess
   assert.equal(read?.snapshotEndReached, true);
   assert.equal(read?.partial, false);
   assert.equal("assessedAt" in read!, false);
+});
+
+it("published tool_call nodes and omitted non-execution hints retain successful native read coverage", () => {
+  const {toolNonExecutionKind, ...executed} = detail();
+  assert.equal(toolNonExecutionKind, null);
+  for (const kind of ["dynamic_tool", "tool_call"]) {
+    const actualProjection = {...projection, nodes: nodes.map(node => node.id === "read-node" ? {...node, kind} : node)};
+    for (const hint of [{}, {toolNonExecutionKind: null}]) {
+      const actual = {...executed, ...hint, toolName: "t3-code.t3_thread_read", output: executed.output.structuredContent};
+      const read = nativeActivityRead(actualProjection, actual, allowed, 100);
+      assert.equal(read?.position, 5, `${kind} with ${JSON.stringify(hint)}`);
+      assert.equal(read?.snapshotEndReached, true);
+      for (const refusal of ["denied", "cancelled"])
+        assert.equal(nativeActivityRead(actualProjection, {...actual, toolNonExecutionKind: refusal}, allowed, 100), null);
+      for (const invalidNode of [{kind: "assistant_message"}, {threadId: "foreign-owner"}, {runId: "foreign-run"}, {parentNodeId: "foreign-root"}, {status: "running"}]) {
+        const invalid = {...actualProjection, nodes: actualProjection.nodes.map(node => node.id === "read-node" ? {...node, ...invalidNode} : node)};
+        assert.equal(nativeActivityRead(invalid, actual, allowed, 100), null, JSON.stringify(invalidNode));
+      }
+    }
+  }
 });
 
 it("cut-off text and item-only reads cannot claim the end of an activity snapshot", () => {
