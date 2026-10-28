@@ -2744,6 +2744,40 @@ it.effect("workflow_write advertises the root-only review outcome record, which 
   assert.match(workflowWriteToolDefinition.description, /It sends nothing; messaging the operative is a separate decision/u);
 }));
 
+it.live("workflow_read returns compact progress by default and complete records only when requested through MCP", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "read-default", "Create the workflow to inspect.");
+    installEvidence(fixture, ensure);
+    assert.equal((yield* fixture.controller.write(ensure)).status, "created");
+    const server = createServer();
+    yield* Layer.build(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
+      Layer.provide(workflowMcpLayer(fixture.controller)),
+      Layer.provide(NodeHttpServer.layer(() => server, {port: 0, host: "127.0.0.1"})),
+    ));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const results: unknown[] = [];
+    for (const fields of [{}, {view: "status"}, {view: "documents"}]) {
+      const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${address.port}/mcp/workflows`, {method: "POST",
+        headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"},
+        body: JSON.stringify({jsonrpc: "2.0", id: results.length, method: "tools/call",
+          params: {name: "workflow_read", arguments: {...locator(fixture), ...fields}}})}));
+      const body = (yield* Effect.promise(() => response.json())) as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
+      assert.notEqual(body.result?.isError, true);
+      results.push(JSON.parse(body.result?.content?.[0]?.text ?? "null"));
+    }
+    assert.deepEqual(results[0], results[1], "omitting view requests the same compact progress as explicit status");
+    assert.match(JSON.stringify(results[0]), /"view":"status"/u);
+    assert.doesNotMatch(JSON.stringify(results[0]), /"document"|"evidence"|"acceptedAgreements"/u);
+    assert.match(JSON.stringify(results[2]), /"document"/u);
+    assert.match(JSON.stringify(results[2]), /"evidence"/u);
+    assert.match(JSON.stringify(results[2]), /"draft_created"/u, "the complete read retains the actual creation event");
+    assert.deepEqual(yield* fixture.controller.readTool({...locator(fixture), definitionIds: ["check"]}),
+      {status: "invalid", reason: "invalid_read_arguments"}, "default progress never silently ignores a definition selector");
+  } finally {yield* fixture.close;}
+}));
+
 it.live("workflow_read view definitions accepts nonempty definitionIds through the real controller and MCP endpoint", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {

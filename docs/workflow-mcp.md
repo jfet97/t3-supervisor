@@ -301,10 +301,12 @@ A successful read through the installed gateway establishes transport/permission
 behavior, not a positive workflow edit or complete configured-project dialogue.
 
 `workflow_read` takes the Supervisor thread ID and binding generation as lookup
-coordinates. It returns bounded workflow state and native main/descendant lineage,
+coordinates. Its explicit document view includes bounded workflow state and native main/descendant lineage,
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
-With `view`, `workflow_read` returns bounded context for the verified binding instead of
+`workflow_read` defaults to compact `status`. Use `view: "documents"` only when complete
+records, history, evidence or accepted snapshots are needed; document and lineage pagination
+remain available in that view. Other `view` values return bounded context for the verified binding instead of
 workflow documents:
 
 - `context`: compact by default: the task's identity, revision pins, objective, status,
