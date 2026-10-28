@@ -1210,17 +1210,26 @@ it.effect(`repeated short passes rotate past a hung Supervisor and keep later ma
     fixture.projections.set(binding.threadId, emptySupervisorProjection(binding.threadId, "project-a", defaultSupervisorModel));
   }
   const supervisor = yield* fixture.makeSupervisor();
-  // the hung read suspends the pass; sibling batch work finishes on the node loop, then the pass is interrupted. twelve passes stay the bound.
+  // the hung read suspends a four-binding batch; all four first reads must enter before interruption. twelve passes stay the bound.
   for (let attempt = 0; attempt < 12 && touched.size < count; attempt++) {
     const hung = yield* Deferred.make<void>();
+    const siblingsEntered = yield* Deferred.make<void>();
+    const entered = new Set<string>();
     fixture.setHoldReads((id) => {
       const main = ids.get(id);
       if (main === undefined) return null;
-      touched.add(main);
-      if (main !== "main-0") return null;
-      return Effect.andThen(Effect.uninterruptible(Effect.ignore(Deferred.succeed(hung, undefined))), Effect.never);
+      return Effect.gen(function* () {
+        touched.add(main);
+        entered.add(main);
+        if (entered.size >= 4) yield* Deferred.succeed(siblingsEntered, undefined);
+        if (main === "main-0") {
+          yield* Deferred.succeed(hung, undefined);
+          return yield* Effect.never;
+        }
+        return {projection: fixture.projections.get(id)!, snapshotSequence: 20};
+      });
     });
-    yield* interruptHungPass(supervisor.cycle, hung, () => touched.size);
+    yield* interruptHungPass(supervisor.cycle, hung, siblingsEntered);
   }
   fixture.setHoldReads(null);
   assert.equal(touched.size, count, "the same slow first binding must not permanently hide tail mains");
