@@ -8,7 +8,7 @@ export class T3TokenUnavailable extends Data.TaggedError("T3TokenUnavailable") {
 
 // a configuration value outside today's acceptance set; the message is the reason code alone, never the value
 export class InvalidConfiguration extends Data.TaggedError("InvalidConfiguration")<{
-  readonly reason: "invalid_helper_provider_instance_id" | "invalid_configuration";
+  readonly reason: "invalid_helper_provider_instance_id" | "invalid_workflow_mcp_alias" | "invalid_workflow_mcp_gateway_tool" | "invalid_configuration";
 }> {
   override readonly message: string = this.reason;
 }

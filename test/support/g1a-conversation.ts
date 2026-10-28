@@ -280,7 +280,8 @@ export const conversationUnit = Effect.fnUntraced(function* (options: Conversati
       if (yield* callbacks.supervisionStopped(mainThreadId)) return true;
       const projectId = (yield* stores.supervisors.bindings()).find((item) => item.mainThreadId === mainThreadId)?.projectId ?? "";
       return !callbacks.enabled(projectId, mainThreadId);
-    })}).pipe(Effect.provideService(SupervisionGate, runtimeGate), Effect.provideService(T3Client, t3), Effect.provide(stores.context));
+    })}).pipe(Effect.provideService(SupervisionScopeService, scope), Effect.provideService(SupervisionGate, runtimeGate), Effect.provideService(T3Client, t3),
+      Effect.provide(stores.context));
   }) : null;
   const {service, seams} = yield* SupervisorConversation.makeUnit.pipe(
     Effect.provideService(SupervisionScopeService, scope),

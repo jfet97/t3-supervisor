@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { NodeServices } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Cause, Effect, Exit } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Option } from "effect";
 import { GuidanceDb, PolicyDb } from "../src/db.js";
 import { AdmissionInsideTransaction, makeSupervisionGate, type GateGuard } from "../src/supervision-gate.js";
 import { guidanceDb, policyDb, temporaryDataDirectory } from "./support/guidance-store-services.js";
@@ -35,4 +35,29 @@ it.live("CT-LIN-07: admission requested inside a guidance transaction dies befor
   assert.ok(Exit.isSuccess(observed.outside), "the permit was not left held by the refused request");
   assert.ok(Exit.isSuccess(observed.otherClient), "a transaction of another client does not refuse admission");
   assert.deepEqual(observed.entered, ["outside", "policy-transaction"], "the refused section never ran");
+})), {timeout: 10_000});
+
+// the non-waiting section of a decision made on native state read just before it (apply_return): while another section holds the gate it
+// answers none and its body never runs; once the gate is free it runs as an ordinary section, and inside a transaction it dies alike
+it.live("an available-only admission never waits behind a held section and otherwise runs as an ordinary section", () => live(Effect.gen(function* () {
+  const directory = yield* temporaryDataDirectory("gate-if-available-");
+  const observed = yield* Effect.gen(function* () {
+    const db = yield* GuidanceDb;
+    const gate = yield* makeSupervisionGate(openGuard);
+    const entered: string[] = [];
+    const held = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const holder = yield* Effect.forkChild(gate.admit(() => Effect.andThen(Deferred.succeed(held, undefined), Deferred.await(release))));
+    yield* Deferred.await(held);
+    const busy = yield* gate.admitIfAvailable(() => Effect.sync(() => {entered.push("while held");return "ran";}));
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(holder);
+    const free = yield* gate.admitIfAvailable(() => Effect.sync(() => {entered.push("when free");return "ran";}));
+    const inside = yield* Effect.exit(db.withTransaction(Effect.andThen(db`SELECT 1`, gate.admitIfAvailable(() => Effect.sync(() => {entered.push("inside");})))));
+    return {busy, free, inside, entered};
+  }).pipe(Effect.provide(guidanceDb(directory)), Effect.provide(policyDb(directory)));
+  assert.ok(Option.isNone(observed.busy));
+  assert.deepEqual(observed.free, Option.some("ran"));
+  assert.ok(Exit.isFailure(observed.inside) && Cause.squash(observed.inside.cause) instanceof AdmissionInsideTransaction);
+  assert.deepEqual(observed.entered, ["when free"]);
 })), {timeout: 10_000});

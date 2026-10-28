@@ -41,6 +41,7 @@ import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.j
 import {
   canonicalJson,
   isRecord,
+  configuredWorkflowToolRoutes,
   providerTurnEvidenceCandidates,
   verifyProviderTurnToolEvidence,
   verifyWorkflowToolEvidence,
@@ -1144,6 +1145,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   // the scope predicates and checks of the interpretation intake, and the run's wake its commit signals (absent in a unit without it)
   const scopes = yield* SupervisionScopeService;
   const checks = interpretationChecks(supervisors, scopes);
+  // the exact native routes of this deployment's registrations of the server and its gateway
+  const routes = configuredWorkflowToolRoutes(scopes.config);
   const wake = Option.getOrNull(yield* Effect.serviceOption(InterpretationWake));
   // the controller's own receipt and evidence tables on the run's guidance client
   yield* guidanceSql(Effect.forEach(writeSchema, (statement) => sql.unsafe(statement)));
@@ -1206,7 +1209,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   const searchToolEvidence = <V>(callerThreadId: string, projectId: string, payload: Record<string, unknown>, tool: WorkflowEvidenceTool,
     cancel: WorkflowCallCancel, verify: (projection: Projection, itemId: string, detail: Record<string, unknown>) => CandidateCheck<V>,
     skipDenied: boolean, candidatesOf: (projection: Projection) => WorkflowEvidenceCandidate[] =
-      (projection) => workflowEvidenceCandidates(projection, callerThreadId, tool, payload)) => Effect.gen(function* (): Effect.fn.Return<CandidateCheck<V>> {
+      (projection) => workflowEvidenceCandidates(projection, callerThreadId, tool, payload, routes)) => Effect.gen(function* (): Effect.fn.Return<CandidateCheck<V>> {
     const startedAt = yield* elapsedMillis;
     let lastReason = "native_evidence_not_visible";
     let unrecognizedToolName: string | undefined;
@@ -1302,7 +1305,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   const findToolEvidence = (callerThreadId: string, projectId: string, payload: Record<string, unknown>, tool: WorkflowEvidenceTool,
     cancel: WorkflowCallCancel): Effect.Effect<EvidenceSearch> => Effect.map(searchToolEvidence(callerThreadId, projectId, payload, tool, cancel,
     (projection, itemId, detail) => {
-      const check = verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload});
+      const check = verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload, routes});
       return check.status === "verified" ? {status: "verified", value: check.evidence} : check;
     }, false), (result): EvidenceSearch => result.status === "verified" ? {status: "verified", evidence: result.value} : result);
 
@@ -1313,11 +1316,11 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     tool: WorkflowEvidenceTool = "plan") =>
     searchToolEvidence<true>(callerThreadId, projectId, payload, tool, cancel, (projection, itemId, detail): CandidateCheck<true> => {
       const check = typeof detail.runId === "string"
-        ? verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload})
-        : verifyProviderTurnToolEvidence({projection, callerThreadId, itemId, detail, tool, arguments: payload});
+        ? verifyWorkflowToolEvidence({projection, supervisorThreadId: callerThreadId, itemId, detail, tool, arguments: payload, routes})
+        : verifyProviderTurnToolEvidence({projection, callerThreadId, itemId, detail, tool, arguments: payload, routes});
       return check.status === "verified" ? {status: "verified", value: true} : check;
-    }, true, (projection) => [...workflowEvidenceCandidates(projection, callerThreadId, tool, payload),
-      ...providerTurnEvidenceCandidates(projection, callerThreadId, tool, payload)]);
+    }, true, (projection) => [...workflowEvidenceCandidates(projection, callerThreadId, tool, payload, routes),
+      ...providerTurnEvidenceCandidates(projection, callerThreadId, tool, payload, routes)]);
 
   const findEvidence = (payload: WorkflowLocator & Record<string, unknown>, owner: WorkflowOwner, cancel: WorkflowCallCancel,
     tool: WorkflowEvidenceTool = "write") => findToolEvidence(payload.supervisorThreadId, owner.projectId, payload, tool, cancel);
@@ -1951,7 +1954,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       (projection, itemId, detail) => {
         const verdict = verifyInterpretationProof({phase: "intake", submission: {envelope, rawArguments, argumentsHash},
           scope: {projectId: binding.projectId, mainThreadId: binding.mainThreadId}, request: attempt.key, binding, ownedThreadIds: supervisors.ownedIds,
-          projection, itemId, detail});
+          projection, itemId, detail, routes});
         return verdict.status === "verified" ? {status: "verified", value: verdict.proof} : verdict.status === "pending_proof"
           ? {status: "pending", reason: verdict.code} : {status: "denied", reason: verdict.code};
       }, true);

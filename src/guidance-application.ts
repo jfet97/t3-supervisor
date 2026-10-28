@@ -26,6 +26,7 @@ import { GitProbe } from "./git-probe.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 import { WorkflowMcp } from "./workflow-mcp.js";
 import { ServiceAuth } from "./service-auth.js";
+import { logEvent } from "./logging.js";
 
 export const runGuidanceApplication = (
   config: SupervisorSettings,
@@ -58,7 +59,7 @@ export const runGuidanceApplication = (
     const endpoint = (token: string) => ({baseUrl: config.t3Url, token});
     const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim())), Context.merge(nativeClients, guidance)) : undefined;
     const cleanupGitProbe = gitProbe ? gitProbe.cleanup.pipe(
-      Effect.catch(() => Effect.sync(() => console.log(JSON.stringify({event: "native_git_probe_cleanup_unavailable"})))),
+      Effect.catch(() => logEvent("native_git_probe_cleanup_unavailable")),
     ) : Effect.void;
     yield* Effect.acquireRelease(Effect.succeed(gitProbe), () => cleanupGitProbe);
     yield* cleanupGitProbe;
@@ -110,7 +111,7 @@ export const runGuidanceApplication = (
     // reported by its event alone
     const interpretation = supervision.cycle.pipe(
       Effect.timeout("120 seconds"),
-      Effect.catchCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.sync(() => console.log(JSON.stringify({event: "task_interpretation_unavailable"})))),
+      Effect.catchCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : logEvent("task_interpretation_unavailable")),
       Effect.andThen(Effect.sleep("5 seconds")), Effect.forever,
     );
     yield* Effect.forkScoped(interpretation);

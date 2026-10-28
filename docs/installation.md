@@ -43,7 +43,7 @@ Local state defaults to `$XDG_STATE_HOME/t3-supervisor`, or
 for `t3-supervisor start` and `t3-supervisor auth forge`.
 
 The dashboard defaults to `127.0.0.1:9008` (`UI_HOST`, `UI_PORT`), and health to
-port 9007 (`HEALTH_PORT`). `/health` reports readiness; `/live` reports liveness.
+`127.0.0.1:9007` (`HEALTH_HOST`, `HEALTH_PORT`). `/health` reports readiness; `/live` reports liveness.
 Both include `version` and `revision`. A source build without a recorded Git
 revision reports `revision: null`.
 
@@ -60,6 +60,12 @@ Create `SUPERVISOR_DATA_DIR` first, owned by that account, with mode 0700. The
 directory is mounted at `/data`; the credential directory is mounted read-only at
 `/run/secrets`. Its `t3-read-token` must be readable by the same account. Optional
 credential files use the names shown in [compose.yaml](../compose.yaml).
+
+A published port reaches only a listener on the container's own network interface,
+not one on container loopback. The image therefore sets `HEALTH_HOST=0.0.0.0`, and
+the template sets `UI_HOST=0.0.0.0`. The template publishes both ports on host
+loopback only. A deployment that builds its own image or uses host networking sets
+`HEALTH_HOST` and `UI_HOST` for its own network.
 
 The default T3 address is `http://host.docker.internal:3773`. Docker Desktop
 provides this hostname; the template also maps it to the host gateway on Linux.

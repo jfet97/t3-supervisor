@@ -20,6 +20,7 @@ import { GuidanceRuntime } from "../src/guidance.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { guidanceTransaction } from "../src/guidance-sql.js";
 import { makeStore, Store } from "../src/store.js";
+import { ThreadPolicyStore } from "../src/thread-policy.js";
 import { listeners, readCsrf, runtimeOver, signIn, uiConfig, grant, type ListenerOptions } from "./support/g11-dashboard.js";
 import { temporaryDirectory } from "./support/g11-stores.js";
 
@@ -57,9 +58,9 @@ it.live("real listener sends committed hints, stays idle across collection cycle
   assert.match(response.headers["content-type"]!, /text\/event-stream/u);
   const pull = yield* Stream.toPull(decode(response));
   assert.equal((yield* pull)[0]?.event, "reset");
-  const settings = yield* f.store.settings();
+  const policy = Context.get(f.services, ThreadPolicyStore);
   const started = yield* Clock.currentTimeMillis;
-  yield* f.store.saveSettings({...settings, guidancePaused: !settings.guidancePaused});
+  yield* policy.save({...(yield* policy.get()), excludedThreadIds: ["excluded-chat"]});
   assert.equal((yield* pull)[0]?.event, "reset", "a global settings commit invalidates mounted readers");
   const commitToHintMs = (yield* Clock.currentTimeMillis) - started;
   console.log(JSON.stringify({sseCommitToHintMs: commitToHintMs}));
@@ -78,11 +79,15 @@ it.live("real listener sends committed hints, stays idle across collection cycle
   const idle = yield* Effect.forkChild(pull);
   yield* f.tasks.saveTask({...task, reason: "Following", updatedAt: 2});
 
-  yield* Effect.exit(transaction(Effect.andThen(f.store.saveSettings({...settings, generation: settings.generation + 1}), Effect.fail("rollback"))));
+  const settings = yield* f.store.settings();
+  yield* Effect.exit(transaction(Effect.andThen(f.store.classify("project", "scratch", settings.generation), Effect.fail("rollback"))));
   for (let cycle = 0; cycle < 3; cycle++) {
     yield* f.source.ingest({stream: "active", item: {kind: "snapshot", snapshotSequence: cycle + 1, snapshot: nativeSnapshot}});
     const client = yield* HttpClient.HttpClient;
-    yield* (yield* client.get(f.origin + "/api/guidance/snapshot", {headers: {"x-supervisor-session": f.session}})).json;
+    const served = (yield* (yield* client.get(f.origin + "/api/guidance/snapshot", {headers: {"x-supervisor-session": f.session}})).json) as Record<string, unknown>;
+    // audit F10: the retired reminder rules' settings, rules, mutes, budget and sending flags are no longer served or read
+    assert.deepEqual(Object.keys(served).sort(), ["activity", "connected", "coverage", "environmentId", "lastCycleAt", "projects", "serverVersion",
+      "threadPolicy", "threads"]);
     yield* f.runtime.markActive;
     yield* f.store.settings();
     yield* transaction(f.store.settings());

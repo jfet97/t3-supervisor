@@ -177,15 +177,21 @@ export interface TeamRuntimeUnitOptions {
 
 const isUnit = (transport: HelperTransportUnit | HelperTransportShape): transport is HelperTransportUnit => "gate" in transport;
 
+// the settings of a unit whose native side is a fake, and the thread policy its scope never reads
+const unitSettings: SupervisorSettings = {dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0};
+const unusedPolicy = ThreadPolicyStore.of({get: () => Effect.die(new Error("unused thread policy")), save: () => Effect.die(new Error("unused thread policy"))});
+
 /** The production team runtime of one process: its layer built in the current scope over the stores and the transport. */
 export const teamRuntimeUnit = (options: TeamRuntimeUnitOptions): Effect.Effect<SupervisorTeamRuntimeShape, never, Scope.Scope> => Effect.gen(function* () {
   const unit = options.transport && isUnit(options.transport) ? options.transport : undefined;
   const transport = unit ? unit.transport : options.transport as HelperTransportShape | undefined;
   const parts = unit ?? (yield* admission(options.stores, openGuard));
   const stopped = options.supervisionStopped;
+  const scope = new SupervisionScope(unitSettings, {guidance: options.stores.guidance, supervisors: options.stores.store, policy: unusedPolicy}, true);
   const context = yield* Layer.build(SupervisorTeamRuntime.layer({stopped: (_guard, mainThreadId) => Effect.sync(() => stopped?.(mainThreadId) === true)}).pipe(
     Layer.provide(Layer.mergeAll(
-      Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionGate, parts.gate), Layer.succeed(T3Client, t3Projections(options.projection)),
+      Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionScopeService, scope), Layer.succeed(SupervisionGate, parts.gate),
+      Layer.succeed(T3Client, t3Projections(options.projection)),
       transport ? Layer.succeed(HelperTransport, transport) : Layer.empty,
       options.requests ? Layer.succeed(SupervisorConversationStore, options.requests) : Layer.empty))));
   return Context.get(context, SupervisorTeamRuntime);
@@ -206,8 +212,6 @@ class CallbackScope extends SupervisionScope {
   override eligible(thread: ThreadInfo, threads: readonly ThreadInfo[]) {return Effect.sync(() => this.callbacks.eligible(thread, threads));}
 }
 
-// the callback scope reads no thread policy
-const unusedPolicy = ThreadPolicyStore.of({get: () => Effect.die(new Error("unused thread policy")), save: () => Effect.die(new Error("unused thread policy"))});
 
 export interface SupervisorConversationUnitOptions {
   readonly stores: TeamStores;
@@ -225,15 +229,15 @@ export interface SupervisorConversationUnitOptions {
 export const supervisorConversationUnit = (options: SupervisorConversationUnitOptions) => Effect.gen(function* () {
   const {stores} = options;
   const callbacks: ConversationCallbacks = {eligible: options.eligible, enabled: options.enabled ?? (() => true), supervisionStopped: () => false};
-  const config: SupervisorSettings = {dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0};
-  const scope = new CallbackScope(config, {guidance: stores.guidance, supervisors: stores.store, policy: unusedPolicy}, callbacks);
+  const scope = new CallbackScope(unitSettings, {guidance: stores.guidance, supervisors: stores.store, policy: unusedPolicy}, callbacks);
   const gate = yield* makeSupervisionGate(scope).pipe(Effect.provide(stores.context));
   const projectOf = (mainThreadId: string) => Effect.map(stores.store.bindings(), (bindings) => bindings.find((item) => item.mainThreadId === mainThreadId)?.projectId ?? "");
   const runtimeParts = yield* admission(stores, openGuard);
   const team = yield* Layer.build(SupervisorTeamRuntime.layer({stopped: (_guard, mainThreadId) => Effect.gen(function* () {
     return callbacks.supervisionStopped(mainThreadId) || !callbacks.enabled(yield* projectOf(mainThreadId), mainThreadId);
   })}).pipe(Layer.provide(Layer.mergeAll(
-    Layer.succeedContext(stores.context), Layer.succeed(SupervisionGate, runtimeParts.gate), Layer.succeed(T3Client, t3Projections(options.projection)),
+    Layer.succeedContext(stores.context), Layer.succeed(SupervisionScopeService, scope), Layer.succeed(SupervisionGate, runtimeParts.gate),
+    Layer.succeed(T3Client, t3Projections(options.projection)),
     options.helperTransport ? Layer.succeed(HelperTransport, options.helperTransport) : Layer.empty))));
   const teamRuntime = Context.get(team, SupervisorTeamRuntime);
   const built = yield* Layer.build(SupervisorConversation.layer.pipe(Layer.provide(Layer.mergeAll(

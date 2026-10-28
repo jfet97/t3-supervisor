@@ -35,7 +35,7 @@ import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { agreementEvidenceNames, agreementEvidenceOf, interpretationPlanDigest, type InterpretationEvidence, type InterpretationSubmissionEvidence, type SupervisorMessageEvidence } from "./interpretation-evidence.js";
 import { interpretationSourcePin, type InterpretationSourcePin } from "./interpretation-submission.js";
 import { taskPendingStart } from "./interpretation-intake.js";
-import { recognisedWorkflowCallArguments, verifyWorkflowToolEvidence, workflowRequestHash, workflowTurnItemDetailMaxBytes } from "./workflow-write-evidence.js";
+import { configuredWorkflowToolRoutes, recognisedWorkflowCallArguments, verifyWorkflowToolEvidence, workflowRequestHash, workflowTurnItemDetailMaxBytes, type WorkflowToolRoutes } from "./workflow-write-evidence.js";
 import { messageReadRule } from "./message-read-handle.js";
 
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
@@ -285,19 +285,19 @@ const samePin = (left: InterpretationSourcePin, right: InterpretationSourcePin):
   left.messageId === right.messageId && left.runId === right.runId && left.ordinal === right.ordinal && left.hash === right.hash;
 
 // the complete arguments of a native interpretation tool item, read on the same recognised routes as its original verification
-const submittedArguments = (detail: Record<string, unknown>): Record<string, unknown> | null =>
-  recognisedWorkflowCallArguments(detail, "interpretation");
+const submittedArguments = (detail: Record<string, unknown>, routes: WorkflowToolRoutes): Record<string, unknown> | null =>
+  recognisedWorkflowCallArguments(detail, "interpretation", routes);
 
 // a recorded tool submission against the bound root's projection and the native detail of its item: current while the item is still
 // an executed, completed main-run item of the same completed run, nothing of it rolled back, whose complete arguments hash to the
 // recorded hash; a detail that was not read or does not decode decides nothing
-const submissionEvidenceState = (evidence: InterpretationSubmissionEvidence, supervisor: Projection, detail: unknown): EvidenceState => {
+const submissionEvidenceState = (evidence: InterpretationSubmissionEvidence, supervisor: Projection, detail: unknown, routes: WorkflowToolRoutes): EvidenceState => {
   if (!(supervisor.turnItems ?? []).some(item => item.id === evidence.itemId && item.threadId === supervisor.thread.id)) return "changed";
   if (!record(detail)) return "unknown";
-  const args = submittedArguments(detail);
+  const args = submittedArguments(detail, routes);
   if (!args) return detail.toolName === undefined || detail.input === undefined ? "unknown" : "changed";
   const check = verifyWorkflowToolEvidence({projection: supervisor, supervisorThreadId: supervisor.thread.id, itemId: evidence.itemId, detail,
-    tool: "interpretation", arguments: args});
+    tool: "interpretation", arguments: args, routes});
   if (check.status === "pending") return "unknown";
   if (check.status === "denied") return "changed";
   const run = supervisor.runs.find(item => item.id === evidence.runId && item.threadId === supervisor.thread.id);
@@ -324,7 +324,8 @@ const evidenceRunOrdinal = (evidence: InterpretationEvidence): number => evidenc
 // whether a candidate is the service-prepared interpretation proposal
 // what evidence is judged against: the bound root's projection, its completed assistant messages and the native details read for its
 // recorded tool submissions
-type EvidenceView = {readonly supervisor: Projection; readonly messages: readonly CompletedMessage[]; readonly details: ReadonlyMap<string, unknown>};
+type EvidenceView = {readonly supervisor: Projection; readonly messages: readonly CompletedMessage[]; readonly details: ReadonlyMap<string, unknown>;
+  readonly routes: WorkflowToolRoutes};
 
 // the task's candidate-free plan evidence: the current attempt, or a retained native submission within the same authorization
 // revision after the requester advances. converted message evidence always requires the current source
@@ -337,7 +338,7 @@ const taskEvidenceState = (task: TaskRecord, view: EvidenceView): EvidenceState 
   const authorization = task.conversation?.authorization;
   const attemptMatches = currentSource ? evidence.attemptId === task.attempt?.attemptId : authorization?.state === "authorized" &&
     evidence.scopeRevision === authorization.scopeRevision && authorization.scopeSources.some(pin => samePin(pin, evidence.sourcePin));
-  return evidence.taskId === task.id && attemptMatches ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
+  return evidence.taskId === task.id && attemptMatches ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId), view.routes) : "changed";
 };
 
 const sourcePinMatchesContext = (value: Pick<WorkflowProposalInfo,
@@ -556,6 +557,8 @@ export interface SupervisorConversationShape {
 /** Uses existing T3 activity and ordinary conversations, with one durable service request per Supervisor. */
 const makeSupervisorConversation = Effect.gen(function* () {
   const scope = yield* SupervisionScopeService;
+  // the exact native routes of this deployment's registrations of the workflow server and its gateway
+  const nativeRoutes = configuredWorkflowToolRoutes(scope.config);
   const gate = yield* SupervisionGate;
   const t3 = yield* T3Client;
   const ids = yield* SupervisorIds;
@@ -1835,7 +1838,7 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
     if (view.supervisor.thread.id !== task.supervisorThreadId) return "changed";
     if (evidence.kind === "interpretation_submission")
       return evidence.taskId === candidate.taskId && evidence.planDigest === interpretationPlanDigest(candidate.workflow)
-        ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId)) : "changed";
+        ? submissionEvidenceState(evidence, view.supervisor, view.details.get(evidence.itemId), view.routes) : "changed";
     const message = evidenceMessage(evidence, view.messages);
     if (!message) return "changed";
     // the interpretation proposal converted from its answer message stays current by that message's unchanged hash alone
@@ -1996,7 +1999,7 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
         }
       }
       const currentTask = (yield* store.task(task.threadId)) ?? task;
-      const view: EvidenceView = {supervisor, messages: supervisorMessages, details: evidenceDetails};
+      const view: EvidenceView = {supervisor, messages: supervisorMessages, details: evidenceDetails, routes: nativeRoutes};
       if (currentTask.agreement?.status === "agreed" && (yield* agreementEvidenceState(currentTask, introduction, agent, view, agentMessages, context)) === "changed") {
         yield* markWorkflowStale(currentTask, "The saved Supervisor proposal or operative acceptance message changed or left the completed main conversation graph; agreement evidence is stale.", now);
       }
@@ -2106,7 +2109,7 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
       if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return null;
       if (freshSupervisor.thread.id !== binding.threadId || freshSupervisor.thread.projectId !== task.projectId || freshSupervisor.thread.deletedAt || freshSupervisor.thread.archivedAt) return null;
       const supervisorMessages = completedAssistantMessages(freshSupervisor, task.supervisorThreadId);
-      if (proposalEvidenceState(currentTask, candidate, {supervisor: freshSupervisor, messages: supervisorMessages, details: evidenceDetails}, context) !== "current") return null;
+      if (proposalEvidenceState(currentTask, candidate, {supervisor: freshSupervisor, messages: supervisorMessages, details: evidenceDetails, routes: nativeRoutes}, context) !== "current") return null;
       const operativeMessages = completedAssistantMessages(finalMain.value, task.threadId);
       const acceptanceMessage = operativeMessages.find(message => message.messageId === agentMessageId);
       if (!acceptanceMessage) return null;
@@ -2171,7 +2174,8 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
     }
     const reading = yield* requests.pending(binding.projectId, binding.threadId);
     if (reading && readRpc) yield* requests.recordNativeReads(binding.projectId, reading.id,
-      yield* collectNativeReads(reading, supervisor, itemId => readRpc.call("orchestration.getTurnItem", {threadId: binding.threadId, itemId}), yield* Clock.currentTimeMillis));
+      yield* collectNativeReads(reading, supervisor, itemId => readRpc.call("orchestration.getTurnItem", {threadId: binding.threadId, itemId}), yield* Clock.currentTimeMillis,
+        nativeRoutes));
     const currentConversationTask = yield* store.task(binding.mainThreadId);
     if (currentConversationTask) {
       const introduction = yield* requests.introduction(currentConversationTask.id);
@@ -2799,7 +2803,7 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
       const expectedWorkflow = workflowValue(task.workflow);
       const initialPlan = validateWorkflowRecord(expectedWorkflow, context);
       if (!initialPlan || !sameWorkflowValue(initialPlan, expectedWorkflow) || prepared.workspaceRoot !== context.workspaceRoot || prepared.revision !== context.revision) return null;
-      const state = taskEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details});
+      const state = taskEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details, routes: nativeRoutes});
       if (state !== "current") return state === "unknown" ? "unknown" : null;
       if (!formalPlanReady(task.workflow) || context.status !== "ready" || !context.complete || !context.revision) return "provisional";
       const workflow: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
@@ -2818,7 +2822,7 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
       const candidate = yield* requests.agreementCandidate(task.id, prepared.proposalId);
       if (!context || !candidate || candidate.interpretation || candidate.evidence.kind === "interpretation_submission" || candidate.planHash !== prepared.digest ||
         !sameWorkflowValue(workflowValue(candidate.workflow), prepared.workflow)) return null;
-      const view: EvidenceView = {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details: new Map()};
+      const view: EvidenceView = {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details: new Map(), routes: nativeRoutes};
       return proposalEvidenceState(task, candidate, view, context) === "current" ? candidate : null;
     });
   const initialWorkflowCandidate = (request: ConversationRequest, runId: string, supervisor: Projection,
@@ -3036,7 +3040,7 @@ Unsolicited wakes: read context/planning; handle pending work or finish silently
         // receipt is only reconciled by later observation and nothing is initiated from the stale copy
         if (!unchangedUnsentIntroduction(yield* requests.introduction(task.id), introduction)) return {_tag: "Answer", value: undefined};
         if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return {_tag: "Answer", value: undefined};
-        const evidence = yield* proposalNoticeEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details: evidenceDetails}, defined);
+        const evidence = yield* proposalNoticeEvidenceState(task, {supervisor, messages: completedAssistantMessages(supervisor, task.supervisorThreadId), details: evidenceDetails, routes: nativeRoutes}, defined);
         // an unread native detail decides nothing; a later observation reads it again
         if (evidence === "unknown") return {_tag: "Answer", value: undefined};
         if (evidence === "changed") {

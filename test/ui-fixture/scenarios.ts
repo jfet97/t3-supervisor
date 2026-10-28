@@ -283,13 +283,10 @@ export class FixtureModel {
   guidanceSnapshot(now: number): GuidanceSnapshot {
     return {
       environmentId: fixtureEnvironments[this.current], serverVersion: "fixture-baseline", connected: true, lastCycleAt: now,
-      sendingReady: true, sendingReason: "Fixture: synthetic data; nothing is sent.",
-      settings: {generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null,
-        model: "fixture-model-steady", reasoning: "low", dailyTokenBudget: 0, evidenceHours: 24, maxAnchorAgeSeconds: 600},
       threadPolicy: this.threadPolicy(),
       threads: this.data.threads.map(thread => ({id: thread.id, title: this.titleOf(thread), projectId: thread.projectId, available: true})),
       projects: this.data.projects.map(project => ({id: project.id, title: project.title, available: true, classification: project.classification})),
-      rules: [], mutes: [], activity: this.largeInterface ? [...activity, ...Array.from({length: 80}, (_, i) => ({...activity[0]!, id: `fixture-long-activity-${i}`, createdAt: fixtureEpoch + (i + 3) * minute}))] : activity, coverage: "Fixture coverage: synthetic API data for UI recordings.", tokensUsed: 0,
+      activity: this.largeInterface ? [...activity, ...Array.from({length: 80}, (_, i) => ({...activity[0]!, id: `fixture-long-activity-${i}`, createdAt: fixtureEpoch + (i + 3) * minute}))] : activity, coverage: "Fixture coverage: synthetic API data for UI recordings.",
     };
   }
 

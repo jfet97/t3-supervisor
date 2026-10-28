@@ -40,11 +40,10 @@ const storedSession = (registry: AtomRegistry.AtomRegistry) => Effect.suspend(()
   return Effect.flatMap(access.SessionAccess, (service) => service.session).pipe(Effect.provide(runtime.value));
 });
 
-const snapshot = (connected: boolean, tokensUsed = 0) => ({
-  environmentId: "environment", serverVersion: "build", connected, lastCycleAt: 1, sendingReady: true, sendingReason: "",
-  settings: { generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null, model: "model",
-    reasoning: "low", dailyTokenBudget: 1, evidenceHours: 1, maxAnchorAgeSeconds: 1 },
-  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], rules: [], mutes: [], activity: [], coverage: "", tokensUsed,
+// lastCycleAt tells successive snapshots apart
+const snapshot = (connected: boolean, lastCycleAt = 0) => ({
+  environmentId: "environment", serverVersion: "build", connected, lastCycleAt,
+  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], activity: [], coverage: "",
 });
 const snapshots = () => browser.sent.filter((request) => request.path === "/api/guidance/snapshot");
 const csrfReads = () => browser.sent.filter((request) => request.path === "/api/csrf");
@@ -89,21 +88,21 @@ it.effect("a failed snapshot keeps the latest successful read with the drafts-ke
   yield* browser.request(() => csrfReads().length === 1, "the access refresh on the first connected snapshot");
   answer = () => json(snapshot(true, 2));
   registry.refresh(shell.dashboardSnapshot);
-  yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isSuccess(result) && !result.waiting && result.value.tokensUsed === 2, "the second snapshot");
+  yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isSuccess(result) && !result.waiting && result.value.lastCycleAt === 2, "the second snapshot");
   assert.equal(csrfReads().length, 1, "a further connected snapshot refreshes nothing");
 
   answer = () => json({ message: "Unavailable." }, 500);
   registry.refresh(shell.dashboardSnapshot);
   const failed = yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isFailure(result) && !result.waiting, "the failed snapshot");
   const view = shell.snapshotView(failed);
-  assert.equal(view.data?.tokensUsed, 2, "the latest successful snapshot is kept");
+  assert.equal(view.data?.lastCycleAt, 2, "the latest successful snapshot is kept");
   assert.equal(view.data?.connected, false);
   assert.equal(view.connected, false);
   assert.equal(view.alert, "Supervisor connection unavailable. Your drafts are kept.");
   yield* browser.request(() => csrfReads().length === 2, "the access refresh on failure");
   registry.refresh(shell.dashboardSnapshot);
   const again = yield* until(registry, shell.dashboardSnapshot, (result) => AsyncResult.isFailure(result) && !result.waiting, "a second failure");
-  assert.equal(shell.snapshotView(again).data?.tokensUsed, 2, "repeated failures keep the latest success");
+  assert.equal(shell.snapshotView(again).data?.lastCycleAt, 2, "repeated failures keep the latest success");
   assert.equal(csrfReads().length, 2, "access refreshes once when reads start failing");
 
   answer = () => json(snapshot(true, 3));

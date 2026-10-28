@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { Cause, Clock, Context, Data, Effect, FileSystem, Layer, Option, type PlatformError, Predicate, PubSub, Redacted, Schema, Scope, Stream } from "effect";
 import type { SqlClient } from "effect/sql";
 import { AccessDb, accessDbLayer, untracedSql } from "./db.js";
+import { logEvent } from "./logging.js";
 
 const TOKEN_BYTES = 32;
 const TOKEN_LENGTH = 43;
@@ -434,7 +435,7 @@ const makeServiceAuth = (dataDirectory: string): Effect.Effect<ServiceAuth["Serv
       Effect.catchCause(cause => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.gen(function* () {
         watchAvailable = false;
         yield* PubSub.publish(revocations, undefined);
-        yield* Effect.sync(() => console.log(JSON.stringify({event: "dashboard_session_watch_unavailable"})));
+        yield* logEvent("dashboard_session_watch_unavailable");
       }))));
 
     const sessionCount = rowCount(db, SESSION_TABLE);

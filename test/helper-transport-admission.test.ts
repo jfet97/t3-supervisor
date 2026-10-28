@@ -136,6 +136,7 @@ const fixtureWith = (mode: "held" | number) => Effect.gen(function* () {
   let sections = 0;
   const gate: SupervisionGateShape = {
     admit: (body) => inner.admit((current) => Effect.ensuring(body(current), Effect.sync(() => {sections += 1;log.push("end");}))),
+    admitIfAvailable: (body) => inner.admitIfAvailable((current) => Effect.ensuring(body(current), Effect.sync(() => {sections += 1;log.push("end");}))),
   };
   const stop = (change: (current: typeof policy) => void, barrier?: { entered: Deferred.Deferred<void>; release: Deferred.Deferred<void> }) =>
     gate.admit(() => Effect.gen(function* () {

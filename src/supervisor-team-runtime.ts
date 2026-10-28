@@ -11,12 +11,13 @@ import { conversationRequestMessageId, SupervisorConversationStore, type Convers
 import { endedWithoutCompletion, notificationClosed, SupervisorTeamStore, type HandoverAttempt, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
 import { T3Client } from "./t3.js";
 import { helperDeliveryBudget, HelperTransport, type HelperTransportShape, type SupervisorHelperMessage, type SupervisorHelperSendResult } from "./supervisor-helper-transport.js";
-import { SupervisionGate, type GateGuard } from "./supervision-gate.js";
+import { SupervisionGate, SupervisionScopeService, type GateGuard } from "./supervision-gate.js";
 import { SupervisorIds } from "./ids.js";
 import { fingerprint } from "./guidance-store.js";
 import type { MessageInfo, Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
 import { workflowMutationLimits } from "./workflow-state-contract.js";
+import { configuredWorkflowToolRoutes } from "./workflow-write-evidence.js";
 
 
 export type SupervisorTeamHelperBatch = {
@@ -163,6 +164,8 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
   const gate = yield* SupervisionGate;
   const t3 = yield* T3Client;
   const readRpc = Option.getOrNull(yield* Effect.serviceOption(NativeRpc));
+  // the exact native routes of this deployment's registrations, on which a helper's own thread reads are recognised
+  const nativeRoutes = configuredWorkflowToolRoutes((yield* SupervisionScopeService).config);
   const ids = yield* SupervisorIds;
   const store = yield* ProjectSupervisorStore;
   const teamStore = yield* SupervisorTeamStore;
@@ -412,7 +415,8 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     if (!projection) return;
     if (!validHelper(member, binding, projection) || !(yield* teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch))) return;
     if (readRpc) yield* requests.recordNativeReads(binding.projectId, request.id,
-      yield* collectNativeReads(request, projection, itemId => readRpc.call("orchestration.getTurnItem", {threadId: member.threadId, itemId}), yield* Clock.currentTimeMillis));
+      yield* collectNativeReads(request, projection, itemId => readRpc.call("orchestration.getTurnItem", {threadId: member.threadId, itemId}), yield* Clock.currentTimeMillis,
+        nativeRoutes));
     const message = yield* firstMatch(binding, request.messageId, request.text, projection, member.threadId);
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
     if (!run) {

@@ -4,7 +4,7 @@ import { fingerprint } from "../../src/guidance-store.js";
 import type { InterpretationSubmitResponse } from "../../src/interpretation-submission.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../../src/project-supervisor-store.js";
-import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
+import type { MessageInfo, Projection, RunInfo, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
 import { execute, intEndpoint, intRun, mcpCall, rows, temporaryDirectory, type IntEndpoint, type IntRun } from "./glinint-wiring.js";
 import { installSubmission, setSubmissionStatus, submissionArguments, submissionDetail, type SubmissionItemOptions } from "./interpretation-submit.js";
@@ -84,7 +84,7 @@ export type InterpretationFixture = {
 type Opened = {run: IntRun; endpoint: IntEndpoint; scope: Scope.Closeable};
 
 // `noProject`: the project is a scratch (no project) project, whose chats are supervised only after an explicit start
-export const startInterpretationFixture = (options: {mainThreadId?: string; noProject?: boolean} = {}): Effect.Effect<InterpretationFixture, never, Scope.Scope> =>
+export const startInterpretationFixture = (options: {mainThreadId?: string; noProject?: boolean; config?: Partial<SupervisorSettings>} = {}): Effect.Effect<InterpretationFixture, never, Scope.Scope> =>
   Effect.gen(function* () {
     const mainThreadId = options.mainThreadId ?? "main-interpretation";
     const native = nativeReadState();
@@ -130,7 +130,7 @@ export const startInterpretationFixture = (options: {mainThreadId?: string; noPr
     const open = Effect.gen(function* () {
       const scope = yield* Scope.make();
       return yield* Effect.gen(function* () {
-        const run = yield* intRun({directory, peerUrl: peer.baseUrl,
+        const run = yield* intRun({directory, peerUrl: peer.baseUrl, config: options.config,
           definitions: () => Effect.sync(() => {definitions.reads++; return definitions.current;}),
           catalog: () => ({projects: [{project: {id: interpretationProjectId, title: "Interpretation", workspaceRoot}, available: true}], threads: catalogThreads})}).pipe(Scope.provide(scope));
         const endpoint = yield* intEndpoint(run).pipe(Scope.provide(scope));

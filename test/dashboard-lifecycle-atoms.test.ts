@@ -5,6 +5,7 @@ import { beforeAll, it } from "@effect/vitest";
 import { Context, Deferred, Effect, Exit, Fiber } from "effect";
 import { AsyncResult, type Atom, type AtomRegistry } from "effect/reactivity";
 import { vi } from "vitest";
+import type { GuidanceSnapshot } from "../src/guidance-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { scopedRegistry } from "./support/g7-page.js";
 import { abortOf, held, json, makeBrowser, orAfter, until, type SentRequest } from "./support/g7-browser.js";
@@ -38,11 +39,9 @@ beforeAll(() => Effect.gen(function* () {
 }));
 
 const fenceKey = "supervisor-pending-start";
-const snapshot = (environmentId: string) => ({
-  environmentId, serverVersion: "build", connected: true, lastCycleAt: 1, sendingReady: true, sendingReason: "",
-  settings: { generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null, model: "model",
-    reasoning: "low", dailyTokenBudget: 1, evidenceHours: 1, maxAnchorAgeSeconds: 1 },
-  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], rules: [], mutes: [], activity: [], coverage: "", tokensUsed: 0,
+const snapshot = (environmentId: string): GuidanceSnapshot => ({
+  environmentId, serverVersion: "build", connected: true, lastCycleAt: 1,
+  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], activity: [], coverage: "",
 });
 const candidates = (environment: string) => ({ exceptions: [], message: environment,
   candidates: [{ id: `${environment}-thread`, projectId: "", title: environment, updatedAt: null, active: false, excluded: false }] });

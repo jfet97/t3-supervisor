@@ -19,7 +19,7 @@ COPY --from=build /app/ui-dist ./ui-dist
 COPY --from=build /app/package.json ./package.json
 COPY skills/usage/ ./skills/usage/
 RUN chmod 755 /app/dist/cli.js && ln -s /app/dist/cli.js /usr/local/bin/t3-supervisor && mkdir /data && chown 501:20 /data
-ENV NODE_ENV=production DATA_DIRECTORY=/data T3_URL=http://host.docker.internal:3773
+ENV NODE_ENV=production DATA_DIRECTORY=/data T3_URL=http://host.docker.internal:3773 HEALTH_HOST=0.0.0.0
 USER 501:20
 ARG VERSION=development
 ARG REVISION=unknown
