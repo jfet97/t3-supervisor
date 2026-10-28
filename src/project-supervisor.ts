@@ -11,7 +11,7 @@ import { GuidanceDb } from "./db.js";
 import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs, workspacePreparationPending } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
-import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type InterpretationSources, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
+import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type InterpretationSourceMessage, type InterpretationSources, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import { modelSelection, NativeOperateRpc, NativeRpc, NativeShell, sameModel, supervisorModels, validModelSelection, SupervisorRpcError } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
@@ -43,6 +43,7 @@ import { HelperTransport } from "./supervisor-helper-transport.js";
 import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorTeamController } from "./supervisor-team-controller.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
+import { messageReadItemId } from "./message-read-handle.js";
 
 type SetupCheckoutTarget = DefinitionCheckoutTarget;
 type DefinitionsFailure = DefinitionSourceFailure | DefinitionCheckoutUnavailable;
@@ -1489,16 +1490,19 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const notice = conversation.rootNotice(owner);
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
-        // the genuine requester messages and operative replies since the activation floor, as handles the root reads natively
+        // the genuine requester messages and operative replies since the activation floor, each with the exact native turn item T3 reads it
+        // by, as the projection names it; message IDs stay provenance and are never a read itemId
         const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
         const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
         const ordinalOf = (runId: string | null | undefined) => source.runs.find(run => run.id === runId)?.ordinal;
+        const sourceMessage = (messageId: string): InterpretationSourceMessage => ({messageId, readItemId: messageReadItemId(source, preparing.threadId, messageId)});
         const interpretationSources: InterpretationSources = {
           requestedBy: requester?.kind === "agent" ? {kind: "launching_agent", threadId: requester.threadId} : {kind: "human"},
           requesterMessages: requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal)
-            .slice(-12).map(item => ({messageId: item.messageId, requester: item.requester})),
-          operativeMessageIds: source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
-            (ordinalOf(item.runId) ?? Infinity) <= preparing.sourceOrdinal && (ordinalOf(item.runId) ?? -1) > (contextFloor ?? Infinity)).slice(-6).map(item => item.id)};
+            .slice(-12).map(item => ({...sourceMessage(item.messageId), requester: item.requester})),
+          operativeMessages: source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
+            (ordinalOf(item.runId) ?? Infinity) <= preparing.sourceOrdinal && (ordinalOf(item.runId) ?? -1) > (contextFloor ?? Infinity)).slice(-6)
+            .map(item => sourceMessage(item.id))};
         // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
         const build = (attemptId: string) => {
           const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {

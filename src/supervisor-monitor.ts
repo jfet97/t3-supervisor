@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { freshRuntimeRequestStatus, mainRunNodeReader, timestampMs } from "./domain.js";
 import { monitoringIntervalMinutes, type SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
 import type { Projection, RunInfo, ThreadInfo } from "./types.js";
+import { messageReadItemId } from "./message-read-handle.js";
 
 // the oldest finished ordinary activity is due after at most two minutes, and a Supervisor gets its next check-in no sooner
 // than 30 seconds after the last one was sent
@@ -308,6 +309,7 @@ const messageActivity = (
   message: RecordLike,
   sourceOrdinal: number,
   now: number,
+  readItemId: string | null,
 ): SupervisorMonitorActivity | null => {
   const id = stringValue(message.id);
   const nodeId = stringValue(message.nodeId);
@@ -330,7 +332,7 @@ const messageActivity = (
   const updatedAt = stringValue(message.updatedAt);
   return activity({
     id: itemId,
-    readItemId: null,
+    readItemId,
     type: role === "user" ? "user_message" : "assistant_message",
     status,
     ordinal: run.ordinal,
@@ -495,7 +497,8 @@ export const collectSupervisorActivity = (
     if (!id) continue;
     const canonicalId = `message:${id}`;
     if (records.has(canonicalId) || (context.run.ordinal < ordinal && !trackedIds.has(canonicalId))) continue;
-    const record = messageActivity(projection.thread.id, context.run, context.nodeFor, value, ordinal, now);
+    // the message's published turn item is its exact read handle; until T3 publishes one, the message ID stays provenance only
+    const record = messageActivity(projection.thread.id, context.run, context.nodeFor, value, ordinal, now, messageReadItemId(projection, projection.thread.id, id));
     if (record && !isExcluded(record.id, id, excludedIds)) records.set(record.id, record);
   }
 

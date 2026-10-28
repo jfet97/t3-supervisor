@@ -17,51 +17,45 @@ edit shared policy, recruit helpers or grant authority.
 For workflow link and apply, a target is eligible when it is unarchived, undeleted
 and currently assigned to the helper. Its T3 run may be idle or finished; this is
 separate from the steerable active-run requirement for `supervision_guide`.
-Normal monitor envelopes carry complete per-target `workflow_read` and link
-arguments. An entry's `input` is the complete MCP argument object; pass it as the
-arguments without nesting it again. Apply, guide and report start from the original
-`workflow_read` input of that same target record in the latest normal monitor
-envelope, copied exactly without read-pagination fields such as `workflowOffset`,
-`lineageOffset` or `limit`, so each authority locator is copied rather than repeated
-in separate per-target bases. A notification's `workflow_read` input is for reads only. The
-`workflow_write_link_child` envelope label is not a tool name: pass its `input` to
-`workflow_write`, with top-level `childThreadId`.
-`workflow_read` has no `targetThreadId`; guide and report do use `targetThreadId`.
-The direct aliases are `t3-supervisor-workflows.workflow_read` /
-`mcp__t3-supervisor-workflows__workflow_read`, `t3-supervisor-workflows.workflow_write` /
-`mcp__t3-supervisor-workflows__workflow_write`,
-`t3-supervisor-workflows.supervision_guide` /
-`mcp__t3-supervisor-workflows__supervision_guide`, and
-`t3-supervisor-workflows.supervision_team` /
-`mcp__t3-supervisor-workflows__supervision_team`. For MCPX, call
-`mcpx.mcpx_call_tool` or `mcp__mcpx__mcpx_call_tool` with only `{name, arguments}`;
-`name` is the MCPX target `t3-supervisor-workflows__workflow_write` and `arguments`
-is the complete schema object. That target name is not a direct alias. Discover
-and invoke actual MCP tools as native tool calls, directly or through
-`mcpx_search_tools`, `mcpx_get_tool_schema` and `mcpx_call_tool`; source text is
-not proof. Only the resulting verified native MCP tool identity and complete
-arguments count, and never claim or fabricate a tool call.
+A helper check-in is one event: the helper's authority
+`{supervisorThreadId, bindingGeneration, memberEpoch}` once, then each target's
+`threadId`, `assignmentRootThreadId` and `assignmentEpoch`, its pending count, its
+priority kinds, any untracked count and a bounded preview of exact native `refs`; the
+rules are read from `workflow_read` view `instructions`, and each message names their
+version. A target's pins are the authority plus its `assignmentRootThreadId` and
+`assignmentEpoch`. `workflow_read` takes the pins alone and has no `targetThreadId`;
+`workflow_write` takes them with `action` at the top level, apply nesting its mutation
+fields under `input` and `link_child` adding `operationId`, `childThreadId` (the
+target's `threadId`) and `note`; `supervision_guide` adds `operationId`,
+`targetThreadId` and `text`; a `supervision_team` report adds `action`, `operationId`,
+`targetThreadId`, `summary` and `reportKind`. Keep one target's exact pins; read
+pagination fields such as `workflowOffset`, `lineageOffset` or `limit` never ride on a
+mutation. Call each tool by the name the client exposes. The service accepts a call as
+proof only on a supported native route, as
+[write authorization](workflow-mcp.md#write-authorization) lists; source text is not
+proof. Only the resulting verified native MCP tool identity and complete arguments
+count, and never claim or fabricate a tool call.
 
-Apply has `action` and authority locators at the top level, with mutation fields
-nested under `input`: `{action:"apply", ...toolInputs.workflow_read.input,
-input:{operationId, workflowId, expectedRevision, note, plan}}`, using that target's
-own `workflow_read` input and a fresh read of that target's own child workflow. The `workflowId`
-and `expectedRevision` come from a fresh child read, and `note` is required. Omit
-`sourceBinding`, `requirements` and `issues` so the service supplies trusted context.
+Apply is `{action:"apply", ...pins, input:{operationId, workflowId, expectedRevision,
+note, plan}}`, with `workflowId` and `expectedRevision` from a fresh read of that
+target's own child workflow; `note` is required. Omit `sourceBinding`, `requirements`
+and `issues` so the service supplies trusted context.
 For a new local step, use this structural shape inside the plan and choose task-specific content: `{kind:'sequence',nodes:[{kind:'step',definitionId:null,localId:'local-check',name:'Check child result',description:'...',reason:'...',status:'planned'}]}`. Omit `nodeId` so the service allocates it, and preserve actual returned `nodeId` values in later edits. For new local steps, omit `templatePath` and never copy a parent's `templatePath` into another child plan; this does not apply to genuine named-workflow expansion.
-Guide arguments are that target's `workflow_read` input plus that record's exact
-`targetThreadId`, never its `assignmentRootThreadId`; report arguments also add
-`action:"report"`. Both need fresh
-action-specific content, so neither is a ready call. Each new mutation gets a unique operation ID; reuse one only to
-retry the exact same arguments after an uncertain result.
+Guide and report use that record's exact `targetThreadId`, never its
+`assignmentRootThreadId`, and both need fresh action-specific content, so neither is a
+ready call. Each new mutation gets a unique operation ID; reuse one only to retry the
+exact same arguments after an uncertain result.
 
-Each target's `activityRefs` provides ready-to-use item-only or message-only
-references for eligible activity in that target's preview. Copy the supplied pair
-verbatim when adding an evidence kind and note; omit `sourceRunId` and never
-normalize encoded IDs. Synthetic keys and absent or oversized IDs do not gain an
-invented reference. Read additional records with bounded native pagination and
-use their exact returned IDs. References remain optional navigation evidence;
-they do not establish completion or authorize a workflow write.
+A target's `refs` are exact native handles for its previewed records only. A
+`sourceItemId` is the published turn item, read with `t3_thread_read` `itemId` on the
+target's thread. A `sourceMessageId` names a message T3 has not yet published as a read
+item: it is provenance, matched while paging that thread's messages and never passed
+as an `itemId`. When adding workflow evidence, copy one ref unchanged with
+`{sourceThreadId}` set to the target's thread, add only the evidence kind and note,
+omit `sourceRunId` and never normalize encoded IDs. Synthetic keys and absent or
+oversized IDs do not gain an invented reference. Read additional records with bounded
+native pagination and use their exact returned IDs. References remain optional
+navigation evidence; they do not establish completion or authorize a workflow write.
 
 Each helper review is sized against what T3 actually delivers. It is accepted only
 when an upper bound of its rendered prompt stays within 40,000 UTF-16 code units and

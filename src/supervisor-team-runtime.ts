@@ -1,6 +1,6 @@
 import { collectNativeReads } from "./supervisor-awareness.js";
 import { NativeRpc } from "./supervisor-native.js";
-import {helperCore, helperInstructionsVersion} from "./supervisor-helper-instructions.js";
+import {helperCore} from "./supervisor-helper-instructions.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, HashMap, HashSet, Layer, Option, Ref } from "effect";
 import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
@@ -49,14 +49,15 @@ const helperCheckinSizePolicy = "rendered-40000-body-65536";
 const hasCompletionMarker = (text: string, marker: string): boolean => text.trim().replace(/[\s`*_.,!?:;'"()]+$/u, "").endsWith(marker);
 const isActivityReferenceId = (value: string): boolean => value.length > 0 && value.length <= workflowMutationLimits.maxNativeReferenceLength &&
   value.trim().length > 0;
+// an exact native handle of a previewed record; with its target's threadId as sourceThreadId it is a workflow_write reference
 const helperActivityReference = (sourceThreadId: string, activity: SupervisorMonitorThreadBatch["items"][number]) => {
   if (!isActivityReferenceId(sourceThreadId)) return null;
   if (activity.readItemId !== null)
-    return isActivityReferenceId(activity.readItemId) ? {sourceThreadId, sourceItemId: activity.readItemId} : null;
+    return isActivityReferenceId(activity.readItemId) ? {sourceItemId: activity.readItemId} : null;
   const messagePrefix = "message:";
   if (!activity.id.startsWith(messagePrefix)) return null;
   const sourceMessageId = activity.id.slice(messagePrefix.length);
-  return isActivityReferenceId(sourceMessageId) ? {sourceThreadId, sourceMessageId} : null;
+  return isActivityReferenceId(sourceMessageId) ? {sourceMessageId} : null;
 };
 
 const scopedBatch = (batch: SupervisorMonitorBatch, threads: SupervisorMonitorThreadBatch[]): SupervisorMonitorBatch | null => {
@@ -66,19 +67,14 @@ const scopedBatch = (batch: SupervisorMonitorBatch, threads: SupervisorMonitorTh
     finalizedActivityCount: threads.reduce((count, thread) => count + thread.finalizedActivityCount, 0), threads};
 };
 
+// a notification is one event line: its handles, the exact read that returns its record, and its marker. Only an attempt
+// that was never posted is generated from this; a posted attempt keeps the exact bytes of its receipt
 export function teamNotificationText(binding: BindingRecord, notification: TeamNotification): {text: string; marker: string} {
-    const attempt = notification.deliveryAttempt ?? 0;
-    const marker = `Supervisor team notification ${notification.id} attempt ${attempt} completed`;
-    const envelope = {rootThreadId: binding.threadId, supervisorThreadId: notification.recipientThreadId, bindingGeneration: binding.generation,
-      helperThreadId: notification.recipientThreadId, memberEpoch: notification.memberEpoch,
-      toolInputs: {workflow_read: {input: {supervisorThreadId: notification.recipientThreadId, bindingGeneration: binding.generation, memberEpoch: notification.memberEpoch,
-        ...(notification.assignmentRootThreadId ? {assignmentRootThreadId: notification.assignmentRootThreadId} : {}),
-        ...(notification.assignmentEpoch ? {assignmentEpoch: notification.assignmentEpoch} : {})}}},
-      notification: {id: notification.id, kind: notification.kind, assignmentRootThreadId: notification.assignmentRootThreadId,
-        assignmentEpoch: notification.assignmentEpoch, deliveryAttempt: attempt, remainingAssignmentRoots: notification.remainingAssignmentRoots, message: notification.message,
-        ...(notification.reviewOf ? {reviewOf: notification.reviewOf, reviewChain: notification.reviewChain, reviewNote: notification.reviewNote} : {})}};
-    return {marker, text: `${helperCore}\nService notification ${notification.id} (${notification.kind}): handle it under your notification instructions. End with this exact marker: ${marker}.\nUNTRUSTED_TEAM_NOTIFICATION\n${JSON.stringify(envelope)}\nEND_UNTRUSTED_TEAM_NOTIFICATION`};
-  }
+  const attempt = notification.deliveryAttempt ?? 0;
+  const marker = `Supervisor team notification ${notification.id} attempt ${attempt} completed`;
+  const read = {action: "read", supervisorThreadId: notification.recipientThreadId, bindingGeneration: binding.generation, memberEpoch: notification.memberEpoch};
+  return {marker, text: `${helperCore}\nTeam notification ${notification.id} (${notification.kind}): read it with supervision_team ${JSON.stringify(read)}.\nEnd with: ${marker}`};
+}
 
 // the transport predicate admits only the attributed delivery message. Every run strongly linked to it, by its
 // userMessageId or by the message's own runId, counts; a live run keeps the attempt open. A marker in another
@@ -100,31 +96,24 @@ export function teamNotificationEvidence(projection: Projection, notification: T
   return {message: messages[0], runs, completedRun};
 }
 
-const workflowAuthority = (binding: BindingRecord, member: TeamMember, target: TeamRequestTarget) => ({
-  supervisorThreadId: member.threadId,
-  bindingGeneration: binding.generation,
-  memberEpoch: member.epoch,
-  assignmentRootThreadId: target.assignmentRootThreadId,
-  assignmentEpoch: target.assignmentEpoch,
-});
-
-const helperTargetToolGuidance = (binding: BindingRecord, member: TeamMember, target: TeamRequestTarget, requestId: string,
-  thread: ThreadInfo | undefined) => {
-  const authority = workflowAuthority(binding, member, target);
-  const unarchived = Boolean(thread && !thread.archivedAt && !thread.deletedAt);
-  return {
-    toolInputs: {
-      workflow_read: {input: {...authority}},
-      ...(unarchived ? {workflow_write_link_child: {input: {action: "link_child", ...authority,
-        operationId: `${requestId}:link:${fingerprint(target.targetThreadId).slice(0, 12)}`,
-        childThreadId: target.targetThreadId, note: "Link the current assigned child workflow."}}} : {}),
-    },
-    ...(unarchived ? {} : {workflowWriteEligibility: thread ? "target_archived_or_deleted" as const : "target_thread_unavailable" as const}),
-  };
+// one check-in target: its pins, counts and exact handles; whether it may be written is stated only when it may not
+const checkinTarget = (target: TeamRequestTarget, monitored: SupervisorMonitorThreadBatch, thread: ThreadInfo | undefined) => {
+  const writable = Boolean(thread && !thread.archivedAt && !thread.deletedAt);
+  const refs = monitored.previewItems.flatMap(item => {
+    const reference = helperActivityReference(target.targetThreadId, item);
+    return reference ? [reference] : [];
+  });
+  return {threadId: target.targetThreadId, assignmentRootThreadId: target.assignmentRootThreadId, assignmentEpoch: target.assignmentEpoch,
+    pending: monitored.pendingItemCount, ...(monitored.priorityKinds.length ? {priority: monitored.priorityKinds} : {}),
+    ...(monitored.untrackedCount ? {untracked: monitored.untrackedCount} : {}), ...(refs.length ? {refs} : {}),
+    ...(writable ? {} : {writable: false, reason: thread ? "target_archived_or_deleted" as const : "target_thread_unavailable" as const})};
 };
 
-const helperReviewText = (envelope: unknown, completionMarker: string): string =>
-  `${helperCore}\nHelper check-in: assess the included targets under your check-in instructions. End with this exact marker: ${completionMarker}.\nUNTRUSTED_TEAM_MONITOR_ENVELOPE\n${JSON.stringify(envelope)}\nEND_UNTRUSTED_TEAM_MONITOR_ENVELOPE`;
+// a check-in is one event: the helper's authority once, its targets, the handles of its open notifications and its marker
+const helperCheckinText = (authority: {supervisorThreadId: string; bindingGeneration: number; memberEpoch: number},
+  targets: ReadonlyArray<ReturnType<typeof checkinTarget>>, notifications: ReadonlyArray<TeamNotification>, completionMarker: string): string =>
+  `${helperCore}\nHelper check-in: assess these targets.\nauthority ${JSON.stringify(authority)}\ntargets ${JSON.stringify(targets)}\n` +
+  `${notifications.length ? `notifications ${JSON.stringify(notifications.map(value => ({id: value.id, kind: value.kind})))}\n` : ""}End with: ${completionMarker}`;
 
 
 type Cancel = Deferred.Deferred<void> | undefined;
@@ -555,8 +544,10 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     const requestId = `team-ready:${readinessKey}:${yield* ids.uuid}`;
     const completionMarker = `Supervisor team readiness ${requestId} completed`;
     const operationId = `team-ready:${readinessKey}`;
-    const text = `${helperCore}
-This readiness turn grants no operational assignment. Read workflow_read view instructions using ${JSON.stringify({supervisorThreadId: member.threadId, bindingGeneration: binding.generation, memberEpoch: member.epoch, view: "instructions"})}. Reference version: ${helperInstructionsVersion}. Then call t3-supervisor-workflows supervision_team with ${JSON.stringify({action: "ready", supervisorThreadId: member.threadId, bindingGeneration: binding.generation, memberEpoch: member.epoch, operationId})}. Finish: ${completionMarker}.`;
+    // the exact ready arguments are the native proof the ready action verifies, so they stay byte-exact in the message
+    const read = {supervisorThreadId: member.threadId, bindingGeneration: binding.generation, memberEpoch: member.epoch, view: "instructions"};
+    const ready = {action: "ready", supervisorThreadId: member.threadId, bindingGeneration: binding.generation, memberEpoch: member.epoch, operationId};
+    const text = `${helperCore}\nReadiness: read them with workflow_read ${JSON.stringify(read)}, then call supervision_team ${JSON.stringify(ready)}.\nEnd with: ${completionMarker}`;
     const request = yield* requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
       kind: "review", taskId: null, text, batch: null, completionMarker, teamMemberEpoch: member.epoch}, now);
     yield* dispatchReadiness(binding, member, request, cancel);
@@ -878,6 +869,7 @@ This readiness turn grants no operational assignment. Read workflow_read view in
       value.memberEpoch === member.epoch && value.state === "delivered" && !notificationClosed(value));
     const threadsById = new Map(threads.map(thread => [thread.id, thread]));
     const monitorThreadsById = new Map(batch.batch.threads.map(thread => [thread.threadId, thread]));
+    const authority = {supervisorThreadId: member.threadId, bindingGeneration: binding.generation, memberEpoch: member.epoch};
     const buildReview = (targets: TeamRequestTarget[]) => {
       const targetThreads: SupervisorMonitorThreadBatch[] = [];
       for (const target of targets) {
@@ -893,18 +885,9 @@ This readiness turn grants no operational assignment. Read workflow_read view in
           ...notification.remainingAssignmentRoots];
         return !notificationRoots.length || notificationRoots.some(root => selectedAssignmentRoots.has(root));
       });
-      const envelope = {rootThreadId: binding.threadId, supervisorThreadId: member.threadId, bindingGeneration: binding.generation,
-        helperThreadId: member.threadId, requestId, memberEpoch: member.epoch,
-        targets: targets.map(target => ({...target,
-          ...helperTargetToolGuidance(binding, member, target, requestId, threadsById.get(target.targetThreadId)),
-          activityRefs: (monitorThreadsById.get(target.targetThreadId)?.previewItems ?? []).flatMap(item => {
-            const reference = helperActivityReference(target.targetThreadId, item);
-            return reference ? [reference] : [];
-          })})),
-        notifications: notifications.map(value => ({id: value.id, kind: value.kind, assignmentRootThreadId: value.assignmentRootThreadId,
-          assignmentEpoch: value.assignmentEpoch, deliveryAttempt: value.deliveryAttempt ?? 0, remainingAssignmentRoots: value.remainingAssignmentRoots, message: value.message})),
-        batch: {...reviewBatch, threads: reviewBatch.threads.map(({items: _items, previewItems, ...thread}) => ({...thread, items: previewItems}))}};
-      return {batch: reviewBatch, targets, notifications, text: helperReviewText(envelope, completionMarker)};
+      const text = helperCheckinText(authority, targets.map((target, index) => checkinTarget(target, targetThreads[index]!, threadsById.get(target.targetThreadId))),
+        notifications, completionMarker);
+      return {batch: reviewBatch, targets, notifications, text};
     };
     // a check-in fits only when its T3 rendering stays within the bound and its delivery stays provable
     const budget = (text: string) => helperDeliveryBudget(conversationRequestMessageId(requestId), text, maxHelperCheckinRenderedLength);

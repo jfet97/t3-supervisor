@@ -1,74 +1,19 @@
-import { engagedTask } from "./support/engaged-task.js";
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Clock, Context, Deferred, Effect, Fiber, Layer } from "effect";
+import { Clock, Deferred, Effect, Fiber } from "effect";
+import { TestClock } from "effect/testing";
 import { fingerprint } from "../src/guidance-store.js";
-import { defaultSupervisorModel, type TaskRecord } from "../src/project-supervisor-store.js";
-import { SupervisorPlanningController } from "../src/supervisor-planning-controller.js";
-import { createPlanningAttempt } from "../src/supervisor-planning.js";
+import { createPlanningAttempt, planningDraftInstruction, planningHoldText, planningReleaseText, resolvePlanningAttempt, startPlanningAttempt } from "../src/supervisor-planning.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
-import { ThreadPolicyStore } from "../src/thread-policy.js";
-import { workflowToolNames } from "../src/workflow-write-evidence.js";
-import {WorkflowStateStore} from "../src/workflow-state-store.js";
 import {helperInstructions, helperInstructionsVersion} from "../src/supervisor-helper-instructions.js";
 import {goldenSnapshot} from "./support/c1-workflow-fixture.js";
 import {proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {planBranches, planEntities, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import type {WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
-import type { Projection, ThreadInfo } from "../src/types.js";
-import { policyLayer, supervisionStores, temporaryDirectory } from "./support/g11-stores.js";
-import { teamControllers } from "./support/g11-team.js";
+import type { ThreadInfo } from "../src/types.js";
+import { planningFixture as fixture } from "./support/planning-fixture.js";
 
-const fixture = (rpc?: NativeRpcShape) => Effect.gen(function* () {
-  const directory = yield* temporaryDirectory("planning-controller-");
-  const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer({dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused",
-    excludedThreadIds: [], healthPort: 0})), ThreadPolicyStore);
-  const binding = {...yield* stores.supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};
-  yield* stores.supervisors.setBinding(binding);
-  let task: TaskRecord = {id: "task-a", sourceHash: fingerprint("Update the application"), threadId: "main", projectId: "project", sourceRunId: "source-run",
-    sourceMessageId: "request-a", status: "inferred", objective: "Update the application", reason: "Requested work", updatedAt: 0,
-    requestText: "Update the application", supervisorThreadId: binding.threadId, messageId: "interpretation-a", dispatchedAt: null,
-    replayCount: 0, supervisorRunId: null, sourceOrdinal: 1};
-  yield* stores.supervisors.saveTask(task);
-  const threads: ThreadInfo[] = [
-    {id: "main", title: "Main", projectId: "project", lineage: {parentThreadId: null, relationshipToParent: null}, runtimeMode: "full-access", interactionMode: "default"},
-    {id: binding.threadId, title: "Supervisor", projectId: "project", lineage: {parentThreadId: "main", relationshipToParent: "subagent"},
-      runtimeMode: "full-access", interactionMode: "default"},
-  ];
-  const projections = new Map<string, Projection>(threads.map(thread => [thread.id, {thread, runs: [], nodes: [], messages: [], turnItems: [], runtimeRequests: []}]));
-  projections.get("main")!.messages.push({id: "request-a", threadId: "main", runId: "source-run", nodeId: "source-node", role: "user", text: task.requestText,
-    streaming: false, createdBy: "user", creationSource: "web", createdAt: "2026-10-27T12:00:00Z", updatedAt: "2026-10-27T12:00:00Z"});
-  projections.get("main")!.runs.push({id: "source-run", threadId: "main", ordinal: 1, status: "completed", rootNodeId: "source-node", providerThreadId: "provider-main",
-    requestedAt: "2026-10-27T12:00:00Z", startedAt: "2026-10-27T12:00:00Z", completedAt: "2026-10-27T12:01:00Z"});
-  (projections.get("main")!.nodes as Record<string, unknown>[]).push({id: "source-node", kind: "root_turn", threadId: "main", runId: "source-run", rootNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
-  task = engagedTask(task, projections.get("main")!);
-  yield* stores.supervisors.saveTask(task);
-  const details = new Map<string, unknown>();
-  const built = yield* teamControllers(stores, policy, {listThreads: () => Effect.succeed(threads), projection: id => Effect.succeed(projections.get(id)!),
-    turnItem: id => Effect.succeed(details.get(id))}, {rpc});
-  const context = yield* Layer.build(SupervisorPlanningController.layer.pipe(Layer.provide(Layer.succeedContext(built.context))));
-  const controller = Context.get(context, SupervisorPlanningController);
-  const proof = (input: Record<string, unknown>) => {
-    const root = projections.get(binding.threadId)!;
-    const itemId = `planning-tool-${details.size}`;
-    const runId = `caller-${itemId}`, rootNodeId = `root-${itemId}`, nodeId = `node-${itemId}`, providerThreadId = "provider-root";
-    const detail = {id: itemId, type: "dynamic_tool", threadId: binding.threadId, runId, nodeId, providerThreadId,
-      providerTurnId: `turn-${itemId}`, nativeItemRef: {driver: "codex", nativeId: itemId, strength: "strong"},
-      parentItemId: null, ordinal: details.size + 1, status: "completed", toolNonExecutionKind: null,
-      toolName: workflowToolNames.planning.direct[0], input};
-    details.set(itemId, detail);
-    root.runs.push({id: runId, threadId: binding.threadId, ordinal: root.runs.length + 1, status: "completed",
-      requestedAt: "2026-10-27T12:00:00Z", startedAt: null, completedAt: null, rootNodeId, providerThreadId});
-    (root.nodes as Record<string, unknown>[]).push({id: rootNodeId, kind: "root_turn", threadId: binding.threadId, runId, rootNodeId, providerThreadId, status: "completed"},
-      {id: nodeId, kind: "dynamic_tool", threadId: binding.threadId, runId, rootNodeId, providerThreadId, parentNodeId: rootNodeId, status: "completed"});
-    root.turnItems!.push({...detail, input: "snapshot-summary"});
-  };
-  const args = {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, taskId: task.id, taskRevision: task.sourceHash,
-    action: "pause", operationId: "pause-a", targetThreadIds: ["main"], reason: "Prepare the requested plan"};
-  return {stores, binding, task, threads, projections, controller, args, proof, workflows: built.workflows,
-    states: Context.get(built.context, WorkflowStateStore)};
-});
+type Answer = {status: string; reason?: string; attempt: {attemptId: string; deadline: string; draftInstruction?: string}};
 
 it.effect("a registering helper reads its own reference on demand without receiving root instructions", () => Effect.gen(function* () {
   const f = yield* fixture();
@@ -90,16 +35,38 @@ it.effect("a planning pause needs its exact native owner call and preserves one 
   assert.notEqual(unproven.status, "recorded");
   assert.deepEqual(yield* f.stores.requests.planningAttempts("project"), []);
   f.proof(f.args);
-  const first = (yield* f.controller.call(f.args)) as {status: string; attempt?: {id: string; deadline: number}};
+  const first = (yield* f.controller.call(f.args)) as Answer;
   assert.equal(first.status, "recorded");
-  const replay = (yield* f.controller.call(f.args)) as typeof first;
-  assert.deepEqual(replay.attempt?.id, first.attempt?.id);
-  assert.equal(replay.attempt?.deadline, first.attempt?.deadline);
+  const [stored] = yield* f.stores.requests.planningAttempts("project");
+  assert.ok(stored);
+  // the owner sees the attempt's states and its drafter's task; delivery identities, texts and hashes stay stored
+  assert.deepEqual(first.attempt, {attemptId: stored.id, state: "open", deadline: new Date(stored.deadline).toISOString(), resolution: null,
+    targets: [{threadId: "main", state: "requested", ack: null}], draft: null, draftInstruction: planningDraftInstruction(stored)});
+  for (const hidden of [stored.targets[0]!.hold.messageId, stored.targets[0]!.hold.commandId, stored.requestHash!])
+    assert.ok(!JSON.stringify(first).includes(hidden), hidden);
+  const replay = (yield* f.controller.call(f.args)) as Answer;
+  assert.deepEqual(replay, first, "an identical retry answers the original attempt");
   assert.equal((yield* f.stores.requests.planningAttempts("project")).length, 1);
   const changed = {...f.args, reason: "A different pause under the same operation"};
   f.proof(changed);
   const conflict = (yield* f.controller.call(changed)) as {reason?: string};
   assert.equal(conflict.reason, "operation_id_conflict");
+  // an explicit read shows the drafter's task again while no drafter is attached; other answers never repeat it
+  const read = {...f.args, action: "read"};
+  delete (read as {operationId?: unknown}).operationId;
+  delete (read as {targetThreadIds?: unknown}).targetThreadIds;
+  delete (read as {reason?: unknown}).reason;
+  f.proof(read);
+  assert.deepEqual(yield* f.controller.call(read), {status: "ready", attempts: [first.attempt]});
+  const release = {...f.args, action: "release", operationId: "release-a", attemptId: stored.id, resolution: "no_plan"};
+  delete (release as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(release);
+  const released = (yield* f.controller.call(release)) as Answer;
+  assert.equal(released.status, "recorded");
+  assert.equal(released.attempt.draftInstruction, undefined);
+  assert.deepEqual(Object.keys(released.attempt), ["attemptId", "state", "deadline", "resolution", "targets", "draft"]);
+  f.proof(read);
+  assert.equal(((yield* f.controller.call(read)) as {attempts: Answer["attempt"][]}).attempts[0]!.draftInstruction, undefined, "a released attempt offers no drafter");
 }));
 
 it.live("the watchdog closes and releases a pause while its original native send is still awaiting a receipt", () => Effect.gen(function* () {
@@ -135,7 +102,8 @@ it.live("the watchdog closes and releases a pause while its original native send
   const [expired] = yield* f.stores.requests.planningAttempts("project");
   assert.equal(expired?.state, "expired");
   assert.equal(expired?.deadline, pause.deadline);
-  assert.match(String(sent.find(payload => String(payload.messageId).includes(":release:"))?.text), /Continue with your authorised task/);
+  assert.equal(String(sent.find(payload => String(payload.messageId).includes(":release:"))?.text),
+    "Planning pause watchdog-pause released (deadline passed). Continue your authorised task; human Stops and limits still apply.");
   yield* Deferred.succeed(holdReply, {sequence: 1});
   yield* Fiber.join(originalSend);
   const [afterLateReceipt] = yield* f.stores.requests.planningAttempts("project");
@@ -152,23 +120,27 @@ it.effect("a source-bound native pause observes the actor's own ACK and confirms
   }};
   const f = yield* fixture(rpc);
   f.proof(f.args);
-  const result = (yield* f.controller.call(f.args)) as {attempt: {id: string}};
+  const result = (yield* f.controller.call(f.args)) as Answer;
   yield* f.controller.reconcile(f.binding);
   const hold = sent.find(item => String(item.messageId).includes(":hold:"))!;
   assert.ok(hold, "the exact native source admits the actual hold send");
+  const [anchored] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(hold.text, planningHoldText(anchored!, anchored!.targets[0]!));
+  assert.equal(anchored!.targets[0]!.hold.text, hold.text, "the stored bytes are the sent bytes");
+  assert.ok(String(hold.text).includes(`\n\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: result.attempt.attemptId, targetThreadId: "main"})}\n\`\`\`\n`));
   const main = f.projections.get("main")!;
   main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
-    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: result.attempt.id, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: result.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
   (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
   yield* f.controller.reconcile(f.binding);
   assert.equal((yield* f.stores.requests.planningAttempts("project"))[0]?.targets[0]?.state, "acknowledged");
-  const release = {...f.args, action: "release", attemptId: result.attempt.id, operationId: "release-a", resolution: "continue"};
+  const release = {...f.args, action: "release", attemptId: result.attempt.attemptId, operationId: "release-a", resolution: "continue"};
   delete (release as {targetThreadIds?: unknown}).targetThreadIds;
   f.proof(release);
   assert.equal(((yield* f.controller.call(release)) as {status: string}).status, "recorded");
   yield* f.controller.reconcile(f.binding);
   const notice = sent.find(item => String(item.messageId).includes(":release:"))!;
-  assert.ok(notice);
+  assert.equal(notice.text, `Planning pause ${result.attempt.attemptId} released (planning resolved). Continue your authorised task; human Stops and limits still apply.`);
   main.messages.push({id: String(notice.messageId), threadId: "main", runId: "source-run", nodeId: "source-node", role: "user", streaming: false,
     text: String(notice.text), creationSource: "server", createdBy: "system", createdAt: "2026-10-27T12:01:02Z", updatedAt: "2026-10-27T12:01:02Z"});
   yield* f.controller.reconcile(f.binding);
@@ -248,8 +220,8 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
     f.args.targetThreadIds.push(coordinator.id);
   }
   f.proof(f.args);
-  const paused = (yield* f.controller.call(f.args)) as {attempt: {id: string}};
-  const input = {...f.args, action: "apply_return", operationId: "return-a", attemptId: paused.attempt.id, workflowId: document.workflowId,
+  const paused = (yield* f.controller.call(f.args)) as Answer;
+  const input = {...f.args, action: "apply_return", operationId: "return-a", attemptId: paused.attempt.attemptId, workflowId: document.workflowId,
     expectedRevision: document.revision, returnId: document.returns[0]!.returnId, reason: "Apply the chosen return."};
   delete (input as {targetThreadIds?: unknown}).targetThreadIds;
   f.proof(input);
@@ -257,12 +229,12 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
   yield* f.controller.reconcile(f.binding);
   const main = f.projections.get("main")!;
   main.messages.push({id: "return-ack", threadId: "main", runId: "source-run", nodeId: "return-ack-node", role: "assistant", streaming: false,
-    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.id, targetThreadId: "main"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
   (main.nodes as Record<string, unknown>[]).push({id: "return-ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
   if (execution === "app_run") {
     const coordinator = f.projections.get("coordinator")!;
     coordinator.messages.push({id: "coordinator-ack", threadId: "coordinator", runId: "coordinator-run", nodeId: "coordinator-ack-node", role: "assistant", streaming: false,
-      text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.id, targetThreadId: "coordinator"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
+      text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.attemptId, targetThreadId: "coordinator"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
     (coordinator.nodes as Record<string, unknown>[]).push({id: "coordinator-ack-node", kind: "assistant_message", threadId: "coordinator", runId: "coordinator-run", rootNodeId: "coordinator-root", parentNodeId: "coordinator-root", providerThreadId: "provider-coordinator", status: "completed"});
   }
   yield* f.controller.reconcile(f.binding);
@@ -334,7 +306,7 @@ it.effect("one new drafting task returns quietly to its owner and is cleaned up 
   const f = yield* fixture(rpc);
   const now = yield* Clock.currentTimeMillis;
   f.proof(f.args);
-  const paused = (yield* f.controller.call(f.args)) as {attempt: {id: string}};
+  const paused = (yield* f.controller.call(f.args)) as Answer;
   const child: ThreadInfo = {id: "writer", title: "Planning writer", projectId: "project", lineage: {parentThreadId: f.binding.threadId, relationshipToParent: "subagent"}, runtimeMode: "full-access", interactionMode: "default"};
   f.threads.push(child);
   const record = {id: "draft-task", childThreadId: child.id, origin: "app_owned", status: "completed", startedAt: new Date(now - 1).toISOString()};
@@ -344,20 +316,33 @@ it.effect("one new drafting task returns quietly to its owner and is cleaned up 
     nodes: [{id: "draft-root", kind: "root_turn", threadId: child.id, runId: "draft-run", rootNodeId: "draft-root", providerThreadId: "provider-writer", status: "completed"},
       {id: "draft-answer", kind: "assistant_message", threadId: child.id, runId: "draft-run", rootNodeId: "draft-root", parentNodeId: "draft-root", providerThreadId: "provider-writer", status: "completed"}],
     messages: [{id: "draft-content", threadId: child.id, runId: "draft-run", nodeId: "draft-answer", role: "assistant", text: "A read-only draft for the owner to assess.", streaming: false,
-      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()}], turnItems: [], runtimeRequests: []});
-  const input = {...f.args, action: "attach_draft", operationId: "attach-a", attemptId: paused.attempt.id, draftThreadId: child.id, draftTaskId: record.id};
+      createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()}],
+    // a provider reply's published turn item: an opaque ID no message ID can be turned into
+    turnItems: [{id: "turn-item:provider:claude:native-turn-7:item-3", type: "assistant_message", messageId: "draft-content", threadId: child.id, runId: "draft-run",
+      text: "A read-only draft for the owner to assess."}], runtimeRequests: []});
+  const input = {...f.args, action: "attach_draft", operationId: "attach-a", attemptId: paused.attempt.attemptId, draftThreadId: child.id, draftTaskId: record.id};
   delete (input as {targetThreadIds?: unknown}).targetThreadIds;
   f.proof(input);
   assert.equal(((yield* f.controller.call(input)) as {reason: string}).reason, "planning_draft_not_new_for_attempt");
   record.startedAt = new Date(now).toISOString();
-  assert.equal(((yield* f.controller.call(input)) as {status: string}).status, "recorded");
+  const attached = (yield* f.controller.call(input)) as Answer & {attempt: {draft: unknown}};
+  assert.equal(attached.status, "recorded");
+  assert.deepEqual(attached.attempt.draft, {state: "working", taskId: "draft-task"});
+  assert.equal(attached.attempt.draftInstruction, undefined, "an attached drafter is not offered again");
   yield* f.controller.reconcile(f.binding);
   const ready = (yield* f.stores.requests.planningAttempts("project"))[0]!;
   assert.equal(ready.draft?.state, "returned");
   assert.equal(ready.draft?.resultMessageId, "draft-content");
   const notice = sent.find(command => command.threadId === f.binding.threadId)!;
   assert.deepEqual(notice.dispatchMode, {type: "queue_after_active"}, "the draft never steers the owner's thinking");
-  const release = {...f.args, action: "release", operationId: "release-draft", attemptId: paused.attempt.id, resolution: "no_plan"};
+  // the notice carries the result's exact read, which the owner's answer no longer repeats: the published item of the reply, never its message ID
+  assert.equal(notice.text, `Planning draft for pause ${ready.id} is ready: read it with t3_thread_read {"threadId":"writer","itemId":"turn-item:provider:claude:native-turn-7:item-3"} (message draft-content). Check ACKs with supervision_planning read and re-read current operative work before adopting it; publish nothing automatically and start no new wait.`);
+  const named = JSON.parse(/t3_thread_read (\{[^}]*\})/u.exec(String(notice.text))![1]!) as {threadId: string; itemId: string};
+  const resolved = f.projections.get(named.threadId)!.turnItems!.find(item => item.id === named.itemId);
+  assert.equal(resolved?.messageId, "draft-content", "the exact lookup returns the drafter's result");
+  assert.equal(f.projections.get(named.threadId)!.turnItems!.some(item => item.id === "draft-content"), false, "the message ID is no item");
+  assert.equal(ready.draft?.ownerNotice?.text, notice.text);
+  const release = {...f.args, action: "release", operationId: "release-draft", attemptId: paused.attempt.attemptId, resolution: "no_plan"};
   delete (release as {targetThreadIds?: unknown}).targetThreadIds;
   f.proof(release);
   assert.equal(((yield* f.controller.call(release)) as {status: string}).status, "recorded");
@@ -368,4 +353,71 @@ it.effect("one new drafting task returns quietly to its owner and is cleaned up 
   assert.equal((yield* f.stores.requests.planningAttempts("project"))[0]!.draft?.cleanupConfirmedAt, now);
   yield* f.controller.reconcile(f.binding);
   assert.equal(sent.filter(command => command.type !== "message.dispatch").length, 2, "confirmed cleanup is not posted twice");
+}));
+
+it.effect("an uncertain hold or release keeps its stored bytes and identities: never resent or re-rendered, only reconciled; new deliveries use the new texts", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+    sent.push({...payload});return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+  }};
+  const f = yield* fixture(rpc);
+  const now = yield* Clock.currentTimeMillis;
+  const main = f.projections.get("main")!;
+  const attempt = (id: string) => createPlanningAttempt({id, operationId: `${id}-operation`, projectId: "project", mainThreadId: "main",
+    ownerThreadId: f.binding.threadId, bindingGeneration: f.binding.generation, taskId: f.task.id, taskRevision: f.task.sourceHash,
+    reason: "Prepare the plan", createdAt: now, timeoutMs: 60_000, targets: [{threadId: "main", recipientThreadId: "main", scope: "implementation"}]});
+  const stored = () => Effect.map(f.stores.requests.planningAttempts("project"), rows => rows.find(row => row.id === "legacy-pause")!);
+  // a hold an earlier version attempted with its own wording, whose outcome is unknown
+  const legacyHold = "The Supervisor is preparing a plan: Prepare the plan\nPlanning pause legacy-pause; scope: implementation. Deadline: earlier wording.";
+  const begun = startPlanningAttempt(attempt("legacy-pause"), now);
+  const hold = {...begun.targets[0]!.hold, state: "uncertain" as const, attemptedAt: now, text: legacyHold};
+  yield* f.stores.requests.savePlanningAttempt({...begun, targets: [{...begun.targets[0]!, hold}]});
+  const server = (id: string, text: string) => ({id, threadId: "main", runId: "source-run", nodeId: "source-node", role: "user" as const, streaming: false,
+    text, creationSource: "server", createdBy: "system", createdAt: "2026-10-27T12:01:02Z", updatedAt: "2026-10-27T12:01:02Z"});
+  yield* f.controller.reconcile(f.binding);
+  assert.equal(sent.length, 0, "an uncertain hold is never sent again");
+  // the same message identity carrying today's rendering is not the stored hold
+  const observed = server(hold.messageId, planningHoldText(begun, begun.targets[0]!));
+  main.messages.push(observed);
+  yield* f.controller.reconcile(f.binding);
+  assert.deepEqual((yield* stored()).targets[0]!.hold, hold, "only the stored bytes confirm it");
+  observed.text = legacyHold;
+  yield* f.controller.reconcile(f.binding);
+  assert.deepEqual((yield* stored()).targets[0]!.hold, {...hold, state: "sent"});
+  assert.equal(sent.length, 0);
+  // the store refuses to replace attempted bytes with a re-rendering
+  const confirmed = yield* stored();
+  const rerendered = yield* Effect.flip(f.stores.requests.savePlanningAttempt({...confirmed, targets: [{...confirmed.targets[0]!,
+    hold: {...confirmed.targets[0]!.hold, text: planningHoldText(confirmed, confirmed.targets[0]!)}}]}));
+  assert.equal((rerendered as {row?: string}).row, "planning_attempt_identity");
+  // a release an earlier version attempted with its own wording, whose outcome is unknown: neither the owner's pass nor the watchdog resends it
+  const releasing = resolvePlanningAttempt(confirmed, "no_plan", now + 1);
+  const legacyRelease = "Planning pause legacy-pause is released for implementation: a shared plan is not needed. Earlier wording.";
+  const release = {...releasing.targets[0]!.release!, state: "uncertain" as const, attemptedAt: now + 1, text: legacyRelease};
+  yield* f.stores.requests.savePlanningAttempt({...releasing, targets: [{...releasing.targets[0]!, release}]});
+  yield* f.controller.reconcile(f.binding);
+  yield* TestClock.adjust("3 seconds");
+  assert.equal(sent.length, 0, "an uncertain release is never sent again");
+  const observedRelease = server(release.messageId, planningReleaseText(releasing, releasing.targets[0]!));
+  main.messages.push(observedRelease);
+  yield* f.controller.reconcile(f.binding);
+  assert.deepEqual((yield* stored()).targets[0]!.release, release);
+  assert.equal((yield* stored()).state, "releasing");
+  observedRelease.text = legacyRelease;
+  yield* f.controller.reconcile(f.binding);
+  const released = yield* stored();
+  assert.deepEqual(released.targets[0]!.release, {...release, state: "sent"});
+  assert.equal(released.targets[0]!.state, "released");
+  assert.equal(released.state, "resolved");
+  assert.equal(sent.length, 0);
+  // a new attempt's first delivery uses the current text under its own stored identities
+  const fresh = attempt("fresh-pause");
+  yield* f.stores.requests.savePlanningAttempt(fresh);
+  yield* f.controller.reconcile(f.binding);
+  const [dispatch] = sent;
+  const anchored = (yield* f.stores.requests.planningAttempts("project")).find(row => row.id === "fresh-pause")!;
+  assert.equal(sent.length, 1);
+  assert.deepEqual({commandId: dispatch!.commandId, messageId: dispatch!.messageId, text: dispatch!.text},
+    {commandId: fresh.targets[0]!.hold.commandId, messageId: fresh.targets[0]!.hold.messageId, text: planningHoldText(anchored, anchored.targets[0]!)});
+  assert.equal(anchored.targets[0]!.hold.text, dispatch!.text);
 }));

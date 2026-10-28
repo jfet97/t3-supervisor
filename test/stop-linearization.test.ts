@@ -543,19 +543,28 @@ it.live("CT-LIN-06: guide: a Stop committed when the steer frame arrives keeps t
   installToolCall(f, helper, workflowToolNames.guide.direct[0], payload);
   const {seen, commit} = stopOnArrival(f);
   f.peer.onRpc = entry => Effect.as(commit(entry), undefined);
-  const result = (yield* f.core.teamController.guide(payload)) as {status: string; requestId: string; commandId: string; messageId: string};
+  const result = (yield* f.core.teamController.guide(payload)) as {status: string; operationId: string; targetThreadId: string};
   assert.equal(seen.stoppedAtArrival, true);
   assert.equal(result.status, "accepted");
-  assert.equal(result.commandId, `${result.requestId}:command:0`);
+  // the answer is the compact receipt; the request identity stays in the team store and the command and message in the native dispatch
+  const [pending] = yield* f.core.team.unresolvedRequests(binding);
+  const [sent] = dispatches(f);
+  assert.equal(sent!.commandId, `${pending!.requestId}:command:0`);
   assert.deepEqual(dispatches(f).map(value => ({...dispatched(value), dispatchMode: value.dispatchMode})), [{type: "message.dispatch",
-    commandId: result.commandId, messageId: result.messageId, threadId: "branch", text: payload.text, dispatchMode: {type: "steer_active", targetRunId: "branch-run"}}]);
+    commandId: sent!.commandId, messageId: sent!.messageId, threadId: "branch", text: payload.text, dispatchMode: {type: "steer_active", targetRunId: "branch-run"}}]);
   const receipts = Effect.map(rows(f.core.sql, "SELECT document FROM supervisor_team_tool_receipts"), (found) => found.map(value => JSON.parse(String(value.document)) as unknown));
-  assert.deepEqual(yield* receipts, [result]);
+  const accepted = yield* receipts;
+  const [record] = accepted as Array<{status: string; operationId: string; targetThreadId: string; routedThreadId: string; requestId: string; commandId: string}>;
+  assert.equal(accepted.length, 1);
+  assert.deepEqual({status: record!.status, operationId: record!.operationId, targetThreadId: record!.targetThreadId, routedThreadId: record!.routedThreadId}, result,
+    "the answer is the stored accepted record's compact receipt");
+  assert.equal(record!.requestId, pending!.requestId);
+  assert.equal(record!.commandId, sent!.commandId);
   assert.deepEqual((yield* f.core.team.unresolvedRequests(binding)).map(request => ({requestId: request.requestId, state: request.state})),
-    [{requestId: result.requestId, state: "pending"}]);
+    [{requestId: pending!.requestId, state: "pending"}]);
   f.peer.onRpc = null;
   yield* f.runOnce;
-  assert.deepEqual(yield* receipts, [result]);
+  assert.deepEqual(yield* receipts, accepted);
   assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch"]);
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 10_000});

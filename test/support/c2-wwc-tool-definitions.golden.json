@@ -1,7 +1,7 @@
 {
   "workflowReadToolDefinition": {
     "name": "workflow_read",
-    "description": "Read bounded semantic workflow records for this current Supervisor binding and a fresh main-thread descendant summary, including retained archived descendants and incompatible older records. Writes accept only strong native item references authorized by the existing evidence verifier. currentAgreementKey only marks content matching a retained snapshot; it does not prove current acceptance, execution, or definition validity. The main workflow's contributions list main-reported external work with its untrusted summary and references and the root's current assessment; none of it proves execution or completes a step.",
+    "description": "Read this Supervisor binding's workflow documents, or one view: status, context, definitions, instructions, interpretation or check. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -64,6 +64,18 @@
           ],
           "description": "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: the project.yaml index, or the exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."
         },
+        "section": {
+          "type": "string",
+          "description": "With view instructions: one section id from its index. With view interpretation: \"plan\", read only when a plan is needed. With view context: \"conversation\", \"plan\" or \"diagnostics\"."
+        },
+        "revision": {
+          "type": "string",
+          "enum": [
+            "approved",
+            "observed"
+          ],
+          "description": "With view definitions: the approved definitions of the task (default) or the checkout's current ones."
+        },
         "definitionIds": {
           "type": "array",
           "maxItems": 50,
@@ -87,7 +99,7 @@
   },
   "workflowWriteToolDefinition": {
     "name": "workflow_write",
-    "description": "Create the main draft, link a verified live descendant, assess a main-reported external contribution result, or update one semantic workflow with revision CAS. apply accepts a nested sequence/parallel plan and its unchanged source-bound requirements; omitted fields retain current values. Newly introduced nodes receive stable service IDs only after exact native submitted-argument verification. Keep operationId unique within this Supervisor binding and edit namespace. Status and notes are the Supervisor's assessment, not proof of execution. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. On rejection, read the reason, code, and path. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId values link to existing in-scope T3 activity; when no sourceThreadId is supplied, the workflow target thread is used. A reference is for navigation and never proves success or grants authority. assess_contribution is root-only for the main workflow: it records accepted or needs_more for the contribution's current result revision with expectedRevision CAS and never changes any status; complete the step separately with apply and status_changed evidence. record_review is root-only: it records the outcome of the monitoring check-in requestId in that check-in's own run: progress_updated citing applyOperationIds of the apply edits made in that run, no_change when nothing changed and no edit was made, needs_attention with a reason, or insufficient_evidence with a reason naming what is missing. It sends nothing; messaging the operative is a separate decision.",
+    "description": "Create the main draft, link a verified live descendant, apply semantic workflow changes with revision CAS, assess a main-reported external contribution result (it never changes any status), or record a check-in's outcome (record_review is root-only; It sends nothing; messaging the operative is a separate decision), as sections workflow_edit and monitoring of workflow_read view instructions describe. The service verifies your own executed call; keep operationId unique within this binding. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId link existing in-scope T3 activity for navigation, never proof or authority. On rejection, read the reason, code, and path.",
     "inputSchema": {
       "$defs": {
         "group": {

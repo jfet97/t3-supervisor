@@ -157,8 +157,13 @@ for (const variant of ["after the request was sent", "before the request was sen
     yield* Deferred.succeed(cancel, undefined);
     const result = yield* within(Fiber.join(running), "3 seconds", "aborted guide");
     const teamRequest = Effect.map(requestStates(f.sql, prepared.requestId), (states) => states.join());
+    // the answer is a compact receipt; the stored record keeps the delivery identities, text and attempts for reconciliation
+    const stored = (yield* f.receipt(f.sql, input.operationId))!;
+    assert.deepEqual([stored.commandId, stored.messageId, stored.attempts.length], [prepared.commandId, prepared.messageId, 1]);
+    assert.deepEqual(Object.keys(result).filter(key => ["commandId", "messageId", "requestId", "text", "attempts", "targetRunId"].includes(key)), []);
     if (variant.startsWith("after")) {
-      assert.deepEqual([result.status, result.reason], ["uncertain", "original_send_requires_reconciliation"]);
+      assert.deepEqual(result, {status: "uncertain", reason: "original_send_requires_reconciliation", operationId: input.operationId, targetThreadId: "branch",
+        routedThreadId: "branch"});
       assert.equal((yield* f.receipt(f.sql, input.operationId))?.attempts[0]?.status, "uncertain");
       assert.equal(yield* teamRequest, "uncertain");
       f.intercept(null);
@@ -167,7 +172,7 @@ for (const variant of ["after the request was sent", "before the request was sen
       assert.equal((yield* guide(f.controller, input)).status, "delivered");
       assert.equal(yield* teamRequest, "settled");
     } else {
-      assert.deepEqual([result.status, result.reason], ["not_sent", "native_transport_not_sent"]);
+      assert.deepEqual(result, {status: "not_sent", reason: "native_transport_not_sent", operationId: input.operationId, targetThreadId: "branch", routedThreadId: "branch"});
       assert.equal(yield* teamRequest, "settled");
       f.intercept(null);
       assert.equal((yield* guide(f.controller, input)).status, "not_sent", "the stored outcome is returned without another dispatch");
@@ -225,9 +230,13 @@ it.live("CT-TCTRL-02: two concurrent guide() calls with one operationId reserve 
   yield* Deferred.succeed(dispatched, {sequence: 7});
   const results = yield* within(Effect.all([Fiber.join(first), Fiber.join(second)]), "3 seconds", "guides");
   assert.deepEqual(results.map(value => value.status).sort(), ["accepted", "prepared"]);
+  const receiptOf = {operationId: input.operationId, targetThreadId: "branch", routedThreadId: "branch"};
+  assert.deepEqual(results.find(value => value.status === "accepted"), {status: "accepted", ...receiptOf}, "an accepted guide answers its route and state only");
+  assert.deepEqual(results.find(value => value.status === "prepared"), {status: "prepared", ...receiptOf});
   const stored = yield* f.receipt(f.sql, input.operationId);
   assert.equal(stored?.status, "accepted");
   assert.equal(stored?.attempts.length, 1);
+  assert.ok(stored?.commandId && stored.messageId && stored.requestId.startsWith("guide:"), "the delivery identities stay in the store");
   assert.deepEqual(yield* requestStates(f.sql, String(stored?.requestId)), ["pending"]);
   f.holdReads(null);
   assert.equal((yield* guide(f.controller, input)).status, "accepted");
@@ -283,7 +292,7 @@ it.live("CT-TCTRL-04: register is denied with native_completed_bootstrap_not_ver
   // the same native records with the exact completed bootstrap register the helper
   child.runs[0]!.status = "completed";
   const accepted = yield* register("register-exact");
-  assert.equal(accepted.result.status, "ok");
+  assert.deepEqual(accepted.result, {status: "ok", result: {threadId: "helper-new", state: "registering", epoch: 1}}, "the answer carries no team snapshot");
   assert.equal(accepted.unchanged, false);
   assert.ok((yield* f.team.snapshot(f.binding)).members.some(value => value.threadId === "helper-new"));
 }), {timeout: 10_000});
@@ -323,4 +332,22 @@ it.live("CT-TCTRL-05: unknown keys, oversize input and non-integer epochs return
   assert.deepEqual(f.calls, []);
   assert.equal(yield* tableDigest(f.sql), digest);
   assert.equal(yield* totalChanges(f.sql), changes);
+}), {timeout: 10_000});
+
+it.live("team mutations answer with their own compact result, never a team snapshot, and an identical retry replays that answer", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const call = (input: Record<string, unknown>) => {
+    f.proof(input, f.binding.threadId, "team");
+    return deadline((cancel) => f.controller.call(input, cancel));
+  };
+  const root = {supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  const note = {...root, action: "note", operationId: "compact-note", memberThreadId: f.member.threadId, summary: "Check the failing test."};
+  assert.deepEqual(yield* call(note), {status: "ok", result: {id: "note:compact-note", kind: "note", recipientThreadId: f.member.threadId, state: "pending"}},
+    "the note answer echoes neither its message nor the team");
+  const release = {...root, action: "release", operationId: "compact-release", targetThreadId: "branch"};
+  const released = yield* call(release);
+  assert.deepEqual(released, {status: "ok", result: {subtreeRootThreadId: "branch", state: "transferring", epoch: f.assignment.epoch + 1,
+    fromMemberThreadId: f.member.threadId, toMemberThreadId: null}});
+  assert.deepEqual(yield* call(release), released, "an identical retry replays the stored answer");
+  assert.deepEqual(JSON.parse(String((yield* row(f.sql, "SELECT document FROM supervisor_team_tool_receipts WHERE operation_id=?", "compact-release"))?.document)), released);
 }), {timeout: 10_000});

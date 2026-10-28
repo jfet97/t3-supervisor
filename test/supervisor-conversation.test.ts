@@ -802,7 +802,7 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   const proposalText = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
   assert.ok(introduction.text.length < proposalText.length, `a ${introduction.text.length}-character notice points to the ${proposalText.length}-character proposal`);
   assert.equal(introduction.text.split("END_correctness").length - 1, 0);
-  assert.match(introduction.text, /^Project Supervisor — proposal [^\n]+\nAgree a proportionate workflow with your Supervisor for the requester-authorized outcome/u);
+  assert.match(introduction.text, new RegExp(`^Project Supervisor — proposal ${acceptance.proposalId} for task ${task.id}\nAgree a proportionate workflow with your Supervisor before continuing\\.`, "u"));
   assert.ok(introduction.text.includes(JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: acceptance.proposalId})));
   assert.doesNotMatch(introduction.text, /Plan outline|workflow-acceptance/u);
   assert.ok(workflowProposalText((yield* fixture.projectStore.task(task.threadId))!).includes(workflowFence("workflow-acceptance", acceptance)));
@@ -887,7 +887,7 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   const noticesSince = () => fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId);
   yield* fixture.run();
   assert.equal(noticesSince().length, 1, "one notice for the revision");
-  assert.match(String(noticesSince()[0]!.payload.text), new RegExp(`^Project Supervisor — revised proposal ${revisionId}\n[^\n]*agreed as proposal ${task.id};`, "u"));
+  assert.match(String(noticesSince()[0]!.payload.text), new RegExp(`^Project Supervisor — revised proposal ${revisionId} for task ${task.id}\n[^\n]*agreed as proposal ${task.id};`, "u"));
   assert.notEqual(noticesSince()[0]!.payload.messageId, first.messageId, "the revision's notice has its own identity");
   const read = yield* fixture.conversation.operativeProposal({callerThreadId: operativeThreadId, projectId, taskId: task.id, proposalId: revisionId, caller: fixture.operative});
   assert.equal(read.status, "ok", JSON.stringify(read));
@@ -999,11 +999,16 @@ it.effect("a main and two reviewer children share one complete task context and 
   const context = envelope.threads.find((row: {taskContext?: unknown}) => row.taskContext);
   assert.equal(context.taskContext.taskId, task.id);
   assert.equal(context.taskContext.taskRevision, task.sourceHash);
-  assert.equal(context.taskContext.proposal.digest, preparedAcceptanceRecord((yield* fixture.projectStore.task(task.threadId))!)?.digest ?? null);
+  // the row names the proposal and its state; its digest is read with view context
+  assert.equal(context.taskContext.proposal.digest, undefined);
+  const current = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
+  assert.equal((current.task as {proposal: {digest: string | null}}).proposal.digest,
+    preparedAcceptanceRecord((yield* fixture.projectStore.task(task.threadId))!)?.digest ?? null);
   for (const row of envelope.threads) {
     assert.equal(row.taskContextThreadId, context.threadId);
     assert.equal(row.items.length, 2);
-    assert.ok(row.contactLimit);
+    assert.ok(["main", "steer_only", "via_parent", "via_parent_modes", "terminal_via_parent", "unknown_via_parent", "archived", "observe_only"].includes(row.contact), row.contact);
+    assert.equal(row.contactLimit, undefined, "the route is a code that section contact explains");
     assert.equal(row.activityRefs, undefined, "one activity list per row");
     assert.equal(row.draft, undefined);
     assert.equal(row.canonicalAuthoringMaterial, undefined);
@@ -1035,7 +1040,7 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   // the sections it names say how to read the supplied handles forward and small, and what a message to the operative may carry
   const monitoring = yield* sectionText(fixture, "monitoring");
   const contact = yield* sectionText(fixture, "contact");
-  assert.match(monitoring, /open an envelope readItemId \(view activity\) or sourceMessageId with t3_thread_read itemId; continue cut-off text with textOffset=nextTextOffset and newer items with afterPosition=nextPosition/u);
+  assert.match(monitoring, /open an envelope or context readItemId \(view activity\) with t3_thread_read itemId, exactly as given; a messageId or sourceMessageId is workflow_write evidence provenance; continue cut-off text with textOffset=nextTextOffset and newer items with afterPosition=nextPosition/u);
   assert.match(monitoring, /keep limit and maxCharsPerItem small \(about 5 and 2000\)/u);
   assert.match(contact, /Contact the operative only with one brief actionable delta or question citing message or item IDs/u);
   assert.match(contact, /never paste plans, definitions, protocol or service notices \(it reads its proposal with supervision_plan/u);
@@ -1050,7 +1055,7 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   assert.ok((yield* fixture.conversation.monitor.pending(projectId, operativeThreadId)).length > 0, "a send never acknowledges the frozen work");
 }));
 
-it.effect("an oversized stale-agreement recovery is visible without a definition review and can be explicitly retried", () => Effect.gen(function* () {
+it.effect("a large changed catalog wakes a stale-agreement recovery with a small handle, never an oversized prompt", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
   const fixture = yield* makeFixture(clock);
   const task = yield* installNestedCatalog(fixture);
@@ -1060,15 +1065,11 @@ it.effect("an oversized stale-agreement recovery is visible without a definition
   fixture.setDefinitions({...task.definitionSnapshot!, revision: "changed-large-catalog", sources: task.definitionSnapshot!.sources.map(source =>
     ({...source, content: `${source.content}\n# ${"Full changed source material. ".repeat(400)}`}))});
   yield* fixture.run();
-  assert.equal(fixture.calls.length, 0);
-  assert.equal((yield* fixture.projectStore.task(task.threadId))?.definitionNoticeKey, undefined);
-  assert.equal((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).state, "unavailable");
-  assert.match((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).message ?? "", /Definition-recovery .*exceeds its limit/u);
-  fixture.setDefinitions(task.definitionSnapshot!);
-  yield* fixture.conversation.retry(projectId, fixture.binding.threadId);
-  yield* fixture.run();
-  assert.equal((yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))?.kind, "review");
-  assert.equal(fixture.calls.length, 1);
+  const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  assert.equal(request?.kind, "review", "the recovery review is sent: its sources are read on demand, not pushed");
+  assert.ok(request!.text.length < 4_000, `recovery handle ${request!.text.length} characters`);
+  assert.equal(request!.text.includes("Full changed source material"), false);
+  assert.notEqual((yield* fixture.conversation.status(projectId, fixture.binding.threadId)).state, "unavailable");
 }));
 
 const appendNoticeForTask = Effect.fnUntraced(function* (fixture: Fixture,
@@ -2306,15 +2307,15 @@ it.effect("a 100-item monitor burst freezes and acknowledges all activity while 
   const envelopeStart = request.text.indexOf("UNTRUSTED_MONITOR_ENVELOPE\n") + "UNTRUSTED_MONITOR_ENVELOPE\n".length;
   const envelopeEnd = request.text.indexOf("\nEND_UNTRUSTED_MONITOR_ENVELOPE", envelopeStart);
   const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as { threads: Array<{ items: Array<{ readItemId: string | null }>;
-    pendingItemCount: number; taskContext?: {protocolRepair: (typeof diagnostic & {blocked: boolean}) | null}; canonicalAuthoringMaterial?: unknown }> };
+    pendingItemCount: number; taskContext?: {protocolRepair?: {code: string; path: string | null; attempts: number; blocked: boolean}}; canonicalAuthoringMaterial?: unknown }> };
   const preview = envelope.threads[0]?.items ?? [];
   assert.equal(preview.length, 2, "the model receives a bounded preview rather than every frozen activity ID");
   assert.ok(preview.some(item => item.readItemId === "burst-command-99"), "the latest frozen activity is navigable rather than an older preview-tail item");
   const frozenReadIds = new Set(request.batch.threads[0]?.items.map(item => item.readItemId).filter(Boolean));
   assert.ok(preview.every(item => item.readItemId === null || frozenReadIds.has(item.readItemId)), "preview read handles belong to the frozen batch");
   assert.equal(envelope.threads[0]?.pendingItemCount, frozenIds.size, "the preview retains the complete frozen count");
-  assert.deepEqual(envelope.threads.find(item => item.taskContext)?.taskContext?.protocolRepair, {...diagnostic, blocked: false},
-    "a rejected proposal rides in the due wake as explicit repair work");
+  assert.deepEqual(envelope.threads.find(item => item.taskContext)?.taskContext?.protocolRepair, {code: diagnostic.code, path: null, attempts: 1, blocked: false},
+    "a rejected proposal rides in the due wake as explicit repair work, its details in view context");
   assert.equal(envelope.threads[0]?.canonicalAuthoringMaterial, undefined, "drafting help is pulled through workflow_read view check");
 
   const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request.messageId);
@@ -3958,7 +3959,12 @@ it.effect("changed definitions stay unapproved, trigger one bounded recovery rev
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.equal(request?.taskId, fixture.task.id);
-  assert.match(request?.text ?? "", /Review the approved and observed \.t3-supervisor snapshots/u);
+  assert.match(request?.text ?? "", /Definition review for task [^:]+: project definitions changed after approval/u);
+  // the approved definitions stay readable as approved, and the changed checkout as observed
+  const named = (view: Record<string, unknown>) => (view.steps as Array<{id: string; name: string}>).map(step => step.name);
+  assert.deepEqual(named(yield* fixture.conversation.readContextView(fixture.binding, {view: "definitions", definitionIds: ["test-plan"]})), ["Test plan"]);
+  assert.deepEqual(named(yield* fixture.conversation.readContextView(fixture.binding, {view: "definitions", revision: "observed", definitionIds: ["test-plan"]})),
+    ["Expanded verification"]);
   const recoveryCalls = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId);
   assert.equal(recoveryCalls.length, 1, "the definition recovery review runs without new tool activity");
   const requestRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
@@ -4153,7 +4159,7 @@ describe("definitions changed before the introduction get autonomous review and 
     yield* fixture.run();
     const request = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
     assert.equal(request.kind, "review");
-    assert.match(request.text, /UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u);
+    assert.match(request.text, /\nREVIEW \{"taskId":/u);
     assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "context");
     assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 
@@ -4268,15 +4274,15 @@ it.effect("stale evidence can be renegotiated with a fresh ID in the same chats 
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.equal(request?.kind, "review");
   assert.equal(request?.taskId, fixture.task.id);
-  assert.match(request?.text ?? "", /Reassess the real task/u);
+  assert.match(request?.text ?? "", /approved definitions were restored or authorized; reassess/u);
   const reviewRun = fixture.supervisor.runs.find(run => run.userMessageId === request?.messageId);
   assert.ok(reviewRun);
   completeRun(fixture.supervisor, reviewRun, `I reviewed the stale evidence. ${request!.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
   yield* fixture.run();
   assert.equal((yield* fixture.conversation.requests.requests(projectId)).find(item => item.id === request?.id)?.state, "completed");
-  const envelope = request!.text.match(/UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE/u)?.[1];
-  assert.ok(envelope);
+  const envelope = request!.text.slice(request!.text.indexOf("\nREVIEW ") + "\nREVIEW ".length);
+  assert.ok(request!.text.includes("\nREVIEW "));
   const proposalId = (JSON.parse(envelope) as {proposalTemplate: {proposalId: string}}).proposalTemplate.proposalId;
   assert.ok(proposalId);
   yield* appendSupervisorProposal(fixture, proposalId, original.workflow, clock.now + 4);
@@ -6449,8 +6455,8 @@ it.effect("Stop sends one concise operative notice and settles the idle root wit
     const notices = () => fixture.calls.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === operativeThreadId);
     assert.equal(notices().length, 1, route);
     const notice = notices()[0]!.payload;
-    assert.match(String(notice.text), /Stop sending updates, findings and workflow acceptances/u);
-    assert.match(String(notice.text), /This does not change your task or the user's instructions/u);
+    assert.match(String(notice.text), /stop sending updates, findings or workflow acceptances to Supervisor/u);
+    assert.match(String(notice.text), /Your task and the user's instructions are unchanged/u);
     assert.match(String(notice.text), /Do not reply/u);
     assert.ok(String(notice.text).length < 500);
     assert.equal(clock.now, before);
@@ -6797,7 +6803,7 @@ it.effect("a no-plan conversation watches real work silently without gaining ope
   assert.ok(request, "Active work retains an observation request.");
   assert.equal(request?.batch?.trigger, "active_watch");
   assert.match(request!.text, /"engagement":"following"/);
-  assert.match(request!.text, /Observe only/);
+  assert.match(request!.text, /"contact":"observe_only"/, "the row's route says observe only; section contact explains it");
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
   assert.equal(yield* fixture.conversation.requests.introduction(current.id), null);
 }));

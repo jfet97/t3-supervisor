@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
+import { Exit, Schema } from "effect";
 import {
   acknowledgePlanningTarget, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs,
-  expirePlanningAttempt, planningCanAdopt, planningHasUnresolvedEffects, planningHoldText, planningReleaseText,
+  expirePlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningCanAdopt, planningDraftInstruction, planningDraftNotice, planningDraftRead,
+  planningHasUnresolvedEffects, planningHoldText, planningInstructions, planningReleaseText,
   planningDelivery, resolvePlanningAttempt, startPlanningAttempt, type PlanningAttempt,
 } from "../src/supervisor-planning.js";
+import { exactFenceRecords } from "../src/supervisor-workflow-agreement.js";
+import { interpretationPlanRules } from "../src/supervisor-workflow.js";
+import { messageReadRule } from "../src/message-read-handle.js";
 
 const now = Date.parse("2026-10-27T12:00:00.000Z");
 const attempt = (): PlanningAttempt => createPlanningAttempt({
@@ -54,9 +59,8 @@ it("the watchdog releases a possibly received hold using its stable identity", (
   assert.equal(planningHasUnresolvedEffects(expired), true);
   assert.equal(expirePlanningAttempt(expired, expired.deadline + 60_000), expired);
   assert.equal(expired.targets[0]?.release?.messageId, planningDelivery("pause-a", "main-a", "release").messageId);
-  assert.match(planningReleaseText(expired, expired.targets[0]!), /Continue with your authorised task/);
-  assert.match(planningReleaseText(expired, expired.targets[0]!), /no remaining wait/);
-  assert.match(planningReleaseText(expired, expired.targets[0]!), /Human Stops, pauses, limits and approvals still apply/);
+  assert.equal(planningReleaseText(expired, expired.targets[0]!),
+    "Planning pause pause-a released (deadline passed). Continue your authorised task; human Stops and limits still apply.");
 });
 
 it("a definitely unsent hold closes without manufacturing a release delivery", () => {
@@ -85,18 +89,95 @@ it("a no-plan decision explicitly releases every existing unresolved hold", () =
   assert.equal(released.state, "releasing");
   assert.equal(released.resolution, "no_plan");
   assert.ok(released.targets.every(target => target.state === "release_pending"));
-  assert.match(planningReleaseText(released, released.targets[0]!), /shared plan is not needed/);
+  assert.equal(planningReleaseText(released, released.targets[0]!),
+    "Planning pause pause-a released (no plan needed). Continue your authorised task; human Stops and limits still apply.");
+  assert.equal(planningReleaseText(released, released.targets[1]!),
+    "Relay to child child-a: planning pause pause-a released (no plan needed). Continue your authorised task; human Stops and limits still apply.");
   assert.equal(expirePlanningAttempt(released, released.deadline).state, "expired", "requesting release does not end deadline recovery");
 });
 
 it("the parent's relay text never asks it to publish a child's ACK", () => {
   const original = attempt();
   const relay = planningHoldText(original, original.targets[1]!);
-  assert.match(relay, /Do not publish an ACK for child-a yourself/);
-  assert.doesNotMatch(relay, /```planning-pause-ack/);
+  assert.equal(relay, "Planning pause pause-a until 2026-10-27T12:05:00.000Z. Scope: child implementation\n" +
+    "Hold dispatch for child child-a and ask it to pause work in this scope; your ACK covers your dispatch only. Human Stops, pauses, limits and approvals still win.");
+  assert.doesNotMatch(relay, /planning-pause-ack/);
   const direct = planningHoldText(original, original.targets[0]!);
-  assert.match(direct, /```planning-pause-ack/);
-  assert.match(direct, /2026-10-27T12:05:00.000Z/);
+  assert.equal(direct, "Planning pause pause-a until 2026-10-27T12:05:00.000Z. Scope: main implementation\n" +
+    "Hold side-effecting work and new or re-tasked children in this scope; reads may continue. When paused, reply with exactly:\n" +
+    "```planning-pause-ack\n{\"attemptId\":\"pause-a\",\"targetThreadId\":\"main-a\"}\n```\n" +
+    "Human Stops, pauses, limits and approvals still win.");
+});
+
+it("the hold's ACK record, reproduced in the actor's reply, is exactly what the service matches", () => {
+  const original = attempt();
+  const direct = planningHoldText(original, original.targets[0]!);
+  const block = direct.slice(direct.indexOf("```planning-pause-ack"), direct.lastIndexOf("```") + 3);
+  const matched = exactFenceRecords(`Paused the edits.\n${block}`, "planning-pause-ack", 2, true).map(record =>
+    Schema.decodeUnknownExit(PlanningAcknowledgement)(record.value, {onExcessProperty: "error"}));
+  assert.equal(matched.length, 1);
+  assert.ok(Exit.isSuccess(matched[0]!));
+  assert.deepEqual(matched[0]!.value, {attemptId: "pause-a", targetThreadId: "main-a"});
+  // a quoted or indented copy is no record
+  assert.deepEqual(exactFenceRecords(`> ${block.replaceAll("\n", "\n> ")}`, "planning-pause-ack", 2, true), []);
+});
+
+it("a continued child's release points to its own scoped plan, through its parent when relayed", () => {
+  const original = sent();
+  const continued = resolvePlanningAttempt({...original, targets: original.targets.map(target => target.threadId === "child-a"
+    ? {...target, state: "acknowledged" as const, scopedWorkflowId: "workflow-child"} : {...target, state: "acknowledged" as const})}, "continue", now + 100);
+  assert.equal(planningReleaseText(continued, continued.targets[0]!),
+    "Planning pause pause-a released (planning resolved). Continue your authorised task; human Stops and limits still apply.");
+  assert.equal(planningReleaseText(continued, continued.targets[1]!),
+    "Relay to child child-a: planning pause pause-a released (planning resolved). Continue your authorised task; human Stops and limits still apply. " +
+    "Read your scoped plan with supervision_plan {\"callerThreadId\":\"child-a\",\"taskId\":\"task-a\",\"proposalId\":\"workflow-child\"}; a parent relays it if the child cannot call it.");
+  assert.equal(planningReleaseText({...continued, resolution: "superseded"}, continued.targets[0]!),
+    "Planning pause pause-a released (superseded). Continue your authorised task; human Stops and limits still apply.");
+});
+
+it("the drafter's task names its read route and pins, never the plan, rules or definitions", () => {
+  const original = attempt();
+  const instruction = planningDraftInstruction(original);
+  assert.equal(instruction, "Read-only drafter for planning pause pause-a until 2026-10-27T12:05:00.000Z. Scope: Reconcile the implementation plan\n" +
+    "Draft a workflow plan. Read with supervision_planning {\"supervisorThreadId\":\"owner-a\",\"bindingGeneration\":1,\"taskId\":\"task-a\",\"taskRevision\":\"source-a\",\"action\":\"draft_read\",\"attemptId\":\"pause-a\",\"view\":\"context\"}, " +
+    "adding section conversation for the intent and section plan for the current plan; other views: definitions (index; definitionIds for complete ones) and plan_rules (plan grammar). " +
+    `Messages context names are in its mainThreadId. ${messageReadRule} ` +
+    "Answer with the plan and a brief rationale. Only read and draft: no edits, commands, contact, delegation or other Supervisor calls; your draft grants no authority and never extends the pause.");
+  assert.ok(instruction.includes(JSON.stringify(planningDraftRead(original, "context"))));
+  for (const copied of [interpretationPlanRules.slice(0, 60), planningInstructions.slice(0, 60), "PLANNING PAUSE", "workflow_read", "mcpx"])
+    assert.ok(!instruction.includes(copied), copied);
+});
+
+it("an answer carries the attempt's states and ACK messages, and its drafter's task only when asked for an open attempt without one", () => {
+  const original = sent();
+  const acknowledged = acknowledgePlanningTarget(original, {attemptId: original.id, targetThreadId: "main-a"}, evidence("main-a"), now + 1);
+  assert.deepEqual(planningAttemptAnswer(acknowledged), {attemptId: "pause-a", state: "open", deadline: "2026-10-27T12:05:00.000Z", resolution: null,
+    targets: [{threadId: "main-a", state: "acknowledged", ack: "ack-main-a"}, {threadId: "child-a", state: "requested", ack: null}], draft: null});
+  assert.equal(planningAttemptAnswer(acknowledged, true).draftInstruction, planningDraftInstruction(acknowledged));
+  const drafting: PlanningAttempt = {...acknowledged, draft: {threadId: "writer-a", taskId: "draft-a", state: "working", resultMessageId: null, resultRunId: null}};
+  assert.deepEqual(planningAttemptAnswer(drafting, true).draft, {state: "working", taskId: "draft-a"});
+  assert.equal(planningAttemptAnswer(drafting, true).draftInstruction, undefined);
+  const released = resolvePlanningAttempt(acknowledged, "no_plan", now + 2);
+  assert.equal(planningAttemptAnswer(released, true).draftInstruction, undefined);
+  const rendered = JSON.stringify(planningAttemptAnswer(released, true));
+  for (const stored of released.targets.flatMap(target => [target.hold, target.release!]).flatMap(delivery => [delivery.messageId, delivery.commandId]))
+    assert.ok(!rendered.includes(stored), stored);
+  assert.ok(!rendered.includes(planningHoldText(released, released.targets[0]!)));
+});
+
+it("the owner's draft notice names the result's exact read and keeps adoption the owner's checked decision", () => {
+  const original = attempt();
+  // the published turn item is the read; the message ID stays provenance and is never offered as an itemId
+  const published = planningDraftNotice(original, {threadId: "writer-a", messageId: "draft-content", readItemId: "turn-item:message:draft-content"});
+  assert.equal(published,
+    "Planning draft for pause pause-a is ready: read it with t3_thread_read {\"threadId\":\"writer-a\",\"itemId\":\"turn-item:message:draft-content\"} (message draft-content). Check ACKs with supervision_planning read and re-read current operative work before adopting it; publish nothing automatically and start no new wait.");
+  assert.doesNotMatch(published, /"itemId":"draft-content"/u);
+  // before T3 publishes the item, the message is matched while paging, never read as an item
+  const unpublished = planningDraftNotice(original, {threadId: "writer-a", messageId: "draft-content", readItemId: null});
+  assert.match(unpublished, /ready as message draft-content of thread writer-a, not yet published as a read item: page that thread's view messages and match the messageId\./u);
+  assert.doesNotMatch(unpublished, /itemId/u);
+  assert.equal(planningDraftNotice(original, null),
+    "Planning draft for pause pause-a is unavailable. Check ACKs with supervision_planning read; publish nothing automatically and start no new wait.");
 });
 
 

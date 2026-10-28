@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import {it} from "vitest";
 import {interpretationPlanRules, interpretationRules, prepareWorkflowRequest} from "../src/supervisor-workflow.js";
 import {goldenSnapshot} from "./support/c1-workflow-fixture.js";
+import { messageReadRule } from "../src/message-read-handle.js";
 
 // the bound root's first interpretation may pause the affected conversations before it plans, through the service; nothing else changes
 const submission = (startVerdict: boolean) => ({supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a",
@@ -23,9 +24,11 @@ it("a bound root's interpretation rules use exact context pins for the early pla
   assert.ok(!interpretationRules.includes("PLANNING PAUSE:"), "stage one names the pause only as a tool exception");
   assert.ok(interpretationRules.includes('When a plan is needed, read view interpretation section "plan" before reading definitions: it holds the planning pause, which comes first'));
   // the tool limit carries the same narrow exception
-  assert.ok(interpretationRules.includes("The second exception: read the main/child message handles view context names with bounded local t3_thread_read, and use supervision_planning and at most one read-only drafter exactly as PLANNING PAUSE says"));
+  assert.ok(interpretationRules.includes("The second exception: read the main/child messages view context names with bounded local t3_thread_read, and use supervision_planning and at most one read-only drafter exactly as PLANNING PAUSE says"));
+  // each named message is read by its exact published read item, a message ID being provenance only
+  assert.ok(interpretationRules.includes(messageReadRule));
   assert.ok(interpretationRules.includes("Otherwise do not browse, read files, run commands, delegate, contact the operational agent, or ask questions."));
-  assert.ok(interpretationRules.includes("Use no other tools except bounded local t3_thread_read of the main/child message handles view context names, the submission, supervision_planning with at most one read-only drafter exactly as PLANNING PAUSE allows"));
+  assert.ok(interpretationRules.includes("Use no other tools except bounded local t3_thread_read of the main/child messages by the exact readItemId view context names, the submission, supervision_planning with at most one read-only drafter exactly as PLANNING PAUSE allows"));
   // the pins are read from view context, never pushed: no request carries a source pin, a scope revision or the pause rules
   for (const options of [{reader, submission: submission(false)}, {reader, submission: submission(true)}, {submission: submission(false)}, {reader}]) {
     const request = prepareWorkflowRequest("thread-a", "message-a", "Change the export format.", goldenSnapshot, options).requestText;

@@ -328,3 +328,17 @@ it.effect("acknowledged detached child history survives restart without waking o
     assert.deepEqual(stored, []);
   }));
 }));
+
+// native proof 2026-10-28: a message is read by its own native turn item, never by its message ID
+it("a message activity without a read handle resolves its exact native turn item, and its message ID stays provenance", () => {
+  const projection = {thread: mainThread, runs: [], nodes: [], messages: [{id: "provider:msg/01 a", threadId: mainThread.id, runId: "run-1", role: "user",
+    text: "Run the check.", streaming: false}], turnItems: [{id: "turn-item:message:provider%3Amsg%2F01%20a", type: "user_message",
+    messageId: "provider:msg/01 a", threadId: mainThread.id, runId: "run-1"}]} as unknown as Projection;
+  const activity = {id: "message:provider:msg/01 a", readItemId: null, type: "user_message", status: "completed", ordinal: 1, detectedAt: now,
+    updatedAt: null, priority: null, nodeId: "node-1", rootNodeId: "node-1"} as unknown as Parameters<typeof monitorActivityReference>[2];
+  const ref = monitorActivityReference(mainThread.id, projection, activity);
+  assert.equal(ref.sourceMessageId, "provider:msg/01 a");
+  assert.equal(ref.sourceItemId, "turn-item:message:provider%3Amsg%2F01%20a");
+  const without = monitorActivityReference(mainThread.id, {...projection, turnItems: []} as Projection, activity);
+  assert.equal(without.sourceItemId, null, "no item is reconstructed from the message ID");
+});

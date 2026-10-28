@@ -2,8 +2,13 @@ import { Schema } from "effect";
 
 export const defaultPlanningTimeoutMs = 5 * 60_000;
 export const planningTimeoutBounds = {min: 10_000, max: 60 * 60_000} as const;
+/** The views a planning drafter reads through draft_read: the task context, the definitions and the plan grammar. */
+export const planningDraftViews = ["context", "definitions", "plan_rules"] as const;
+export type PlanningDraftView = typeof planningDraftViews[number];
+/** The context sections a drafter reads explicitly: the conversation facts (intent) and the current plan. */
+export const planningDraftSections = ["conversation", "plan"] as const;
 export const planningInstructions = "Use supervision_planning pause with current task/binding pins, operationId, reason and affected targetThreadIds. " +
-  "Require each actor's ACK or verified quiescence; parent ACK holds dispatch only. Root/helpers may use local orchestrator_capabilities/delegate_task for one read-only writer created for this attempt; attach_draft uses its childThreadId/taskId as draftThreadId/draftTaskId. Follow draftInstruction and model/isolation rules. Writers cannot guide, edit, publish, monitor or delegate. " +
+  "Require each actor's ACK or verified quiescence; parent ACK holds dispatch only. Root/helpers may use local orchestrator_capabilities/delegate_task for one read-only drafter created for this attempt, its task exactly the answer's draftInstruction, following model/isolation rules; attach_draft uses its childThreadId/taskId as draftThreadId/draftTaskId. It only reads and drafts. " +
   "Reconcile ACKs, results and fresh work before adoption. For pending back_to, apply_return takes workflowId, workflowThreadId, expectedRevision, returnId, reason and open attemptId; it verifies pauses and retires old child runs. Main acceptance and child scoped plans remain. " +
   "Release with continue/no_plan. The fixed deadline covers ACK, drafting and negotiation; late results never re-pause. Preserve human Stops, limits and approvals.";
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
