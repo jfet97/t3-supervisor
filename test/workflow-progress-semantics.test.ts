@@ -97,10 +97,15 @@ it.effect("parent-only and later-stage writes are rejected atomically while a co
       path: "/input/status", expected: "enter a workflow or the task together with the member that is actually underway, and enter a member only inside an entered workflow and task."}});
 
     // the compact status read carries identities and statuses without descriptions, accepted snapshots or history
-    const full = yield* fixture.controller.readTool({...locator(fixture), limit: 10});
-    const compact = yield* fixture.controller.readTool({...locator(fixture), view: "status"});
+    const full = yield* fixture.controller.readTool({...locator(fixture), view: "documents", limit: 10});
+    assert.equal(full.status, "ok", "complete records remain available through an explicit request");
+    const compact = yield* fixture.controller.readTool(locator(fixture));
+    assert.deepEqual(compact, yield* fixture.controller.readTool({...locator(fixture), view: "status"}), "ordinary reads default to compact status");
     assert.equal(compact.status, "ok");
     assert.ok("view" in compact && compact.view === "status");
+    assert.doesNotMatch(JSON.stringify(compact), /"evidence"|"acceptedAgreements"|"document"/u);
+    assert.match(JSON.stringify(full), /"evidence"/u);
+    assert.match(JSON.stringify(full), /"acceptedAgreements"/u);
     const rows = (compact as {workflows: Array<{occurrences: Array<{name: string; status: string | null; depth: number}>}>}).workflows[0]!.occurrences;
     assert.deepEqual(rows.slice(0, 3).map(row => [row.name, row.status, row.depth]), [["Change", "planned", 0], ["Scope and authority", "planned", 1], ["Gather source evidence", "planned", 1]]);
     assert.ok(JSON.stringify(compact).length * 3 < JSON.stringify(full).length, "the status view is a small fraction of the document read");

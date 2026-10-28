@@ -1,7 +1,7 @@
 {
   "workflowReadToolDefinition": {
     "name": "workflow_read",
-    "description": "Read this Supervisor binding's workflow documents, or one view: status, context, definitions, instructions, interpretation or check. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
+    "description": "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -56,13 +56,14 @@
           "type": "string",
           "enum": [
             "status",
+            "documents",
             "context",
             "definitions",
             "instructions",
             "interpretation",
             "check"
           ],
-          "description": "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: the project.yaml index, or the exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."
+          "description": "Omit for status: current occurrences, nesting, progress, branch reach, omissions and attempts. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."
         },
         "section": {
           "type": "string",

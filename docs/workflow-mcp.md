@@ -301,10 +301,12 @@ A successful read through the installed gateway establishes transport/permission
 behavior, not a positive workflow edit or complete configured-project dialogue.
 
 `workflow_read` takes the Supervisor thread ID and binding generation as lookup
-coordinates. It returns bounded workflow state and native main/descendant lineage,
+coordinates. Its explicit document view includes bounded workflow state and native main/descendant lineage,
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
-With `view`, `workflow_read` returns bounded context for the verified binding instead of
+`workflow_read` defaults to compact `status`. Use `view: "documents"` only when complete
+records, history, evidence or accepted snapshots are needed; document and lineage pagination
+remain available in that view. Other `view` values return bounded context for the verified binding instead of
 workflow documents:
 
 - `context`: compact by default: the task's identity, revision pins, objective, status,
@@ -316,9 +318,10 @@ workflow documents:
   the projection's `turnItems` on `messageId` and never constructed. A message T3
   recorded no item for has no read handle: it is matched while paging that thread's
   messages, never passed as an `itemId`; no body is copied. `section` reads the rest
-  on demand: `conversation` (the current conversation facts), `plan` (the current
-  proposal's identity and agreement state, requirement decisions, the outline and each
-  task-local duty's text) and `diagnostics` (definition issues, protocol repair,
+  on demand: `conversation` (the current conversation facts), `plan` (the live plan
+  bound to this task and scope, with its revision and current acceptance flag, or the
+  current proposal when no live plan matches; requirements, outline and task-local duties
+  are included) and `diagnostics` (definition issues, protocol repair,
   operative record and definition review details). For a stopped chat it returns
   supervision=stopped even without a current task or enabled project; a valid pending
   Start returns supervision=pending_start.

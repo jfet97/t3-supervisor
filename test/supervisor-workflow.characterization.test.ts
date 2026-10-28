@@ -51,7 +51,7 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   // notifications contain lookup handles; canonical policy and plan hashes remain unchanged
   assert.equal(prepared.requestText.length, 242);
   // the request names the interpretation rules' version, so a deliberate rule change moves this digest and nothing else
-  assert.equal(sha256(prepared.requestText), "d8f189e109ec09127292c7a34cc33c3335b8286e90ff440301a5a9759a9ab8f8");
+  assert.equal(sha256(prepared.requestText), "98f8c9dd4a10a4d6d8167a4b7f24d33cc575a9f15fe09ebdc9cb65ac44342c12");
   assert.equal(prepared.requestText.includes("github_pat_12345678901234567890"), false);
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");
@@ -60,7 +60,7 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
     {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}});
   assert.equal(reader.requestText.length, 311);
-  assert.equal(sha256(reader.requestText), "6ee5697489a5ea7b34fd75ac46c55b0874343c1d2f888e255879c590631d19e6");
+  assert.equal(sha256(reader.requestText), "615156be9a286afe371347b3ed28f41c00dc148c5ef5675f58042aaaf4b6de8e");
   assert.deepEqual(reader.context, prepared.context);
   assert.deepEqual(reader.workflow, prepared.workflow);
   const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
@@ -68,7 +68,7 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
       submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
         sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
   assert.equal(typed.requestText.length, 329);
-  assert.equal(sha256(typed.requestText), "aa59be400233dc4ae463a6b0daa1285d5c3b0afb0bcdadb60b3d6bf2ebd56e4e");
+  assert.equal(sha256(typed.requestText), "0f3e24040f993f8089328189ac47d34266554a0d2eb9fb7f2b21f7e6e20f03b9");
   assert.deepEqual(typed.context, prepared.context);
   assert.deepEqual(typed.workflow, prepared.workflow);
 

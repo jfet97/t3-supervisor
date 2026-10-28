@@ -137,10 +137,10 @@ const progressSnapshot: WorkflowProgressSnapshot = {
   incompatibleWorkflows: [],
   workflows: [
     {workflowId: "main-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "task-thread", parentThreadId: null,
-      revision: 2, status: "underway", objective: "Review the source change", plan, updatedAt: 1_800_000_000_080,
+      revision: 2, status: "underway", objective: "Review the source change", plan, acceptedProposalId: "proposal-1", updatedAt: 1_800_000_000_080,
       parentNodeReferences: [], observations: [], contributions: []},
     {workflowId: "child-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "child-one", parentThreadId: "task-thread",
-      revision: 1, status: "needs_attention", objective: "Review the integration", plan: null, updatedAt: 1_800_000_000_070,
+      revision: 1, status: "needs_attention", objective: "Review the integration", plan: null, acceptedProposalId: null, updatedAt: 1_800_000_000_070,
       parentNodeReferences: [
         {parentWorkflowId: "main-workflow", parentThreadId: "task-thread", nodeId: "step-inspect", nodeKind: "step", nodeName: "Inspect source"},
         {parentWorkflowId: "main-workflow", parentThreadId: "task-thread", nodeId: "step-local", nodeKind: "step", nodeName: "Check migration notes"},

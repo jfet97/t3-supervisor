@@ -173,7 +173,7 @@ export type SupervisionStopResult =
   | {status: "stopped"; targetThreadId: string; route: "direct" | "relay" | "chat"; alreadyStopped: boolean}
   | {status: "denied" | "invalid" | "unavailable" | "pending"; reason: string; retryable?: boolean};
 export type WorkflowReadPayload = WorkflowLocator & {
-  view?: SupervisorContextViewName | "status";
+  view?: SupervisorContextViewName | "status" | "documents";
   section?: string;
   revision?: "approved" | "observed";
   definitionIds?: string[];
@@ -714,11 +714,12 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
   if (!isRecord(value) || !hasExactKeys(value, ["supervisorThreadId", "bindingGeneration"],
     ["view", "section", "revision", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
-  // the compact status view pages the same workflows as a document read
-  if (value.view === "status") {
+  // compact status and explicit complete records page the same workflows
+  if (value.view === "status" || value.view === "documents") {
     const documents = parseReadPayload(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "view")));
-    return documents.ok && ["lineageOffset", "section", "revision", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined)
-      ? {ok: true, value: {...documents.value, view: "status"}} : {ok: false, reason: "invalid_read_arguments"};
+    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined) &&
+      (value.view === "documents" || value.lineageOffset === undefined)
+      ? {ok: true, value: {...documents.value, view: value.view}} : {ok: false, reason: "invalid_read_arguments"};
   }
   if (value.view !== undefined) {
     if (!locator || !["context", "definitions", "instructions", "interpretation", "check"].includes(String(value.view)) ||
@@ -995,7 +996,7 @@ export const supervisionInterpretationSubmitToolDefinition = {
 
 export const workflowReadToolDefinition = {
   name: "workflow_read",
-  description: "Read this Supervisor binding's workflow documents, or one view: status, context, definitions, instructions, interpretation or check. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
+  description: "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
   // the read input names no plan, so it advertises none of the plan schema
   inputSchema: {
     type: "object",
@@ -1007,8 +1008,8 @@ export const workflowReadToolDefinition = {
       workflowOffset: {type: "integer", minimum: 0, maximum: 10_000},
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
-      view: {type: "string", enum: ["status", "context", "definitions", "instructions", "interpretation", "check"],
-        description: "Omit for complete workflow documents. status: each current workflow's occurrences with nodeId, nesting, status, branch reach and visible omissions, without descriptions, accepted snapshots or history; use it to reconcile statuses. context: current task, objective, revisions, proposal, agreement and diagnostic. definitions: the project.yaml index, or the exact complete definitions for definitionIds. instructions: the full standing Supervisor instructions. interpretation: only the interpretation instructions. check: dry-run one compact workflow-proposal record without publishing it."},
+      view: {type: "string", enum: ["status", "documents", "context", "definitions", "instructions", "interpretation", "check"],
+        description: "Omit for status: current occurrences, nesting, progress, branch reach, omissions and attempts. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."},
       section: {type: "string", description: "With view instructions: one section id from its index. With view interpretation: \"plan\", read only when a plan is needed. With view context: \"conversation\", \"plan\" or \"diagnostics\"."},
       revision: {type: "string", enum: ["approved", "observed"], description: "With view definitions: the approved definitions of the task (default) or the checkout's current ones."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
@@ -2061,16 +2062,18 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     }));
   });
 
-  /** The MCP workflow_read entry: bounded context views for the verified binding, or the workflow documents. */
+  /** The MCP workflow_read entry: compact status by default, or an explicitly requested view. */
   const readTool = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<WorkflowReadResult | SupervisorContextViewResult | WorkflowStatusViewResult, SupervisionStoreError> {
     let inputBytes: number;
     try {inputBytes = workflowToolInputSize(input);} catch {return {status: "invalid", reason: "arguments_not_json"};}
     if (inputBytes > workflowToolInputMaxBytes) return {status: "invalid", reason: "arguments_too_large"};
-    const parsed = parseReadPayload(input);
+    const readInput = isRecord(input) && input.view === undefined ? {...input, view: "status"} : input;
+    const parsed = parseReadPayload(readInput);
     if (!parsed.ok) return {status: "invalid", reason: parsed.reason};
-    if (!parsed.value.view) return yield* read(input, cancel);
-    if (parsed.value.view === "status") {
-      const documents = yield* read(Object.fromEntries(Object.entries(input as Record<string, unknown>).filter(([key]) => key !== "view")), cancel);
+    if (parsed.value.view === "documents")
+      return yield* read(Object.fromEntries(Object.entries(readInput as Record<string, unknown>).filter(([key]) => key !== "view")), cancel);
+    if (!parsed.value.view || parsed.value.view === "status") {
+      const documents = yield* read(Object.fromEntries(Object.entries(readInput as Record<string, unknown>).filter(([key]) => key !== "view")), cancel);
       if (documents.status !== "ok") return documents;
       return {status: "ok", view: "status", mainTaskAgreementStatus: documents.mainTaskAgreementStatus,
         workflowOffset: documents.workflowOffset, workflowHasMore: documents.workflowHasMore,
