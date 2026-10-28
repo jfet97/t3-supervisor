@@ -482,9 +482,8 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
   const workflow = task.workflow!;
   const proposalId = task.workflowProposalId ?? task.id;
   const acceptance = preparedAcceptanceRecord(task);
-  const read = `with the t3-supervisor-workflows tool supervision_plan and exactly ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId})}. ${toolRouteReminder}`;
-  const contact = `Questions or proposed changes: t3_thread_send to Supervisor ${task.supervisorThreadId}, mode queue, naming task ${task.id} and this proposal; ` +
-    "if you cannot read the proposal, ask there for its outline and acceptance record.";
+  const read = `supervision_plan ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId})}. ${toolRouteReminder}`;
+  const contact = `Questions: t3_thread_send to ${task.supervisorThreadId}, mode queue.`;
   const warning = currentDefinitionReadUnavailable
     ? "A fresh definition read is unavailable; this proposal uses cached incomplete or invalid material that may be stale, so do not record formal acceptance.\n" : "";
   // a revised proposal whose plan, requirement decisions and definitions are unchanged needs only that fact and its new acceptance record
@@ -493,14 +492,14 @@ export const workflowIntroductionText = (task: TaskRecord, currentDefinitionRead
     (earlier.globalRevision ?? null) === (workflow.globalRevision ?? null) && planStructure(earlier.plan) === planStructure(workflow.plan) &&
     canonicalJson(earlier.requirements.map(item => [item.kind, item.id, item.state])) === canonicalJson(workflow.requirements.map(item => [item.kind, item.id, item.state]))) {
     const scopeChanged = (task.agreementSourceHash ?? null) !== null && task.agreementSourceHash !== taskScopeRevision(task);
-    return `Project Supervisor — revised proposal ${proposalId} for task ${task.id}\n${scopeChanged ? "The authorized scope changed; t" : "T"}he agreed plan of proposal ${task.agreement!.proposalId} is unchanged and recorded progress is kept, so nothing is rerun. Read its new acceptance record ${read}\n${contact}`;
+    return `Project Supervisor — revised workflow proposal\n${scopeChanged ? "The authorized scope changed; t" : "T"}he agreed plan of proposal ${task.agreement!.proposalId} is unchanged and recorded progress is kept, so nothing is rerun. Read its new acceptance record: ${read}\n${contact}`;
   }
   const agreed = task.agreement?.status === "agreed" && task.agreement.proposalId !== proposalId ? task.agreement.proposalId : null;
   const event = nonBlocking ? "Non-blocking workflow suggestion: the earlier planning wait has ended; continue your authorised work while considering it."
     : agreed ? `This revises the workflow you agreed as proposal ${agreed}; agree the revision with your Supervisor before continuing under the change.`
     : "Agree a proportionate workflow with your Supervisor before continuing.";
-  return `Project Supervisor — ${agreed ? "revised " : ""}proposal ${proposalId} for task ${task.id}${acceptance ? "" : " (provisional: no acceptance record yet)"}\n` +
-    `${event} Read it ${read}\n${warning}${contact}`;
+  return `Project Supervisor — ${agreed ? "revised " : ""}workflow proposal${acceptance ? "" : " (provisional: no acceptance record yet)"}\n` +
+    `${event} Read: ${read}\n${warning}${contact}`;
 };
 
 type TeamPolicy = {maxHelpersPerRoot: number; readyHelpers: number; registeringHelpers: number};

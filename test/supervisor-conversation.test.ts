@@ -802,7 +802,7 @@ it.effect("a realistic nested catalog completes startup, introduction and exact 
   const proposalText = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
   assert.ok(introduction.text.length < proposalText.length, `a ${introduction.text.length}-character notice points to the ${proposalText.length}-character proposal`);
   assert.equal(introduction.text.split("END_correctness").length - 1, 0);
-  assert.match(introduction.text, new RegExp(`^Project Supervisor — proposal ${acceptance.proposalId} for task ${task.id}\nAgree a proportionate workflow with your Supervisor before continuing\\.`, "u"));
+  assert.match(introduction.text, /^Project Supervisor — workflow proposal\nAgree a proportionate workflow with your Supervisor before continuing\./u);
   assert.ok(introduction.text.includes(JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: acceptance.proposalId})));
   assert.doesNotMatch(introduction.text, /Plan outline|workflow-acceptance/u);
   assert.ok(workflowProposalText((yield* fixture.projectStore.task(task.threadId))!).includes(workflowFence("workflow-acceptance", acceptance)));
@@ -887,7 +887,7 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   const noticesSince = () => fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId);
   yield* fixture.run();
   assert.equal(noticesSince().length, 1, "one notice for the revision");
-  assert.match(String(noticesSince()[0]!.payload.text), new RegExp(`^Project Supervisor — revised proposal ${revisionId} for task ${task.id}\n[^\n]*agreed as proposal ${task.id};`, "u"));
+  assert.match(String(noticesSince()[0]!.payload.text), new RegExp(`^Project Supervisor — revised workflow proposal\n[^\n]*agreed as proposal ${task.id};`, "u"));
   assert.notEqual(noticesSince()[0]!.payload.messageId, first.messageId, "the revision's notice has its own identity");
   const read = yield* fixture.conversation.operativeProposal({callerThreadId: operativeThreadId, projectId, taskId: task.id, proposalId: revisionId, caller: fixture.operative});
   assert.equal(read.status, "ok", JSON.stringify(read));
@@ -2983,7 +2983,7 @@ it.effect("a restarted source run still gets its introduction in two startup cyc
   const acceptanceText = workflowFence("workflow-acceptance", preparedAcceptanceRecord((yield* fixture.projectStore.task(fixture.task.threadId))!));
   assert.ok(workflowProposalText((yield* fixture.projectStore.task(fixture.task.threadId))!).includes(acceptanceText),
     "the operative reads the exact acceptance record of the interpreted proposal");
-  assert.match(introduction.text, /supervision_plan and exactly \{"callerThreadId":/u);
+  assert.match(introduction.text, /supervision_plan \{"callerThreadId":/u);
   yield* fixture.run();
   assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "sent");
   const nativeIntroduction = fixture.operative.messages.find(message => message.id === introduction.messageId);

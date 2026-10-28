@@ -68,7 +68,7 @@ it.effect("the operative gets a short pinned notice, reads its own complete prop
   const proposalId = task.workflowProposalId ?? task.id;
   const args = {callerThreadId: sourceThreadId, taskId: task.id, proposalId};
   const text = String(notice.payload.text);
-  assert.ok(text.includes(`supervision_plan and exactly ${JSON.stringify(args)}`), "the notice carries the exact read");
+  assert.ok(text.includes(`supervision_plan ${JSON.stringify(args)}`), "the notice carries the exact read");
   assert.doesNotMatch(text, /Plan outline|workflow-acceptance|branch-selection|Do design\./u, "the notice pastes no plan, record, protocol or contract");
 
   const operative = fixture.projections.get(sourceThreadId)!;

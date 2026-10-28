@@ -297,11 +297,12 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
     // the notice names the exact read; the complete proposal it returns carries the plan, its contracts' locations and the acceptance record
     const notice = workflowIntroductionText(task);
     const full = workflowProposalText(task);
-    assert.ok(notice.includes(`supervision_plan and exactly ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
-    // the event: proposal and task identities, the operative's agreement step and the contact route; the contract and the definitions'
-    // starting point are part of the complete proposal it reads
-    assert.match(notice, new RegExp(`^Project Supervisor — proposal ${task.workflowProposalId ?? task.id} for task ${task.id}\n`, "u"));
-    assert.match(notice, /Questions or proposed changes: t3_thread_send to Supervisor [^,]+, mode queue, naming task /u);
+    assert.ok(notice.includes(`supervision_plan ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
+    // the event, exact read arguments and contact route; identities are not repeated in headings or contact prose
+    assert.match(notice, /^Project Supervisor — workflow proposal\n/u);
+    assert.ok(notice.endsWith(`Questions: t3_thread_send to ${task.supervisorThreadId}, mode queue.`));
+    assert.equal(notice.split('"taskId":').length - 1, 1);
+    assert.equal(notice.split('"proposalId":').length - 1, 1);
     assert.doesNotMatch(notice, /Plan outline|workflow-acceptance|branch-selection|Required references|project\.yaml|approval step/u,
       "the notice pastes no plan, protocol, record, contract or definitions pointer");
     assert.match(full, /It adds no human approval step or authority, cannot block tools/u, "the agreement contract is read with the proposal");
@@ -323,18 +324,18 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
       proposalId: "proposal-change", agreedAt: 1, evidence: {kind: "supervisor_message" as const, messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow: earlier}};
     const revised = {...sameScope, agreementSourceHash: "an-earlier-scope"};
     const delta = workflowIntroductionText(revised);
-    assert.match(delta, /^Project Supervisor — revised proposal proposal-change-limits for task [^\n]+\nThe authorized scope changed; the agreed plan of proposal proposal-change is unchanged/u);
-    assert.match(workflowIntroductionText(sameScope), /^Project Supervisor — revised proposal proposal-change-limits for task [^\n]+\nThe agreed plan of proposal proposal-change is unchanged/u,
+    assert.match(delta, /^Project Supervisor — revised workflow proposal\nThe authorized scope changed; the agreed plan of proposal proposal-change is unchanged/u);
+    assert.match(workflowIntroductionText(sameScope), /^Project Supervisor — revised workflow proposal\nThe agreed plan of proposal proposal-change is unchanged/u,
       "a revision without a scope change does not claim one");
-    assert.match(delta, /Read its new acceptance record with the t3-supervisor-workflows tool supervision_plan and exactly \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
+    assert.match(delta, /Read its new acceptance record: supervision_plan \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
     assert.match(workflowProposalText(revised), /```workflow-acceptance\n\{"taskId":"[^"]+","proposalId":"proposal-change-limits","digest":"[0-9a-f]{64}"\}\n```/u);
     assert.doesNotMatch(delta, /Plan outline|branch-selection|workflow-acceptance/u);
     // whole messages count, fixed protocol prose included: both notices together stay below one complete proposal
     assert.ok(notice.length + delta.length < full.length, `notices ${notice.length} + ${delta.length} characters against ${full.length}`);
     const changedPlan = {...revised, agreement: {...revised.agreement, workflow: {...earlier, plan: sequencePlan([localStep("Other plan", "A different plan.")])}}};
-    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — revised proposal proposal-change-limits for task [^\n]+\nThis revises the workflow you agreed as proposal proposal-change; agree the revision/u,
+    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — revised workflow proposal\nThis revises the workflow you agreed as proposal proposal-change; agree the revision/u,
       "a changed plan gets the proposal notice naming the agreed proposal it replaces");
-    assert.match(workflowIntroductionText(changedPlan), /Read it with the t3-supervisor-workflows tool supervision_plan and exactly \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
+    assert.match(workflowIntroductionText(changedPlan), /Read: supervision_plan \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
   } finally {yield* fixture.close;}
 }));
 
