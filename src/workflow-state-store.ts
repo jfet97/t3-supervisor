@@ -293,23 +293,14 @@ const backToBudgetIds = (plan: unknown, into: string[] = []): string[] => {
   visit(plan);
   return into;
 };
-const agreementBudgetIds = (value: Record<string, unknown>): string[] => {
-  const plans: unknown[] = [value.plan];
-  if (Array.isArray(value.acceptedAgreements)) for (const item of value.acceptedAgreements) {
-    if (!isRecord(item)) continue;
-    plans.push(item.plan);
-    if (isRecord(item.agreement) && isRecord(item.agreement.workflow)) plans.push(item.agreement.workflow.plan);
-  }
-  return plans.flatMap(plan => backToBudgetIds(plan));
-};
 const validReturnBudgets = (value: unknown): value is ReturnBudget[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxReturns &&
   new Set(value.map(item => isRecord(item) ? item.budgetId : null)).size === value.length &&
   value.reduce((count, item) => count + (isRecord(item) && Array.isArray(item.events) ? item.events.length : 0), 0) <= workflowMutationLimits.maxEvidence &&
   value.every(item => isRecord(item) && validBudgetId(item.budgetId) && validText(item.address) && Array.isArray(item.events) &&
     item.events.every(event => isRecord(event) && (event.kind === "consumed" || event.kind === "reset") && validId(event.returnId) && Number.isFinite(event.at)));
-// a present ledger must cover every live and accepted return, and every applied jump must still have its consumed event. an empty list is not an unused budget
+// the executable plan's budgets need rows, and every applied jump keeps its consumed event. a historical acceptance does not mint a budget. an empty list is not an unused budget
 const returnBudgetCoverage = (value: Record<string, unknown>): boolean => {
-  const needed = agreementBudgetIds(value);
+  const needed = backToBudgetIds(value.plan);
   if (value.returnBudgets === undefined) return needed.length === 0;
   if (!validReturnBudgets(value.returnBudgets)) return false;
   const rows = value.returnBudgets;
@@ -1041,6 +1032,11 @@ const decodeOperationRow = Schema.decodeUnknownEffect(Schema.Struct({request_has
 const decodeWorkflowJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeStoredDocument = Schema.decodeUnknownExit(WorkflowStateDocumentSchema);
 const decodeStoredReceipt = Schema.decodeUnknownExit(WorkflowMutationReceiptSchema);
+const documentTextAccepted = (serialized: string): boolean => {
+  const parsed = decodeWorkflowJson(serialized);
+  if (Exit.isFailure(parsed) || !isRecord(parsed.value) || parsed.value.formatVersion !== 2) return false;
+  return Exit.isSuccess(decodeStoredDocument(parsed.value)) && validDocument(parsed.value);
+};
 
 // a stored document must decode with the stored-shape schema and pass the store's own limits and row identity; it is
 // returned as stored (key order included), since its fingerprint is the receipt's stateHash
@@ -1550,6 +1546,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (!documentTextAccepted(serialized)) return {status: "invalid", operationId, reason: "invalid_workflow_document"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (creatingMain) yield* insertWorkflow(next, serialized);
     else if (row?.revision === 0) yield* replaceWorkflow(next, serialized, 0);
     else if (!(yield* casUpdate(owner, next.workflowId, next.revision, serialized, at, row!.revision)))

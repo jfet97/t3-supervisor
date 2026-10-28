@@ -634,6 +634,77 @@ it.live("a supplied duplicate budget writes nothing, and a missing or stripped l
   assert.equal(String((yield* query(spentRun.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "stripped-return-ledger"))[0]?.document), stripped.text);
 }), {timeout: 30_000});
 
+const laterAcceptance = (proposalId: string, workflow: WorkflowProposalInfo): WorkflowAgreementImport => ({
+  taskId: "task-a", sourceThreadId: "main-a", sourceRunId: "run-b", sourceMessageId: `message-${proposalId}`, sourceHash: taskSourceHash,
+  objective: "Ship the reviewed change.", agreement: {status: "agreed", message: "Accepted.", proposalId, agreedAt: 20,
+    evidence: {kind: "supervisor_message", messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow},
+});
+
+it.live("a later acceptance adds a new return, and a fresh id does not refill a spent one", () => Effect.gen(function* () {
+  const added = yield* open([local("work")]);
+  const broad = yield* added.main();
+  assert.equal(broad.returnBudgets?.length ?? 0, 0);
+  const drafted = canonicalizeProposalDraft(draft(local("work"), branch("Findings remain.", [backTo("work", 2)])), context, "added-return", planOf(broad));
+  assert.ok(drafted.ok, JSON.stringify(drafted));
+  if (!drafted.ok || !drafted.workflow.plan) return;
+  const addedReturn = planBackTos(drafted.workflow.plan)[0];
+  assert.ok(addedReturn);
+  const proposal = {status: "proposed", message: "A later draft.", workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, ...drafted.workflow} as WorkflowProposalInfo;
+  const imported = yield* added.box.stores.workflows.importAcceptedAgreement(added.owner, laterAcceptance("proposal-added", proposal), added.tick());
+  assert.equal(imported.status, "applied", JSON.stringify(imported));
+  const held = yield* added.main();
+  assert.equal(held.acceptedAgreements.length, 2);
+  assert.equal(held.returnBudgets?.length ?? 0, 0);
+  assert.equal(planBackTos(held.plan).length, 0);
+  assert.equal(planBackTos(held.acceptedAgreements[1]!.plan)[0]?.budgetId, addedReturn.budgetId);
+  assert.equal(planBackTos(held.acceptedAgreements[1]!.agreement.workflow.plan)[0]?.budgetId, addedReturn.budgetId);
+  assert.equal((yield* added.box.stores.workflows.getState("project-a", "main-a")).status, "found");
+  const adopted = yield* added.submit(held, "adopt-added-return", added.tick(), drafted.workflow.plan);
+  assert.equal(adopted.status, "applied", JSON.stringify(adopted));
+  const freshUse = yield* added.budget("work");
+  assert.equal(freshUse.used, 0);
+  assert.deepEqual(freshUse.events, []);
+  assert.equal(freshUse.node.budgetId, addedReturn.budgetId);
+  assert.equal(planBackTos((yield* added.main()).acceptedAgreements[1]!.plan)[0]?.budgetId, addedReturn.budgetId);
+
+  const spentRun = yield* open([local("work"), branch("Findings remain.", [backTo("work", 1)])]);
+  yield* spentRun.complete(["work"], "work-for-fresh");
+  yield* spentRun.choose("Findings remain.", "then");
+  yield* spentRun.jump("work", "spend-for-fresh");
+  const spent = yield* spentRun.main();
+  const owned = planBackTos(spent.plan).find(node => node.target === "work");
+  assert.ok(owned);
+  const consumedId = spent.returnBudgets?.find(item => item.budgetId === owned.budgetId)?.events.find(event => event.kind === "consumed")?.returnId;
+  assert.ok(consumedId);
+  const freshBudget = "cd".repeat(32);
+  const redrafted = canonicalizeProposalDraft(draft(local("work"), branch("Findings remain.", [{...backTo("work", 1), nodeId: "00000000-0000-4000-8000-0000000000e1", budgetId: freshBudget}])), context, "fresh-return", planOf(spent));
+  assert.ok(redrafted.ok, JSON.stringify(redrafted));
+  if (!redrafted.ok || !redrafted.workflow.plan) return;
+  const proposed = planBackTos(redrafted.workflow.plan)[0];
+  assert.ok(proposed);
+  assert.equal(proposed.budgetId, freshBudget);
+  assert.notEqual(proposed.nodeId, owned.nodeId);
+  const freshProposal = {status: "proposed", message: "A later draft.", workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, ...redrafted.workflow} as WorkflowProposalInfo;
+  const second = yield* spentRun.box.stores.workflows.importAcceptedAgreement(spentRun.owner, laterAcceptance("proposal-fresh", freshProposal), spentRun.tick());
+  assert.equal(second.status, "applied", JSON.stringify(second));
+  const stored = yield* spentRun.main();
+  assert.equal((yield* spentRun.box.stores.workflows.getState("project-a", "main-a")).status, "found");
+  assert.equal(stored.returnBudgets?.some(item => item.budgetId === freshBudget), false);
+  assert.equal(returnBudgetUsed(stored.returnBudgets?.find(item => item.budgetId === owned.budgetId)?.events ?? []), 1);
+  assert.equal(planBackTos(stored.acceptedAgreements[1]!.plan)[0]?.budgetId, freshBudget);
+  assert.equal(planBackTos(stored.plan).find(node => node.target === "work")?.budgetId, owned.budgetId);
+  const replaced = yield* spentRun.submit(stored, "adopt-fresh-return", spentRun.tick(), redrafted.workflow.plan);
+  assert.equal(replaced.status, "applied", JSON.stringify(replaced));
+  const kept = yield* spentRun.budget("work");
+  assert.equal(kept.node.budgetId, owned.budgetId);
+  assert.equal(kept.used, 1);
+  assert.equal(kept.events.find(event => event.kind === "consumed")?.returnId, consumedId);
+  assert.equal(kept.document.returnBudgets?.some(item => item.budgetId === freshBudget), false);
+  const unchanged = yield* spentRun.main();
+  assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.plan)[0]?.budgetId, freshBudget);
+  assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.agreement.workflow.plan)[0]?.budgetId, freshBudget);
+}), {timeout: 30_000});
+
 it.live("an enclosing return resets the inner budget, and the inner return does not reset it", () => Effect.gen(function* () {
   const opened = yield* open([local("implement"), branch("Review findings.", [backTo("implement", 5)]), branch("CI failed.", [backTo("implement", 10)])]);
   const conditionOf = (document: WorkflowStateDocument, nodeId: string) => {

@@ -237,10 +237,11 @@ after the latest reset. Applying a return appends one consumed event for itself 
 one reset event for each strictly nested replayed return, in the same transaction as
 the new attempt. Each return occurrence has its own budget, including each expansion
 of one reusable workflow. An edit that keeps a return's nodeId or budgetId keeps that
-budget when the return is reordered or retitled. A stored plan or accepted agreement
-that contains a return whose budget is missing from `returnBudgets`, or an applied
-return whose consumed event is missing, stays on disk and is classified incompatible.
-An empty ledger is not repaired into an unused budget. A plan with no return may omit
+budget when the return is reordered or retitled. The executable plan's returns need
+a `returnBudgets` row, and an applied return needs its consumed event. A later
+accepted agreement is history: it keeps its own budget ids and does not mint a ledger
+row. A missing executable row, or a missing consumed event, stays on disk and is
+classified incompatible. An empty ledger is not repaired into an unused budget. A plan with no return may omit
 the field. Two returns that both move and keep no nodeId or budgetId are rejected with
 `return_budget_identity_ambiguous` and write nothing. Two returns that claim one
 `budgetId` are rejected with `return_budget_duplicate` and write nothing.
