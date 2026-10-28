@@ -527,6 +527,8 @@ The disclosure holds the step's duty (definition description), read-only referen
 
 The tinted Agent and Supervisor region beside the plan presents the actual proposal state and the recorded agent acceptance as two attributed rows, each message stated once: a proposal's message only while it is the open question, the acceptance message once accepted. Messages come from those records; they are not invented chat. Links open the Supervisor and agent conversations. Disclosures hold the acceptance record (time, proposal, agent and Supervisor message or interpretation submission), plan provenance (proposal status, definitions status, requirements, checkout and revision, issues) and the task interpretation. “Plan accepted” requires an active task whose acceptance covers the current proposal. A revised proposal reads “Earlier plan accepted; update awaiting acceptance”, without implying an enforcement gate, and a “Proposed update awaiting acceptance” panel lists the actual added, removed and changed steps against the accepted plan, with an optional plan-note comparison.
 
+An acceptance covers only the content it accepted. A live plan is titled “Current accepted plan” only while its content still matches the accepted snapshot; after a later change it is “Current plan · differs from the accepted plan”, steps outside the acceptance carry “Not in the accepted plan”, the agent row says it accepted an earlier version, and the accepted plan remains its own record under History.
+
 **The Current Task Rule.** Bind current outcome and alignment to the selected task; retain unrelated workflow records as explicitly labeled history without presenting their agreement as the current task's agreement.
 
 ### Evidence and history

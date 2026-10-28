@@ -80,7 +80,9 @@ export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) =>
 const noPlanNeeded = (task: TaskInterpretationInfo | undefined) => task?.supervision === "not_needed" && !task.agreement;
 
 /** The one-line agreement state for the task band. */
-export const alignmentLabel = (task: TaskInterpretationInfo | undefined) => hasCurrentAgreement(task) ? "Plan accepted"
+// changedSinceAcceptance: the displayed live plan no longer matches the accepted snapshot, so its contents are not accepted
+export const alignmentLabel = (task: TaskInterpretationInfo | undefined, changedSinceAcceptance = false) => hasCurrentAgreement(task)
+  ? changedSinceAcceptance ? "Changes not accepted" : "Plan accepted"
   : acceptedAgreement(task) ? "Update awaiting acceptance"
   : task?.agreement?.status === "stale" ? "Acceptance needs review"
   : noPlanNeeded(task) ? "No plan needed"
@@ -274,10 +276,13 @@ const proposalProgress: Record<WorkflowProposalInfo["status"], string> = {pendin
   unavailable: "Plan unavailable", invalid: "Plan needs correction", stale: "Plan needs review"};
 
 /** The actual proposal and acceptance records for the task, each stated once. */
-export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretationInfo | undefined; supervisorThreadId?: string}) {
+export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance = false}: {task: TaskInterpretationInfo | undefined; supervisorThreadId?: string;
+  changedSinceAcceptance?: boolean}) {
   const accepted = acceptedAgreement(task);
   const pending = pendingProposal(task);
-  const current = Boolean(accepted && !pending);
+  // an acceptance covers only the content it accepted; later changes to the live plan are not accepted
+  const changed = Boolean(accepted && !pending && changedSinceAcceptance);
+  const current = Boolean(accepted && !pending) && !changed;
   const stale = task?.agreement?.status === "stale";
   const historical = Boolean(task && ["expired", "not_supervised"].includes(task.status));
   const proposal = pending ?? task?.workflow ?? task?.agreement?.workflow;
@@ -288,6 +293,7 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
   // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance
   const proposalMessage = unneeded ? task?.reason ?? null : proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
   const agentLine = historical && task?.agreement ? "Earlier acceptance retained"
+    : changed ? "Accepted an earlier version; later changes are not accepted"
     : current ? "Accepted this plan"
     : update ? "Earlier plan accepted; update awaiting acceptance"
     : stale ? "Earlier acceptance is out of date"

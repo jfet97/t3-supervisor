@@ -318,9 +318,10 @@ workflow documents:
   the projection's `turnItems` on `messageId` and never constructed. A message T3
   recorded no item for has no read handle: it is matched while paging that thread's
   messages, never passed as an `itemId`; no body is copied. `section` reads the rest
-  on demand: `conversation` (the current conversation facts), `plan` (the current
-  proposal's identity and agreement state, requirement decisions, the outline and each
-  task-local duty's text) and `diagnostics` (definition issues, protocol repair,
+  on demand: `conversation` (the current conversation facts), `plan` (the live plan
+  bound to this task and scope, with its revision and current acceptance flag, or the
+  current proposal when no live plan matches; requirements, outline and task-local duties
+  are included) and `diagnostics` (definition issues, protocol repair,
   operative record and definition review details). For a stopped chat it returns
   supervision=stopped even without a current task or enabled project; a valid pending
   Start returns supervision=pending_start.

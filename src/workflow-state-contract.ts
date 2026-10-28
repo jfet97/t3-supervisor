@@ -331,6 +331,14 @@ export type WorkflowStateDocument = {
   updatedAt: number;
 };
 
+/**
+ * The proposal whose retained accepted snapshot the document's content still matches, or null once any later write changed that
+ * content: edited contents are never the accepted plan, while the earlier acceptance stays retained in acceptedAgreements.
+ */
+export const currentAcceptedProposalId = (document: Pick<WorkflowStateDocument, "currentAgreementKey" | "acceptedAgreements">): string | null =>
+  document.currentAgreementKey === null ? null
+    : document.acceptedAgreements.find(item => item.key === document.currentAgreementKey)?.agreement.proposalId ?? null;
+
 export type WorkflowStateIncompatible = {
   status: "incompatible";
   workflowId: string;

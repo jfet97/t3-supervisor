@@ -442,8 +442,10 @@ Its task is the pause answer's `draftInstruction`: the coordinates of its own re
 route, never a copy of the plan, rules or definitions. With `supervision_planning`
 action `draft_read`, the attempt's pins and its own executed call, before and after it
 is attached, it reads view `context` (compact by default; section `conversation` for
-the current intent and section `plan` for the current plan, including each task-local
-duty), `definitions` and `plan_rules` (the shared plan authoring rules without the
+the current intent and section `plan` for the current plan: the main's live workflow
+while it is bound to the task and its current scope, with its revision and whether its
+content is still the accepted plan, otherwise the current proposal, each task-local duty
+included), `definitions` and `plan_rules` (the shared plan authoring rules without the
 root's pause coordination). No section names the root's interpretation submission
 inputs, and a read changes, renews or attaches nothing. Its result queues an owner
 notification without steering its thinking; the notification names the exact

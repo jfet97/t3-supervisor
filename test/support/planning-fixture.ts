@@ -10,6 +10,7 @@ import { workflowToolNames } from "../../src/workflow-write-evidence.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { engagedTask } from "./engaged-task.js";
 import { policyLayer, supervisionStores, temporaryDirectory } from "./g11-stores.js";
+import { definitionsService } from "./g1a-conversation.js";
 import { teamControllers } from "./g11-team.js";
 
 /**
@@ -42,8 +43,11 @@ export const planningFixture = (rpc?: NativeRpcShape) => Effect.gen(function* ()
   task = engagedTask(task, projections.get("main")!);
   yield* stores.supervisors.saveTask(task);
   const details = new Map<string, unknown>();
+  // a definition-checked workflow_write reads the main task's own definition snapshot
+  const definitions = definitionsService({load: () => Effect.flatMap(stores.supervisors.task("main"), current => current?.definitionSnapshot
+    ? Effect.succeed(current.definitionSnapshot) : Effect.die(new Error("the main task has no definition snapshot")))});
   const built = yield* teamControllers(stores, policy, {listThreads: () => Effect.succeed(threads), projection: id => Effect.succeed(projections.get(id)!),
-    turnItem: id => Effect.succeed(details.get(id))}, {rpc});
+    turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions});
   const views = Context.add(built.context, SupervisorConversation, Context.get(yield* Layer.build(SupervisorConversation.layer.pipe(
     Layer.provide(Layer.succeedContext(built.context)))), SupervisorConversation));
   const context = yield* Layer.build(SupervisorPlanningController.layer.pipe(Layer.provide(Layer.succeedContext(views))));

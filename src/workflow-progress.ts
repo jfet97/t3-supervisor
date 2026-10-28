@@ -2,7 +2,7 @@ import { Schema } from "effect";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBranches, planEntities } from "./workflow-plan-tree.js";
-import { branchSelectionPaths, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
+import { branchSelectionPaths, currentAcceptedProposalId, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
   WorkflowReturnRunSchema, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
 import { WorkflowAssessment, workflowAssessment } from "./workflow-assessment.js";
@@ -142,6 +142,8 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   assessment: Schema.optionalKey(Schema.NullOr(WorkflowAssessment)),
   objective: NullableText,
   plan: Schema.NullOr(WorkflowPlanGroupSchema),
+  /** The proposal whose accepted snapshot this content still matches; null once a later write changed it, so it is not accepted. */
+  acceptedProposalId: NullableText,
   updatedAt: Schema.Number,
   parentNodeReferences: Schema.Array(Schema.Struct({
     parentWorkflowId: Schema.String,
@@ -332,6 +334,7 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   assessment: workflowAssessment(document),
   objective: document.objective,
   plan: document.plan,
+  acceptedProposalId: currentAcceptedProposalId(document),
   updatedAt: document.updatedAt,
   parentNodeReferences: [...parentNodeReferences],
   history: progressHistory(document),

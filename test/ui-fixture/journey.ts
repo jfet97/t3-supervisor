@@ -172,9 +172,10 @@ export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: 
   const liveVerifyNote = v2Accepted ? refinedVerify : notes.verify;
   const workflows: WorkflowProgressSnapshot["workflows"] = live ? [{workflowId: "fixture-workflow-packing", projectId, mainThreadId: threadId, threadId, parentThreadId: null,
     revision: order.indexOf(livePhase as typeof order[number]) + 2, status: live.task.status, objective: journeyObjective, plan: plan(liveVerifyNote, live.statuses),
+    acceptedProposalId: task.agreement?.status === "agreed" ? task.agreement.proposalId : null,
     assessment: {taskId: base.id, sourceHash: base.sourceHash, status: live.task.status, summary: live.task.note, updatedAt: now - moments[livePhase as typeof order[number]].at * 60_000},
     updatedAt: now - moments[livePhase as typeof order[number]].at * 60_000, parentNodeReferences: [], observations: live.records, contributions: []}]
-    : phase === "retained" ? [{workflowId: "fixture-workflow-earlier", projectId, mainThreadId: threadId, threadId, parentThreadId: null, revision: 4, status: "completed",
+    : phase === "retained" ? [{workflowId: "fixture-workflow-earlier", projectId, mainThreadId: threadId, threadId, parentThreadId: null, revision: 4, status: "completed", acceptedProposalId: null,
       objective: "Reconstructed example: an earlier task in this conversation (packing label layout)", plan: {kind: "sequence", templatePath: null, nodes: [step("scope", notes.scope, "completed"), step("deliver", notes.deliver, "completed")]},
       assessment: {taskId: "fixture-task-earlier", sourceHash: "fixture-source-earlier", status: "completed", summary: "Reconstructed example: the earlier task was assessed complete.", updatedAt: now - 3 * 86_400_000},
       updatedAt: now - 3 * 86_400_000, parentNodeReferences: [], observations: [], contributions: []}] : [];
@@ -227,12 +228,12 @@ function branchJourney(phase: BranchCase, base: TaskInterpretationInfo, taskBase
     : null;
   const childId = "fixture-branch-reviewer";
   const workflows: WorkflowProgressSnapshot["workflows"] = live ? [{workflowId: "fixture-workflow-packing", projectId, mainThreadId: threadId, threadId, parentThreadId: null, revision: 6,
-    status: live.task.status, objective: journeyObjective, plan: branchPlan(live.statuses), assessment: {taskId: taskBase.id, sourceHash: taskBase.sourceHash, status: live.task.status,
+    status: live.task.status, objective: journeyObjective, plan: branchPlan(live.statuses), acceptedProposalId: task.agreement?.status === "agreed" ? task.agreement.proposalId : null, assessment: {taskId: taskBase.id, sourceHash: taskBase.sourceHash, status: live.task.status,
       summary: live.task.note, updatedAt: now - 10 * 60_000, ...(live.reassessment ? {reassessment: live.reassessment} : {})}, updatedAt: now - 3 * 60_000, parentNodeReferences: [],
     observations: [], contributions: [], branchSelections: live.selections, branchEvents: live.events,
     completions: phase === "branch-changed" ? [{nodeId: "packing-review", completedAt: now - 10 * 60_000}] : []},
   ...(phase === "branch-selected" ? [{workflowId: "fixture-workflow-branch-reviewer", projectId, mainThreadId: threadId, threadId: childId, parentThreadId: threadId, revision: 3,
-    status: "underway" as Status, objective: "Reconstructed example: the delegated reviewer’s own plan.", plan: {kind: "sequence" as const, templatePath: null, nodes: [{kind: "branch" as const,
+    status: "underway" as Status, objective: "Reconstructed example: the delegated reviewer’s own plan.", acceptedProposalId: null, plan: {kind: "sequence" as const, templatePath: null, nodes: [{kind: "branch" as const,
       nodeId: "fixture-child-branch", templatePath: null, condition: "The diff stays within the packing scan module.", reason: "The reviewer decides whether one pass is enough.",
       then: {kind: "sequence" as const, templatePath: null, nodes: [{...singleReview, nodeId: "fixture-child-one-pass", localId: "one-pass", name: "One review pass", status: "underway" as Status}]},
       else: null}]}, assessment: {taskId: taskBase.id, sourceHash: taskBase.sourceHash, status: "underway", summary: "Reconstructed example: the reviewer’s pass is underway.",

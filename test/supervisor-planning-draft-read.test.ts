@@ -6,7 +6,13 @@ import { fingerprint } from "../src/guidance-store.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
 import { planningDraftRead, type PlanningAttempt } from "../src/supervisor-planning.js";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import type { ProjectSupervisorInfo } from "../src/project-supervisor-contract.js";
 import { planAuthoringRules, proposalContextFromDefinitions, validateWorkflowPlan } from "../src/supervisor-workflow.js";
+import { progressWorkflow, type WorkflowProgressSnapshot } from "../src/workflow-progress.js";
+import type { WorkflowStateDocument } from "../src/workflow-state-contract.js";
+import { TaskWorkspace } from "../ui/src/project-supervisor.js";
 import type { WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
 import type { ThreadInfo } from "../src/types.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
@@ -234,7 +240,8 @@ const acceptedPlan = (duty: string) => (task: TaskRecord): TaskRecord => {
   proposalContextFromDefinitions(definitions))!;
   const proposal: WorkflowProposalInfo = {status: "proposed", message: "The accepted proposal.", workspaceRoot: definitions.workspaceRoot,
     revision: definitions.revision, globalRevision: definitions.globalRevision ?? null, ...normalized};
-  return {...task, workflow: proposal, workflowProposalId: "proposal-accepted", agreement: {status: "agreed", message: "The operative accepted the plan.",
+  return {...task, definitionContext: proposalContextFromDefinitions(definitions), agreementSourceHash: task.sourceHash, workflow: proposal,
+    workflowProposalId: "proposal-accepted", agreement: {status: "agreed", message: "The operative accepted the plan.",
     proposalId: "proposal-accepted", agreedAt: 1, evidence: {kind: "supervisor_message", messageId: "proposal-message"}, agentMessageId: "acceptance-message",
     workflow: proposal}};
 };
@@ -287,6 +294,7 @@ it.effect("a drafter fetches the intent and the accepted current plan with its t
     const plan = shown.plan!;
     assert.deepEqual([(plan.proposal as {proposalId: string}).proposalId, (plan.agreement as {status: string; proposalId: string})],
       ["proposal-accepted", {status: "agreed", proposalId: "proposal-accepted"}]);
+    assert.deepEqual(plan.source, {kind: "proposal", proposalId: "proposal-accepted"}, "without a live workflow the plan is the proposal");
     assert.ok((plan.outline as string[]).some(line => line.includes("Notify the release owner [local:notify-the-release-owner]")), JSON.stringify(plan.outline));
     assert.deepEqual(plan.localDuties, [`- Notify the release owner [local:notify-the-release-owner]:\n  ${duty}`]);
     return shown;
@@ -343,4 +351,120 @@ it.effect("a drafter reads in the pre-attach window after its owner's turn ended
   assert.equal(((yield* call(attach)) as Result).status, "recorded");
   f.callAs("writer", read("context", {section: "plan"}));
   assert.deepEqual(yield* call(read("context", {section: "plan"})), plan);
+}));
+
+/** The accepted proposal imported into the main's live workflow, whose content then matches the accepted snapshot. */
+const liveAccepted = Effect.gen(function* () {
+  const {f, attempt, read, call} = yield* draftingWith(acceptedPlan("Original local duty"));
+  const task = (yield* f.stores.supervisors.task("main"))!;
+  const owner = {projectId: "project", mainThreadId: "main", supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  const imported = yield* f.states.importAcceptedAgreement(owner, {taskId: task.id, sourceThreadId: "main", sourceRunId: task.sourceRunId,
+    sourceMessageId: task.sourceMessageId, sourceHash: task.sourceHash, objective: task.objective!, agreement: task.agreement!}, 1);
+  assert.equal(imported.status, "applied", JSON.stringify(imported));
+  const accepted = (yield* f.states.get("project", "main"))!;
+  return {f, attempt, read, call, task, accepted};
+});
+
+/**
+ * Astra's reproduction: the production workflow_write controller then adds a task-local duty, so the live plan (revision 2) no
+ * longer matches the accepted snapshot.
+ */
+const liveEdit = Effect.gen(function* () {
+  const {f, attempt, read, call, task, accepted} = yield* liveAccepted;
+  const duty = "Preserve the deployment recovery evidence before handoff.";
+  const writeArgs = {supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation, action: "apply", input: {operationId: "add-live-duty",
+    workflowId: accepted.workflowId, expectedRevision: accepted.revision, status: accepted.status, objective: accepted.objective,
+    sourceBinding: accepted.sourceBinding!, requirements: accepted.requirements, issues: accepted.issues,
+    plan: {...accepted.plan!, nodes: [...accepted.plan!.nodes, {kind: "step", definitionId: null, localId: "recovery-evidence", name: "Recovery evidence",
+      description: duty, reason: "Current live supporting duty.", status: "planned"}]}, note: "Add supporting work."}};
+  // the root's own executed workflow_write call proves the write
+  f.proof(writeArgs);
+  const writeDetail = [...f.details.values()].at(-1) as {id: string; toolName: string};
+  writeDetail.toolName = workflowToolNames.write.direct[0];
+  f.projections.get(f.binding.threadId)!.turnItems!.find(item => item.id === writeDetail.id)!.toolName = writeDetail.toolName;
+  const written = (yield* f.workflows.write(writeArgs)) as {status: string};
+  assert.equal(written.status, "applied", JSON.stringify(written));
+  const live = (yield* f.states.get("project", "main"))!;
+  assert.ok(JSON.stringify(live.plan).includes(duty));
+  return {f, attempt, read, call, task, accepted, live, duty};
+});
+
+it.effect("a drafter reads a duty added to the current live plan before and after attach, with its revision and acceptance validity", () => Effect.gen(function* () {
+  const {f, attempt, read, call, task, live, duty} = yield* liveEdit;
+  assert.equal(live.currentAgreementKey, null, "the edit leaves the accepted snapshot");
+  const args = read("context", {section: "plan"});
+  f.callAs("writer", args);
+  const before = yield* call(args);
+  assert.equal(before.status, "ok", JSON.stringify(before));
+  assert.deepEqual(before.source, {kind: "live", workflowId: live.workflowId, revision: live.revision, accepted: false});
+  assert.deepEqual(before.localDuties, ["- Notify the release owner [local:notify-the-release-owner]:\n  Original local duty", `- Recovery evidence [local:recovery-evidence]:\n  ${duty}`]);
+  assert.ok((before.outline as string[]).some(line => line.includes("Recovery evidence [local:recovery-evidence]")));
+  assert.deepEqual(before.requirements, live.requirements);
+  // the earlier acceptance stays its own record: it still names the accepted proposal, which never contained the new duty
+  assert.deepEqual(before.agreement, {status: "agreed", proposalId: "proposal-accepted"});
+  assert.equal(JSON.stringify(task.agreement!.workflow.plan).includes(duty), false);
+  const attach = {...f.args, action: "attach_draft", operationId: "attach-current-live", attemptId: attempt.id, draftThreadId: "writer", draftTaskId: "draft-task"};
+  delete (attach as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(attach);
+  assert.equal((yield* call(attach)).status, "recorded");
+  assert.deepEqual(yield* call(args), before, "the attached drafter reads the same current plan");
+}));
+
+const planSection = (f: Fixture) =>
+  Effect.map(f.conversation.readContextView(f.binding, {view: "context", section: "plan"}), read => read as Record<string, unknown>);
+
+it.effect("the plan section reports the imported live plan accepted while its content matches the accepted snapshot", () => Effect.gen(function* () {
+  const {f, accepted} = yield* liveAccepted;
+  assert.notEqual(accepted.currentAgreementKey, null);
+  const plan = yield* planSection(f);
+  assert.deepEqual(plan.source, {kind: "live", workflowId: accepted.workflowId, revision: accepted.revision, accepted: true});
+  assert.deepEqual(plan.localDuties, ["- Notify the release owner [local:notify-the-release-owner]:\n  Original local duty"]);
+}));
+
+it.effect("a live plan bound to an earlier scope is not the current plan: the section falls back to the task's proposal", () => Effect.gen(function* () {
+  const {f, task, live, duty} = yield* liveEdit;
+  assert.equal(((yield* planSection(f)).source as {kind: string}).kind, "live");
+  // a new authorized scope unbinds the live workflow: the plan is the task's current proposal again, without the live duty
+  yield* f.stores.supervisors.saveTask({...task, conversation: {...task.conversation!, authorization: {...task.conversation!.authorization!,
+    scopeRevision: fingerprint("A reconsidered authorized scope.")}}});
+  const fallback = yield* planSection(f);
+  assert.deepEqual(fallback.source, {kind: "proposal", proposalId: "proposal-accepted"});
+  assert.equal(JSON.stringify(fallback).includes(duty), false);
+  assert.ok(JSON.stringify(live.plan).includes(duty));
+}));
+
+/** The task workspace for the main, rendered from the live workflow the way the dashboard reads it. */
+const renderLive = (task: TaskRecord, document: WorkflowStateDocument, initialView: "plan" | "history" = "plan") => {
+  const page: WorkflowProgressSnapshot = {status: "ok", message: null, projectId: "project", mainThreadId: "main", observedAt: 2, scope: null,
+    incompatibleWorkflows: [], workflows: [progressWorkflow(document, [])], workflowOffset: 0, workflowHasMore: false, lineageOffset: 0, lineageHasMore: false};
+  return renderToStaticMarkup(createElement(TaskWorkspace, {snapshot: {available: true} as unknown as ProjectSupervisorInfo, task, threadId: "main", initialView,
+    progress: {key: "live-edit", pages: [page], loading: false, error: null}, connected: true, attention: [], stopped: false, readAt: 2, refreshing: false,
+    onRefresh: () => {}, onLoadMore: () => {}}));
+};
+const journeyTitle = (html: string) => /<h2 id="journey-title">(.*?)<\/h2>/su.exec(html)?.[1];
+
+it.effect("the dashboard never labels an edited, unaccepted plan accepted and keeps the accepted plan as its own record", () => Effect.gen(function* () {
+  const {task, accepted, live, duty} = yield* liveEdit;
+  // control: the imported plan still matches its accepted snapshot
+  const acceptedHtml = renderLive(task, accepted);
+  assert.equal(journeyTitle(acceptedHtml), "Current accepted plan");
+  assert.match(acceptedHtml, /Plan accepted/);
+  // the live plan with the added duty: shown as the current plan, its new step outside the acceptance
+  const html = renderLive(task, live);
+  assert.equal(journeyTitle(html), "Current plan · differs from the accepted plan");
+  assert.ok(html.includes(duty), "the unaccepted added duty is rendered");
+  assert.match(html, /Recovery evidence<span class="step-flags"><span class="pill">Not in the accepted plan<\/span>/u);
+  assert.match(html, /This plan changed after proposal proposal-accepted was accepted/u);
+  assert.match(html, /Changes not accepted/u);
+  assert.match(html, /Accepted an earlier version; later changes are not accepted/u);
+  assert.doesNotMatch(html, /Current accepted plan|Plan accepted|Accepted this plan/u);
+  // History keeps the accepted plan distinct: its own steps, without the later duty
+  const history = renderLive(task, live, "history");
+  // the accepted plan's record is the last part of the History sources, each of its steps its own disclosure
+  const acceptedTitle = history.indexOf("Accepted plan (before later changes)");
+  assert.notEqual(acceptedTitle, -1);
+  const acceptedRecord = history.slice(acceptedTitle);
+  assert.match(acceptedRecord, /The plan accepted as proposal proposal-accepted/u);
+  assert.match(acceptedRecord, /Notify the release owner/u);
+  assert.doesNotMatch(acceptedRecord, /Recovery evidence/u);
 }));

@@ -586,6 +586,10 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const accepted = acceptedAgreement(task);
   const pending = pendingProposal(task);
   const changes = accepted && pending ? pending.plan ? planChanges(accepted.workflow.plan, pending.plan) : [] : null;
+  // the live plan is the accepted plan only while its content still matches that acceptance's snapshot; after a later change it
+  // is the current plan, and the earlier acceptance stays a separate record
+  const liveAccepted = record.kind === "live" && accepted !== null && record.workflow.acceptedProposalId === accepted.proposalId;
+  const changedSinceAcceptance = record.kind === "live" && accepted !== null && !liveAccepted;
   // a live plan counts only the steps that currently apply; a pending decision is current work and its paths are not outstanding steps
   const notApplicable = record.kind === "live" ? new Set(record.workflow.notApplicable ?? []) : undefined;
   const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow), notApplicable) : null;
@@ -612,7 +616,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       {task?.reason && task.status !== "inferred" && <p className="muted">{task.reason}</p>}
       <TaskOutcome {...(currentAssessment && current ? {currentStep: current} : {})} assessment={currentAssessment} fallback={fallback} stopped={stopped}/>
       <div className="task-reading">
-        <span><strong>{alignmentLabel(task)}</strong></span>
+        <span><strong>{alignmentLabel(task, changedSinceAcceptance)}</strong></span>
         <span>{assessmentState}</span>
         <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<RefreshAction label="Refresh task and supervision state" busy={refreshing} enabled={connected} onRefresh={onRefresh}/></span>
       </div>
@@ -638,9 +642,12 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     {historyVisible ? <WorkflowHistory workflow={mainWorkflow}/> : <div className="workflow-journey-layout">
       <section className="workflow-plan-surface" aria-labelledby="journey-title">
         <div className="journey-head">
-          <h2 id="journey-title">{record.kind === "live" ? accepted ? "Current accepted plan" : "Draft plan" : record.kind === "agreed" ? "Accepted plan" : record.kind === "proposed" ? "Pending proposal" : "Plan"}</h2>
+          <h2 id="journey-title">{record.kind === "live" ? liveAccepted ? "Current accepted plan" : changedSinceAcceptance ? "Current plan · differs from the accepted plan" : "Draft plan"
+            : record.kind === "agreed" ? "Accepted plan" : record.kind === "proposed" ? "Pending proposal" : "Plan"}</h2>
           <span className="small muted">{record.kind === "live" && !currentAssessment ? "Earlier scope assessments retained" : record.kind === "live" ? `${steps.filter(step => step.status === "completed").length} of ${steps.length} applicable steps assessed complete${live?.pending.length ? ` · ${live.pending.length} branch decision${live.pending.length === 1 ? "" : "s"} pending` : ""}` : record.kind === "agreed" ? "Not yet assessed" : record.kind === "proposed" ? "Awaiting acceptance" : ""}</span>
         </div>
+        {changedSinceAcceptance && accepted && <p className="notice" role="status">This plan changed after proposal {accepted.proposalId} was accepted; steps not in the
+          accepted plan are not accepted. The accepted plan stays under History.</p>}
         {record.kind === "none"
           ? <p className="muted">{task?.supervision === "not_needed" && !task.agreement ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
             : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
@@ -648,7 +655,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
             completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt]))} : {})}/>}
       </section>
       <aside className="workflow-context">
-        <TaskAlignment task={task} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>
+        <TaskAlignment task={task} changedSinceAcceptance={changedSinceAcceptance} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>
         {pending && changes && <PlanChanges changes={changes} proposal={pending} proposalId={task?.workflowProposalId}/>}
         {latestObservation && <section className="workflow-observation-summary" aria-labelledby="latest-observation-title"><h3 id="latest-observation-title">Latest Supervisor record</h3>
           <p>{latestObservation.note}</p><p className="small muted">{latestObservation.targetNodeId ? latestObservation.targetNodeName ?? "Step" : "Whole task"} · {formatProgressTime(latestObservation.recordedAt)}</p></section>}
@@ -660,6 +667,9 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       {record.kind === "live" && <BranchDecisionHistory workflow={record.workflow}/>}
       {removedContributions.length > 0 && <section className="stack"><h3>Contributions for steps no longer in the plan</h3><StepContributions items={removedContributions}/></section>}
       {mainThread && <section className="stack"><h3>Native conversation</h3><p className="small">{lifecyclePresentation(mainThread).label}{mainThread.lifecycleDetail ? ` · ${mainThread.lifecycleDetail}` : ""} · <a href={threadHref(threadId)}>Open in T3</a></p>{mainThread.contactLimit && <p className="small muted">{mainThread.contactLimit}</p>}<SupportingActivity thread={mainThread}/></section>}
+      {changedSinceAcceptance && accepted?.workflow.plan && <EntityDetails title={<>Accepted plan (before later changes)</>} className="retained-workflow">
+        <p className="notice">The plan accepted as proposal {accepted.proposalId}. Later changes to the current plan are not part of this acceptance.</p>
+        <PlanJourney node={accepted.workflow.plan} mode="agreed"/></EntityDetails>}
       {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
       {retained.map(workflow => <EntityDetails title={<>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
         <p className="notice">Retained workflow record. It is not linked to the current task.</p>
