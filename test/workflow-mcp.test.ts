@@ -124,7 +124,7 @@ it.live("separate skills reach the real write controller through HTTP MCP and ma
       references: ["docs/testing.md"], skills, reason: "The task needs verification."}]), note: "Record supporting guidance."});
   installEvidence(f, args);
   assert.equal((yield* call("workflow_write", args)).status, "applied");
-  const read = yield* call<WorkflowReadResult>("workflow_read", {...locator(f), limit: 10});
+  const read = yield* call<WorkflowReadResult>("workflow_read", {...locator(f), view: "documents", limit: 10});
   assert.equal(read.status, "ok");
   assert(read.status === "ok");
   const saved = planEntities(read.workflows[0]!.document.plan)[0]!;

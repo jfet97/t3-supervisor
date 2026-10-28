@@ -215,6 +215,8 @@ it.effect("a drafter cannot write, act through its read or read a closed, expire
   assert.equal((yield* call(read("context"))).status, "ok");
   yield* TestClock.adjust(attempt.deadline - (yield* Clock.currentTimeMillis));
   assert.deepEqual(yield* call(read("context")), {status: "closed", reason: "planning_attempt_closed"}, "an expired attempt");
+  // the read refuses immediately; the service owns persisting expiry and releasing the hold
+  yield* f.controller.reconcile(f.binding);
   const expired = JSON.parse(yield* stored())[0] as PlanningAttempt;
   assert.equal(expired.state, "expired", "the deadline ended it; a later read cannot reopen it");
   assert.equal((yield* call(read("context"))).status, "closed");

@@ -24,7 +24,8 @@ it.effect("a registering helper reads its own reference on demand without receiv
   assert.deepEqual(result, {status: "ok", view: "instructions", version: helperInstructionsVersion, instructions: helperInstructions});
   assert.doesNotMatch(helperInstructions, /Root team coordination|recruit or manage other helpers/u);
   assert.match(helperInstructions, /Do not perform operative work/u);
-  assert.match(helperInstructions, /workflow_read supplies plans, lineage and status on demand/u);
+  assert.match(helperInstructions, /workflow_read returns compact status by default/u);
+  assert.match(helperInstructions, /request view documents only for complete plans, lineage, history or evidence/u);
   assert.equal((yield* f.workflows.readTool({...input, memberEpoch: member.epoch + 1}, cancel)).status, "denied");
   assert.notEqual((yield* f.workflows.readTool({...input, view: "context"}, cancel)).status, "ok", "registration grants reference reading only");
 }));
