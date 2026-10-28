@@ -103,7 +103,8 @@ export type WorkflowProgressBranchEvent = typeof WorkflowProgressBranchEventSche
 
 /**
  * One return of the workflow in request order: pending until the Supervisor applies it, applied when it started a new attempt of its
- * region, dismissed when its back_to was no longer reached. An applied return keeps what the attempt it closed ended with.
+ * region, dismissed when its back_to was no longer reached, exhausted when its maximum is used and the failure is still in force.
+ * An applied return keeps what the attempt it closed ended with.
  */
 export const WorkflowProgressReturnSchema = Schema.Struct({
   returnId: Schema.String,
@@ -112,7 +113,7 @@ export const WorkflowProgressReturnSchema = Schema.Struct({
   targetName: NullableText,
   regionNodeIds: Schema.Array(Schema.String),
   attempt: Schema.Number,
-  state: Schema.Literals(["pending", "applied", "dismissed"]),
+  state: Schema.Literals(["pending", "applied", "dismissed", "exhausted"]),
   reason: Schema.String,
   sourceThreadId: NullableText,
   sourceMessageId: NullableText,

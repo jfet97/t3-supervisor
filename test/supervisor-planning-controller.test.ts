@@ -181,7 +181,7 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
   const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The request needs ${id}.`});
   const plan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [local("work"), local("review"),
     {kind: "branch", condition: "Corrections are required.", reason: "Review determines the next work.", then: {kind: "sequence", nodes: [
-      {kind: "back_to", target: "work", reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
+      {kind: "back_to", target: "work", maximum: 5, reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
   assert.ok(plan?.plan);
   const proposal: WorkflowProposalInfo = {status: "proposed", message: "Complete the requested work.", workspaceRoot: "/work/project", revision: "revision-ready", globalRevision: null, ...plan};
   const agreement = {status: "agreed" as const, message: "Accepted.", proposalId: "proposal-a", agreedAt: now,
@@ -319,7 +319,7 @@ const pendingReturn = (onRead: (threadId: string) => void, reviewerTarget = fals
   const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The request needs ${id}.`});
   const plan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [local("work"), local("review"),
     {kind: "branch", condition: "Corrections are required.", reason: "Review determines the next work.", then: {kind: "sequence", nodes: [
-      {kind: "back_to", target: "work", reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
+      {kind: "back_to", target: "work", maximum: 5, reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
   assert.ok(plan?.plan);
   const proposal: WorkflowProposalInfo = {status: "proposed", message: "Complete the requested work.", workspaceRoot: "/work/project", revision: "revision-ready", globalRevision: null, ...plan};
   const agreement = {status: "agreed" as const, message: "Accepted.", proposalId: "proposal-a", agreedAt: now,

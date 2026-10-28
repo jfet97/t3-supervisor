@@ -557,3 +557,99 @@ export const occurrenceAttempts = (returns: ReadonlyArray<{readonly state: strin
   for (const item of returns) if (item.state === "applied") for (const nodeId of item.regionNodeIds) attempts.set(nodeId, (attempts.get(nodeId) ?? 1) + 1);
   return attempts;
 };
+
+/** Position of one return, without its node id, target or maximum. A parallel frame is part of the address and is not itself a reset. */
+export const returnBudgetAddress = (plan: WorkflowPlanGroupInfo, nodeId: string): string | null => {
+  const frames = framesTo(plan, nodeId);
+  if (!frames) return null;
+  return frames.map(frame => {
+    const node = frame.group.nodes[frame.index];
+    if (!node || isPlanGroup(node)) return `${frame.group.kind}@${frame.index}`;
+    if (node.kind === "branch") return `branch:${node.condition}@${frame.index}`;
+    if (node.kind === "workflow") return `workflow:${node.definitionId}@${frame.index}`;
+    if (node.kind === "step") return `step:${node.definitionId ?? node.localId}@${frame.index}`;
+    return `back_to@${frame.index}`;
+  }).join("/");
+};
+
+/** Successful jumps since the latest reset. Pending, dismissed and exhausted rows are not events. */
+export const returnBudgetUsed = (events: readonly {readonly kind: string}[]): number => {
+  let used = 0;
+  for (const event of events) {
+    if (event.kind === "reset") used = 0;
+    else if (event.kind === "consumed") used += 1;
+  }
+  return used;
+};
+
+const replayScope = (plan: WorkflowPlanGroupInfo, nodeId: string): readonly string[] | null => {
+  const resolved = resolveBackTo(plan, nodeId);
+  return resolved.ok ? resolved.regionNodeIds : null;
+};
+
+/**
+ * Returns whose resolved replay scope is a proper subset of the applied return's scope. Equal scopes, crossing scopes and the applied
+ * return itself are left out. Containment uses the whole inner scope, not the back_to node alone and not a shared target.
+ */
+export const strictlyNestedReplayReturns = (plan: WorkflowPlanGroupInfo, appliedNodeId: string): WorkflowPlanBackToInfo[] => {
+  const outer = replayScope(plan, appliedNodeId);
+  if (!outer) return [];
+  const outerIds = new Set(outer);
+  return planBackTos(plan).filter(node => {
+    if (node.nodeId === appliedNodeId) return false;
+    const inner = replayScope(plan, node.nodeId);
+    if (!inner || inner.length >= outer.length) return false;
+    return inner.every(id => outerIds.has(id));
+  });
+};
+
+const budgetAddressOf = (plan: WorkflowPlanGroupInfo, node: WorkflowPlanBackToInfo): string =>
+  node.templatePath ?? returnBudgetAddress(plan, node.nodeId) ?? node.budgetId;
+
+const rewriteBudgetIds = (plan: WorkflowPlanGroupInfo, assigned: ReadonlyMap<string, string>): WorkflowPlanGroupInfo => {
+  const mapGroup = (group: WorkflowPlanGroupInfo): WorkflowPlanGroupInfo => ({...group, nodes: group.nodes.map(mapNode)});
+  const mapNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
+    if (isPlanGroup(node)) return mapGroup(node);
+    if (node.kind === "back_to") {
+      const budgetId = assigned.get(node.nodeId);
+      return budgetId ? {...node, budgetId} : node;
+    }
+    if (node.kind === "branch") return {...node, then: mapGroup(node.then), else: node.else ? mapGroup(node.else) : null};
+    if (node.kind === "workflow") return {...node, plan: node.plan ? mapGroup(node.plan) : null};
+    return node;
+  };
+  return mapGroup(plan);
+};
+
+/**
+ * Keeps a retained budget on the return that still occupies its address, or on the single unmatched return when only one retained budget
+ * is left. Several unmatched returns against several retained budgets are ambiguous and are not paired or zeroed.
+ */
+export const retainReturnBudgetIds = (
+  previousPlan: WorkflowPlanGroupInfo | null,
+  nextPlan: WorkflowPlanGroupInfo,
+  ledger: readonly {readonly budgetId: string; readonly address: string}[],
+): {plan: WorkflowPlanGroupInfo; ambiguous: boolean} => {
+  const nextNodes = planBackTos(nextPlan);
+  const previousNodes = previousPlan ? planBackTos(previousPlan) : [];
+  const used = new Set<string>();
+  const assigned = new Map<string, string>();
+  const unmatchedNext: WorkflowPlanBackToInfo[] = [];
+  for (const node of nextNodes) {
+    const address = budgetAddressOf(nextPlan, node);
+    const fromPlan = previousPlan ? previousNodes.filter(item => !used.has(item.budgetId) && budgetAddressOf(previousPlan, item) === address).map(item => item.budgetId) : [];
+    const fromLedger = ledger.filter(item => !used.has(item.budgetId) && item.address === address).map(item => item.budgetId);
+    const matches = [...new Set([...fromPlan, ...fromLedger])];
+    if (matches.length === 1) {
+      used.add(matches[0]!);
+      assigned.set(node.nodeId, matches[0]!);
+    } else unmatchedNext.push(node);
+  }
+  const residual = [...new Set([
+    ...ledger.filter(item => !used.has(item.budgetId)).map(item => item.budgetId),
+    ...previousNodes.filter(item => !used.has(item.budgetId)).map(item => item.budgetId),
+  ])];
+  if (unmatchedNext.length === 1 && residual.length === 1) assigned.set(unmatchedNext[0]!.nodeId, residual[0]!);
+  else if (unmatchedNext.length > 0 && residual.length > 0) return {plan: nextPlan, ambiguous: true};
+  return {plan: rewriteBudgetIds(nextPlan, assigned), ambiguous: false};
+};

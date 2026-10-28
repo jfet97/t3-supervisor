@@ -216,7 +216,7 @@ export type WorkflowReturn = {
   regionNodeIds: string[];
   /** the attempt of the back_to occurrence that reached it, which an applied return closes */
   attempt: number;
-  state: "pending" | "applied" | "dismissed";
+  state: "pending" | "applied" | "dismissed" | "exhausted";
   /** the reason of the selection that led to the back_to, or why it was reached unconditionally */
   reason: string;
   sourceThreadId: string | null;
@@ -245,7 +245,7 @@ export type WorkflowStateEvidence = {
   operationId: string;
   kind: "draft_created" | "lineage_linked" | "agreement_imported" | "plan_updated" | "status_changed" | "node_removed" | "note" | "observation" |
     "not_applicable" | "contribution_recorded" | "contribution_assessed" | "branch_selected" | "branch_selection_invalidated" | "branch_changed" |
-    "return_requested" | "return_applied" | "return_dismissed";
+    "return_requested" | "return_applied" | "return_dismissed" | "return_budget_exhausted";
   recordedAt: number;
   actorSupervisorThreadId: string;
   targetNodeId: string | null;
@@ -303,6 +303,20 @@ export type AcceptedWorkflowAgreementRecord = {
   agreement: WorkflowAgreementInfo;
 };
 
+/** One debit or reset of a return occurrence's jump budget. The node's current maximum is the ceiling; events are not cleared by editing it. */
+export type ReturnBudgetEvent = {
+  kind: "consumed" | "reset";
+  returnId: string;
+  at: number;
+};
+
+/** Retained jump budget for one return occurrence. address is the structural slot, not a target or a node id. */
+export type ReturnBudget = {
+  budgetId: string;
+  address: string;
+  events: ReturnBudgetEvent[];
+};
+
 export type WorkflowStateDocument = {
   formatVersion: 2;
   workflowId: string;
@@ -326,6 +340,8 @@ export type WorkflowStateDocument = {
   branchSelections: BranchSelection[];
   // every return this workflow's back_to nodes requested, in request order; a stored document without this field reads as empty
   returns: WorkflowReturn[];
+  // jump budgets keyed by budgetId. Absent only on a document that stores no back_to; a missing key is not an empty budget for a return.
+  returnBudgets?: ReturnBudget[];
   evidence: WorkflowStateEvidence[];
   createdAt: number;
   updatedAt: number;
@@ -481,7 +497,7 @@ export const storedPlanJsonDepth = 1 + 3 * workflowMutationLimits.maxPlanDepth +
 const mutableArray = <S extends Schema.Top>(item: S) => Schema.mutable(Schema.Array(item));
 export const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
   "not_applicable", "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed",
-  "return_requested", "return_applied", "return_dismissed"] as const;
+  "return_requested", "return_applied", "return_dismissed", "return_budget_exhausted"] as const;
 
 export const BranchSelectionSchema = Schema.Struct({
   nodeId: Schema.String,
@@ -584,13 +600,24 @@ export const WorkflowReturnRunSchema = Schema.Union([
   Schema.Struct({kind: Schema.Literal("thread"), threadId: Schema.String, reason: Schema.String}),
 ]);
 
+export const ReturnBudgetEventSchema = Schema.Struct({
+  kind: Schema.Literals(["consumed", "reset"]),
+  returnId: Schema.String,
+  at: Schema.Number,
+});
+export const ReturnBudgetSchema = Schema.Struct({
+  budgetId: Schema.String,
+  address: Schema.String,
+  events: mutableArray(ReturnBudgetEventSchema),
+});
+
 export const WorkflowReturnSchema = Schema.Struct({
   returnId: Schema.String,
   backToNodeId: Schema.String,
   targetNodeId: Schema.String,
   regionNodeIds: mutableArray(Schema.String),
   attempt: Schema.Number,
-  state: Schema.Literals(["pending", "applied", "dismissed"]),
+  state: Schema.Literals(["pending", "applied", "dismissed", "exhausted"]),
   reason: Schema.String,
   sourceThreadId: Schema.NullOr(Schema.String),
   sourceRunId: Schema.NullOr(Schema.String),
@@ -640,6 +667,7 @@ export const WorkflowStateDocumentSchema = Schema.Struct({
   contributions: mutableArray(ExternalContributionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   branchSelections: mutableArray(BranchSelectionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   returns: mutableArray(WorkflowReturnSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  returnBudgets: Schema.optionalKey(mutableArray(ReturnBudgetSchema)),
   evidence: mutableArray(WorkflowStateEvidenceSchema),
   createdAt: Schema.Number,
   updatedAt: Schema.Number,

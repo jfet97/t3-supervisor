@@ -9,7 +9,7 @@ const note = "Reconstructed example: the review found an overfill defect; implem
 const returnPlan = (plan: WorkflowPlanGroupInfo): WorkflowPlanGroupInfo => ({...plan, nodes: [
   ...plan.nodes.slice(0, -1),
   {kind: "branch", nodeId: "packing-redo-decision", templatePath: null, condition: "The review leaves a material implementation finding.", reason: "Reconstructed example: a failed review returns to the affected work.",
-    then: {kind: "sequence", templatePath: null, nodes: [{kind: "back_to", nodeId: "packing-return", templatePath: null, target: "implement-in-scope", targetNodeId: "packing-implement", reason: note}]}, else: null},
+    then: {kind: "sequence", templatePath: null, nodes: [{kind: "back_to", nodeId: "packing-return", templatePath: null, target: "implement-in-scope", targetNodeId: "packing-implement", maximum: 5, budgetId: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", reason: note}]}, else: null},
   ...plan.nodes.slice(-1),
 ]});
 

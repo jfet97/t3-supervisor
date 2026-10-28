@@ -209,8 +209,9 @@ export type WorkflowPlanBranchInfo = {
 };
 /**
  * A return to a fixed earlier occurrence of the same sequential lane, named by its step or workflow ID. Reaching it ends the current
- * forward path and opens another runtime attempt of the region from the target through the member holding it; it has no status of
- * its own. targetNodeId is resolved in every composed plan and is null only inside a definition's own template expansion.
+ * forward path and opens another runtime attempt of the region from the target through the member holding it, until maximum successful
+ * jumps of this occurrence have been applied. It has no status of its own. targetNodeId is resolved in every composed plan and is null
+ * only inside a definition's own template expansion. budgetId names the retained jump budget and is not the occurrence id.
  */
 export type WorkflowPlanBackToInfo = {
   kind: "back_to";
@@ -219,6 +220,8 @@ export type WorkflowPlanBackToInfo = {
   target: string;
   targetNodeId: string | null;
   reason: string;
+  maximum: number;
+  budgetId: string;
 };
 export type WorkflowPlanNodeInfo = WorkflowPlanStepInfo | WorkflowPlanWorkflowInfo | WorkflowPlanBranchInfo | WorkflowPlanBackToInfo | WorkflowPlanGroupInfo;
 const WorkflowPlanStep = Schema.Struct({
@@ -243,6 +246,8 @@ const WorkflowPlanBackTo = Schema.Struct({
   target: Schema.String,
   targetNodeId: Schema.NullOr(Schema.String),
   reason: Schema.String,
+  maximum: Schema.Int,
+  budgetId: Schema.String,
 });
 const workflowPlanNodeSchema = (): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.suspend((): Schema.Codec<WorkflowPlanNodeInfo, WorkflowPlanNodeInfo, never, never> => Schema.Union([
   WorkflowPlanStep,
