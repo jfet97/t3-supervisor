@@ -63,9 +63,17 @@ export interface Projection {
   [key: string]: unknown;
 }
 
+// the authoritative archive half of one live shell snapshot, already read from getArchivedShellSnapshot
+export interface ArchiveCut {
+  readonly snapshotSequence: number;
+  readonly threads: ReadonlyArray<unknown>;
+}
+
 export interface SourceItem {
   stream: "active" | "archive";
   item: JsonRecord;
+  // present only for a non-enrichment active snapshot whose archive half was read before ingestion
+  archiveCut?: ArchiveCut;
 }
 
 // the parsed process configuration, the value of the SupervisorConfig service

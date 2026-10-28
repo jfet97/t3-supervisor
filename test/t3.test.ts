@@ -509,7 +509,7 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
       if (!isRecord(frame)) return;
       if (frame._tag === "Request") {
         subscriptions.push(frame);
-        if (subscriptions.length === 2) {
+        if (subscriptions.length === 1) {
           complete(requestsSeen);
           const activeSnapshot = {
             kind: "snapshot",
@@ -517,11 +517,9 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
             resolvedRepositoryIdentityRoots: ["/workspace/repo"]
           };
           const activeUpdate = { kind: "thread.updated", sequence: 12, thread: { id: "thread-1" } };
-          const archiveSnapshot = { kind: "snapshot", snapshot: { schemaVersion: 2, snapshotSequence: 4, projects: [], threads: [] } };
           socket.send(JSON.stringify([
             { _tag: "Ping" },
             { _tag: "Chunk", requestId: "1", values: [activeSnapshot, activeUpdate] },
-            { _tag: "Chunk", requestId: "2", values: [archiveSnapshot] }
           ]));
         }
         return;
@@ -529,7 +527,7 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
       if (frame._tag === "Pong") complete(pongSeen);
       if (frame._tag === "Ack" && typeof frame.requestId === "string") {
         acknowledgements.push(frame.requestId);
-        if (acknowledgements.length === 2) complete(acknowledgementsSeen);
+        if (acknowledgements.length === 1) complete(acknowledgementsSeen);
       }
     });
   });
@@ -554,26 +552,167 @@ it.live("watch handles RPC envelopes and waits for durable ingestion before ackn
       _tag: "Request",
       id: "1",
       tag: "orchestration.subscribeShell",
-      payload: { afterSequence: 7 },
+      payload: { requestCompletionMarker: true, afterSequence: 7 },
       headers: []
     },
-    {
-      _tag: "Request",
-      id: "2",
-      tag: "orchestration.subscribeArchivedShell",
-      payload: {},
-      headers: []
-    }
   ]);
 
   yield* Deferred.succeed(releaseIngest, undefined);
   yield* within(acknowledgementsSeen);
-  assert.deepEqual(acknowledgements, ["1", "2"]);
-  assert.deepEqual(items.map((item) => item.stream), ["active", "active", "archive"]);
+  assert.deepEqual(acknowledgements, ["1"]);
+  assert.deepEqual(items.map((item) => item.stream), ["active", "active"]);
   assert.deepEqual(items[0]?.item.resolvedRepositoryIdentityRoots, ["/workspace/repo"]);
 
   yield* Fiber.interrupt(fiber);
   yield* within(remoteClosed);
+}));
+
+it.live("watch pairs an empty archivedThreads list with the unary archive snapshot before any ingest or Ack", () => Effect.gen(function*() {
+  const requests: string[] = [];
+  const acknowledgements: string[] = [];
+  const archiveRequested = yield* Deferred.make<void>();
+  const acknowledged = yield* Deferred.make<void>();
+  let releaseArchive = (): void => undefined;
+  const archiveHeld = new Promise<void>((resolve) => {
+    releaseArchive = resolve;
+  });
+  const items: SourceItem[] = [];
+  const active = { id: "live", title: "Live", projectId: null, lineage: { parentThreadId: null, relationshipToParent: null } };
+  const archived = { id: "x", title: "Archived", projectId: null, lineage: { parentThreadId: null, relationshipToParent: null } };
+
+  const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
+  server.webSockets.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const frame: unknown = JSON.parse(data.toString());
+      if (!isRecord(frame)) return;
+      if (frame._tag === "Ack" && typeof frame.requestId === "string") {
+        acknowledgements.push(frame.requestId);
+        complete(acknowledged);
+        return;
+      }
+      if (frame._tag !== "Request" || typeof frame.tag !== "string") return;
+      requests.push(frame.tag);
+      if (frame.tag === "orchestration.subscribeShell") {
+        socket.send(JSON.stringify({
+          _tag: "Chunk",
+          requestId: frame.id,
+          values: [
+            { kind: "snapshot", snapshot: { schemaVersion: 2, snapshotSequence: 8, projects: [], threads: [active], archivedThreads: [] } },
+            { kind: "thread.updated", sequence: 9, location: "active", thread: archived },
+          ],
+        }));
+      }
+      if (frame.tag === "orchestration.getArchivedShellSnapshot") {
+        complete(archiveRequested);
+        void archiveHeld.then(() => {
+          if (socket.readyState === socket.OPEN) {
+            socket.send(JSON.stringify({
+              _tag: "Exit",
+              requestId: frame.id,
+              exit: { _tag: "Success", value: { schemaVersion: 2, snapshotSequence: 8, projects: [], threads: [archived] } },
+            }));
+          }
+        });
+      }
+    });
+  });
+
+  const client = yield* getClient(server.baseUrl);
+  const fiber = yield* Effect.forkChild(client.watch(undefined, (item) => Effect.sync(() => {
+    items.push(item);
+  })));
+  yield* within(archiveRequested);
+  assert.deepEqual(requests, ["orchestration.subscribeShell", "orchestration.getArchivedShellSnapshot"]);
+  assert.equal(items.length, 0);
+  assert.deepEqual(acknowledgements, []);
+  releaseArchive();
+  yield* within(acknowledged);
+  assert.equal(items[0]?.archiveCut?.snapshotSequence, 8);
+  assert.equal(items[0]?.archiveCut?.threads.length, 1);
+  assert.equal(items[1]?.item.kind, "thread.updated");
+  assert.equal(items[1]?.archiveCut, undefined);
+  assert.deepEqual(acknowledgements, ["1"]);
+  yield* Fiber.interrupt(fiber);
+}));
+
+it.live("watch does not acknowledge a shell snapshot whose archive sequence does not match", () => Effect.gen(function*() {
+  const sent = yield* Deferred.make<void>();
+  const acknowledgements: string[] = [];
+  const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
+  server.webSockets.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const frame: unknown = JSON.parse(data.toString());
+      if (!isRecord(frame)) return;
+      if (frame._tag === "Ack" && typeof frame.requestId === "string") {
+        acknowledgements.push(frame.requestId);
+        return;
+      }
+      if (frame._tag !== "Request" || typeof frame.tag !== "string") return;
+      if (frame.tag === "orchestration.subscribeShell") {
+        socket.send(JSON.stringify({
+          _tag: "Chunk",
+          requestId: frame.id,
+          values: [{ kind: "snapshot", snapshot: { schemaVersion: 2, snapshotSequence: 8, projects: [], threads: [], archivedThreads: [] } }],
+        }));
+      }
+      if (frame.tag === "orchestration.getArchivedShellSnapshot") {
+        socket.send(JSON.stringify({
+          _tag: "Exit",
+          requestId: frame.id,
+          exit: { _tag: "Success", value: { schemaVersion: 2, snapshotSequence: 3, projects: [], threads: [], private: "secret" } },
+        }));
+        complete(sent);
+      }
+    });
+  });
+  const client = yield* getClient(server.baseUrl);
+  const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
+  yield* within(sent);
+  assert.ok(failure instanceof T3TransportError);
+  assert.equal(failure.message, "T3 archived shell snapshot does not match the live shell");
+  assert.equal(failure.message.includes("secret"), false);
+  assert.deepEqual(acknowledgements, []);
+}));
+
+it.live("watch does not acknowledge a shell snapshot whose archive read fails", () => Effect.gen(function*() {
+  const sent = yield* Deferred.make<void>();
+  const acknowledgements: string[] = [];
+  let ingested = 0;
+  const server = yield* mockServer((_request, response) => sendJson(response, 404, {}));
+  server.webSockets.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const frame: unknown = JSON.parse(data.toString());
+      if (!isRecord(frame)) return;
+      if (frame._tag === "Ack" && typeof frame.requestId === "string") {
+        acknowledgements.push(frame.requestId);
+        return;
+      }
+      if (frame._tag !== "Request" || typeof frame.tag !== "string") return;
+      if (frame.tag === "orchestration.subscribeShell") {
+        socket.send(JSON.stringify({
+          _tag: "Chunk",
+          requestId: frame.id,
+          values: [{ kind: "snapshot", snapshot: { schemaVersion: 2, snapshotSequence: 8, projects: [], threads: [], archivedThreads: [] } }],
+        }));
+      }
+      if (frame.tag === "orchestration.getArchivedShellSnapshot") {
+        socket.send(JSON.stringify({
+          _tag: "Exit",
+          requestId: frame.id,
+          exit: { _tag: "Failure", cause: { detail: "secret-exit-body" } },
+        }));
+        complete(sent);
+      }
+    });
+  });
+  const client = yield* getClient(server.baseUrl);
+  const failure = yield* failureOf(client.watch(undefined, () => Effect.sync(() => {ingested += 1;})));
+  yield* within(sent);
+  assert.ok(failure instanceof T3TransportError);
+  assert.equal(failure.message, "T3 archived shell snapshot failed");
+  assert.equal(failure.message.includes("secret-exit-body"), false);
+  assert.equal(ingested, 0);
+  assert.deepEqual(acknowledgements, []);
 }));
 
 it.effect("watch bounds a websocket peer that completes the handshake but never answers native Ping", () => Effect.gen(function*() {
@@ -585,7 +724,7 @@ it.effect("watch bounds a websocket peer that completes the handshake but never 
     socket.once("close", () => complete(remoteClosed));
     socket.on("message", (data) => {
       const frame: unknown = JSON.parse(data.toString());
-      if (isRecord(frame) && frame._tag === "Request" && frame.id === "2") complete(subscribed);
+      if (isRecord(frame) && frame._tag === "Request" && frame.id === "1") complete(subscribed);
       if (isRecord(frame) && frame._tag === "Ping") complete(pingSeen);
     });
   });

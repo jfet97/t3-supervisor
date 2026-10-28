@@ -272,7 +272,7 @@ it.live("CT-WSFRAME-01: project-files sends exact Request frames, answers Ping, 
 it.live("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Ping with Pong, Ack each Chunk and end on any Exit", () => Effect.gen(function* () {
   for (const outcome of ["Success", "Failure"] as const) {
     const peer = yield* startPeer((socket, frame) => {
-      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Ping" }));
+      if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify({ _tag: "Ping" }));
       else if (frame._tag === "Pong") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1", values: [{ kind: "synchronized" }] }));
       else if (frame._tag === "Ack") socket.send(exitFrame("1", outcome === "Success" ? { _tag: "Success", value: null } : failureExit({ message: "ended" })));
     });
@@ -284,8 +284,7 @@ it.live("CT-WSFRAME-01: t3.ts subscriptions send exact Request frames, answer Pi
     assert.equal(error.message, "T3 subscription ended");
     assert.deepEqual(items, [{ stream: "active", item: { kind: "synchronized" } }]);
     assert.deepEqual(raw(peer), [
-      '{"_tag":"Request","id":"1","tag":"orchestration.subscribeShell","payload":{"afterSequence":7},"headers":[]}',
-      '{"_tag":"Request","id":"2","tag":"orchestration.subscribeArchivedShell","payload":{},"headers":[]}',
+      '{"_tag":"Request","id":"1","tag":"orchestration.subscribeShell","payload":{"requestCompletionMarker":true,"afterSequence":7},"headers":[]}',
       pongFrame,
       '{"_tag":"Ack","requestId":"1"}',
     ]);

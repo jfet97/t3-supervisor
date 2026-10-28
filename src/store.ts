@@ -5,7 +5,7 @@ import { Context, Data, Effect, FileSystem, Layer, Predicate, Schema } from "eff
 import { SqlClient, type SqlError } from "effect/sql";
 import { CatalogDb, catalogDbLayer, securePrivateFiles, untracedSql } from "./db.js";
 import { timestampMs } from "./domain.js";
-import type { ProjectInfo, SourceItem, ThreadInfo } from "./types.js";
+import type { ArchiveCut, ProjectInfo, SourceItem, ThreadInfo } from "./types.js";
 
 const maxKnownThreads = 50_000;
 const maxStoredShellChars = 512_000;
@@ -29,10 +29,17 @@ export interface StoreStats {
   databaseBytes: number;
 }
 
+export interface IngestResult {
+  // a paired archive snapshot was committed, or a later sequenced change arrived after one already had been
+  readonly connected: boolean;
+}
+
 export interface StoreShape {
   catalog(): Effect.Effect<{ projects: Array<{ project: ProjectInfo; available: boolean }>; threads: ThreadInfo[] }, StoreError>;
   activate(environmentId: string, now: number): Effect.Effect<number, StoreError>;
-  ingest(source: SourceItem): Effect.Effect<void, StoreError>;
+  ingest(source: SourceItem): Effect.Effect<IngestResult, StoreError>;
+  // the sequence of the last committed archive snapshot; an active cursor alone is not this
+  coverage(): Effect.Effect<number | null, StoreError>;
   cursor(stream: SourceItem["stream"]): Effect.Effect<number, StoreError>;
   thread(threadId: string): Effect.Effect<ThreadInfo | null, StoreError>;
   project(threadId: string): Effect.Effect<ProjectInfo | null, StoreError>;
@@ -149,7 +156,8 @@ const itemSequence = (item: Record<string, unknown>): Effect.Effect<number | nul
 };
 
 const threadLocation = (stream: SourceItem["stream"], item: Record<string, unknown>, shell: ThreadInfo): "active" | "archive" => {
-  if (stream === "archive" || item.location === "archive" || shell.archivedAt) return "archive";
+  if (item.location === "active" || item.location === "archive") return item.location;
+  if (stream === "archive" || shell.archivedAt) return "archive";
   return "active";
 };
 
@@ -186,6 +194,10 @@ const schema = [
     id TEXT PRIMARY KEY,
     document TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0
+  )`,
+  `CREATE TABLE IF NOT EXISTS shell_coverage (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    sequence INTEGER NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS threads (
     id TEXT PRIMARY KEY,
@@ -227,6 +239,9 @@ const make = Effect.gen(function* () {
 
   const currentCursor = (stream: SourceItem["stream"]) => sql`SELECT sequence FROM cursors WHERE stream=${stream}`.pipe(
     Effect.flatMap(([row]) => row === undefined ? Effect.succeed(0) : decodeSequenceRow(row).pipe(Effect.map((value) => value.sequence))));
+
+  const coverageSequence = () => sql`SELECT sequence FROM shell_coverage WHERE id=1`.pipe(
+    Effect.flatMap(([row]) => row === undefined ? Effect.succeed(null) : decodeSequenceRow(row).pipe(Effect.map((value) => value.sequence))));
 
   const nextRevision = (threadId: string) => sql`
     INSERT INTO thread_revisions(thread_id, revision) VALUES (${threadId}, 1)
@@ -282,11 +297,25 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const shellIds = (values: ReadonlyArray<unknown>) => Effect.gen(function* () {
+    const ids: string[] = [];
+    for (const value of values) ids.push((yield* readThread(value)).id);
+    return ids;
+  });
+
+  const applyThreads = Effect.fnUntraced(function* (location: "active" | "archive", incoming: ReadonlyArray<unknown>) {
+    yield* reconcileThreads(location === "active" ? "active" : "archive", incoming);
+    for (const value of incoming) yield* storeThread(yield* readThread(value), location);
+  });
+
+  // archivedThreads on an active snapshot is not archive membership. archive rows change from an explicit
+  // location, a removal, an archive-stream item, or a paired getArchivedShellSnapshot cut.
   const ingestSnapshot = Effect.fnUntraced(function* (
     stream: SourceItem["stream"],
     item: Record<string, unknown>,
     sequence: number | null,
     cursor: number,
+    archiveCut: ArchiveCut | undefined,
   ) {
     if (!Predicate.isObject(item.snapshot)) return yield* fail("snapshot item is missing its snapshot payload");
     const snapshot = item.snapshot;
@@ -294,7 +323,13 @@ const make = Effect.gen(function* () {
     if (hasEnrichmentMarker && !Array.isArray(item.resolvedRepositoryIdentityRoots)) {
       return yield* fail("snapshot enrichment roots must be an array");
     }
-    if (sequence !== null && sequence < cursor && !hasEnrichmentMarker) return false;
+    if (archiveCut !== undefined && (stream !== "active" || hasEnrichmentMarker)) {
+      return yield* fail("archive snapshot is only paired with an active shell snapshot");
+    }
+    if (archiveCut !== undefined && (sequence === null || archiveCut.snapshotSequence !== sequence)) {
+      return yield* fail("archived shell snapshot does not match the live shell");
+    }
+    if (sequence !== null && sequence < cursor && !hasEnrichmentMarker) return { advance: false, paired: false };
     const projects = snapshot.projects;
     const threads = snapshot.threads;
     const archivedThreads = snapshot.archivedThreads;
@@ -315,17 +350,25 @@ const make = Effect.gen(function* () {
       : projects.filter((value) => Predicate.isObject(value) && enrichmentRoots.includes(String(value.workspaceRoot)));
     for (const value of selectedProjects) yield* storeProject(yield* readProject(value));
 
-    if (enrichmentRoots !== null) return false;
+    if (enrichmentRoots !== null) return { advance: false, paired: false };
+
+    if (archiveCut !== undefined) {
+      const activeIds = yield* shellIds(threads);
+      const archiveIds = yield* shellIds(archiveCut.threads);
+      if (new Set(activeIds).size !== activeIds.length || new Set(archiveIds).size !== archiveIds.length) {
+        return yield* fail("shell snapshot repeats a thread");
+      }
+      if (archiveIds.some((id) => activeIds.includes(id))) return yield* fail("shell snapshot lists one thread as active and archived");
+      yield* applyThreads("active", threads);
+      yield* applyThreads("archive", archiveCut.threads);
+      return { advance: true, paired: true };
+    }
 
     const incoming: unknown[] = stream === "active"
       ? threads
       : Array.isArray(archivedThreads) && archivedThreads.length > 0 ? archivedThreads : threads;
-    yield* reconcileThreads(stream, incoming);
-    for (const value of incoming) {
-      const shell = yield* readThread(value);
-      yield* storeThread(shell, stream === "active" ? "active" : "archive");
-    }
-    return true;
+    yield* applyThreads(stream === "active" ? "active" : "archive", incoming);
+    return { advance: true, paired: false };
   });
 
   // the open-time migration re-whitelists every stored shell in one transaction; a malformed row fails the open
@@ -379,34 +422,43 @@ const make = Effect.gen(function* () {
     }));
   }).pipe(Effect.mapError(storeFailure), untracedSql);
 
-  const ingest = (source: SourceItem): Effect.Effect<void, StoreError> => Effect.gen(function* () {
+  const ingest = (source: SourceItem): Effect.Effect<IngestResult, StoreError> => Effect.gen(function* () {
     if (source.stream !== "active" && source.stream !== "archive") return yield* fail("unknown source stream");
     if (!Predicate.isObject(source.item)) return yield* fail("source item must be an object");
     const item: Record<string, unknown> = source.item;
     const kind = item.kind;
     const sequence = yield* itemSequence(item);
 
-    yield* write(Effect.gen(function* () {
+    const connected = yield* write(Effect.gen(function* () {
       const cursor = yield* currentCursor(source.stream);
+      const covered = yield* coverageSequence();
       const stale = sequence !== null && sequence <= cursor;
       let advanceCursor = true;
+      let paired = false;
+      let live = false;
       if (kind === "snapshot") {
-        advanceCursor = yield* ingestSnapshot(source.stream, item, sequence, cursor);
+        const applied = yield* ingestSnapshot(source.stream, item, sequence, cursor, source.archiveCut);
+        advanceCursor = applied.advance;
+        paired = applied.paired;
       } else if (stale) {
-        return;
+        return false;
       } else if (kind === "thread.updated") {
         const shell = yield* readThread(item.thread);
         yield* storeThread(shell, threadLocation(source.stream, item, shell));
+        live = true;
       } else if (kind === "thread.removed") {
         yield* removeThread(item.threadId);
+        live = true;
       } else if (kind === "project.updated") {
         yield* storeProject(yield* readProject(item.project));
+        live = true;
       } else if (kind === "project.removed") {
         const id = yield* readString(item.projectId, "project id");
         const changed = yield* sql`UPDATE projects SET deleted=1 WHERE id=${id} AND deleted=0 RETURNING id`;
         if (changed.length > 0) yield* invalidate(projectKeys(id));
+        live = true;
       } else if (kind === "synchronized" && sequence === null) {
-        return;
+        return false;
       } else if (sequence !== null) {
         return yield* fail(`unsupported sequenced shell item: ${String(kind)}`);
       }
@@ -416,8 +468,19 @@ const make = Effect.gen(function* () {
           ON CONFLICT(stream) DO UPDATE SET sequence=MAX(cursors.sequence, excluded.sequence)
         `;
       }
+      if (paired && sequence !== null) {
+        yield* sql`
+          INSERT INTO shell_coverage(id, sequence) VALUES (1, ${sequence})
+          ON CONFLICT(id) DO UPDATE SET sequence=MAX(shell_coverage.sequence, excluded.sequence)
+        `;
+      }
+      return paired || (covered !== null && live);
     }));
+    return { connected };
   }).pipe(Effect.mapError(storeFailure), untracedSql);
+
+  const coverage = (): Effect.Effect<number | null, StoreError> =>
+    coverageSequence().pipe(Effect.mapError(storeFailure), untracedSql);
 
   const cursor = (stream: SourceItem["stream"]): Effect.Effect<number, StoreError> =>
     currentCursor(stream).pipe(Effect.mapError(storeFailure), untracedSql);
@@ -449,7 +512,7 @@ const make = Effect.gen(function* () {
     return { projects: totals.projects, threads: totals.threads, databaseBytes };
   }).pipe(Effect.mapError(storeFailure), untracedSql);
 
-  return { catalog, activate, ingest, cursor, thread, project, stats } satisfies StoreShape;
+  return { catalog, activate, ingest, coverage, cursor, thread, project, stats } satisfies StoreShape;
 });
 
 // effect/sql spans carry query text and transaction exits, so the store's construction and every operation run untraced

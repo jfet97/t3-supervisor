@@ -39,7 +39,7 @@ const failureOf = (exit: Exit.Exit<unknown, unknown>): unknown => {
   return Cause.squash(exit.cause);
 };
 
-const subscribed = (payload: Buffer): boolean => payload.toString("utf8").includes("orchestration.subscribeArchivedShell");
+const subscribed = (payload: Buffer): boolean => payload.toString("utf8").includes("orchestration.subscribeShell");
 
 // one loopback request whose answer is read to its end; its status
 const barrier = (url: string) => Effect.gen(function* () {
@@ -63,11 +63,11 @@ it.live("CT-T3-01: a second chunk is neither processed nor acknowledged before t
         const next = acknowledged[acknowledgements.length - 1];
         if (next) Deferred.doneUnsafe(next, Exit.void);
       }
-      if (frame._tag !== "Request" || ++requests !== 2) return;
-      // two separate frames: the active chunk, then the archive chunk
+      if (frame._tag !== "Request" || ++requests !== 1) return;
+      // two separate frames on the one subscription: the second waits for the first chunk's Ack
       socket.send(JSON.stringify(chunk("1", 1)), (first) => {
         if (first) return Deferred.doneUnsafe(framesSent, Exit.fail(first));
-        socket.send(JSON.stringify(chunk("2", 2)), (second) => Deferred.doneUnsafe(framesSent, second ? Exit.fail(second) : Exit.void));
+        socket.send(JSON.stringify(chunk("1", 2)), (second) => Deferred.doneUnsafe(framesSent, second ? Exit.fail(second) : Exit.void));
       });
     });
   });
@@ -94,11 +94,11 @@ it.live("CT-T3-01: a second chunk is neither processed nor acknowledged before t
   yield* within(Deferred.await(started[1]!), 2500, "second onItem");
   // the second chunk's ingestion is still held, so its ACK has not been sent
   assert.deepEqual(acknowledgements, ["1"]);
-  assert.deepEqual(processed, ["active", "archive"]);
+  assert.deepEqual(processed, ["active", "active"]);
 
   releases[1]!();
   yield* within(Deferred.await(acknowledged[1]!), 2500, "second ACK");
-  assert.deepEqual(acknowledgements, ["1", "2"]);
+  assert.deepEqual(acknowledgements, ["1", "1"]);
 }), { timeout: 10_000 });
 
 it.live("CT-T3-02: nine frames in one TCP write trip the buffered-frame limit and an oversized frame hits maxPayload", () => Effect.gen(function* () {
@@ -120,7 +120,7 @@ it.live("CT-T3-02: nine frames in one TCP write trip the buffered-frame limit an
     yield* within(connection.gone, 2500, "client terminating the connection");
     assert.deepEqual(sequences, [1]);
     assert.deepEqual(connection.frames.map((frame) => JSON.parse(frame.payload.toString("utf8")) as JsonRecord)
-      .map((frame) => [frame._tag, frame.id]), [["Request", "1"], ["Request", "2"]]);
+      .map((frame) => [frame._tag, frame.id]), [["Request", "1"]]);
     // a bounded absence window: while onItem is blocked the watch reports nothing
     yield* Effect.sleep("250 millis");
     assert.equal(fiber.pollUnsafe(), undefined);
@@ -131,7 +131,7 @@ it.live("CT-T3-02: nine frames in one TCP write trip the buffered-frame limit an
     assert.ok(failure instanceof T3TransportError);
     assert.equal(failure.message, "T3 websocket is not open");
     assert.deepEqual(sequences, [1]);
-    assert.equal(connection.frames.length, 2);
+    assert.equal(connection.frames.length, 1);
   }));
 
   // onItem completes at once: the watch fails with the byte-limit error after acknowledging only the first frame
@@ -150,7 +150,7 @@ it.live("CT-T3-02: nine frames in one TCP write trip the buffered-frame limit an
     assert.equal(failure.message, "T3 websocket message exceeded the byte limit");
     assert.deepEqual(sequences, [1]);
     yield* within(connection.gone, 2500, "client terminating the connection");
-    assert.deepEqual(connection.frames.slice(2).map((frame) => frame.payload.toString("utf8")), ['{"_tag":"Ack","requestId":"1"}']);
+    assert.deepEqual(connection.frames.slice(1).map((frame) => frame.payload.toString("utf8")), ['{"_tag":"Ack","requestId":"1"}']);
   }));
 
   // a frame declaring one byte over 32 MiB is rejected by ws maxPayload: close code 1009 and the websocket failure
@@ -202,7 +202,7 @@ it.live("CT-T3-04: binary and non-JSON frames fail with fixed messages and neste
     const server = yield* mockT3((_request, response) => sendJson(response, 404, {}));
     server.webSockets.on("connection", (socket) => {
       let requests = 0;
-      socket.on("message", () => {if (++requests === 2) send(socket);});
+      socket.on("message", () => {if (++requests === 1) send(socket);});
     });
     const client = yield* getClient(server.baseUrl);
     return failureOf(yield* within(Effect.exit(client.watch(undefined, () => Effect.void)), 2500, "watch failure"));
@@ -214,13 +214,36 @@ it.live("CT-T3-04: binary and non-JSON frames fail with fixed messages and neste
   assert.ok(text instanceof T3TransportError);
   assert.equal(text.message, "T3 websocket message was not valid protocol JSON");
 
+  // a removed archive subscription id is not a second stream: earlier live chunks are acknowledged, then the watch stops
+  const unknownAcknowledgements: string[] = [];
+  const unknownServer = yield* mockT3((_request, response) => sendJson(response, 404, {}));
+  unknownServer.webSockets.on("connection", (socket) => {
+    socket.on("message", (data) => {
+      const frame: unknown = JSON.parse(data.toString());
+      if (!isRecord(frame)) return;
+      if (frame._tag === "Ack" && typeof frame.requestId === "string") unknownAcknowledgements.push(frame.requestId);
+      if (frame._tag === "Request" && frame.tag === "orchestration.subscribeShell") {
+        socket.send(JSON.stringify([[chunk("1", 1), [chunk("1", 2)]], [[[chunk("2", 3)]]], chunk("1", 4)]));
+      }
+    });
+  });
+  const unknownClient = yield* getClient(unknownServer.baseUrl);
+  const unknownItems: Array<[string, unknown]> = [];
+  const unknownRequest = failureOf(yield* within(Effect.exit(unknownClient.watch(undefined, (item) => Effect.sync(() => {
+    unknownItems.push([item.stream, item.item.sequence]);
+  }))), 2500, "unknown request id"));
+  assert.ok(unknownRequest instanceof T3TransportError);
+  assert.equal(unknownRequest.message, "T3 websocket message used an unsupported protocol frame");
+  assert.deepEqual(unknownItems, [["active", 1], ["active", 2]]);
+  assert.deepEqual(unknownAcknowledgements, ["1", "1"]);
+
   // flattening visits every array and record; 8 * 1024 visits are accepted and one more rejects the frame
   const pongs = (count: number) => Array.from({ length: count }, () => ({ _tag: "Pong" }));
   const deep = (depth: number, value: unknown): string => "[".repeat(depth) + JSON.stringify(value) + "]".repeat(depth);
   const frames = [
-    JSON.stringify([[chunk("1", 1), [chunk("1", 2)]], [[[chunk("2", 3)]]], chunk("1", 4)]),
+    JSON.stringify([[chunk("1", 1), [chunk("1", 2)]], [[[chunk("1", 3)]]], chunk("1", 4)]),
     JSON.stringify([...pongs(8190), chunk("1", 5)]),
-    deep(8191, chunk("2", 6)),
+    deep(8191, chunk("1", 6)),
     JSON.stringify([...pongs(8191), chunk("1", 7)]),
   ];
   const acknowledgements: string[] = [];
@@ -230,7 +253,7 @@ it.live("CT-T3-04: binary and non-JSON frames fail with fixed messages and neste
     socket.on("message", (data) => {
       const frame: unknown = JSON.parse(data.toString());
       if (isRecord(frame) && frame._tag === "Ack" && typeof frame.requestId === "string") acknowledgements.push(frame.requestId);
-      if (isRecord(frame) && frame._tag === "Request" && ++requests === 2) for (const value of frames) socket.send(value);
+      if (isRecord(frame) && frame._tag === "Request" && ++requests === 1) for (const value of frames) socket.send(value);
     });
   });
   const client = yield* getClient(server.baseUrl);
@@ -240,8 +263,8 @@ it.live("CT-T3-04: binary and non-JSON frames fail with fixed messages and neste
   }))), 2500, "watch failure"));
   assert.ok(failure instanceof T3TransportError);
   assert.equal(failure.message, "T3 websocket message was not valid protocol JSON");
-  assert.deepEqual(items, [["active", 1], ["active", 2], ["archive", 3], ["active", 4], ["active", 5], ["archive", 6]]);
-  assert.deepEqual(acknowledgements, ["1", "1", "2", "1", "1", "2"]);
+  assert.deepEqual(items, [["active", 1], ["active", 2], ["active", 3], ["active", 4], ["active", 5], ["active", 6]]);
+  assert.deepEqual(acknowledgements, ["1", "1", "1", "1", "1", "1"]);
 }), { timeout: 10_000 });
 
 it.live("CT-T3-05: the oversized projection memo evicts the oldest thread after 512 distinct threads", () => Effect.gen(function* () {
