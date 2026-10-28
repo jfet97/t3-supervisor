@@ -8,7 +8,9 @@ description: Use an existing T3 Supervisor dashboard to inspect project definiti
 Supervisor observes native project conversations and their descendants, discusses
 workflow plans and records progress. Telegram communication is a separate service.
 Task's Plan view shows current work; History keeps the forward record when a
-`back_to` starts another attempt. Supervision separates actual reads from recorded
+`back_to(n)` starts another attempt. `n` is that return's maximum number of
+successful jumps. An exhausted return stays visible and does not jump again.
+Supervision separates actual reads from recorded
 assessments and shows affected actors, pause acknowledgements and the fixed planning
 deadline. Connected work identifies parent steps, attempts and monitoring owners;
 a content-only planning writer is distinct from an operational child or helper.

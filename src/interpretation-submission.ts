@@ -3,7 +3,7 @@ import { Data, Effect, Schema, type SchemaAST, type SchemaIssue } from "effect";
 import { canonicalJson } from "./canonical-json.js";
 import type { LogFields } from "./logging.js";
 import { WorkflowProposal } from "./project-supervisor-contract.js";
-import { branchConditionMaxLength } from "./project-definitions-contract.js";
+import { branchConditionMaxLength, returnBudgetMaximum } from "./project-definitions-contract.js";
 import {
   interpretationFromFields,
   interpretationLimits,
@@ -54,6 +54,7 @@ const knownPathKeys = new Set([
   "supervisorThreadId", "bindingGeneration", "taskId", "attemptId", "sourcePin", "messageId", "runId", "ordinal", "hash",
   "objective", "reason", "sourceMessageIds", "supervision", "workflow", "startRequested", "requirements", "plan", "kind", "id",
   "applies", "nodes", "definitionId", "localId", "name", "description", "references", "skills", "omit", "member",
+  "condition", "then", "else", "target", "maximum",
 ]);
 const pathOf = (segments: ReadonlyArray<PropertyKey>): string => {
   let path = "";
@@ -111,6 +112,8 @@ export const interpretationSchemaIssues = (issue: SchemaIssue.Issue): ReadonlyAr
 const ToolId = Schema.String.check(maxLength(workflowMutationLimits.maxOperationIdLength), nonBlank);
 const Sha256 = Schema.String.check(sha256Pattern);
 const Count = Schema.Number.check(coded(Schema.isInt(), "not_integer"), nonNegative);
+const ReturnMaximum = Schema.Number.check(coded(Schema.isInt(), "not_integer"),
+  coded(Schema.isBetween({minimum: 1, maximum: returnBudgetMaximum}), "invalid_value"));
 
 // the task's source revision a submission is pinned to: the genuine human message, its run and ordinal, and its text hash
 export const InterpretationSourcePin = Schema.Struct({messageId: ToolId, runId: ToolId, ordinal: Count, hash: Sha256});
@@ -167,7 +170,7 @@ export type InterpretationPlanNode =
     readonly reason: string; readonly references?: ReadonlyArray<SupportingReference>; readonly skills?: ReadonlyArray<string>}
   | {readonly kind: "workflow"; readonly definitionId: string; readonly reason: string; readonly omit?: ReadonlyArray<InterpretationOmission>}
   | {readonly kind: "branch"; readonly condition: string; readonly reason: string; readonly then: InterpretationPlanGroup; readonly else?: InterpretationPlanGroup | null}
-  | {readonly kind: "back_to"; readonly target: string; readonly reason: string}
+  | {readonly kind: "back_to"; readonly target: string; readonly maximum: number; readonly reason: string}
   | InterpretationPlanGroup;
 export type InterpretationPlanGroup = {readonly kind: "sequence" | "parallel"; readonly nodes: ReadonlyArray<InterpretationPlanNode>};
 /** A member of a referenced flexible workflow that does not apply to this task, named by its definitionId or localId. */
@@ -185,7 +188,7 @@ const PlanNode: Schema.Codec<InterpretationPlanNode> = Schema.suspend((): Schema
     omit: Schema.optionalKey(Schema.Array(Schema.Struct({member: DefinitionId, reason: Reason})).check(Schema.isMinLength(1), maxLength(limits.maxExpandedNodes)))}),
   Schema.Struct({kind: Schema.Literal("branch"), condition: Schema.String.check(maxLength(branchConditionMaxLength)), reason: Reason,
     then: PlanGroup, else: Schema.optionalKey(Schema.NullOr(PlanGroup))}),
-  Schema.Struct({kind: Schema.Literal("back_to"), target: DefinitionId, reason: Reason}),
+  Schema.Struct({kind: Schema.Literal("back_to"), target: DefinitionId, maximum: ReturnMaximum, reason: Reason}),
   PlanGroup,
 ]));
 const PlanGroup: Schema.Codec<InterpretationPlanGroup> = Schema.Struct({

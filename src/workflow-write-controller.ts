@@ -75,7 +75,7 @@ import {
 } from "./interpretation-submission.js";
 import { InterpretationWake } from "./interpretation-wake.js";
 import { logEvent, type LogFields } from "./logging.js";
-import {branchConditionMaxLength, definitionSnapshotIndexed, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
+import {branchConditionMaxLength, definitionSnapshotIndexed, returnBudgetMaximum, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
 import {currentPendingDecisions, occurrenceAttempts, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanReach, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
 
@@ -425,10 +425,12 @@ const validPlanRequest = (value: unknown): boolean => {
         isText(node.condition, branchConditionMaxLength) && isText(node.reason, maxPlanReasonLength) &&
         visitGroup(node.then, depth + 1) && (node.else === undefined || node.else === null || visitGroup(node.else, depth + 1));
       if (node.kind === "back_to") return ++count <= workflowMutationLimits.maxPlanNodes &&
-        hasExactKeys(node, ["kind", "target", "reason"], ["nodeId", "templatePath", "targetNodeId"]) &&
+        hasExactKeys(node, ["kind", "target", "maximum", "reason"], ["nodeId", "templatePath", "targetNodeId", "budgetId"]) &&
         (node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) &&
         (node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) && isText(node.target, 200) &&
         (node.targetNodeId === undefined || node.targetNodeId === null || typeof node.targetNodeId === "string" && planNodeIdPattern.test(node.targetNodeId)) &&
+        typeof node.maximum === "number" && Number.isSafeInteger(node.maximum) && node.maximum >= 1 && node.maximum <= returnBudgetMaximum &&
+        (node.budgetId === undefined || typeof node.budgetId === "string" && /^[a-f0-9]{64}$/u.test(node.budgetId)) &&
         isText(node.reason, maxPlanReasonLength);
       if (++count > workflowMutationLimits.maxPlanNodes || !(node.nodeId === undefined || typeof node.nodeId === "string" && planNodeIdPattern.test(node.nodeId)) ||
         !(node.templatePath === undefined || node.templatePath === null || isText(node.templatePath, 2000)) ||
@@ -805,11 +807,14 @@ const workflowPlanDefinitions = {
   },
   node: {oneOf: [{$ref: "#/$defs/group"}, {$ref: "#/$defs/step"}, {$ref: "#/$defs/workflow"}, {$ref: "#/$defs/branch"}, {$ref: "#/$defs/back_to"}]},
   back_to: {
-    type: "object", additionalProperties: false, required: ["kind", "target", "reason"],
-    description: "A return to the earlier step or workflow member of the same sequential lane whose definitionId or localId is target; it ends its path. Keep nodeId and templatePath of an existing return; the service resolves targetNodeId.",
+    type: "object", additionalProperties: false, required: ["kind", "target", "maximum", "reason"],
+    description: "A return to the earlier step or workflow member of the same sequential lane whose definitionId or localId is target. maximum is the most successful jumps of this return, an integer from 1 to 99; the first pass consumes none. It ends its path. Keep nodeId, templatePath and budgetId of an existing return; the service resolves targetNodeId.",
     properties: {
       kind: {const: "back_to"}, nodeId: idSchema(64), templatePath: nullableTextSchema(2000), target: textSchema(200),
-      targetNodeId: {anyOf: [idSchema(64), {type: "null"}]}, reason: textSchema(maxPlanReasonLength),
+      targetNodeId: {anyOf: [idSchema(64), {type: "null"}]},
+      maximum: {type: "integer", minimum: 1, maximum: returnBudgetMaximum},
+      budgetId: {type: "string", pattern: "^[a-f0-9]{64}$"},
+      reason: textSchema(maxPlanReasonLength),
     },
   },
   branch: {
@@ -958,8 +963,9 @@ const interpretationPlanDefinitions = {
     {type: "object", additionalProperties: false, required: ["kind", "condition", "reason", "then"],
       properties: {kind: {const: "branch"}, condition: interpretationText(branchConditionMaxLength), reason: interpretationText(interpretationLimits.maxReasonLength),
         then: {$ref: "#/$defs/group"}, else: {anyOf: [{$ref: "#/$defs/group"}, {type: "null"}]}}},
-    {type: "object", additionalProperties: false, required: ["kind", "target", "reason"],
-      properties: {kind: {const: "back_to"}, target: interpretationText(interpretationLimits.maxDefinitionIdLength), reason: interpretationText(interpretationLimits.maxReasonLength)}},
+    {type: "object", additionalProperties: false, required: ["kind", "target", "maximum", "reason"],
+      properties: {kind: {const: "back_to"}, target: interpretationText(interpretationLimits.maxDefinitionIdLength),
+        maximum: {type: "integer", minimum: 1, maximum: returnBudgetMaximum}, reason: interpretationText(interpretationLimits.maxReasonLength)}},
     {$ref: "#/$defs/group"},
   ]},
   group: {type: "object", additionalProperties: false, required: ["kind", "nodes"],

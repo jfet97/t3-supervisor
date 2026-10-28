@@ -158,7 +158,7 @@ sequence:
 
 `account-for-findings` follows the whole branch on either path. A reviewer pass
 describes one reviewer and one artifact. `paired-review` composes two such passes
-with `parallel`; the caller coordinates findings and any conditional `back_to`
+with `parallel`; the caller coordinates findings and any conditional `back_to(n)`
 after they join. Reviewer count and repetition belong to that caller. Leave out `else`
 when a false condition simply skips the extra work. Each path needs at least one
 member, the condition is one line of at most 300 characters, and a path can hold
@@ -196,13 +196,14 @@ sequence:
   - branch:
       if: The review left material findings.
       then:
-        - back_to: implement
+        - back_to(5): implement
   - step: deliver
 ```
 
-`back_to` names the ID of an earlier step, local step or workflow in the same sequential
-lane and ends its path. Put it in a branch path so the work can also continue; a return
-with no way out is rejected. When the operative reaches it, the region from `implement`
+`back_to(n)` names the ID of an earlier step, local step or workflow in the same sequential
+lane and ends its path. `n` is a required integer from 1 to 99, the maximum successful
+jumps of that return; the first pass consumes none. Put it in a branch path so the work can also continue; a return
+with no way out is rejected. When the operative reaches it and jumps remain, the region from `implement`
 through verification, Review and the branch waits. The Supervisor applies the return at
 a safe point, and the next attempt repeats that region with the same reviewer conversations; the
 branch decision is recorded again for each attempt. A reusable workflow may return to a

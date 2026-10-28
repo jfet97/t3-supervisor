@@ -55,7 +55,7 @@ function TemplateNode({node, definitions, ancestors = []}: {node: DefinitionNode
       </div>
     </div>;
   }
-  if ("back_to" in node) return <p className="branch-condition template-return"><span className="branch-label">Return</span> <span>Back to <code className="small">{node.back_to}</code>: a new attempt repeats that earlier member and everything after it</span></p>;
+  if ("back_to" in node) return <p className="branch-condition template-return"><span className="branch-label">Return</span> <span>Back to <code className="small">{node.back_to}</code>, at most {node.maximum} successful {node.maximum === 1 ? "jump" : "jumps"}: a new attempt repeats that earlier member and everything after it</span></p>;
   if ("step" in node) {
     const step = typeof node.step === "string" ? definitions.steps.find(item => item.id === node.step) : node.step;
     return <EntityDetails icon="record" title={<>Step: {step?.name ?? String(node.step)}</>} className="template-node">

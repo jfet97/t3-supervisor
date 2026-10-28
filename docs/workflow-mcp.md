@@ -204,9 +204,11 @@ its branch node ID, condition and paths, the task ID and this record format.
 ## Returns and attempts
 
 A plan return is `{kind: "back_to", nodeId, templatePath, target, targetNodeId,
-reason}`; like a branch it has no status or contributors. `target` is the step, local
-step or workflow ID of an earlier member in the same sequential lane, and the service
-resolves `targetNodeId` in the composed plan, so drafts and applies omit it. A plan
+maximum, budgetId, reason}`; like a branch it has no status or contributors. `target`
+is the step, local step or workflow ID of an earlier member in the same sequential
+lane, and the service resolves `targetNodeId` in the composed plan, so drafts and
+applies omit it. `maximum` is an integer from 1 to 99, the most successful jumps of
+this return. `budgetId` identifies that return's own budget. A plan
 that cannot resolve a return is rejected with `back_to_target_not_found`,
 `back_to_target_ambiguous`, `back_to_unreachable_member` (a member follows it) or
 `back_to_no_exit_cycle`, and a pointer to the return.
@@ -222,6 +224,21 @@ the return, or completes the task or a workflow enclosing it. Observations remai
 possible. A pending entry whose return is no longer reached, or has left the plan, is
 dismissed with `return_dismissed` evidence. Entries are never removed, and a workflow
 holds at most 100.
+
+When the successful jumps reach `maximum`, the document records an `exhausted`
+return and `return_budget_exhausted` evidence instead of another pending request.
+An `apply` that would complete the task or enter work after that return is rejected
+with `return_budget_exhausted`. `apply_return` on a pending row whose budget is
+already spent returns the same reason and writes nothing. Selecting another path
+sets `resolvedAt` and keeps the exhausted row. The document stores `returnBudgets`.
+Each entry is `{budgetId, address, events}`, and an event is
+`{kind: "consumed" | "reset", returnId, at}`. Current use is the consumed events
+after the latest reset. Applying a return appends one consumed event for itself and
+one reset event for each strictly nested replayed return, in the same transaction as
+the new attempt. A stored plan that contains a return but no `returnBudgets` array
+stays on disk and is classified incompatible. A plan with no return may omit the
+field. An edit that moves more than one return without a unique address match is
+rejected with `return_budget_identity_ambiguous` and writes nothing.
 
 The Supervisor applies a pending, still reached return at a safe point. Applying it
 records `return_applied` evidence and keeps the closed attempt on the entry: `closed`

@@ -180,12 +180,15 @@ alternatives without a later selection.
 
 ## Returns
 
-A `back_to:` member repeats earlier work. It names the step, local step or workflow
-ID of an earlier member in the same sequential lane: earlier in its own sequence or
-branch path, then in each enclosing sequence, branch path or workflow, up to the first
-enclosing parallel group. It ends its sequence or branch path, it is never a direct
-member of a parallel group, and the member that holds it must still be able to finish
-without returning, so a return belongs in a branch path:
+A `back_to(n):` member repeats earlier work at most `n` times. `n` is a required
+integer from 1 to 99 and is the maximum number of successful backward jumps of that
+return. The first pass consumes none. There is no default and no bare `back_to:`
+form. It names the step, local step or workflow ID of an earlier member in the same
+sequential lane: earlier in its own sequence or branch path, then in each enclosing
+sequence, branch path or workflow, up to the first enclosing parallel group. It ends
+its sequence or branch path, it is never a direct member of a parallel group, and the
+member that holds it must still be able to finish without returning, so a return
+belongs in a branch path:
 
 ```yaml
 name: Reviewed change
@@ -197,7 +200,7 @@ sequence:
   - branch:
       if: The review left material findings.
       then:
-        - back_to: implement
+        - back_to(5): implement
   - step: deliver
 ```
 
@@ -213,6 +216,17 @@ contributor conversations linked, and the branch is decided again with the next
 selection revision. Output of a retired run, or a decision written before the return,
 stays with the closed attempt. A return that is no longer reached, because the
 operative selected the other path, is dismissed and kept as history.
+
+Each return has its own budget. Applying it spends one jump. An applied return
+resets the budgets of returns whose replay region is strictly inside the region it
+reopens, including a loop nested in a parallel group that the outer return replays.
+It does not reset its own budget, an enclosing return, or a return in a sibling lane
+outside that region. Equal or crossing regions do not reset each other. Pending,
+dismissed, rejected and replayed requests spend nothing. When the maximum is used,
+the failure stays visible and the workflow does not start another jump, skip the
+failure, or complete past it. The operative can select another path, which leaves
+the return unreached without spending another jump. The budget persists across
+restarts.
 
 A reusable workflow may also return to an earlier member of the workflow that includes
 it, so a return's target resolves in the composed plan. A target that is missing,
@@ -412,7 +426,7 @@ parallel:
 
 A completed pass can report important problems. The caller's acceptance rule remains
 open until the required findings are resolved or the requester explicitly decides
-them. If another pass is required, the caller uses a conditional `back_to` after the
+them. If another pass is required, the caller uses a conditional `back_to(n)` after the
 reviews join, as in [Returns](#returns), and reuses the same ordinary reviewer
 conversations where supported. Without a return, the plan continues to its following
 members; a reviewer description does not secretly restart earlier work. A reference

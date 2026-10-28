@@ -108,7 +108,9 @@ condition selects between substantially different pieces of work, such as a cont
 change getting one reviewer instead of two independent complete reviewers. Keep finer
 conditions and completion rules in descriptions; there is no `elif`, jump or `goto`.
 To repeat earlier members as a visible new attempt, end a branch path with
-`back_to: <id>` naming an earlier member of the same sequential lane; the reference
+`back_to(n): <id>` naming an earlier member of the same sequential lane. `n` is a
+required integer from 1 to 99, the maximum successful jumps of that return; the
+first pass consumes none. There is no bare `back_to:` form. The reference
 shows the review-round pattern. Branches belong in workflow files, never in step frontmatter. The next
 member after a branch follows whichever path applies. The operative working on the
 workflow selects the path from actual context with its own `branch-selection` record;
@@ -171,7 +173,7 @@ required list.
 
 Keep each reviewer workflow to one pass by one reviewer. Its caller owns reviewer
 count and assignments, using `parallel` for independent complete passes. If earlier
-work must repeat, the caller uses a conditional `back_to`, for example after material
+work must repeat, the caller uses a conditional `back_to(n)`, for example after material
 findings or a verification/CI defect. Review preferences alone do not justify a return.
 Fine-grained work within an entered step can remain in its description; do not hide
 repetition across declared steps there. A findings step owns the main's accounting,

@@ -164,9 +164,10 @@
           "required": [
             "kind",
             "target",
+            "maximum",
             "reason"
           ],
-          "description": "A return to the earlier step or workflow member of the same sequential lane whose definitionId or localId is target; it ends its path. Keep nodeId and templatePath of an existing return; the service resolves targetNodeId.",
+          "description": "A return to the earlier step or workflow member of the same sequential lane whose definitionId or localId is target. maximum is the most successful jumps of this return, an integer from 1 to 99; the first pass consumes none. It ends its path. Keep nodeId, templatePath and budgetId of an existing return; the service resolves targetNodeId.",
           "properties": {
             "kind": {
               "const": "back_to"
@@ -203,6 +204,15 @@
                   "type": "null"
                 }
               ]
+            },
+            "maximum": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 99
+            },
+            "budgetId": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
             },
             "reason": {
               "type": "string",
