@@ -40,7 +40,7 @@ export type SupervisionResume = {callerThreadId: string; userMessageId: string; 
 export const prepareStopNotice = (ids: SupervisorIds["Service"], binding: Pick<BindingRecord, "threadId">, stoppedAt: number, enabledAt: number | null): Effect.Effect<SupervisorStopNotice> =>
   Effect.map(Effect.all([ids.uuid, ids.uuid]), ([messageUuid, commandUuid]) => ({
     messageId: `supervisor-notice:stop:${messageUuid}`, commandId: `supervisor-stop-notice:${commandUuid}`, stoppedAt, enabledAt, state: "ready",
-    text: `Supervision was stopped for this conversation at ${new Date(stoppedAt).toISOString()}. Stop sending updates, findings and workflow acceptances to Supervisor ${binding.threadId}. This does not change your task or the user's instructions; a later explicit Enable takes precedence. Do not reply to this notice.`,
+    text: `Supervision of this chat was stopped at ${new Date(stoppedAt).toISOString()}: stop sending updates, findings or workflow acceptances to Supervisor ${binding.threadId}. Your task and the user's instructions are unchanged; a later explicit Enable takes precedence. Do not reply.`,
   }));
 export type SupervisionStartRecord = {
   threadId: string; projectId: string; operationId: string; requestHash: string; route: "agent" | "ui";
@@ -54,13 +54,18 @@ export type SupervisionFolderPresence = {status: "present" | "missing" | "unavai
 export type ProtocolAnchor = {supervisorThreadId: string; sourceHash: string; promptMessageId: string; promptRun?: {id: string; ordinal: number}; editedAfter?: {runOrdinal: number; itemOrdinal: number | null} | null};
 export type TaskRecord = TaskInterpretationInfo & TaskInterpretationFields & {id: string; sourceHash: string; /** Earlier unresolved genuine requests in the same main that this task continues. */ contextMessageIds?: string[]; /** observedAt of the Supervisor protocol diagnostic last sent as a focused repair request. */ protocolRepairNoticeAt?: number; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null; protocolAnchor?: ProtocolAnchor; /** The conversation handles the current interpretation reads on demand, prepared with its request. */ interpretationSources?: InterpretationSources};
 /**
- * Who asked for the current interpretation, and the handles of the genuine requester messages and operative replies since the activation
- * floor that its root reads natively: identities and requester kinds only, never bodies.
+ * One conversation message the current interpretation reads natively: its message ID as provenance, and the exact native turn item T3
+ * reads it by (t3_thread_read itemId), as the projection names it; null when T3 recorded no item for it.
+ */
+export type InterpretationSourceMessage = {readonly messageId: string; readonly readItemId: string | null};
+/**
+ * Who asked for the current interpretation, and the genuine requester messages and operative replies since the activation floor that
+ * its root reads on demand.
  */
 export type InterpretationSources = {
   readonly requestedBy: {readonly kind: "human"} | {readonly kind: "launching_agent"; readonly threadId: string};
-  readonly requesterMessages: ReadonlyArray<{readonly messageId: string; readonly requester: "human" | "launching_agent"}>;
-  readonly operativeMessageIds: readonly string[];
+  readonly requesterMessages: ReadonlyArray<InterpretationSourceMessage & {readonly requester: "human" | "launching_agent"}>;
+  readonly operativeMessages: ReadonlyArray<InterpretationSourceMessage>;
 };
 
 // the permanent root and helper ownership of the process: each supervision run's store layer adds the stored ids when it is

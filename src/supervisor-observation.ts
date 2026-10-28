@@ -3,6 +3,7 @@ import {projectionHasOngoingWork} from "./domain.js";
 import {readNativeProviderTurns} from "./workflow-native-turns.js";
 import type { SupervisorMonitorActivity } from "./supervisor-monitor.js";
 import type { Projection, ThreadInfo } from "./types.js";
+import { messageReadItemId } from "./message-read-handle.js";
 
 export const SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS = 100;
 export const SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS = 20;
@@ -110,6 +111,8 @@ export const monitorActivityReference = (
   const messageId = activity.id.startsWith("message:") ? activity.id.slice("message:".length) :
     typeof item?.messageId === "string" ? item.messageId : null;
   const message = messageId ? projection?.messages.find(value => value.id === messageId && value.threadId === threadId) : undefined;
+  // the exact native turn item T3 reads a message by, as the projection names it; a message ID is provenance, never a read itemId
+  const messageItemId = !item && messageId ? messageReadItemId(projection, threadId, messageId) : null;
   const runId = typeof item?.runId === "string" ? item.runId :
     typeof message?.runId === "string" ? message.runId : activity.id.startsWith("run:") ? activity.id.slice("run:".length) : null;
   const rawType = activity.type.replace(/[^a-z0-9_ -]/giu, "").slice(0, 48) || "activity";
@@ -118,7 +121,7 @@ export const monitorActivityReference = (
     sourceThreadId: threadId,
     sourceRunId: runId,
     sourceMessageId: messageId,
-    sourceItemId: activity.readItemId,
+    sourceItemId: activity.readItemId ?? messageItemId,
     kind: rawType,
     observedAt: activity.detectedAt,
     label: `${rawType} · ${rawStatus}`.slice(0, 96),

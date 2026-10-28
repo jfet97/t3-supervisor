@@ -107,7 +107,7 @@ it.effect("a proportionate plan reuses individual steps and adds local ones whil
   assert.match(introduction, /Update documentation/u);
   for (const name of catalogNames) assert.equal(introduction.includes(name), false, `${name} is absent, not listed as not applicable`);
   assert.doesNotMatch(introduction, /not applicable: /u);
-  assert.match(introduction, /The plan should hold only what this task needs; .+ If a commitment is unnecessary for this task, ask for a smaller plan instead of accepting\./u);
+  assert.match(introduction, /The plan holds only what this task needs: revise it as the work evolves, keeping applicable required and fixed commitments, and ask for a smaller plan rather than accepting an unnecessary commitment\./u);
 }));
 
 it.effect("an applicable required step left out of the plan stays unresolved instead of becoming a formal proposal", () => Effect.gen(function* () {

@@ -8,6 +8,7 @@ import {
   addSupervisorRequest, appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, projectId,
   sourceMessageId, sourceThreadId, submitAndComplete, unavailableDefinitionSnapshot,
 } from "./support/ctl-workflow.js";
+import { messageReadRule } from "../src/message-read-handle.js";
 
 // the interpretation fields a root submits for the export task
 const workflowFields = (messageId: string): Record<string, unknown> => ({
@@ -549,6 +550,7 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.match(String((yield* supervisor.conversation.readContextView(binding, {view: "instructions", section: "contact"})).instructions),
     /Contact the operative only with one brief actionable delta/u);
   assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the core carries the local routing rule once");
+  assert.equal(occurrences(messageReadRule), 1, "the core carries the one message read rule once");
   assert.match(core, /supervision_interpretation_submit when an interpretation request asks for it/u);
   assert.match(core, /if one is not listed directly, check whether a connected gateway exposes it/u);
   assert.doesNotMatch(core, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix/u, "no gateway, alias or recipe");
@@ -727,4 +729,35 @@ it.effect("the proposal is introduced in the same cycle its interpretation compl
   assert.equal((yield* fixture.task())!.status, "inferred");
   const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
   assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}:${task.sourceHash.slice(0, 20)}`, "the introduction goes out in the completion cycle");
+}));
+
+// native proof 2026-10-28 (VM run 4): t3_thread_read with a message ID as itemId returns no items; T3 reads a user message by its own
+// turn item, `turn-item:message:<URI-encoded message ID>`. The context names that exact native item, as the projection reports it,
+// beside the message ID, which stays provenance and is never a read itemId.
+it.effect("the interpretation context names each requester message's exact native read item beside its message ID", () => Effect.gen(function* () {
+  const fixture = yield* makeWorkflowFixture();
+  const source = fixture.projections.get(sourceThreadId)!;
+  // a provider-style message ID whose native item ID is encoded, as T3 publishes it
+  const providerId = "provider:msg/01 a";
+  appendSourceMessage(source, providerId, 2, "Implement the CSV export with a regression test.");
+  const nativeItem = (messageId: string) => ({id: `turn-item:message:${encodeURIComponent(messageId)}`, type: "user_message", messageId,
+    threadId: sourceThreadId, runId: source.messages.find(item => item.id === messageId)!.runId, status: "completed",
+    text: source.messages.find(item => item.id === messageId)!.text, streaming: false});
+  source.turnItems = [...(source.turnItems ?? []), nativeItem(providerId)];
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.cycle;
+  const binding = (yield* fixture.binding())!;
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  const sources = (context.task as {sources: {requesterMessages: Array<{messageId: string; readItemId: string | null; requester: string}>}}).sources;
+  const provider = sources.requesterMessages.find(item => item.messageId === providerId);
+  assert.deepEqual(provider, {messageId: providerId, readItemId: "turn-item:message:provider%3Amsg%2F01%20a", requester: "human"});
+  // the exact lookup T3 performs by itemId finds the request itself; the message ID finds nothing
+  const byItemId = (itemId: string) => (source.turnItems ?? []).filter(item => item.id === itemId);
+  assert.deepEqual(byItemId(provider!.readItemId!).map(item => [item.type, item.messageId, item.text]),
+    [["user_message", providerId, "Implement the CSV export with a regression test."]]);
+  assert.deepEqual(byItemId(providerId), [], "a message ID is not an item ID");
+  assert.equal(JSON.stringify(context).includes("Implement the CSV export with a regression test."), false, "the context copies no body");
+  // a message T3 recorded no item for has no read handle, and no message ID is ever offered as one
+  assert.equal(sources.requesterMessages.find(item => item.messageId === sourceMessageId)?.readItemId, null);
+  assert.ok(sources.requesterMessages.every(item => item.readItemId !== item.messageId));
 }));

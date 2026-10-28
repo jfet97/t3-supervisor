@@ -297,9 +297,15 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
     // the notice names the exact read; the complete proposal it returns carries the plan, its contracts' locations and the acceptance record
     const notice = workflowIntroductionText(task);
     const full = workflowProposalText(task);
-    assert.ok(notice.includes(`supervision_plan and exactly ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
-    assert.match(notice, /Definitions start at [^\n]*\.t3-supervisor\/project\.yaml\./u);
-    assert.doesNotMatch(notice, /Plan outline|workflow-acceptance|branch-selection|Required references/u, "the notice pastes no plan, protocol or record");
+    assert.ok(notice.includes(`supervision_plan ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
+    // the event, exact read arguments and contact route; identities are not repeated in headings or contact prose
+    assert.match(notice, /^Project Supervisor — workflow proposal\n/u);
+    assert.ok(notice.endsWith(`Questions: t3_thread_send to ${task.supervisorThreadId}, mode queue.`));
+    assert.equal(notice.split('"taskId":').length - 1, 1);
+    assert.equal(notice.split('"proposalId":').length - 1, 1);
+    assert.doesNotMatch(notice, /Plan outline|workflow-acceptance|branch-selection|Required references|project\.yaml|approval step/u,
+      "the notice pastes no plan, protocol, record, contract or definitions pointer");
+    assert.match(full, /It adds no human approval step or authority, cannot block tools/u, "the agreement contract is read with the proposal");
     assert.ok(notice.length * 4 < full.length, `notice ${notice.length} characters against the ${full.length}-character proposal it points to`);
     assert.match(full, /```workflow-acceptance\n/u);
     assert.doesNotMatch(full, /^\s+Reference: /mu, "definition pointers are not repeated under every member");
@@ -318,18 +324,18 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
       proposalId: "proposal-change", agreedAt: 1, evidence: {kind: "supervisor_message" as const, messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow: earlier}};
     const revised = {...sameScope, agreementSourceHash: "an-earlier-scope"};
     const delta = workflowIntroductionText(revised);
-    assert.match(delta, /^Project Supervisor — revised proposal proposal-change-limits\nThe authorized scope changed; the agreed workflow plan is unchanged from proposal proposal-change/u);
-    assert.match(workflowIntroductionText(sameScope), /^Project Supervisor — revised proposal proposal-change-limits\nThe agreed workflow plan is unchanged/u,
+    assert.match(delta, /^Project Supervisor — revised workflow proposal\nThe authorized scope changed; the agreed plan of proposal proposal-change is unchanged/u);
+    assert.match(workflowIntroductionText(sameScope), /^Project Supervisor — revised workflow proposal\nThe agreed plan of proposal proposal-change is unchanged/u,
       "a revision without a scope change does not claim one");
-    assert.match(delta, /Read its new acceptance record and any updated notes with the t3-supervisor-workflows tool supervision_plan and exactly \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
+    assert.match(delta, /Read its new acceptance record: supervision_plan \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
     assert.match(workflowProposalText(revised), /```workflow-acceptance\n\{"taskId":"[^"]+","proposalId":"proposal-change-limits","digest":"[0-9a-f]{64}"\}\n```/u);
     assert.doesNotMatch(delta, /Plan outline|branch-selection|workflow-acceptance/u);
     // whole messages count, fixed protocol prose included: both notices together stay below one complete proposal
     assert.ok(notice.length + delta.length < full.length, `notices ${notice.length} + ${delta.length} characters against ${full.length}`);
     const changedPlan = {...revised, agreement: {...revised.agreement, workflow: {...earlier, plan: sequencePlan([localStep("Other plan", "A different plan.")])}}};
-    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — revised proposal proposal-change-limits\nYour Supervisor revised the workflow you agreed as proposal proposal-change; agree this revision/u,
+    assert.match(workflowIntroductionText(changedPlan), /^Project Supervisor — revised workflow proposal\nThis revises the workflow you agreed as proposal proposal-change; agree the revision/u,
       "a changed plan gets the proposal notice naming the agreed proposal it replaces");
-    assert.match(workflowIntroductionText(changedPlan), /Read the complete proposal \(limits, required references, the plan with its omissions and branches, and the exact acceptance record\)/u);
+    assert.match(workflowIntroductionText(changedPlan), /Read: supervision_plan \{"callerThreadId":[^}]+"proposalId":"proposal-change-limits"\}/u);
   } finally {yield* fixture.close;}
 }));
 
@@ -380,7 +386,7 @@ it.effect("completion requires every applicable member settled, and a fixed memb
     assert.equal(done.result.status, "applied", JSON.stringify(done.result));
     assert.equal((yield* occurrence(fixture, "account-for-findings")).status, "planned", "completion never completes a member");
     const status = yield* fixture.controller.readTool({...locator(fixture), view: "status"});
-    assert.match(JSON.stringify(status), /"name":"Account for findings","ref":"step:account-for-findings","status":"planned","reach":"unconditional","notApplicable":true/u,
+    assert.match(JSON.stringify(status), /"name":"Account for findings","ref":"step:account-for-findings","status":"planned","notApplicable":true/u,
       "the status view marks the current not-applicable assessment distinctly from completion");
     const stored = (yield* current(fixture)).evidence.find(item => item.kind === "not_applicable");
     assert.equal(stored?.scopeRevision, fixture.sourceBinding.sourceHash, "the assessment is bound to the task scope it assessed");

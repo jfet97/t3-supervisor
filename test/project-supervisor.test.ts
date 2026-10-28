@@ -290,6 +290,11 @@ it.effect("an agent-launched main is silent while off and, once enabled, its lau
 
   yield* TestClock.adjust("1 second");
   addAgentMainTurn(fixture, "agent-main", "project-a", agentTurn("agent-task", 12, "Implement the CSV export with tests", fixture.now()));
+  // T3 reads the launching agent's request by its own turn item, as for a human's
+  const agentMain = fixture.projections.get("agent-main")!;
+  const request = agentMain.messages.find(item => item.id === "agent-task")!;
+  agentMain.turnItems = [...(agentMain.turnItems ?? []), {id: "turn-item:message:agent-task", type: "user_message", messageId: "agent-task",
+    threadId: "agent-main", runId: request.runId, status: "completed", text: request.text, streaming: false}];
   yield* supervisor.runOnce;
   const task = yield* fixture.store.task("agent-main");
   assert.equal(task?.sourceMessageId, "agent-task");
@@ -304,7 +309,8 @@ it.effect("an agent-launched main is silent while off and, once enabled, its lau
   assert.doesNotMatch(text, /Implement the CSV export with tests/u);
   const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
   assert.deepEqual((context.task as {sources: unknown}).sources, {requestedBy: {kind: "launching_agent", threadId: "coordinator"},
-    requesterMessages: [{messageId: "agent-task", requester: "launching_agent"}], operativeMessageIds: []}, "the request stays attributed to the launching agent");
+    requesterMessages: [{messageId: "agent-task", readItemId: "turn-item:message:agent-task", requester: "launching_agent"}], operativeMessages: []},
+    "the request stays attributed to the launching agent and names the native item T3 reads it by");
   assert.equal(sent[0]!.payload.createdBy, "system", "the service's own request is not relabelled");
 
   assert.equal((yield* supervisor.submit(task!, taskFields(task!, "Implement the CSV export", "The launching agent asks for a repository change."))).status, "submitted");

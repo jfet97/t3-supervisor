@@ -4,6 +4,7 @@ import {Context, Effect, Layer} from "effect";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {supervisionTeamToolDefinition, type SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import {teamNotificationEvidence, teamNotificationText} from "../src/supervisor-team-runtime.js";
+import {helperInstructions} from "../src/supervisor-helper-instructions.js";
 import {attributesHelperDelivery} from "../src/supervisor-helper-transport.js";
 import {ThreadPolicyStore} from "../src/thread-policy.js";
 import type {WorkflowCallCancel} from "../src/workflow-write-controller.js";
@@ -118,6 +119,55 @@ it.live("review_handover requires exact native root proof and offers no helper a
   f.proof(f.args);
   assert.equal((yield* f.call()).status, "ok");
   assert.ok(f.reads.includes(f.member.threadId), "the root action reads current native helper truth");
+}));
+
+it.live("a helper reads only its own records: a note keeps its message while kind meanings stay in the helper instructions", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const registered = yield* f.team.registerMember(f.binding, {threadId: "other-helper", taskId: "other-task", bootstrapRunId: "other-bootstrap"});
+  const other = yield* f.team.markReady(f.binding, registered.threadId, registered.epoch);
+  for (const [id, member] of [["note:own", f.member], ["note:other", other]] as const) {
+    yield* f.team.note(f.binding, {eventId: id, notificationId: id, memberThreadId: member.threadId, memberEpoch: member.epoch, message: `Root note for ${member.threadId}.`});
+    yield* f.team.updateNotificationDelivery(f.binding, f.binding.threadId, id, "sending");
+    yield* f.team.updateNotificationDelivery(f.binding, f.binding.threadId, id, "delivered");
+  }
+  const helperRead = {supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch, action: "read"};
+  assert.deepEqual(yield* f.call(helperRead), {status: "ok", team: {
+    member: {threadId: f.member.threadId, state: "ready", epoch: f.member.epoch},
+    assignments: [{subtreeRootThreadId: "branch", state: "transferring", epoch: f.assignment.epoch, handover: "incoming"}],
+    notifications: [
+      {id: f.original.id, kind: "handover_receive", deliveryAttempt: 0, assignmentRootThreadId: "branch", assignmentEpoch: f.assignment.epoch},
+      {id: "note:own", kind: "note", deliveryAttempt: 0, assignmentRootThreadId: null, assignmentEpoch: null, message: `Root note for ${f.member.threadId}.`},
+    ]}}, "another helper's records and the receive notice's prose are not part of this helper's read");
+  assert.match(helperInstructions, /handover_receive: take responsibility for the subtree rooted at its assignmentRootThreadId at its assignmentEpoch/u);
+  assert.deepEqual(yield* f.call({...helperRead, memberEpoch: f.member.epoch - 1}), {status: "denied", reason: "actor_not_current_ready_enabled"},
+    "a stale member epoch reads nothing");
+  // the root reads the whole team; only a note keeps its message
+  const root = (yield* f.call({supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation, action: "read"})) as unknown as
+    {status: string; team: {members: Array<{threadId: string}>; notifications: Array<Record<string, unknown>>}};
+  assert.equal(root.status, "ok");
+  assert.deepEqual(root.team.members.map(member => member.threadId), [f.member.threadId, other.threadId]);
+  assert.deepEqual(root.team.notifications.map(notification => [notification.id, notification.message]),
+    [[f.original.id, undefined], ["note:own", `Root note for ${f.member.threadId}.`], ["note:other", `Root note for ${other.threadId}.`]]);
+  assert.deepEqual(root.team.notifications[0]?.observedRun && (root.team.notifications[0].observedRun as {runId: string}).runId, "interrupted-native-run",
+    "the root keeps the native evidence review_handover needs");
+}));
+
+it.live("a team action answers with its own compact result, and the helper reads the review's chain and untrusted note on demand", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  f.proof(f.args);
+  const answer = yield* f.call();
+  const review = (yield* f.team.snapshot(f.binding)).notifications.find(value => value.kind === "handover_review")!;
+  assert.deepEqual(answer, {status: "ok", result: {id: review.id, kind: "handover_review", recipientThreadId: f.member.threadId, state: "pending"}},
+    "no team snapshot or kind message rides the action answer");
+  assert.deepEqual(JSON.parse(String((yield* row(f.sql, "SELECT document FROM supervisor_team_tool_receipts"))?.document)), answer,
+    "the receipt stores exactly the answer an identical retry replays");
+  yield* f.team.updateNotificationDelivery(f.binding, f.binding.threadId, review.id, "sending");
+  const read = (yield* f.call({supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch, action: "read"})) as unknown as
+    {team: {notifications: Array<Record<string, unknown>>}};
+  assert.deepEqual(read.team.notifications.find(value => value.id === review.id), {id: review.id, kind: "handover_review", deliveryAttempt: 0,
+    assignmentRootThreadId: "branch", assignmentEpoch: f.assignment.epoch, reviewOf: review.reviewOf, reviewChain: review.reviewChain, reviewNote: "sentinel-root-note"});
+  assert.equal(JSON.stringify(read).includes(review.message), false, "the review's rules are read once from the helper instructions");
+  assert.match(helperInstructions, /handover_review: inspect the actual native effects of EVERY attempt in its reviewChain/u);
 }));
 
 it.live("a human stop of the main fences every team and guidance effect at its first and final authority check, but not reads", () => Effect.gen(function* () {

@@ -13,7 +13,7 @@ import { SupervisorIds } from "./ids.js";
 import { ProjectSupervisorStore, type BindingRecord } from "./project-supervisor-store.js";
 import { taskScopeRevision } from "./supervision-conversation.js";
 import { admitSend, SupervisionGate, type GateGuard, type SendPreparation } from "./supervision-gate.js";
-import { canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun } from "./supervisor-conversation.js";
+import { canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun, SupervisorConversation } from "./supervisor-conversation.js";
 import { SupervisorConversationStore } from "./supervisor-conversation-store.js";
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle } from "./supervisor-observation.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
@@ -24,18 +24,21 @@ import { WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel,
 import { workflowRequestHash } from "./workflow-write-evidence.js";
 import {
   acknowledgePlanningTarget, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs, expirePlanningAttempt,
-  markPlanningTargetQuiescent, startPlanningAttempt, PlanningAcknowledgement, planningDelivery, planningCanAdopt, planningDraftInstruction, planningHasUnresolvedEffects,
-  planningHoldText, planningReleaseText, planningWaitOpen, resolvePlanningAttempt,
+  markPlanningTargetQuiescent, startPlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningDelivery, planningCanAdopt, planningDraftNotice,
+  planningDraftSections, planningDraftViews, planningHasUnresolvedEffects, planningHoldText, planningReleaseText, planningWaitOpen, resolvePlanningAttempt,
   type PlanningAttempt, type PlanningDelivery, type PlanningTarget,
 } from "./supervisor-planning.js";
+import type { ConversationFacts, RequesterSource } from "./supervision-conversation-contract.js";
+import { planAuthoringRules } from "./supervisor-workflow.js";
+import { messageReadItemId } from "./message-read-handle.js";
 import type { MessageInfo, Projection } from "./types.js";
 
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
 const Epoch = Schema.Finite.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(1));
-const Arguments = Schema.Struct({
-  supervisorThreadId: Id, bindingGeneration: Epoch, memberEpoch: Schema.optional(Epoch),
+const Pins = {supervisorThreadId: Id, bindingGeneration: Epoch, taskId: Id, taskRevision: Id};
+const OwnerArguments = Schema.Struct({
+  ...Pins, memberEpoch: Schema.optional(Epoch),
   assignmentRootThreadId: Schema.optional(Id), assignmentEpoch: Schema.optional(Epoch),
-  taskId: Id, taskRevision: Id,
   action: Schema.Literals(["read", "pause", "attach_draft", "release", "apply_return"]),
   operationId: Schema.optional(Id), attemptId: Schema.optional(Id),
   targetThreadIds: Schema.optional(Schema.mutable(Schema.Array(Id).check(Schema.isMinLength(1), Schema.isMaxLength(100)))),
@@ -44,20 +47,38 @@ const Arguments = Schema.Struct({
   resolution: Schema.optional(Schema.Literals(["continue", "no_plan"])),
   workflowThreadId: Schema.optional(Id), workflowId: Schema.optional(Id), expectedRevision: Schema.optional(Epoch), returnId: Schema.optional(Id),
 });
-type PlanningArguments = typeof Arguments.Type;
+// a drafter's read carries its attempt's pins and one view, and no field of any action that could act
+const DraftReadArguments = Schema.Struct({
+  ...Pins, action: Schema.Literal("draft_read"), attemptId: Id, view: Schema.Literals(planningDraftViews),
+  section: Schema.optional(Schema.Literals(planningDraftSections)),
+  definitionIds: Schema.optional(Schema.mutable(Schema.Array(Id).check(Schema.isMinLength(1), Schema.isMaxLength(50)))),
+});
+// a drafter reads no input of the root's own interpretation submission in any section: no submission pins or verdict, no
+// interpretation attempt, and requester source pins only as their message provenance
+const sourceProvenance = (source: RequesterSource | null) => source === null ? null : {messageId: source.messageId, requester: source.requester};
+const drafterConversation = (facts: ConversationFacts | null) => facts === null ? null : {draft: facts.draft,
+  authorization: facts.authorization === null ? null : {scopeRevision: facts.authorization.scopeRevision, outcome: facts.authorization.outcome,
+    limits: facts.authorization.limits, state: facts.authorization.state, scopeSources: facts.authorization.scopeSources.map(sourceProvenance),
+    stateSource: sourceProvenance(facts.authorization.stateSource)},
+  considered: sourceProvenance(facts.considered), observed: sourceProvenance(facts.observed), updatedAt: facts.updatedAt};
+const Arguments = Schema.Union([OwnerArguments, DraftReadArguments]);
+type PlanningArguments = typeof OwnerArguments.Type;
+type DraftReadArguments = typeof DraftReadArguments.Type;
 
 export const supervisionPlanningToolDefinition = {
   name: "supervision_planning",
-  description: "Request a bounded planning pause for affected operational actors, read ACK/draft state, attach one read-only drafting child, or explicitly release the planning wait. Uses the caller's exact native tool evidence and current source/ownership. A parent ACK never confirms an active child. The service owns delivery and the fixed deadline. Drafting may begin immediately with local T3 delegate_task (one read-only app-owned child, record its taskId and childThreadId and attach_draft); adoption waits for the relevant ACKs and a fresh owner assessment. apply_return requires workflowId, workflowThreadId, expectedRevision, returnId, reason and an open attemptId; the service verifies current pauses/quiescence and captures retired child runs. This never changes human Stops, pauses or approvals.",
+  description: "Bounded planning pauses. An owner (root or assigned helper, with its pins and its own exact native call) can pause affected actors, read ACK and draft state, attach_draft its one new read-only drafting child started with local T3 delegate_task whose task is the answer's draftInstruction, release with continue or no_plan, or apply_return a pending back_to (workflowId, workflowThreadId, expectedRevision, returnId, reason, open attemptId). The service delivers holds and releases and owns the fixed deadline; a parent ACK never confirms an active child; adoption waits for the relevant ACKs. A drafter only reads, with draft_read and its draftInstruction's pins: view context (section conversation for the intent, plan for the current plan), definitions (definitionIds for complete ones) or plan_rules. Nothing here changes human Stops, pauses or approvals.",
   inputSchema: {type: "object", additionalProperties: false,
     required: ["supervisorThreadId", "bindingGeneration", "taskId", "taskRevision", "action"],
     properties: {
       supervisorThreadId: {type: "string"}, bindingGeneration: {type: "integer", minimum: 1}, memberEpoch: {type: "integer", minimum: 1},
       assignmentRootThreadId: {type: "string"}, assignmentEpoch: {type: "integer", minimum: 1}, taskId: {type: "string"}, taskRevision: {type: "string"},
-      action: {type: "string", enum: ["read", "pause", "attach_draft", "release", "apply_return"]}, operationId: {type: "string"}, attemptId: {type: "string"},
+      action: {type: "string", enum: ["read", "pause", "attach_draft", "release", "apply_return", "draft_read"]}, operationId: {type: "string"}, attemptId: {type: "string"},
       targetThreadIds: {type: "array", minItems: 1, maxItems: 100, items: {type: "string"}}, reason: {type: "string", maxLength: 4000},
       workflowThreadId: {type: "string"}, workflowId: {type: "string"}, expectedRevision: {type: "integer", minimum: 1}, returnId: {type: "string"},
       draftThreadId: {type: "string"}, draftTaskId: {type: "string"}, resolution: {type: "string", enum: ["continue", "no_plan"]},
+      view: {type: "string", enum: planningDraftViews}, section: {type: "string", enum: planningDraftSections},
+      definitionIds: {type: "array", minItems: 1, maxItems: 50, items: {type: "string"}},
     }},
 } as const;
 
@@ -90,6 +111,8 @@ const make = Effect.gen(function* () {
   const ids = yield* SupervisorIds;
   const transaction = guidanceTransaction(yield* GuidanceDb);
   const rpc = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  // the read-only context views a drafter reads; absent where a scope has no conversation service
+  const conversation = Option.getOrNull(yield* Effect.serviceOption(SupervisorConversation));
   const inFlight = yield* FiberMap.make<string, void>();
   const reconciliations = yield* FiberMap.make<string, void>();
   const releaseSlots = yield* Semaphore.make(8);
@@ -116,12 +139,34 @@ const make = Effect.gen(function* () {
     if (next !== current) yield* requests.savePlanningAttempt(next);
     return next;
   }));
-  const view = (row: PlanningAttempt) => ({...row, canAdopt: planningCanAdopt(row, clock.currentTimeMillisUnsafe()),
-    ...(row.draft ? {} : {draftInstruction: planningDraftInstruction(row)})});
+  // the model-facing attempt; the stored row keeps every delivery identity, text and hash
+  const answer = (row: PlanningAttempt, withDraftInstruction = false) => planningAttemptAnswer(row, withDraftInstruction);
+
+  /**
+   * Why attach_draft refuses a thread as this attempt's drafter, or null: it must be the owner's own app-owned delegated child for this
+   * task, no helper, created (or first run) within the attempt's window, with a task no other attempt holds. draft_read admits the same
+   * child, so a drafter can read before and after its owner attaches it.
+   */
+  const draftingChildRefusal = (selected: PlanningAttempt, owner: Projection, threadId: string, taskId: string, binding: BindingRecord, cancel?: WorkflowCallCancel) =>
+    Effect.gen(function* () {
+      const taskRecord = owner.subagents?.find(item => item.id === taskId && item.childThreadId === threadId && item.origin === "app_owned");
+      const draft = yield* attempt(native.projection(threadId, cancel));
+      if (!taskRecord || owner.thread.id !== selected.ownerThreadId || !draft.ok || draft.value.thread.lineage.parentThreadId !== selected.ownerThreadId ||
+        draft.value.thread.lineage.relationshipToParent !== "subagent" ||
+        (yield* team.snapshot(binding)).members.some(member => member.threadId === threadId)) return "planning_draft_not_owned_child";
+      const created = typeof taskRecord.startedAt === "string" ? Date.parse(taskRecord.startedAt) : Number.NaN;
+      const freshRun = draft.value.runs.some(run => run.delegatedTaskId === taskId && Date.parse(run.requestedAt) >= selected.createdAt &&
+        Date.parse(run.requestedAt) < selected.deadline);
+      if (!(Number.isFinite(created) && created >= selected.createdAt && created < selected.deadline) && !freshRun ||
+        (yield* requests.planningAttempts(selected.projectId)).some(row => row.id !== selected.id && row.draft?.taskId === taskId))
+        return "planning_draft_not_new_for_attempt";
+      return null;
+    });
 
   const call = (input: unknown, cancel?: WorkflowCallCancel) => Effect.gen(function* (): Effect.fn.Return<unknown, SupervisionStoreError> {
     const parsed = Schema.decodeUnknownExit(Arguments)(input, {onExcessProperty: "error"});
     if (Exit.isFailure(parsed)) return {status: "invalid", reason: "invalid_planning_arguments"};
+    if (parsed.value.action === "draft_read") return yield* draftRead(parsed.value, cancel);
     const payload = parsed.value;
     const proof = yield* workflows.authorizeNative(payload as WorkflowLocator & Record<string, unknown>, "planning", false, cancel);
     if (proof.status !== "verified") return proof;
@@ -129,35 +174,26 @@ const make = Effect.gen(function* () {
     const task = yield* supervisors.task(binding.mainThreadId);
     if (!task || task.id !== payload.taskId || taskScopeRevision(task) !== payload.taskRevision) return denied("planning_task_changed");
     const existing = yield* requests.planningAttempts(binding.projectId, payload.supervisorThreadId);
-    if (payload.action === "read") return {status: "ready", attempts: existing.filter(row => row.taskId === task.id).map(view)};
+    if (payload.action === "read") return {status: "ready", attempts: existing.filter(row => row.taskId === task.id).map(row => answer(row, true))};
     if (!payload.operationId) return {status: "invalid", reason: "operation_id_required"};
     const clockNow = yield* Clock.currentTimeMillis;
     if (payload.action === "apply_return") return yield* applyReturn(payload, binding, cancel);
     if (payload.action !== "pause") {
       const selected = existing.find(row => row.id === payload.attemptId && row.taskId === task.id);
       if (!selected) return denied("planning_attempt_unknown");
-      if (selected.state !== "open" || clockNow >= selected.deadline) return {status: "closed", attempt: view(expirePlanningAttempt(selected, clockNow))};
+      if (selected.state !== "open" || clockNow >= selected.deadline) return {status: "closed", attempt: answer(expirePlanningAttempt(selected, clockNow))};
       if (payload.action === "attach_draft") {
         if (!payload.draftThreadId || selected.draft && selected.draft.threadId !== payload.draftThreadId) return denied("planning_draft_already_assigned");
-        const draft = yield* attempt(native.projection(payload.draftThreadId, cancel));
         const owner = yield* attempt(native.projection(payload.supervisorThreadId, cancel));
-        if (!payload.draftTaskId || !owner.ok || !owner.value.subagents?.some(item => item.id === payload.draftTaskId && item.childThreadId === payload.draftThreadId && item.origin === "app_owned") ||
-          !draft.ok || draft.value.thread.lineage.parentThreadId !== payload.supervisorThreadId ||
-          draft.value.thread.lineage.relationshipToParent !== "subagent" ||
-          (yield* team.snapshot(binding)).members.some(member => member.threadId === payload.draftThreadId)) return denied("planning_draft_not_owned_child");
-        const taskRecord = owner.value.subagents!.find(item => item.id === payload.draftTaskId)!;
-        const created = typeof taskRecord.startedAt === "string" ? Date.parse(taskRecord.startedAt) : Number.NaN;
-        const freshRun = draft.value.runs.some(run => run.delegatedTaskId === payload.draftTaskId && Date.parse(run.requestedAt) >= selected.createdAt &&
-          Date.parse(run.requestedAt) < selected.deadline);
-        if (!(Number.isFinite(created) && created >= selected.createdAt && created < selected.deadline) && !freshRun ||
-          (yield* requests.planningAttempts(binding.projectId)).some(row => row.id !== selected.id && row.draft?.taskId === payload.draftTaskId))
-          return denied("planning_draft_not_new_for_attempt");
+        if (!payload.draftTaskId || !owner.ok) return denied("planning_draft_not_owned_child");
+        const refusal = yield* draftingChildRefusal(selected, owner.value, payload.draftThreadId, payload.draftTaskId, binding, cancel);
+        if (refusal) return denied(refusal);
         const attached = yield* gate.admit(guard => transaction(Effect.gen(function* () {
           if (!(yield* currentOwner(payload, binding, guard))) return null;
           return yield* update(binding.projectId, selected.id, current => current.state === "open" && clock.currentTimeMillisUnsafe() < current.deadline && !current.draft
             ? {...current, draft: {threadId: payload.draftThreadId!, taskId: payload.draftTaskId ?? null, state: "working", resultMessageId: null, resultRunId: null}} : current);
         })));
-        return attached ? {status: "recorded", attempt: view(attached)} : denied("planning_scope_changed");
+        return attached ? {status: "recorded", attempt: answer(attached)} : denied("planning_scope_changed");
       }
       if (payload.resolution !== "no_plan" && !planningCanAdopt(selected, clockNow)) return denied("planning_acks_incomplete");
       const released = yield* gate.admit(guard => transaction(Effect.gen(function* () {
@@ -173,12 +209,12 @@ const make = Effect.gen(function* () {
         return yield* update(binding.projectId, selected.id, row => resolvePlanningAttempt({...row, targets: row.targets.map(target =>
           scopedIds.has(target.threadId) ? {...target, scopedWorkflowId: scopedIds.get(target.threadId)!} : target)}, payload.resolution ?? "continue", clockNow));
       })));
-      return released ? {status: "recorded", attempt: view(released)} : denied("planning_scope_changed");
+      return released ? {status: "recorded", attempt: answer(released)} : denied("planning_scope_changed");
     }
     if (!payload.targetThreadIds?.length || !payload.reason || new Set(payload.targetThreadIds).size !== payload.targetThreadIds.length)
       return {status: "invalid", reason: "planning_targets_required"};
     const replay = existing.find(row => row.operationId === payload.operationId && row.bindingGeneration === binding.generation);
-    if (replay) return replay.requestHash === workflowRequestHash(input) ? {status: "recorded", attempt: view(replay)} : denied("operation_id_conflict");
+    if (replay) return replay.requestHash === workflowRequestHash(input) ? {status: "recorded", attempt: answer(replay, true)} : denied("operation_id_conflict");
     if (existing.some(row => row.state === "open")) return denied("planning_attempt_inflight");
     const observedThreads = yield* attempt(native.listThreads(cancel));
     if (!observedThreads.ok) return denied("planning_scope_unavailable");
@@ -227,9 +263,9 @@ const make = Effect.gen(function* () {
       if (!(yield* currentOwner(payload, binding, guard))) return denied("planning_scope_changed");
       const concurrent = (yield* requests.planningAttempts(binding.projectId, payload.supervisorThreadId)).find(row => row.state === "open");
       if (concurrent) return concurrent.operationId === payload.operationId && concurrent.requestHash === created.requestHash
-        ? {status: "recorded", attempt: view(concurrent)} : denied("planning_attempt_inflight");
+        ? {status: "recorded", attempt: answer(concurrent, true)} : denied("planning_attempt_inflight");
       yield* requests.savePlanningAttempt(created);
-      return {status: "recorded", attempt: view(created)};
+      return {status: "recorded", attempt: answer(created, true)};
     })));
   });
 
@@ -352,6 +388,72 @@ const make = Effect.gen(function* () {
       return yield* states.applyReturn(owner, {operationId: payload.operationId!, workflowId: payload.workflowId!, expectedRevision: payload.expectedRevision!,
         returnId: payload.returnId!, note: payload.reason!, retiredRuns}, now);
     })));
+  });
+
+  /**
+   * A drafter's read. The call is admitted only as the own executed call, with exactly these arguments, of this attempt's drafter: the
+   * attached one or, before attach_draft, a new app-owned child of the owner that attach_draft would accept (a child whose task started
+   * outside the attempt's window reads only once attached). The attempt must be open, before its deadline, for the current binding
+   * generation, owner and task revision, with no other drafter attached. It answers one read-only view and writes, contacts, changes
+   * and renews nothing; it never names the root's own interpretation submission.
+   */
+  const draftRead = (payload: DraftReadArguments, cancel?: WorkflowCallCancel) => Effect.gen(function* (): Effect.fn.Return<unknown, SupervisionStoreError> {
+    if (payload.definitionIds && payload.view !== "definitions" || payload.section && payload.view !== "context")
+      return {status: "invalid", reason: "invalid_planning_arguments"};
+    if (!conversation) return {status: "unavailable", reason: "planning_views_unavailable"};
+    const owner = yield* attempt(native.projection(payload.supervisorThreadId, cancel));
+    if (!owner.ok || owner.value.thread.id !== payload.supervisorThreadId || typeof owner.value.thread.projectId !== "string") return denied("planning_attempt_unknown");
+    const projectId = owner.value.thread.projectId;
+    const selected = (yield* requests.planningAttempts(projectId, payload.supervisorThreadId)).find(row => row.id === payload.attemptId &&
+      row.bindingGeneration === payload.bindingGeneration && row.taskId === payload.taskId && row.taskRevision === payload.taskRevision);
+    if (!selected) return denied("planning_attempt_unknown");
+    const closed = {status: "closed", reason: "planning_attempt_closed"};
+    if (selected.state !== "open" || clock.currentTimeMillisUnsafe() >= selected.deadline) return closed;
+    const binding = yield* supervisors.binding(projectId, selected.mainThreadId);
+    if (!binding) return denied("planning_scope_changed");
+    const inWindow = (startedAt: unknown) => {
+      const created = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN;
+      return !Number.isFinite(created) || created >= selected.createdAt && created < selected.deadline;
+    };
+    const candidates = (owner.value.subagents ?? []).filter(item => item.origin === "app_owned" && typeof item.id === "string" && typeof item.childThreadId === "string" &&
+      (selected.draft ? item.id === selected.draft.taskId && item.childThreadId === selected.draft.threadId : inWindow(item.startedAt)));
+    let proof: {status: string; reason?: string} = {status: "denied", reason: "planning_drafter_unknown"};
+    let drafter: string | null = null;
+    for (const candidate of candidates) {
+      const threadId = candidate.childThreadId as string;
+      if ((yield* draftingChildRefusal(selected, owner.value, threadId, candidate.id as string, binding, cancel)) !== null) continue;
+      proof = yield* workflows.verifyOwnCall(threadId, projectId, payload, "planning", cancel);
+      if (proof.status === "verified") {
+        drafter = threadId;
+        break;
+      }
+    }
+    if (drafter === null) return {status: proof.status, reason: proof.reason, ...(proof.status === "pending" ? {retryable: true} : {})};
+    const admitted = yield* gate.admit(guard => Effect.gen(function* () {
+      const current = yield* currentAttempt(projectId, selected.id);
+      if (current?.state !== "open" || clock.currentTimeMillisUnsafe() >= current.deadline) return "closed" as const;
+      const actor = yield* workflows.resolveBinding({supervisorThreadId: selected.ownerThreadId, bindingGeneration: selected.bindingGeneration,
+        ...(selected.memberEpoch === undefined ? {} : {memberEpoch: selected.memberEpoch})}, false, "effect", guard);
+      const task = yield* supervisors.task(selected.mainThreadId);
+      return actor && actor.mainThreadId === selected.mainThreadId && actor.generation === selected.bindingGeneration &&
+        (!current.draft || current.draft.threadId === drafter) && task?.id === selected.taskId && taskScopeRevision(task) === selected.taskRevision &&
+        (!selected.requestSource || task.sourceMessageId === selected.requestSource.messageId) ? actor : "changed" as const;
+    }));
+    if (admitted === "closed") return closed;
+    if (admitted === "changed") return denied("planning_scope_changed");
+    // the plan authoring rules, without the root's pause coordination
+    if (payload.view === "plan_rules") return {status: "ok", view: payload.view, instructions: planAuthoringRules};
+    const read = yield* conversation.readContextView(admitted, {view: payload.view, ...(payload.section ? {section: payload.section} : {}),
+      ...(payload.definitionIds ? {definitionIds: payload.definitionIds} : {})}, cancel);
+    // a Stop since admission answers the root's own resume route, never a drafter's
+    if (read.supervision === "stopped") return denied("planning_scope_changed");
+    const shown: Record<string, unknown> = {...read};
+    delete shown.submission;
+    // the main's message handles are read in its own thread; the sections a drafter reads are its own
+    return {...shown, view: payload.view,
+      ...(payload.view === "context" && read.status === "ok" ? {mainThreadId: admitted.mainThreadId} : {}),
+      ...(payload.view === "context" && Array.isArray(read.sections) ? {sections: planningDraftSections} : {}),
+      ...("conversation" in read ? {conversation: drafterConversation(read.conversation as ConversationFacts | null)} : {})};
   });
 
   const replaceDelivery = (row: PlanningAttempt, threadId: string, kind: "hold" | "release", delivery: PlanningDelivery, confirmed = false): PlanningAttempt => {
@@ -550,7 +652,8 @@ const make = Effect.gen(function* () {
               ? {...row, draft: {...row.draft, state: terminalStatus === "completed" && reply ? "returned" : "failed",
                 resultMessageId: reply?.id ?? null, resultRunId: reply?.runId ?? latestRun?.id ?? null,
                 ownerNotice: planningDelivery(row.id, row.ownerThreadId, "draft"),
-                ownerNoticeText: `Registered planning draft ${row.id} is ${terminalStatus === "completed" && reply ? "ready" : "unavailable"}. Read supervision_planning for its exact result and actor ACKs. Re-read current operative work before adopting any content. Publish no automatic plan and impose no new wait.`}} : row))!;
+                ownerNoticeText: planningDraftNotice(row, terminalStatus === "completed" && reply ? {threadId: row.draft.threadId, messageId: reply.id,
+                  readItemId: messageReadItemId(child.value, row.draft.threadId, reply.id)} : null)}} : row))!;
           }
         }
       }

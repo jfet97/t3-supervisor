@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
+import { messageReadRule } from "./message-read-handle.js";
 import { planningTimeoutBounds } from "./supervisor-planning-contract.js";
-import type { NewPlanningAttempt, PlanningAttempt, PlanningAcknowledgement, PlanningDelivery, PlanningTarget } from "./supervisor-planning-contract.js";
+import type { NewPlanningAttempt, PlanningAttempt, PlanningAcknowledgement, PlanningDelivery, PlanningDraftView, PlanningTarget } from "./supervisor-planning-contract.js";
 export * from "./supervisor-planning-contract.js";
 
 /** Delivery identities are allocated before any send and never depend on retry time. */
@@ -87,19 +88,53 @@ export const planningHasUnresolvedEffects = (attempt: PlanningAttempt): boolean 
   attempt.draft?.ownerNotice?.state === "sending" || attempt.draft?.ownerNotice?.state === "uncertain" ||
   Boolean(attempt.draft?.taskId && attempt.draft.state === "closed" && attempt.draft.cleanupConfirmedAt === undefined);
 
+const deadlineText = (attempt: PlanningAttempt): string => new Date(attempt.deadline).toISOString();
+// the one rule an operative is told with each hold or release, since it has no read of the planning rules
+const humanPrecedence = "Human Stops, pauses, limits and approvals still win.";
+
+/**
+ * A hold is one event: the attempt, its deadline and scope and, for an actor, the exact ACK record the service matches in its own
+ * completed reply. A parent relaying for a child holds its dispatch only and is given no record for the child.
+ */
 export const planningHoldText = (attempt: PlanningAttempt, target: PlanningTarget): string => {
-  const recipient = target.threadId === target.recipientThreadId
-    ? "Hold side-effecting work and new or re-tasked children in this scope. Read-only observation may continue."
-    : `Hold new or re-tasked work for child ${target.threadId} and ask it to pause conflicting work when possible. Your ACK covers your own dispatch only, not the child's active work.`;
-  const acknowledgement = target.threadId === target.recipientThreadId
-    ? `When your own work is paused, publish this exact record in your own completed reply:\n\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: attempt.id, targetThreadId: target.threadId})}\n\`\`\``
-    : `Confirmation must come from the child's own reply or verified terminal work. Do not publish an ACK for ${target.threadId} yourself. A separate pause addressed to you has its own ACK.`;
-  return `The Supervisor is preparing a plan: ${attempt.reason}\nPlanning pause ${attempt.id}; scope: ${target.scope}. Deadline: ${new Date(attempt.deadline).toISOString()}.\n${recipient}\n${acknowledgement}\nThe service will send a plan or release. This planning wait expires at the printed deadline; it never overrides a human Stop, pause, limit or approval.`;
+  const pause = `Planning pause ${attempt.id} until ${deadlineText(attempt)}. Scope: ${target.scope}\n`;
+  return target.threadId === target.recipientThreadId
+    ? `${pause}Hold side-effecting work and new or re-tasked children in this scope; reads may continue. When paused, reply with exactly:\n\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: attempt.id, targetThreadId: target.threadId})}\n\`\`\`\n${humanPrecedence}`
+    : `${pause}Hold dispatch for child ${target.threadId} and ask it to pause work in this scope; your ACK covers your dispatch only. ${humanPrecedence}`;
 };
 
-export const planningReleaseText = (attempt: PlanningAttempt, target: PlanningTarget): string =>
-  `${target.threadId !== target.recipientThreadId ? `Relay this release to child ${target.threadId}; it concerns that child's wait. ` : ""}Planning pause ${attempt.id} is released for ${target.scope}${attempt.resolution === "timeout" ? ": its deadline expired before all required planning outcomes were confirmed" :
-    attempt.resolution === "no_plan" ? ": a shared plan is not needed" : attempt.resolution === "superseded" ? ": newer instructions superseded it" : ": planning is resolved"}. Continue with your authorised task. There is no remaining wait for this planning attempt. Human Stops, pauses, limits and approvals still apply.${target.scopedWorkflowId && attempt.resolution === "continue" ? ` Read the complete scoped plan with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: attempt.taskId, proposalId: target.scopedWorkflowId})}; if the child cannot call it, its parent relays the scoped instructions.` : ""}`;
+const releaseNotes = {continue: "planning resolved", no_plan: "no plan needed", timeout: "deadline passed", superseded: "superseded"} as const;
 
+/** A release names the attempt and its resolution; a continued child is pointed to its own scoped plan, and a parent relays a child's. */
+export const planningReleaseText = (attempt: PlanningAttempt, target: PlanningTarget): string =>
+  `${target.threadId !== target.recipientThreadId ? `Relay to child ${target.threadId}: planning` : "Planning"} pause ${attempt.id} released (${releaseNotes[attempt.resolution ?? "continue"]}). Continue your authorised task; human Stops and limits still apply.${target.scopedWorkflowId && attempt.resolution === "continue" ? ` Read your scoped plan with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: attempt.taskId, proposalId: target.scopedWorkflowId})}; a parent relays it if the child cannot call it.` : ""}`;
+
+/** The drafter's only read: its attempt's pins and one view, proven by the drafter's own executed call of exactly these arguments. */
+export const planningDraftRead = (attempt: PlanningAttempt, view: PlanningDraftView) => ({supervisorThreadId: attempt.ownerThreadId,
+  bindingGeneration: attempt.bindingGeneration, taskId: attempt.taskId, taskRevision: attempt.taskRevision, action: "draft_read" as const,
+  attemptId: attempt.id, view});
+
+/** The drafting child's task: the read route and coordinates, never a copy of the plan, the rules or the definitions. */
 export const planningDraftInstruction = (attempt: PlanningAttempt): string =>
-  `Prepare read-only draft content for planning attempt ${attempt.id}, owned by ${attempt.ownerThreadId}. Deadline: ${new Date(attempt.deadline).toISOString()}. Scope: ${attempt.reason}. Return the proposed workflow and concise rationale to your parent. Do not implement work, publish a plan, instruct an operative, change state, monitor ongoing work or delegate. The owner is obtaining pause acknowledgements and will reconcile your draft with later activity before adopting it. Your result grants no authority and cannot renew or reopen this attempt.`;
+  `Read-only drafter for planning pause ${attempt.id} until ${deadlineText(attempt)}. Scope: ${attempt.reason}\nDraft a workflow plan. Read with supervision_planning ${JSON.stringify(planningDraftRead(attempt, "context"))}, adding section conversation for the intent and section plan for the current plan; other views: definitions (index; definitionIds for complete ones) and plan_rules (plan grammar). Messages context names are in its mainThreadId. ${messageReadRule} Answer with the plan and a brief rationale. Only read and draft: no edits, commands, contact, delegation or other Supervisor calls; your draft grants no authority and never extends the pause.`;
+
+/**
+ * What supervision_planning answers about an attempt: its states, deadline and each target's ACK message; delivery identities, texts
+ * and hashes stay stored. The draft instruction comes only with a pause or an explicit read, while the open attempt has no drafter.
+ */
+export const planningAttemptAnswer = (attempt: PlanningAttempt, withDraftInstruction = false) => ({
+  attemptId: attempt.id, state: attempt.state, deadline: deadlineText(attempt), resolution: attempt.resolution,
+  targets: attempt.targets.map(target => ({threadId: target.threadId, state: target.state, ack: target.acknowledgement?.messageId ?? null})),
+  draft: attempt.draft ? {state: attempt.draft.state, taskId: attempt.draft.taskId} : null,
+  ...(withDraftInstruction && attempt.state === "open" && !attempt.draft ? {draftInstruction: planningDraftInstruction(attempt)} : {}),
+});
+
+/**
+ * The owner's notice that its drafter ended: the exact read of the result's published turn item, or, before T3 publishes one, the
+ * result's message ID as provenance to match while paging; adoption stays the owner's checked decision.
+ */
+export const planningDraftNotice = (attempt: PlanningAttempt, result: {threadId: string; messageId: string; readItemId: string | null} | null): string =>
+  `Planning draft for pause ${attempt.id} is ${!result ? "unavailable" : result.readItemId
+    ? `ready: read it with t3_thread_read ${JSON.stringify({threadId: result.threadId, itemId: result.readItemId})} (message ${result.messageId})`
+    : `ready as message ${result.messageId} of thread ${result.threadId}, not yet published as a read item: page that thread's view messages and match the messageId`}. ` +
+  `Check ACKs with supervision_planning read${result ? " and re-read current operative work before adopting it" : ""}; publish nothing automatically and start no new wait.`;

@@ -11,7 +11,8 @@ import {decodeGuidanceRow, GuidanceStoreError, guidanceSql, guidanceTransaction,
   type SupervisionStoreError} from "./guidance-sql.js";
 import {ProjectSupervisorStore, type BindingRecord} from "./project-supervisor-store.js";
 import {SupervisorConversationStore} from "./supervisor-conversation-store.js";
-import {endedWithoutCompletion, maxHandoverReviewChain, parseHandoverReview, SupervisorTeamStore, type HandoverReviewInput} from "./supervisor-team-store.js";
+import {endedWithoutCompletion, maxHandoverReviewChain, notificationClosed, parseHandoverReview, SupervisorTeamStore, type HandoverReviewInput,
+  type SupervisorTeamSnapshot, type TeamAssignment, type TeamEvent, type TeamMember, type TeamNotification} from "./supervisor-team-store.js";
 import {attributesHelperDelivery, HelperTransport, invalidReceipt} from "./supervisor-helper-transport.js";
 import {teamNotificationEvidence, teamNotificationText} from "./supervisor-team-runtime.js";
 import {admitSend, SupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation} from "./supervision-gate.js";
@@ -39,7 +40,7 @@ const handoverReviewErrors = new Set([
 ]);
 export const supervisionTeamToolDefinition = {
   name: "supervision_team",
-  description: "Read this root's flat Supervisor team. Root registers actual completed native delegate_task children, assigns or releases operational subtrees, retires or quarantines helpers, sends notes, reviews interrupted handovers with review_handover, and retries only definite failed deliveries. review_handover requires notificationId, expectedDeliveryAttempt, expectedRunId and the exact ordered expectedChain of open attempts; optional note is bounded untrusted plain text. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
+  description: "Read this root's flat Supervisor team; a helper's read lists only its own membership, assignments and open notifications, and every other action answers with its own result. Root registers actual completed native delegate_task children, assigns or releases operational subtrees, retires or quarantines helpers, sends notes, reviews interrupted handovers with review_handover, and retries only definite failed deliveries. review_handover requires notificationId, expectedDeliveryAttempt, expectedRunId and the exact ordered expectedChain of open attempts; optional note is bounded untrusted plain text. Helpers acknowledge readiness and report significant assessments/escalations. All mutations require exact native caller proof; IDs and transport credentials alone grant no authority. Later helper check-ins are service-managed, not raw t3_thread_send.",
   inputSchema: {type: "object", additionalProperties: false, required: ["supervisorThreadId", "bindingGeneration", "action"], properties: {
     ...locator, action: {type: "string", enum: ["read", "register", "assign", "release", "retire", "quarantine", "note", "retry", "ready", "report", "review_handover"]},
     operationId: text(128), memberThreadId: text(512), taskId: text(512), bootstrapRunId: text(512),
@@ -92,6 +93,41 @@ const fail = (reason: string) => ({status: "denied", reason});
 const id = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 512;
 const bounded = (value: unknown, max: number): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= max;
 const parentMap = (threads: readonly ThreadInfo[]) => new Map(threads.map(thread => [thread.id, thread.lineage.parentThreadId]));
+
+// the model-facing team answers: an action answers with its own compact result and the team is read on demand. A
+// notification kind's meaning lives in the helper instructions, so only a note keeps its message
+const memberResult = (member: TeamMember) => ({threadId: member.threadId, state: member.state, epoch: member.epoch});
+const assignmentResult = (assignment: TeamAssignment) => ({subtreeRootThreadId: assignment.subtreeRootThreadId, state: assignment.state,
+  epoch: assignment.epoch, ...(assignment.memberThreadId ? {memberThreadId: assignment.memberThreadId} : {}),
+  ...(assignment.state === "transferring" ? {fromMemberThreadId: assignment.fromMemberThreadId ?? null, toMemberThreadId: assignment.toMemberThreadId ?? null,
+    ...(assignment.pendingRequestIds?.length ? {pendingRequests: assignment.pendingRequestIds.length} : {})} : {})});
+const notificationResult = (notification: TeamNotification) =>
+  ({id: notification.id, kind: notification.kind, recipientThreadId: notification.recipientThreadId, state: notification.state});
+const eventResult = (event: TeamEvent) => ({id: event.id, kind: event.kind, severity: event.severity});
+const rootTeamView = (snapshot: SupervisorTeamSnapshot) => ({...snapshot,
+  notifications: snapshot.notifications.map(({message, ...notification}) => notification.kind === "note" ? {...notification, message} : notification)});
+// a helper reads only its own membership, its assignments and the notifications posted to it that remain open
+const postedNotificationStates = new Set(["sending", "uncertain", "delivered"]);
+const helperTeamView = (snapshot: SupervisorTeamSnapshot, helperThreadId: string) => {
+  const member = snapshot.members.find(value => value.threadId === helperThreadId);
+  return {member: member ? memberResult(member) : null,
+    assignments: snapshot.assignments.flatMap(assignment => assignment.memberThreadId === helperThreadId
+      ? [{subtreeRootThreadId: assignment.subtreeRootThreadId, state: assignment.state, epoch: assignment.epoch}]
+      : assignment.fromMemberThreadId === helperThreadId || assignment.toMemberThreadId === helperThreadId
+        ? [{subtreeRootThreadId: assignment.subtreeRootThreadId, state: assignment.state, epoch: assignment.epoch,
+          handover: assignment.toMemberThreadId === helperThreadId ? "incoming" as const : "outgoing" as const}]
+        : []),
+    notifications: snapshot.notifications.filter(value => value.recipientThreadId === helperThreadId && postedNotificationStates.has(value.state) &&
+      !notificationClosed(value)).map(value => ({id: value.id, kind: value.kind, deliveryAttempt: value.deliveryAttempt,
+      assignmentRootThreadId: value.assignmentRootThreadId, assignmentEpoch: value.assignmentEpoch,
+      ...(value.remainingAssignmentRoots.length ? {remainingAssignmentRoots: value.remainingAssignmentRoots} : {}),
+      ...(value.kind === "note" ? {message: value.message} : {}),
+      ...(value.reviewOf ? {reviewOf: value.reviewOf, reviewChain: value.reviewChain ?? [], ...(value.reviewNote !== undefined ? {reviewNote: value.reviewNote} : {})} : {})}))};
+};
+// a guidance answer is its compact receipt: state, route and the caller's own identities. The stored record keeps the
+// delivery identities, the text and every attempt for reconciliation
+const guideAnswer = (record: GuideRecord) => ({status: record.status, ...(record.reason ? {reason: record.reason} : {}),
+  operationId: record.operationId, targetThreadId: record.targetThreadId, ...(record.routedThreadId ? {routedThreadId: record.routedThreadId} : {})});
 
 // the supervision_team and supervision_guide argument envelopes: the locator bounds and exactly the action's keys; an excess
 // key is rejected, never stripped, and the raw arguments stay the proof and receipt hash source
@@ -319,7 +355,10 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       }
     }
     if (!binding) return fail("actor_not_current_ready_enabled");
-    if (payload.action === "read") return {status: "ok", team: yield* team.snapshot(binding)};
+    if (payload.action === "read") {
+      const snapshot = yield* team.snapshot(binding);
+      return {status: "ok", team: payload.supervisorThreadId === binding.threadId ? rootTeamView(snapshot) : helperTeamView(snapshot, payload.supervisorThreadId)};
+    }
     const proof = yield* workflows.authorizeNative(payload, "team", payload.action === "ready", cancel);
     if (proof.status !== "verified") return payload.action === "review_handover" ? fail("native_root_proof_required") : proof;
     const prior = yield* receipt(payload, binding);
@@ -343,22 +382,22 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         if (concurrent) return concurrent.hash === workflowRequestHash(payload) ? concurrent.value : fail("operation_id_conflict");
         let result: unknown;
         if (reviewInput) {
-          result = yield* team.reviewHandover(binding, payload.supervisorThreadId, reviewInput);
+          result = notificationResult(yield* team.reviewHandover(binding, payload.supervisorThreadId, reviewInput));
         } else if (payload.action === "register") {
           if (!id(payload.memberThreadId) || !id(payload.taskId) || !id(payload.bootstrapRunId)) return fail("invalid_registration");
-          result = yield* team.registerMember(binding, {threadId: payload.memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
+          result = memberResult(yield* team.registerMember(binding, {threadId: payload.memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId}));
         } else if (payload.action === "ready") {
           if (root || typeof payload.memberEpoch !== "number") return fail("registered_helper_required");
-          result = yield* team.markReady(binding, payload.supervisorThreadId, payload.memberEpoch);
+          result = memberResult(yield* team.markReady(binding, payload.supervisorThreadId, payload.memberEpoch));
         } else if (payload.action === "assign" || payload.action === "release") {
           if (payload.action === "assign" && !id(payload.memberThreadId)) return fail("member_required");
-          result = yield* team.assign(binding, String(payload.targetThreadId), payload.action === "release" ? null : String(payload.memberThreadId), parentMap(threads));
+          result = assignmentResult(yield* team.assign(binding, String(payload.targetThreadId), payload.action === "release" ? null : String(payload.memberThreadId), parentMap(threads)));
         } else if (payload.action === "retire") {
           if (!id(payload.memberThreadId)) return fail("member_required");
-          result = yield* team.retireMember(binding, payload.memberThreadId);
+          result = memberResult(yield* team.retireMember(binding, payload.memberThreadId));
         } else if (payload.action === "quarantine") {
           if (!root || !id(payload.memberThreadId)) return fail("root_authority_required");
-          result = yield* team.quarantineMember(binding, payload.memberThreadId);
+          result = memberResult(yield* team.quarantineMember(binding, payload.memberThreadId));
         } else if (payload.action === "retry") {
           if (!id(payload.memberThreadId)) return fail("member_required");
           const memberThreadId = payload.memberThreadId;
@@ -373,8 +412,8 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
           const memberThreadId = payload.memberThreadId;
           const member = (yield* team.snapshot(binding)).members.find(item => item.threadId === memberThreadId);
           if (!member) return fail("member_required");
-          result = yield* team.note(binding, {eventId: `note:${payload.operationId}`, notificationId: `note:${payload.operationId}`,
-            memberThreadId, memberEpoch: member.epoch, message: payload.summary});
+          result = notificationResult(yield* team.note(binding, {eventId: `note:${payload.operationId}`, notificationId: `note:${payload.operationId}`,
+            memberThreadId, memberEpoch: member.epoch, message: payload.summary}));
         } else if (payload.action === "report") {
           if (root || !bounded(payload.summary, 4000) || !["assessment", "escalation", "group_result"].includes(String(payload.reportKind)) ||
             !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, String(payload.targetThreadId), parentMap(threads), payload)))
@@ -383,9 +422,10 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
             memberEpoch: payload.memberEpoch!, targets: [{targetThreadId: String(payload.targetThreadId),
               assignmentRootThreadId: payload.assignmentRootThreadId!, assignmentEpoch: payload.assignmentEpoch!}],
             summary: payload.summary, parentById: parentMap(threads), ...(payload.reportKind === "group_result" ? {severity: "result" as const} : {})};
-          result = payload.reportKind === "escalation" ? yield* team.escalate(binding, report) : yield* team.assessment(binding, report);
+          result = eventResult(payload.reportKind === "escalation" ? yield* team.escalate(binding, report) : yield* team.assessment(binding, report));
         } else return {status: "invalid", reason: "unknown_team_action"};
-        const response = {status: "ok", result, team: yield* team.snapshot(binding)};
+        // the stored receipt is this exact answer, so an identical retry replays it byte for byte
+        const response = {status: "ok", result};
         yield* save(payload, binding, proof.evidence.itemId, response);
         return response;
       })));
@@ -581,8 +621,9 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     const attempt = prepared.attempts[attemptIndex]!;
     const command = guideCommand(attempt, record.text);
     const acceptedResult = (latest: GuideRecord): Effect.Effect<GuideRecord, GuidanceStoreError> => {
-      const result = {...changedAttempt(latest, attemptIndex, "accepted"), status: "accepted" as const,
-        reason: "Native steer command accepted; late completion can still start a turn. Do not send another route."};
+      // accepted is final for this route; the helper instructions state that a late completion can still start a turn
+      const result: GuideRecord = {...changedAttempt(latest, attemptIndex, "accepted"), status: "accepted"};
+      delete result.reason;
       return Effect.as(save(payload, binding, evidenceItemId, result), result);
     };
     // the reply's records stay separate statements, as at baseline: they close or settle the reserved attempt and a fallback
@@ -677,12 +718,12 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         if (!Array.isArray(original.attempts)) {
           const projection = yield* native.projection(original.routedThreadId, cancel);
           if (projection.messages.some(message => message.id === original.messageId && message.threadId === original.routedThreadId && message.text === payload.text)) {
-            const result = {...original, status: "delivered"};yield* save(payload, binding, proof.evidence.itemId, result);
-            yield* team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");return {_tag: "Done" as const, value: result as unknown};
+            const result: GuideRecord = {...original, status: "delivered"};yield* save(payload, binding, proof.evidence.itemId, result);
+            yield* team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");return {_tag: "Record" as const, record: result};
           }
-          return {_tag: "Done" as const, value: {...original, status: "uncertain", reason: "original_send_requires_reconciliation"} as unknown};
+          return {_tag: "Record" as const, record: {...original, status: "uncertain" as const, reason: "original_send_requires_reconciliation"}};
         }
-        if (["accepted", "delivered", "denied", "escalated", "not_sent"].includes(original.status)) return {_tag: "Done" as const, value: prior.value as unknown};
+        if (["accepted", "delivered", "denied", "escalated", "not_sent"].includes(original.status)) return {_tag: "Record" as const, record: original};
         if (original.status === "needs_fallback") return {_tag: "Fallback" as const, record: original};
         if (original.status === "needs_escalation") return {_tag: "Escalate" as const, record: original};
         if (original.routedThreadId) {
@@ -690,17 +731,17 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
           const message = projection.messages.find(item => item.id === original.messageId && item.threadId === original.routedThreadId && item.text === payload.text &&
             item.createdBy === "user" && item.creationSource === "server");
           if (message) {
-            const result = {...original, status: "delivered"};yield* save(payload, binding, proof.evidence.itemId, result);
+            const result: GuideRecord = {...original, status: "delivered"};yield* save(payload, binding, proof.evidence.itemId, result);
             yield* team.setRequestState(binding, binding.threadId, original.requestId, 0, "settled");
             if (message.runId && message.runId !== original.targetRunId) yield* team.serviceAttention(binding, {
               eventId: `late-guide:${original.requestId}`, memberThreadId: original.supervisorThreadId, targetThreadId: original.targetThreadId,
               summary: `The native steer reached a new run in ${original.routedThreadId} after the targeted run ended. Stop further direct guidance and assess whether its operational parent needs attention.`});
-            return {_tag: "Done" as const, value: result as unknown};
+            return {_tag: "Record" as const, record: result};
           }
         }
         const uncertain: GuideRecord = {...original, status: "uncertain", reason: "original_send_requires_reconciliation"};
         yield* save(payload, binding, proof.evidence.itemId, uncertain);
-        return {_tag: "Done" as const, value: uncertain as unknown};
+        return {_tag: "Record" as const, record: uncertain};
       }
       if ((yield* team.unresolvedRequests(binding)).some(request => request.requestId.startsWith("guide:") &&
         request.targets.some(target => target.targetThreadId === payload.targetThreadId)))
@@ -730,9 +771,10 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       return {_tag: "Send" as const, record, route: search.route, parents: search.parents};
     }).pipe(otherwise(() => ({_tag: "Done" as const, value: fail("guidance_native_read_unavailable") as unknown})));
     if (next._tag === "Done") return next.value;
-    if (next._tag === "Fallback") return yield* continueAfterDefiniteRejection(payload, binding, proof.evidence.itemId, next.record, cancel);
-    if (next._tag === "Escalate") return yield* finishRootEscalation(payload, binding, proof.evidence.itemId, next.record, next.record.attempts.length > 0);
-    return yield* sendGuideAttempt(payload, binding, proof.evidence.itemId, next.record, next.route, next.parents, cancel);
+    if (next._tag === "Record") return guideAnswer(next.record);
+    if (next._tag === "Fallback") return guideAnswer(yield* continueAfterDefiniteRejection(payload, binding, proof.evidence.itemId, next.record, cancel));
+    if (next._tag === "Escalate") return guideAnswer(yield* finishRootEscalation(payload, binding, proof.evidence.itemId, next.record, next.record.attempts.length > 0));
+    return guideAnswer(yield* sendGuideAttempt(payload, binding, proof.evidence.itemId, next.record, next.route, next.parents, cancel));
   });
 
   const reconcile = Effect.fnUntraced(function* (binding: BindingRecord, stopped: boolean, cancel: WorkflowCallCancel): Effect.fn.Return<void, SupervisionStoreError> {

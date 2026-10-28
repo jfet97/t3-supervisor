@@ -26,6 +26,13 @@ import {
   scriptedOperate, sequencePlan, snapshotWith, teamView, thread, type WwcFixture,
 } from "./support/wwc-fixture.js";
 
+// a guidance answer is its compact receipt; the stored receipt keeps the request, delivery identities and every attempt
+type StoredGuide = {requestId: string; messageId: string;
+  attempts: Array<{routedThreadId: string; commandId: string; messageId: string; targetRunId: string; status: string; dispatchFailureReplayAttempted?: boolean}>};
+const storedGuide = (db: Parameters<typeof sqlGet>[0], operationId: string) =>
+  Effect.map(sqlGet(db, "SELECT document FROM supervisor_team_tool_receipts WHERE operation_id=?", operationId),
+    (row) => JSON.parse(String(row?.document)) as StoredGuide);
+
 it.effect("unverified JSON stays pending without reserving an operation and a verified retry applies", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {
@@ -1990,7 +1997,7 @@ it.effect("helper guidance resolves an omitted activeRunId and retains uncertain
       assignmentRootThreadId: target.id, assignmentEpoch: assignment.epoch,
       operationId: "uncertain-guidance", targetThreadId: target.id, text: "Reconsider the observed failed test before completing this step."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
-    const first = (yield* controller.guide(args)) as {status: string; messageId: string};
+    const first = (yield* controller.guide(args)) as {status: string};
     assert.equal(first.status, "uncertain");
     assert.deepEqual(sent[0]!.dispatchMode, {type: "steer_active", targetRunId: "guide-active"});
     assert.equal(sent[0]!.createdBy, "system");
@@ -2026,7 +2033,8 @@ it.effect("helper guidance resolves an omitted activeRunId and retains uncertain
       yield* team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
     }
     assert.match((yield* Effect.flip(team.completeTransfer(f.binding, target.id, transfer.epoch))).message, /pending_effects/u);
-    targetProjection.messages.push({id: first.messageId, threadId: target.id, runId: "guide-active", nodeId: "guide-root", role: "user", text: args.text,
+    // the native message of the uncertain send, under the identity the stored request dispatched
+    targetProjection.messages.push({id: String(sent[0]!.messageId), threadId: target.id, runId: "guide-active", nodeId: "guide-root", role: "user", text: args.text,
       streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z", createdBy: "user", creationSource: "server"});
     yield* controller.reconcile(f.binding);
     assert.equal((yield* team.unresolvedRequests(f.binding)).length, 0);
@@ -2176,11 +2184,10 @@ it.effect("deferred owner guidance raises one stable attention after grace and r
       targetThreadId: target.id, text: "Recheck the target after its owner request is resolved."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
 
-    const deferred = (yield* controller.guide(args)) as {
-      status: string; reason?: string; requestId: string; attempts: Array<{commandId: string; status: string}>;
-    };
-    assert.equal(deferred.status, "needs_fallback");
-    assert.equal(deferred.reason, "target_pending_owner_input");
+    const answer = (yield* controller.guide(args)) as {status: string; reason?: string};
+    assert.equal(answer.status, "needs_fallback");
+    assert.equal(answer.reason, "target_pending_owner_input");
+    const deferred = yield* storedGuide(f.db, args.operationId);
     assert.equal(deferred.attempts[0]?.status, "rejected");
     assert.equal(sent.length, 1);
     assert.equal(sent[0]?.threadId, target.id);
@@ -2278,14 +2285,13 @@ it.live("helper guidance records a pre-open transport refusal as not sent withou
       targetThreadId: target.id, text: "Recheck the failing child before continuing."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
 
-    const result = (yield* controller.guide(args)) as {
-      status: string; reason: string; attempts: Array<{routedThreadId: string; status: string}>;
-    };
+    const result = (yield* controller.guide(args)) as {status: string; reason: string};
     assert.equal(result.status, "not_sent");
     assert.equal(result.reason, "native_transport_not_sent");
-    assert.equal(result.attempts.length, 1, "a pre-open failure does not create a second ancestor route");
-    assert.equal(result.attempts[0]?.routedThreadId, target.id);
-    assert.equal(result.attempts[0]?.status, "not_sent");
+    const stored = yield* storedGuide(f.db, args.operationId);
+    assert.equal(stored.attempts.length, 1, "a pre-open failure does not create a second ancestor route");
+    assert.equal(stored.attempts[0]?.routedThreadId, target.id);
+    assert.equal(stored.attempts[0]?.status, "not_sent");
     assert.equal(upgrades, 1);
     assert.equal((yield* team.unresolvedRequests(f.binding)).length, 0, "a command that never reached T3 does not retain a pending-effect fence");
     assert.equal(yield* team.authorizeWrite(f.binding, member.threadId, target.id, parents,
@@ -2371,9 +2377,7 @@ it.live("helper guidance replays a received dispatch failure with the exact comm
       targetThreadId: target.id, text: "Recheck the blocked test before marking this subtree complete."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
 
-    const result = (yield* controller.guide(args)) as {
-      status: string; attempts: Array<{routedThreadId: string; commandId: string; messageId: string; targetRunId: string; status: string; dispatchFailureReplayAttempted?: boolean}>;
-    };
+    const result = (yield* controller.guide(args)) as {status: string};
     assert.equal(result.status, "accepted");
     assert.equal(calls.length, 3);
     assert.deepEqual(calls[0], calls[1], "the server-failure replay must preserve the full native command payload");
@@ -2386,9 +2390,10 @@ it.live("helper guidance replays a received dispatch failure with the exact comm
     assert.notEqual(calls[2]!.commandId, calls[0]!.commandId);
     assert.notEqual(calls[2]!.messageId, calls[0]!.messageId);
     assert.deepEqual(calls[2]!.dispatchMode, {type: "steer_active", targetRunId: parent.activeRunId});
-    assert.equal(result.attempts[0]?.dispatchFailureReplayAttempted, true);
-    assert.equal(result.attempts[0]?.status, "rejected");
-    assert.equal(result.attempts[1]?.status, "accepted");
+    const stored = yield* storedGuide(f.db, args.operationId);
+    assert.equal(stored.attempts[0]?.dispatchFailureReplayAttempted, true);
+    assert.equal(stored.attempts[0]?.status, "rejected");
+    assert.equal(stored.attempts[1]?.status, "accepted");
   } finally {
     yield* Effect.callback<void>((resume) => {server.close(() => resume(Effect.void));});
     yield* f.close;
@@ -2686,7 +2691,8 @@ it.effect("a main contribution import and Supervisor writes race only through re
     const read = yield* f.controller.read(locator(f));
     assert.equal(read.status, "ok");
     if (read.status !== "ok") return;
-    assert.match(read.externalContributionNote, /untrusted/u);
+    // the meaning of contributions is said once, in section contributions, never repeated in each read
+    assert.equal("externalContributionNote" in read, false);
     const seen = read.workflows[0]!.document;
     assert.deepEqual(seen.contributions.map(item => [item.contributionId, item.state]), [["external-review", "awaiting_result"]]);
 

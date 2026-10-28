@@ -333,11 +333,11 @@ it.live("CT-INT-02: valid, replay and conflict quarantine through native proof a
   const reply = yield* mcpCall(f.endpoint, "supervision_team", args);
   assert.equal(reply.httpStatus, 200);
   assert.equal(reply.isError, false);
-  const value = reply.value as {status: string; result: {state: string; epoch: number}; team: unknown};
+  const value = reply.value as {status: string; result: {state: string; epoch: number}; team?: unknown};
   assert.equal(value.status, "ok");
   assert.equal(value.result.state, "quarantined");
   assert.equal(value.result.epoch, ready.epoch + 1);
-  assert.equal(typeof value.team, "object");
+  assert.equal("team" in value, false, "an action answers with its own result; the team is read with action read");
   const receipts = yield* rows(f.core.sql, "SELECT evidence_item_id,document FROM supervisor_team_tool_receipts");
   assert.equal(receipts.length, 1);
   assert.equal(receipts[0]!.evidence_item_id, itemId);
