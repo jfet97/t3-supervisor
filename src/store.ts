@@ -458,7 +458,8 @@ const make = Effect.gen(function* () {
         if (changed.length > 0) yield* invalidate(projectKeys(id));
         live = true;
       } else if (kind === "synchronized" && sequence === null) {
-        return false;
+        // caught up on a stored archive snapshot; the marker does not move the cursor or the archive
+        return covered !== null;
       } else if (sequence !== null) {
         return yield* fail(`unsupported sequenced shell item: ${String(kind)}`);
       }

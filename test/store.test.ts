@@ -172,6 +172,44 @@ it.live("an empty archivedThreads list keeps the unary archive on a cold store a
   assert.equal(yield* withStore(directory, store => store.cursor("active")), 9);
 }).pipe(Effect.provide(NodeFileSystem.layer)));
 
+it.live("a covered completion marker connects without moving the archive, and an uncovered marker or enrichment does not", () => Effect.gen(function* () {
+  const bare = yield* temporaryDirectory;
+  yield* withStore(bare, store => Effect.gen(function* () {
+    const marker = yield* store.ingest(sourceItem("active", {kind: "synchronized"}));
+    assert.equal(marker.connected, false);
+    assert.equal(yield* store.coverage(), null);
+    assert.equal(yield* store.cursor("active"), 0);
+  }));
+
+  const directory = yield* temporaryDirectory;
+  const archived = {...thread("x"), archivedAt: "2026-01-01T00:00:00.000Z"};
+  yield* withStore(directory, store => store.ingest({
+    stream: "active",
+    item: {kind: "snapshot", snapshot: {
+      schemaVersion: 2, snapshotSequence: 8, projects: [project()], threads: [thread("live")], archivedThreads: [],
+    }},
+    archiveCut: {snapshotSequence: 8, threads: [archived]},
+  }).pipe(Effect.asVoid));
+  yield* withStore(directory, store => Effect.gen(function* () {
+    const marker = yield* store.ingest(sourceItem("active", {kind: "synchronized"}));
+    assert.equal(marker.connected, true);
+    assert.equal(yield* store.cursor("active"), 8);
+    assert.equal(yield* store.coverage(), 8);
+    assert.equal((yield* store.thread("x"))?.id, "x");
+    assert.deepEqual((yield* store.catalog()).threads.map(value => value.id), ["live"]);
+    const enriched = yield* store.ingest(sourceItem("active", {
+      kind: "snapshot", resolvedRepositoryIdentityRoots: ["/work/project-one"], snapshot: {
+        schemaVersion: 2, snapshotSequence: 100, projects: [project("project-1", "Renamed")], threads: [thread("live")], archivedThreads: [],
+      },
+    }));
+    assert.equal(enriched.connected, false);
+    assert.equal(yield* store.cursor("active"), 8);
+    assert.equal(yield* store.coverage(), 8);
+    assert.equal((yield* store.catalog()).projects[0]?.project.title, "Renamed");
+    assert.equal((yield* store.thread("x"))?.id, "x");
+  }));
+}).pipe(Effect.provide(NodeFileSystem.layer)));
+
 it.live("explicit location wins over archivedAt, and a partial cursor is not archive coverage", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory;
   yield* withStore(directory, store => Effect.gen(function* () {
