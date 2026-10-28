@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.16
+
+### Patch Changes
+
+- d3c2330: New Supervisors receive tool discovery guidance before their first instruction read. Stop confirmation requires a recorded service result, and explicit chat Stops notify the operative even before first contact.
+
 ## 0.0.15
 
 ### Patch Changes
