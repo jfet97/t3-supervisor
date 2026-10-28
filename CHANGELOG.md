@@ -1,5 +1,24 @@
 # T3 Supervisor
 
+## 0.0.12
+
+### Patch Changes
+
+- 2587094: Follow active operational work continuously through native T3 reads, including children under their assigned Supervisor. Add affected-scope planning pauses with actor acknowledgements, a fixed recovery deadline and bounded read-only drafting tasks. Distinguish fetched activity from recorded assessments, show planning waits and settle completed main and Supervisor conversations independently while respecting each conversation’s keep-active choice.
+- 4edad18: List project conversations and chat picker results by creation time, newest first, so ongoing activity does not reshuffle them.
+- 4de4a6c: A planning writer and the Supervisor now read the current plan, including duties added after it was accepted, together with its revision and whether it is still the accepted plan. The task view no longer calls a plan changed after acceptance accepted: it shows the current plan with its unaccepted steps marked and keeps the accepted plan as a separate record.
+- dce344c: Supervisor coordination uses short notices with exact read references. Instructions, source messages, definitions and plans are read on demand; planning, team and guidance replies contain the action's own result. Planning writers can read intent, current duties and shared grammar before or after attachment.
+
+  Routine `workflow_read` calls return compact progress. Request `view: "documents"` for complete history, evidence and accepted snapshots. Chat readers request one run by default, and the dashboard records native read coverage separately from assessments. Ownership, Stop, approval and uncertain-delivery safeguards remain in force.
+
+- 2587094: Workflows can repeat earlier work as a visible new attempt with `back_to`. The destination must resolve to one earlier occurrence in the same sequential lane, and the plan must retain an exit. The Supervisor confirms affected work is paused or quiet before applying the return. The main Plan moves back while History keeps prior statuses, contributors, decisions and results in forward order.
+
+  Reviewers continue in the same conversation when their separate executions can be identified. Late results from an earlier pass cannot satisfy repeated work. Native reviewers without separate execution identities require an explicit replacement carrying their earlier findings. Connected work and History explain which case applies.
+
+  A conversation started inside a supervised chat can now read its own scoped plan through the same plan read the main uses; it still accepts nothing itself. Plan reads include task-local duties and follow the current requester scope. Repeated steps show aligned titles, attempt labels and status badges at wide and narrow widths.
+
+  Revised plans also keep the identity of work already in them. A step inside a referenced workflow keeps its existing ID across proposals, revisions and applies, so its progress, contributors and history stay attached. A step a revision adds back gets the same new ID in the proposal and in the applied plan. Workflow plans and records written before this update keep the IDs they already have.
+
 ## 0.0.11
 
 ### Patch Changes
