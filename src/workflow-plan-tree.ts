@@ -558,14 +558,18 @@ export const occurrenceAttempts = (returns: ReadonlyArray<{readonly state: strin
   return attempts;
 };
 
-/** Position of one return, without its node id, target or maximum. A parallel frame is part of the address and is not itself a reset. */
+/** Position of one return, without its node id, target or maximum. A branch segment names then or else, so the two arms do not share an address. A parallel frame is part of the address and is not itself a reset. */
 export const returnBudgetAddress = (plan: WorkflowPlanGroupInfo, nodeId: string): string | null => {
   const frames = framesTo(plan, nodeId);
   if (!frames) return null;
-  return frames.map(frame => {
+  return frames.map((frame, level) => {
     const node = frame.group.nodes[frame.index];
     if (!node || isPlanGroup(node)) return `${frame.group.kind}@${frame.index}`;
-    if (node.kind === "branch") return `branch:${node.condition}@${frame.index}`;
+    if (node.kind === "branch") {
+      const inner = frames[level + 1];
+      const arm = inner && node.else && inner.group === node.else ? "else" : "then";
+      return `branch:${node.condition}@${frame.index}:${arm}`;
+    }
     if (node.kind === "workflow") return `workflow:${node.definitionId}@${frame.index}`;
     if (node.kind === "step") return `step:${node.definitionId ?? node.localId}@${frame.index}`;
     return `back_to@${frame.index}`;
@@ -622,8 +626,10 @@ const rewriteBudgetIds = (plan: WorkflowPlanGroupInfo, assigned: ReadonlyMap<str
 };
 
 /**
- * Keeps a retained budget on the return that still occupies its address, or on the single unmatched return when only one retained budget
- * is left. Several unmatched returns against several retained budgets are ambiguous and are not paired or zeroed.
+ * Keeps a retained budget on the same return occurrence. A preserved nodeId keeps that occurrence's budget, and a carried budgetId that
+ * is still retained keeps it, including when the return is reordered or retitled. Address matches only a return with no preserved
+ * identity, and only when one retained budget occupies that address. One unmatched return may inherit the one remaining budget. Several
+ * unmatched returns against several retained budgets are ambiguous and are not paired or zeroed.
  */
 export const retainReturnBudgetIds = (
   previousPlan: WorkflowPlanGroupInfo | null,
@@ -632,24 +638,36 @@ export const retainReturnBudgetIds = (
 ): {plan: WorkflowPlanGroupInfo; ambiguous: boolean} => {
   const nextNodes = planBackTos(nextPlan);
   const previousNodes = previousPlan ? planBackTos(previousPlan) : [];
+  const previousByNodeId = new Map(previousNodes.map(node => [node.nodeId, node]));
+  const retainedIds = new Set([...ledger.map(item => item.budgetId), ...previousNodes.map(item => item.budgetId)]);
   const used = new Set<string>();
   const assigned = new Map<string, string>();
-  const unmatchedNext: WorkflowPlanBackToInfo[] = [];
+  const claim = (nodeId: string, budgetId: string) => {used.add(budgetId); assigned.set(nodeId, budgetId);};
+  const pending: WorkflowPlanBackToInfo[] = [];
   for (const node of nextNodes) {
+    const previous = previousByNodeId.get(node.nodeId);
+    if (previous && !used.has(previous.budgetId)) claim(node.nodeId, previous.budgetId);
+    else pending.push(node);
+  }
+  const addressPending: WorkflowPlanBackToInfo[] = [];
+  for (const node of pending) {
+    if (retainedIds.has(node.budgetId) && !used.has(node.budgetId)) claim(node.nodeId, node.budgetId);
+    else addressPending.push(node);
+  }
+  const unmatchedNext: WorkflowPlanBackToInfo[] = [];
+  for (const node of addressPending) {
     const address = budgetAddressOf(nextPlan, node);
     const fromPlan = previousPlan ? previousNodes.filter(item => !used.has(item.budgetId) && budgetAddressOf(previousPlan, item) === address).map(item => item.budgetId) : [];
     const fromLedger = ledger.filter(item => !used.has(item.budgetId) && item.address === address).map(item => item.budgetId);
     const matches = [...new Set([...fromPlan, ...fromLedger])];
-    if (matches.length === 1) {
-      used.add(matches[0]!);
-      assigned.set(node.nodeId, matches[0]!);
-    } else unmatchedNext.push(node);
+    if (matches.length === 1) claim(node.nodeId, matches[0]!);
+    else unmatchedNext.push(node);
   }
   const residual = [...new Set([
     ...ledger.filter(item => !used.has(item.budgetId)).map(item => item.budgetId),
     ...previousNodes.filter(item => !used.has(item.budgetId)).map(item => item.budgetId),
   ])];
-  if (unmatchedNext.length === 1 && residual.length === 1) assigned.set(unmatchedNext[0]!.nodeId, residual[0]!);
+  if (unmatchedNext.length === 1 && residual.length === 1) claim(unmatchedNext[0]!.nodeId, residual[0]!);
   else if (unmatchedNext.length > 0 && residual.length > 0) return {plan: nextPlan, ambiguous: true};
   return {plan: rewriteBudgetIds(nextPlan, assigned), ambiguous: false};
 };

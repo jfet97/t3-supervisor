@@ -323,6 +323,8 @@ type CanonicalOptions = {
   reuseExistingIdentity?: boolean;
   /** Supplies new node IDs; compact proposal drafts use a seeded sequence so the same draft always yields the same record. */
   nodeIds: NodeIds;
+  /** Budget ids already claimed by a return in this canonicalization. A second return that resolves to one of them is rejected. */
+  usedBudgetIds?: Set<string>;
 };
 /**
  * The occurrence a template expansion belongs to and the IDs its existing members already carry: an unchanged member keeps its actual ID,
@@ -451,6 +453,9 @@ const normalizeBackTo = (value: Record<string, unknown>, options: CanonicalOptio
   const supplied = typeof value.budgetId === "string" ? value.budgetId : undefined;
   const budgetId = carried ?? supplied ?? fingerprint(["return-budget", templatePath ?? nodePath]);
   if (!/^[a-f0-9]{64}$/u.test(budgetId)) throw new Error("invalid_back_to_budget");
+  const claimed = options.usedBudgetIds ?? (options.usedBudgetIds = new Set());
+  if (claimed.has(budgetId)) throw new Error("duplicate_return_budget");
+  claimed.add(budgetId);
   if (options.strict && value.budgetId !== budgetId) throw new Error("noncanonical_back_to_node");
   return {kind: "back_to", nodeId: id, templatePath, target: value.target, targetNodeId: options.strict ? value.targetNodeId as string | null : null,
     maximum: value.maximum, budgetId, reason: redact(value.reason.trim())};
@@ -731,7 +736,7 @@ const expandNodeFromDefinition = (node: DefinitionNode, templatePath: string, co
       else: node.branch.else ? expandGroupFromDefinition("sequence", node.branch.else, `${templatePath}/else`, context, stack, options, depth + 1, scope) : null};
   }
   if ("back_to" in node) return {kind: "back_to", nodeId: memberNodeId(scope, templatePath), templatePath, target: node.back_to, targetNodeId: null,
-    maximum: node.maximum, budgetId: fingerprint(["return-budget", templatePath]), reason: "Declared as a return in its workflow."};
+    maximum: node.maximum, budgetId: fingerprint(["return-budget", scope.occurrenceId, templatePath]), reason: "Declared as a return in its workflow."};
   if ("workflow" in node) {
     const definition = workflowById(context).get(node.workflow);
     const nodeId = memberNodeId(scope, templatePath);
@@ -1184,6 +1189,7 @@ const draftExpectations: Record<string, string> = {
   invalid_back_to_target: "the ID of an earlier step or workflow member",
   invalid_back_to_target_node: "omit targetNodeId; the service resolves it",
   invalid_back_to_budget: "keep the return's budgetId, a 64-character hex fingerprint",
+  duplicate_return_budget: "each return has its own budgetId; two returns cannot share one",
   template_back_to_changed: "keep a definition's back_to target and maximum unchanged",
   ...backToExpectations,
   invalid_compact_omission: "omit is a nonempty array of {member, reason}: a member's definitionId, localId or nodeId and a task-specific reason",
@@ -1526,7 +1532,10 @@ export const validateWorkflowApplyAgainstPinnedContext = (
     if (canonical.issues.length > 0 || requirements.some(item => item.state === "unknown" || item.state === "unresolved") ||
       !canonicalJsonEqual(requirements, agreedRequirements)) return null;
     return {plan: canonical.plan, requirements, issues: [...agreedIssues]};
-  } catch {return null;}
+  } catch (error) {
+    if (error instanceof Error && error.message === "duplicate_return_budget") throw error;
+    return null;
+  }
 };
 
 const provisionalRecord = (context: ProposalContext, message: string, extraIssues: readonly WorkflowIssueInfo[] = []): WorkflowPlanValue => {

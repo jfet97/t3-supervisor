@@ -272,26 +272,58 @@ const identityKey = (node: PlanEntity | WorkflowPlanBranchInfo): string => node.
 const validReturnMaximum = (value: unknown): value is number =>
   typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= returnBudgetMaximum;
 const validBudgetId = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
-const planContainsBackTo = (plan: unknown): boolean => {
-  const visit = (node: unknown): boolean => {
-    if (!isRecord(node)) return false;
-    if (node.kind === "back_to") return true;
-    if (node.kind === "sequence" || node.kind === "parallel") return Array.isArray(node.nodes) && node.nodes.some(visit);
-    if (node.kind === "branch") return visit(node.then) || visit(node.else);
-    if (node.kind === "workflow") return visit(node.plan);
-    return false;
+const backToBudgetIds = (plan: unknown, into: string[] = []): string[] => {
+  const visit = (node: unknown): void => {
+    if (!isRecord(node)) return;
+    if (node.kind === "back_to") {
+      if (typeof node.budgetId === "string") into.push(node.budgetId);
+      return;
+    }
+    if (node.kind === "sequence" || node.kind === "parallel") {
+      if (Array.isArray(node.nodes)) for (const child of node.nodes) visit(child);
+      return;
+    }
+    if (node.kind === "branch") {
+      visit(node.then);
+      visit(node.else);
+      return;
+    }
+    if (node.kind === "workflow") visit(node.plan);
   };
-  return visit(plan);
+  visit(plan);
+  return into;
+};
+const agreementBudgetIds = (value: Record<string, unknown>): string[] => {
+  const plans: unknown[] = [value.plan];
+  if (Array.isArray(value.acceptedAgreements)) for (const item of value.acceptedAgreements) {
+    if (!isRecord(item)) continue;
+    plans.push(item.plan);
+    if (isRecord(item.agreement) && isRecord(item.agreement.workflow)) plans.push(item.agreement.workflow.plan);
+  }
+  return plans.flatMap(plan => backToBudgetIds(plan));
 };
 const validReturnBudgets = (value: unknown): value is ReturnBudget[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxReturns &&
   new Set(value.map(item => isRecord(item) ? item.budgetId : null)).size === value.length &&
   value.reduce((count, item) => count + (isRecord(item) && Array.isArray(item.events) ? item.events.length : 0), 0) <= workflowMutationLimits.maxEvidence &&
   value.every(item => isRecord(item) && validBudgetId(item.budgetId) && validText(item.address) && Array.isArray(item.events) &&
     item.events.every(event => isRecord(event) && (event.kind === "consumed" || event.kind === "reset") && validId(event.returnId) && Number.isFinite(event.at)));
+// a present ledger must cover every live and accepted return, and every applied jump must still have its consumed event. an empty list is not an unused budget
+const returnBudgetCoverage = (value: Record<string, unknown>): boolean => {
+  const needed = agreementBudgetIds(value);
+  if (value.returnBudgets === undefined) return needed.length === 0;
+  if (!validReturnBudgets(value.returnBudgets)) return false;
+  const rows = value.returnBudgets;
+  const covered = new Set(rows.map(item => item.budgetId));
+  if (needed.some(id => !covered.has(id))) return false;
+  const consumed = new Set(rows.flatMap(item => item.events.filter(event => event.kind === "consumed").map(event => event.returnId)));
+  return !Array.isArray(value.returns) || value.returns.every(entry => !isRecord(entry) || entry.state !== "applied" ||
+    typeof entry.returnId === "string" && consumed.has(entry.returnId));
+};
 
 const validPlan = (value: unknown): value is WorkflowStatePlan => {
   if (value === null) return true;
   const budget: PlanBudget = {nodes: 0, nodeIds: new Set()};
+  const budgetIds = new Set<string>();
   const visit = (group: unknown, depth: number): boolean => {
     if (!isRecord(group) || (group.kind !== "sequence" && group.kind !== "parallel") ||
       !validPlanText(group.templatePath, true) && group.templatePath !== null || !Array.isArray(group.nodes) || group.nodes.length === 0 ||
@@ -317,8 +349,9 @@ const validPlan = (value: unknown): value is WorkflowStatePlan => {
         if (budget.nodes > workflowMutationLimits.maxPlanNodes || !validNodeId(node.nodeId) || budget.nodeIds.has(node.nodeId) ||
           !validPlanText(node.templatePath, true) && node.templatePath !== null || !validId(node.target) ||
           !(node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason) ||
-          !validReturnMaximum(node.maximum) || !validBudgetId(node.budgetId)) return false;
+          !validReturnMaximum(node.maximum) || !validBudgetId(node.budgetId) || budgetIds.has(node.budgetId)) return false;
         budget.nodeIds.add(node.nodeId);
+        budgetIds.add(node.budgetId);
         continue;
       }
       budget.nodes++;
@@ -661,6 +694,7 @@ const ledgerForPlan = (ledger: readonly ReturnBudget[], plan: WorkflowPlanGroupI
     const address = addresses.get(item.budgetId);
     return {...item, ...(address ? {address} : {}), events: item.events.map(event => ({...event}))};
   });
+  // empty events start a return this valid document has not recorded; they do not repair a stored row whose returns lack a ledger
   for (const [budgetId, address] of addresses) if (!next.some(item => item.budgetId === budgetId)) next.push({budgetId, address, events: []});
   return next;
 };
@@ -952,9 +986,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   (value.contributions === undefined || validContributions(value.contributions)) &&
   (value.branchSelections === undefined || validBranchSelections(value.branchSelections)) &&
   (value.returns === undefined || validReturns(value.returns)) &&
-  (value.returnBudgets === undefined
-    ? !planContainsBackTo(value.plan) && !(Array.isArray(value.acceptedAgreements) && value.acceptedAgreements.some(item => isRecord(item) && planContainsBackTo(item.plan)))
-    : validReturnBudgets(value.returnBudgets)) &&
+  returnBudgetCoverage(value) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
     validId(item.id) && validId(item.operationId) && (workflowEvidenceKinds as readonly string[]).includes(String(item.kind)) &&
     validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) &&
@@ -1287,7 +1319,11 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceBinding: input.sourceBinding as WorkflowSourceBindingInfo}, validation.pinnedContext, validation.originalProposal,
       validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash,
       {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId}, acceptedPlans, currentPlan);
-    } catch {canonical = null;}
+    } catch (error) {
+      if (error instanceof Error && error.message === "duplicate_return_budget")
+        return {status: "invalid", operationId: input.operationId, reason: "return_budget_duplicate"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+      canonical = null;
+    }
     if (!canonical) return {status: "invalid", operationId: input.operationId, reason: "pinned_definition_context_mismatch"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const validatedInput: WorkflowApplyInput = {...input, plan: canonical.plan, requirements: canonical.requirements, issues: canonical.issues};
 
@@ -1295,6 +1331,9 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     if (!normalized.ok) return {status: "invalid", operationId: input.operationId,
       reason: normalized.diagnostic?.code ?? "invalid_plan_or_missing_status_evidence",
       ...(normalized.diagnostic ? {diagnostic: normalized.diagnostic} : {})} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const normalizedBudgetIds = normalized.plan ? planBackTos(normalized.plan).map(node => node.budgetId) : [];
+    if (new Set(normalizedBudgetIds).size !== normalizedBudgetIds.length)
+      return {status: "invalid", operationId: input.operationId, reason: "return_budget_duplicate"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const retainedBudgets = normalized.plan === null
       ? {plan: null, ambiguous: false}
       : retainReturnBudgetIds(current.plan, normalized.plan, current.returnBudgets ?? []);

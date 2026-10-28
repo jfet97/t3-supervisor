@@ -187,7 +187,8 @@ is shown as needing reassessment. See [branch selections](workflow-mcp.md#branch
 
 A return (`back_to(n)`) repeats earlier work as a new attempt. `n` is that return's
 maximum number of successful jumps, an integer from 1 to 99. The first pass consumes
-none. When the operative's work
+none. Each occurrence has its own budget, including two uses of one workflow, and a
+preserved node keeps that budget when it is reordered or retitled. When the operative's work
 reaches it and jumps remain, the region from its target through the member that holds it waits for the
 Supervisor, which applies the return at a safe point once the closed attempt's work has
 stopped. Once `n` jumps have been applied, the unresolved failure stays visible and

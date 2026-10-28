@@ -217,7 +217,9 @@ selection revision. Output of a retired run, or a decision written before the re
 stays with the closed attempt. A return that is no longer reached, because the
 operative selected the other path, is dismissed and kept as history.
 
-Each return has its own budget. Applying it spends one jump. An applied return
+Each return has its own budget, and so does each occurrence of a reusable workflow.
+A reordered or retitled return keeps the budget of its preserved node. Applying it
+spends one jump. An applied return
 resets the budgets of returns whose replay region is strictly inside the region it
 reopens, including a loop nested in a parallel group that the outer return replays.
 It does not reset its own budget, an enclosing return, or a return in a sibling lane

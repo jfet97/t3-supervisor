@@ -5,8 +5,8 @@ import {parseDefinitionWorkflow} from "../src/project-definitions.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {canonicalizeProposalDraft, proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
-import type {WorkflowAgreementImport, WorkflowApplyInput, WorkflowExecutionStatus, WorkflowOwner, WorkflowStateDocument, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
-import {backToContext, occurrenceAttempts, planBackTos, planBranches, returnBudgetUsed, strictlyNestedReplayReturns} from "../src/workflow-plan-tree.js";
+import {workflowMutationLimits, type WorkflowAgreementImport, type WorkflowApplyInput, type WorkflowExecutionStatus, type WorkflowOwner, type WorkflowStateDocument, type WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
+import {backToContext, occurrenceAttempts, planBackTos, planBranches, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns} from "../src/workflow-plan-tree.js";
 import {effectiveIndex, indexSource, projectIndex} from "./project-definitions-fixture.js";
 import {execute, openWorkflowStores, query, temporaryDirectory} from "./support/g12-stores.js";
 
@@ -445,11 +445,34 @@ it.live("a retained address keeps its usage, a single moved return inherits it, 
   };
   const retitled = retitle(renamed);
   if (retitled.kind !== "sequence" && retitled.kind !== "parallel") throw new Error("expected a group");
-  const before = String((yield* query(ambiguous.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", current.workflowId))[0]?.document);
-  const refused = yield* ambiguous.submit(current, "retitle-returns", other.tick(), retitled);
+  const spentIds = planBackTos(current.plan).map(node => [node.nodeId, node.budgetId]);
+  const retitledResult = yield* ambiguous.submit(current, "retitle-returns", other.tick(), retitled);
+  assert.equal(retitledResult.status, "applied", JSON.stringify(retitledResult));
+  const kept = yield* ambiguous.main();
+  assert.ok(kept.plan);
+  assert.deepEqual(planBackTos(kept.plan).map(node => [node.nodeId, node.budgetId]), spentIds, "a preserved node keeps its budget across a retitle");
+  const usedTarget = (document: WorkflowStateDocument, target: string) => {
+    const node = planBackTos(document.plan).find(item => item.target === target)!;
+    return returnBudgetUsed(document.returnBudgets?.find(item => item.budgetId === node.budgetId)?.events ?? []);
+  };
+  assert.deepEqual([usedTarget(kept, "a"), usedTarget(kept, "b")], [1, 1]);
+
+  const detached = JSON.parse(JSON.stringify(kept.plan)) as WorkflowPlanGroupInfo;
+  let slot = 0;
+  const detach = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo => {
+    if (node.kind === "sequence" || node.kind === "parallel") return {...node, nodes: node.nodes.map(detach)};
+    if (node.kind === "branch") return {...node, condition: `${node.condition} again`, then: detach(node.then) as WorkflowPlanGroupInfo, else: node.else ? detach(node.else) as WorkflowPlanGroupInfo : null};
+    if (node.kind !== "back_to") return node;
+    slot += 1;
+    return {...node, nodeId: `00000000-0000-4000-8000-0000000000d${slot}`, budgetId: (slot === 1 ? "c" : "d").repeat(64)};
+  };
+  const unidentified = detach(detached);
+  if (unidentified.kind !== "sequence" && unidentified.kind !== "parallel") throw new Error("expected a group");
+  const before = String((yield* query(ambiguous.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", kept.workflowId))[0]?.document);
+  const refused = yield* ambiguous.submit(kept, "unidentified-moves", other.tick(), unidentified);
   assert.equal(invalidReason(refused), "return_budget_identity_ambiguous");
-  const after = String((yield* query(ambiguous.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", current.workflowId))[0]?.document);
-  assert.equal(after, before, "an ambiguous move does not refill or rewrite the ledger");
+  const after = String((yield* query(ambiguous.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", kept.workflowId))[0]?.document);
+  assert.equal(after, before, "two unidentified moves are not paired or zeroed");
 }), {timeout: 30_000});
 
 it.live("a stored return without a maximum stays raw and incompatible, and a plan without a return still reads with no ledger", () => Effect.gen(function* () {
@@ -485,3 +508,219 @@ it.live("a stored return without a maximum stays raw and incompatible, and a pla
   if (found.status === "found") assert.equal(found.document.plan, null);
   assert.equal(String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", readable.workflowId))[0]?.document).includes("returnBudgets"), false);
 }), {timeout: 20_000});
+
+it("two expansions of one workflow have different budgets, and one supplied budget id cannot be shared", () => {
+  const parsed = parseDefinitionWorkflow("loop", "name: Loop\ndescription: Repeat work.\nsequence:\n  - step: {id: work, name: Work, description: Do the work.}\n  - branch:\n      if: Again?\n      then:\n        - back_to(2): work\n");
+  const loopContext = {...context, workflows: [{...parsed, summary: "Repeat work.", origin: "project" as const, path: ".t3-supervisor/workflows/loop.yaml", sourceId: "loop"}]};
+  const expanded = canonicalizeProposalDraft(draft({kind: "parallel", nodes: [
+    {kind: "workflow", definitionId: "loop", reason: "Use the first loop."},
+    {kind: "workflow", definitionId: "loop", reason: "Use the second loop."},
+  ]}), loopContext, "two-loops");
+  assert.ok(expanded.ok, JSON.stringify(expanded));
+  if (!expanded.ok || !expanded.workflow.plan) return;
+  const [first, second] = planBackTos(expanded.workflow.plan);
+  assert.ok(first && second);
+  assert.equal(first.templatePath, second.templatePath, "both occurrences expand the same template path");
+  assert.notEqual(first.budgetId, second.budgetId);
+  assert.notEqual(first.nodeId, second.nodeId);
+  const ledger = planBackTos(expanded.workflow.plan).map(node => ({budgetId: node.budgetId, address: node.templatePath ?? node.budgetId}));
+  const retained = retainReturnBudgetIds(expanded.workflow.plan, expanded.workflow.plan, ledger);
+  assert.equal(retained.ambiguous, false);
+  assert.deepEqual(planBackTos(retained.plan).map(node => node.budgetId), [first.budgetId, second.budgetId]);
+
+  const shared = "ab".repeat(32);
+  const aliased = canonicalizeProposalDraft(draft(local("work"), branch("Inner.", [{...backTo("work", 2), budgetId: shared}]),
+    branch("Outer.", [{...backTo("work", 5), budgetId: shared}])), context, "aliased-budget");
+  assert.equal(aliased.ok, false);
+  if (!aliased.ok) assert.equal(aliased.code, "duplicate_return_budget");
+});
+
+const storedCopy = (document: WorkflowStateDocument, workflowId: string, edit: (value: Record<string, unknown>) => void) => {
+  const copy = JSON.parse(JSON.stringify(document)) as Record<string, unknown>;
+  copy.workflowId = workflowId;
+  copy.threadId = workflowId;
+  edit(copy);
+  return copy;
+};
+
+it.live("then and else returns stay writable and independent, and a preserved swap does not refill", () => Effect.gen(function* () {
+  const arms = yield* open([local("work"), {kind: "branch", condition: "Retry?", reason: "The findings decide.", then: {kind: "sequence", nodes: [
+    {kind: "branch", condition: "Which retry?", reason: "The findings decide.", then: {kind: "sequence", nodes: [backTo("work", 2)]},
+      else: {kind: "sequence", nodes: [backTo("work", 2)]}}]}}]);
+  const armed = yield* arms.main();
+  const armedPlan = planOf(armed);
+  const addresses = planBackTos(armedPlan).map(node => returnBudgetAddress(armedPlan, node.nodeId));
+  assert.equal(addresses.length, 2);
+  assert.ok(addresses[0]?.includes(":then") && addresses[1]?.includes(":else"), JSON.stringify(addresses));
+  assert.notEqual(addresses[0], addresses[1]);
+  const restated = yield* arms.submit(armed, "restate-arms", arms.tick(), armedPlan);
+  assert.equal(restated.status, "applied", JSON.stringify(restated));
+  const afterRestate = yield* arms.main();
+  assert.deepEqual(planBackTos(afterRestate.plan).map(node => node.budgetId), planBackTos(armed.plan).map(node => node.budgetId));
+
+  const swappedRun = yield* open([local("work"), branch("Retry?", [backTo("work", 1)]), branch("Retry?", [backTo("work", 2)])]);
+  yield* swappedRun.complete(["work"], "work-1");
+  yield* swappedRun.choose("Retry?", "then");
+  const pending = yield* swappedRun.main();
+  const max1 = planBackTos(pending.plan).find(node => node.maximum === 1)!;
+  const max2 = planBackTos(pending.plan).find(node => node.maximum === 2)!;
+  const waiting = pending.returns.find(item => item.state === "pending" && item.backToNodeId === max1.nodeId);
+  assert.ok(waiting);
+  assert.equal((yield* swappedRun.box.stores.workflows.applyReturn(swappedRun.owner, {operationId: "swap-jump", workflowId: pending.workflowId,
+    expectedRevision: pending.revision, returnId: waiting.returnId, note: "Apply the first return."}, swappedRun.tick())).status, "applied");
+  const spent = yield* swappedRun.main();
+  assert.ok(spent.plan);
+  const used = (document: WorkflowStateDocument, budgetId: string) =>
+    returnBudgetUsed(document.returnBudgets?.find(item => item.budgetId === budgetId)?.events ?? []);
+  assert.deepEqual([used(spent, max1.budgetId), used(spent, max2.budgetId)], [1, 0]);
+  const nodes = [...spent.plan.nodes];
+  const swapped = yield* swappedRun.submit(spent, "swap-branches", swappedRun.tick(), {...spent.plan, nodes: [nodes[0]!, nodes[2]!, nodes[1]!]});
+  assert.equal(swapped.status, "applied", JSON.stringify(swapped));
+  const after = yield* swappedRun.main();
+  const kept1 = planBackTos(after.plan).find(node => node.nodeId === max1.nodeId)!;
+  const kept2 = planBackTos(after.plan).find(node => node.nodeId === max2.nodeId)!;
+  assert.equal(kept1.budgetId, max1.budgetId);
+  assert.equal(kept2.budgetId, max2.budgetId);
+  assert.deepEqual([used(after, kept1.budgetId), used(after, kept2.budgetId)], [1, 0]);
+  assert.equal(returnBudgetAddress(planOf(after), kept1.nodeId), returnBudgetAddress(planOf(spent), max2.nodeId), "the spent return now occupies the other address");
+}), {timeout: 30_000});
+
+it.live("a supplied duplicate budget writes nothing, and a missing or stripped ledger is not seeded", () => Effect.gen(function* () {
+  const opened = yield* open([local("work")]);
+  const document = yield* opened.main();
+  assert.ok(document.plan);
+  const work = document.plan.nodes[0]!;
+  const shared = "ab".repeat(32);
+  const arm = (branchId: string, returnId: string, condition: string, maximum: number): WorkflowPlanNodeInfo => ({
+    kind: "branch", nodeId: branchId, templatePath: null, condition, reason: "The findings decide.",
+    then: {kind: "sequence", templatePath: null, nodes: [{kind: "back_to", nodeId: returnId, templatePath: null, target: "work", targetNodeId: null,
+      maximum, budgetId: shared, reason: "Repeat from work while findings remain."}]},
+    else: null,
+  });
+  const before = String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", document.workflowId))[0]?.document);
+  const aliased = yield* opened.submit(document, "alias-budgets", opened.tick(), {kind: "sequence", templatePath: document.plan.templatePath, nodes: [
+    work, arm("00000000-0000-4000-8000-0000000000b1", "00000000-0000-4000-8000-0000000000c1", "Inner.", 2),
+    arm("00000000-0000-4000-8000-0000000000b2", "00000000-0000-4000-8000-0000000000c2", "Outer.", 5)]});
+  assert.equal(invalidReason(aliased), "return_budget_duplicate");
+  assert.equal(String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", document.workflowId))[0]?.document), before);
+
+  const spentRun = yield* open([local("work"), branch("Findings remain.", [backTo("work", 2)])]);
+  yield* spentRun.complete(["work"], "work-1");
+  yield* spentRun.choose("Findings remain.", "then");
+  yield* spentRun.jump("work", "spend-1");
+  const spent = yield* spentRun.main();
+  const insert = (workflowId: string, edit: (value: Record<string, unknown>) => void) => Effect.gen(function* () {
+    const copy = storedCopy(spent, workflowId, edit);
+    const text = JSON.stringify(copy);
+    yield* execute(spentRun.box.stores.sql, "INSERT INTO supervisor_workflow_state(workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      workflowId, "project-a", "main-a", workflowId, null, null, copy.revision, text, 10, 11);
+    return {copy, text};
+  });
+  const empty = yield* insert("empty-return-ledger", value => {value.returnBudgets = [];});
+  assert.deepEqual(yield* spentRun.box.stores.workflows.getState("project-a", "main-a", "empty-return-ledger"),
+    {status: "incompatible", workflowId: "empty-return-ledger", formatVersion: 2});
+  const repair = yield* spentRun.box.stores.workflows.apply(spentRun.owner, {operationId: "repair-empty-ledger", workflowId: "empty-return-ledger",
+    expectedRevision: Number(empty.copy.revision), status: spent.status, objective: spent.objective, sourceBinding: spentRun.binding,
+    requirements: [], issues: [], plan: spent.plan, note: "Attempt to repair a missing ledger.", evidence: []}, spentRun.validation, spentRun.tick());
+  assert.equal(repair.status, "incompatible", JSON.stringify(repair));
+  assert.equal(String((yield* query(spentRun.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "empty-return-ledger"))[0]?.document), empty.text);
+
+  const stripped = yield* insert("stripped-return-ledger", value => {
+    const rows = value.returnBudgets as Array<Record<string, unknown>>;
+    value.returnBudgets = rows.map(row => ({...row, events: []}));
+  });
+  assert.deepEqual(yield* spentRun.box.stores.workflows.getState("project-a", "main-a", "stripped-return-ledger"),
+    {status: "incompatible", workflowId: "stripped-return-ledger", formatVersion: 2});
+  assert.equal(String((yield* query(spentRun.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "stripped-return-ledger"))[0]?.document), stripped.text);
+}), {timeout: 30_000});
+
+it.live("an enclosing return resets the inner budget, and the inner return does not reset it", () => Effect.gen(function* () {
+  const opened = yield* open([local("implement"), branch("Review findings.", [backTo("implement", 5)]), branch("CI failed.", [backTo("implement", 10)])]);
+  const conditionOf = (document: WorkflowStateDocument, nodeId: string) => {
+    const branch = backToContext(planOf(document), nodeId).branches.at(-1);
+    return branch ? planBranches(document.plan).find(item => item.nodeId === branch.nodeId)?.condition : undefined;
+  };
+  const byCondition = (document: WorkflowStateDocument, condition: string) => {
+    const node = planBackTos(document.plan).find(item => conditionOf(document, item.nodeId) === condition);
+    assert.ok(node, condition);
+    const events = document.returnBudgets?.find(item => item.budgetId === node.budgetId)?.events ?? [];
+    return {node, events, used: returnBudgetUsed(events)};
+  };
+  const applyCondition = (condition: string, operationId: string) => Effect.gen(function* () {
+    const document = yield* opened.main();
+    const node = byCondition(document, condition).node;
+    const pending = document.returns.find(item => item.state === "pending" && item.backToNodeId === node.nodeId);
+    assert.ok(pending, condition);
+    const result = yield* opened.box.stores.workflows.applyReturn(opened.owner, {operationId, workflowId: document.workflowId, expectedRevision: document.revision,
+      returnId: pending.returnId, note: `Apply ${condition}.`}, opened.tick());
+    assert.equal(result.status, "applied", JSON.stringify(result));
+    return pending.returnId;
+  });
+  yield* opened.complete(["implement"], "implement-1");
+  yield* opened.choose("Review findings.", "then");
+  const reviewId = yield* applyCondition("Review findings.", "jump-review");
+  const reviewed = yield* opened.main();
+  const reviewEvents = byCondition(reviewed, "Review findings.").events;
+  assert.deepEqual(reviewEvents.map(event => event.kind), ["consumed"], "a return does not reset itself");
+  assert.equal(reviewEvents[0]?.returnId, reviewId);
+  yield* opened.complete(["implement"], "implement-2");
+  yield* opened.choose("Review findings.", "else");
+  yield* opened.choose("CI failed.", "then");
+  const ciId = yield* applyCondition("CI failed.", "jump-ci");
+  const reset = yield* opened.main();
+  assert.equal(byCondition(reset, "Review findings.").used, 0);
+  assert.equal(byCondition(reset, "CI failed.").used, 1);
+  assert.ok(byCondition(reset, "Review findings.").events.some(event => event.kind === "reset" && event.returnId === ciId));
+  assert.deepEqual(byCondition(reset, "CI failed.").events.map(event => event.kind), ["consumed"]);
+  yield* opened.complete(["implement"], "implement-3");
+  yield* opened.choose("Review findings.", "then");
+  yield* applyCondition("Review findings.", "jump-review-again");
+  const again = yield* opened.main();
+  assert.equal(byCondition(again, "Review findings.").used, 1);
+  assert.equal(byCondition(again, "CI failed.").used, 1, "the inner return does not reset the enclosing budget");
+}), {timeout: 30_000});
+
+it.live("one of two competing applies debits once, and a full ledger rolls back", () => Effect.gen(function* () {
+  const opened = yield* open([local("work"), branch("Findings remain.", [backTo("work", 3)])]);
+  yield* opened.complete(["work"], "work-1");
+  yield* opened.choose("Findings remain.", "then");
+  const pending = yield* opened.main();
+  const waiting = pending.returns.find(item => item.state === "pending")!;
+  const attempt = (operationId: string, at: number) => opened.box.stores.workflows.applyReturn(opened.owner, {operationId, workflowId: pending.workflowId,
+    expectedRevision: pending.revision, returnId: waiting.returnId, note: "Apply the return."}, at);
+  const results = yield* Effect.all([attempt("race-a", 2_000), attempt("race-b", 2_001)], {concurrency: "unbounded"});
+  const applied = results.filter(result => result.status === "applied");
+  const conflicts = results.filter(result => result.status === "conflict");
+  assert.equal(applied.length, 1, JSON.stringify(results));
+  assert.equal(conflicts.length, 1, JSON.stringify(results));
+  const raced = yield* opened.main();
+  const racedNode = planBackTos(raced.plan).find(node => node.target === "work")!;
+  const racedEvents = raced.returnBudgets?.find(item => item.budgetId === racedNode.budgetId)?.events ?? [];
+  assert.equal(returnBudgetUsed(racedEvents), 1);
+  assert.equal(racedEvents.filter(event => event.kind === "consumed").length, 1);
+
+  const capped = yield* open([local("work"), branch("Findings remain.", [backTo("work", 3)])]);
+  yield* capped.complete(["work"], "cap-work");
+  yield* capped.choose("Findings remain.", "then");
+  const ready = yield* capped.main();
+  const raw = String((yield* query(capped.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", ready.workflowId))[0]?.document);
+  const padded = JSON.parse(raw) as WorkflowStateDocument;
+  const events: Array<{kind: "consumed" | "reset"; returnId: string; at: number}> = Array.from({length: workflowMutationLimits.maxEvidence - 1}, (_item, index) =>
+    ({kind: "consumed", returnId: `pad-${index}`, at: 10}));
+  events.push({kind: "reset", returnId: "pad-reset", at: 11});
+  const budgetId = planBackTos(padded.plan).find(node => node.target === "work")!.budgetId;
+  padded.returnBudgets = (padded.returnBudgets ?? []).map(row => row.budgetId === budgetId ? {...row, events} : row);
+  const paddedText = JSON.stringify(padded);
+  yield* execute(capped.box.stores.sql, "UPDATE supervisor_workflow_state SET document=? WHERE workflow_id=?", paddedText, ready.workflowId);
+  const loaded = yield* capped.box.stores.workflows.getState("project-a", "main-a", ready.threadId);
+  assert.equal(loaded.status, "found", JSON.stringify(loaded));
+  const loadedDocument = yield* capped.main();
+  const loadedNode = planBackTos(loadedDocument.plan).find(node => node.target === "work")!;
+  assert.equal(returnBudgetUsed(loadedDocument.returnBudgets?.find(item => item.budgetId === loadedNode.budgetId)?.events ?? []), 0);
+  const refusal = yield* capped.box.stores.workflows.applyReturn(capped.owner, {operationId: "over-capacity", workflowId: ready.workflowId,
+    expectedRevision: ready.revision, returnId: ready.returns.find(item => item.state === "pending")!.returnId, note: "This jump does not fit."}, capped.tick());
+  assert.equal(invalidReason(refusal), "return_budget_capacity");
+  const stored = yield* query(capped.box.stores.sql, "SELECT revision,document FROM supervisor_workflow_state WHERE workflow_id=?", ready.workflowId);
+  assert.equal(stored[0]?.revision, ready.revision);
+  assert.equal(String(stored[0]?.document), paddedText);
+}), {timeout: 30_000});

@@ -235,10 +235,15 @@ Each entry is `{budgetId, address, events}`, and an event is
 `{kind: "consumed" | "reset", returnId, at}`. Current use is the consumed events
 after the latest reset. Applying a return appends one consumed event for itself and
 one reset event for each strictly nested replayed return, in the same transaction as
-the new attempt. A stored plan that contains a return but no `returnBudgets` array
-stays on disk and is classified incompatible. A plan with no return may omit the
-field. An edit that moves more than one return without a unique address match is
-rejected with `return_budget_identity_ambiguous` and writes nothing.
+the new attempt. Each return occurrence has its own budget, including each expansion
+of one reusable workflow. An edit that keeps a return's nodeId or budgetId keeps that
+budget when the return is reordered or retitled. A stored plan or accepted agreement
+that contains a return whose budget is missing from `returnBudgets`, or an applied
+return whose consumed event is missing, stays on disk and is classified incompatible.
+An empty ledger is not repaired into an unused budget. A plan with no return may omit
+the field. Two returns that both move and keep no nodeId or budgetId are rejected with
+`return_budget_identity_ambiguous` and write nothing. Two returns that claim one
+`budgetId` are rejected with `return_budget_duplicate` and write nothing.
 
 The Supervisor applies a pending, still reached return at a safe point. Applying it
 records `return_applied` evidence and keeps the closed attempt on the entry: `closed`
