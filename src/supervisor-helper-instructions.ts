@@ -20,4 +20,4 @@ Stay quiet for routine work. End each requested turn with its supplied completio
 
 export const helperInstructionsVersion = fingerprint(helperInstructions).slice(0, 16);
 /** The first line of every helper message: where its rules live and which version they must have. */
-export const helperCore = `Supervisor helper rules: workflow_read view instructions, version ${helperInstructionsVersion}; read them if this version is new to you.`;
+export const helperCore = `Supervisor helper rules: ${toolRouteReminder} workflow_read view instructions, version ${helperInstructionsVersion}; read them if this version is new to you.`;

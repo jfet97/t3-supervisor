@@ -504,6 +504,10 @@ A human can stop supervision of one chat: from the dashboard's selected-chat Sto
 supervision control, by telling its Supervisor directly, by asking the operative to
 relay the request with the human's original message ID, or from another ordinary chat
 in the same environment whose genuine user message names the exact target chat ID.
+The initial Supervisor and helper notices include portable tool-discovery guidance before
+their first instruction read. No gateway implementation is assumed. The initial root
+notice also requires a stopped service result before confirming Stop and gives the
+dashboard fallback when that call is unavailable or denied.
 The assistant that calls `supervision_stop` judges that a genuine human asked to stop, in
 any language; the service does not interpret the words. It verifies deterministically that
 the cited message is that human's original native message, that the caller's own native
@@ -533,7 +537,7 @@ its pair held, across any Stop, Enable or activation boundary, until that outcom
 Supervisor conversation is replaced. A stop
 cancels never-sent check-ins, keeps sent and uncertain delivery identities, and sends no new
 check-in or introduction. An explicit Stop schedules one concise operative notice per
-Enable period, only if supervision previously contacted that main. The notice says to
+Enable period, even before supervision first contacted that main. The notice says to
 stop replying to the Supervisor while continuing the task; it never asks for a reply.
 Unsent notices are fenced by Enable; accepted or uncertain identities are only observed.
 Three visibility misses at least a minute apart park the notice as unconfirmed with

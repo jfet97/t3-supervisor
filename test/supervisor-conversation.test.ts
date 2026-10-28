@@ -18,7 +18,7 @@ import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { prepareWorkflowRequest, proportionatePlanRule, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { prepareWorkflowRequest, proportionatePlanRule, toolRouteReminder, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import type { ConversationRequest, ReviewOutcomeKind, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { T3TransportError } from "../src/t3.js";
@@ -4892,7 +4892,8 @@ it.effect("the root instructions name operations and tools with one neutral gate
   for (const teamEnabled of [false, true]) {
     const fixture = yield* makeFixture({now: baseTime}, teamEnabled ? {teamEnabled, helperProviderInstanceId: "isolated-helper-provider"} : {});
     const reference = yield* fixture.conversation.roleFor(fixture.binding);
-    assert.match(reference, /Permitted tools: [^\n]*Run no shell commands and access no files\. Call each named tool by its exposed name; if one is not listed directly, check whether a connected gateway exposes it\./u, `team=${teamEnabled}`);
+    assert.match(reference, /Permitted tools: [^\n]*Run no shell commands and access no files\./u, `team=${teamEnabled}`);
+    assert.equal(reference.split(toolRouteReminder).length - 1, 1, `team=${teamEnabled}`);
     assert.equal(reference.split("gateway").length - 1, 1, `team=${teamEnabled}: one neutral reminder`);
     assert.doesNotMatch(reference, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix|\b(wrappers?|code-mode|functions\.exec|harness(es)?)\b/iu, `team=${teamEnabled}`);
   }
@@ -6365,10 +6366,16 @@ const rootCore = Effect.fnUntraced(function* (fixture: Fixture) {
   return String((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})).core);
 });
 
-it.effect("the root notice carries no rules, and the core permits the typed submission without the interpretation rules", () => Effect.gen(function* () {
+it.effect("the bootstrap carries discovery and truthful Stop fallback before its first reader, with other rules on demand", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
-  const notice = fixture.conversation.rootNotice(fixture.binding)!;
-  assert.ok(notice.length < 600, `root notice ${notice.length}`);
+  const notice = fixture.conversation.rootNotice({...fixture.binding, mainThreadId: "00000000-0000-4000-8000-000000000001",
+    threadId: "supervisor-root:00000000-0000-4000-8000-000000000002"})!;
+  assert.ok(notice.length < 850, `root notice ${notice.length}`);
+  assert.equal(notice.split(toolRouteReminder).length - 1, 1);
+  assert.ok(notice.indexOf(toolRouteReminder) < notice.indexOf("workflow_read"), "discovery is available before the first instruction read");
+  assert.match(notice, /freshly read your chat, call supervision_stop; confirm only its stopped result/u);
+  assert.match(notice, /If unavailable or denied, say supervision was not stopped and point to dashboard Stop supervision/u);
+  assert.doesNotMatch(notice, /sourcePin|UNTRUSTED_WORKFLOW_ENVELOPE|"requirements":/u);
   assert.match(notice, /Instructions: workflow_read view instructions with \{"supervisorThreadId":"[^"]+","bindingGeneration":\d+\}, version [0-9a-f]{16}/u);
   const core = yield* rootCore(fixture);
   assert.doesNotMatch(core, /follow only the interpretation instructions|use no tool except the workflow_read reader|Contact the operative only/u);
@@ -6379,8 +6386,8 @@ it.effect("the root notice carries no rules, and the core permits the typed subm
 
 // native proof 2026-10-23 (VM, two models): both roots read definitions through a gateway call, then refused to submit, reading "never
 // through a script or code-mode wrapper" as forbidding that same call. The rendered request, the interpretation rules and the tool
-// description now state the operation only: the model calls the tools exposed to it, with one neutral gateway reminder in the core
-it.effect("the submission route states the operation, names no gateway or recipe and suggests no code", () => Effect.gen(function* () {
+// description now state the operation only: the model calls the tools exposed to it, with one neutral gateway reminder before the first reader and in the core
+it.effect("the submission route includes portable discovery without a named gateway, recipe or code", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const task = (yield* fixture.projectStore.task(fixture.task.threadId))!;
   const request = prepareWorkflowRequest(task.threadId, task.sourceMessageId, sourceText, definitions(), {
@@ -6395,8 +6402,8 @@ it.effect("the submission route states the operation, names no gateway or recipe
     assert.doesNotMatch(text, /mcpx|MCPX|t3-supervisor-workflows|t3-code\b|namespace prefix|discovery route/u, label);
     assert.doesNotMatch(text, /\b(code-mode|functions\.exec|scripts?)\b/iu, label);
   }
-  assert.equal(core.split("gateway").length - 1, 1, "one neutral gateway reminder, in the core only");
-  for (const text of [requestText, instructions, description]) assert.doesNotMatch(text, /gateway/u);
+  for (const text of [core, requestText]) assert.equal(text.split(toolRouteReminder).length - 1, 1, "one portable discovery reminder per message");
+  for (const text of [instructions, description]) assert.doesNotMatch(text, /gateway/u);
   for (const text of [instructions, description]) assert.match(text, /executed call/u);
   assert.match(instructions, /call submission\.tool\. Only that executed call records an interpretation/u);
   assert.doesNotMatch(requestText, /SUBMISSION:|sourcePin/u, "submission details are fetched, never pushed");
@@ -6521,13 +6528,22 @@ it.effect("a lost Stop-notice response preserves its exact identity across Stop,
 }));
 
 
-it.effect("Stop of a no-contact request sends no operative message, and stopped context remains readable without a task", () => Effect.gen(function* () {
+it.effect("Stop before first contact sends one operative notice across restart, and stopped context remains readable without a task", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
   const fixture = yield* makeFixture(clock);
   const service = fixture.makeProjectSupervisor();
   yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: (yield* fixture.threadPolicy.get()).generation});
   yield* fixture.conversation.reconcileStopNotice(fixture.binding);
-  assert.equal(fixture.calls.length, 0);
+  const notice = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!.stopNotice!;
+  assert.equal(fixture.calls.length, 1);
+  assert.equal(fixture.calls[0]!.payload.threadId, operativeThreadId);
+  assert.equal(fixture.calls[0]!.payload.messageId, notice.messageId);
+  assert.match(String(fixture.calls[0]!.payload.text), /stop sending updates, findings or workflow acceptances/u);
+  const restarted = yield* fixture.makeRestartedConversation();
+  yield* restarted.reconcileStopNotice(fixture.binding);
+  yield* fixture.conversation.reconcileStopNotice(fixture.binding);
+  assert.equal(fixture.calls.length, 1, "a restarted service observes the original notice instead of replaying it");
+  assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))!.stopNotice!.state, "sent");
   yield* fixture.sql.unsafe("DELETE FROM supervisor_task_interpretations WHERE thread_id=?", [operativeThreadId]);
   const result = yield* fixture.conversation.readContextView(fixture.binding, {view: "context"});
   assert.equal(result.supervision, "stopped");assert.equal(result.status, "ok");

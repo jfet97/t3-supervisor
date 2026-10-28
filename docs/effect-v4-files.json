@@ -11583,7 +11583,7 @@
     "introduction routing: steer_active only for a verified running provider turn; explicit activeRunId null/ambiguous waits; omitted activeRunId may steer one verified run; pending owner input defers; stop/enable/activation-boundary rechecked immediately before POST; 'sending'+dispatchMode persisted before POST (L1946-1989)",
     "introduction outcomes: accepted -> visibility misses, blocked only after >60s and 3 misses (L1934-1939); sending/uncertain/definiteRejection===false -> 'uncertain', never replayed (L1940-1945); definite steer rejection -> exactly one queued fallback with new IDs ':queue' and rejectedAttempts retained (L1996-2005)",
     "Retry only re-observes unknown identities; only definitely rejected introductions get fresh 'retry:<n>' IDs; blocked-accepted returns to accepted; stop notice unconfirmed->uncertain / blocked->ready (L2008-2031)",
-    "Stop notice: one notice per Enable period only if supervision contacted the main; persisted 'uncertain' with dispatchMode before POST; definite steer rejection queues once with retained rejected IDs; 3 visibility misses >=60s apart park it (blocked/unconfirmed); Enable or no-contact supersedes unsent notices; accepted/uncertain only observed (L1687-1760)",
+    "Stop notice: one notice per Enable period even before first contact; persisted 'uncertain' with dispatchMode before POST; definite steer rejection queues once with retained rejected IDs; 3 visibility misses >=60s apart park it (blocked/unconfirmed); Enable supersedes unsent notices; accepted/uncertain only observed (L1687-1760)",
     "settled/resting pairs are never woken for backlog, repairs, definition recovery or historical introductions; only a genuine human message after max(settledAt, chat enabledAt) and the activation boundary wakes them (L1466-1478, L1490, L1562, L1565, L1008-1015)",
     "per-binding single in-flight root request; failed unacknowledged review blocks further check-ins until Retry (L1484, L1561); root cooldown SUPERVISOR_MONITOR_COOLDOWN_MS (L1481, L757, L783)",
     "agreement: candidate only from a formal compact draft in a completed Supervisor message after the prompt-run anchor; acceptance only an exact {taskId,proposalId,digest} in a completed main message after the visible introduction; recordWorkflowAgreement re-reads everything and CAS-checks task/binding/introduction/candidate inside one transaction (L1236-1313, L1362-1439)",
@@ -17467,7 +17467,7 @@
     "Stop sends one concise operative notice and settles the idle root without a quiet-minute delay",
     "Enable fences an unsent Stop notice; historical exclusions never create notices",
     "a lost Stop-notice response preserves its exact identity across Stop, Enable and observation",
-    "Stop of a no-contact request sends no operative message, and stopped context remains readable without a task",
+    "Stop before first contact sends one operative notice across restart, and stopped context remains readable without a task",
     "a definitely rejected Stop steer queues once with retained rejected IDs",
     "unknown Stop-notice visibility is bounded and explicit Retry only re-observes its retained identity",
     "an uncertain Stop notice keeps its exact body through root replacement and can be confirmed"
