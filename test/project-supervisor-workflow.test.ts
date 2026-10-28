@@ -8,6 +8,7 @@ import {
   addSupervisorRequest, appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, projectId,
   sourceMessageId, sourceThreadId, submitAndComplete, unavailableDefinitionSnapshot,
 } from "./support/ctl-workflow.js";
+import { toolRouteReminder } from "../src/supervisor-workflow.js";
 import { messageReadRule } from "../src/message-read-handle.js";
 
 // the interpretation fields a root submits for the export task
@@ -552,7 +553,7 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the core carries the local routing rule once");
   assert.equal(occurrences(messageReadRule), 1, "the core carries the one message read rule once");
   assert.match(core, /supervision_interpretation_submit when an interpretation request asks for it/u);
-  assert.match(core, /if one is not listed directly, check whether a connected gateway exposes it/u);
+  assert.equal(occurrences(toolRouteReminder), 1);
   assert.doesNotMatch(core, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix/u, "no gateway, alias or recipe");
   assert.match(core, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
   assert.match(core, /Never reuse IDs or treat quotes\/cancellation as Stop/u);

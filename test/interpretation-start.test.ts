@@ -126,7 +126,12 @@ it.live("CT-ISUB-07: a mode change, a later Stop or a rolled-back tool item befo
     yield* f.runOnce();
     assert.notEqual((yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.status, "active", change);
     assert.equal(yield* f.core.scope.scopeEnabled(task.projectId, f.mainThreadId).pipe(Effect.orDie), false, change);
-    assert.equal(f.operativeSends().length, 0, change);
+    if (change === "stop") {
+      const notice = (yield* f.core.store.binding(task.projectId, f.mainThreadId).pipe(Effect.orDie))?.stopNotice;
+      assert.ok(notice);
+      assert.deepEqual(f.operativeSends().map(command => ({commandId: command.commandId, messageId: command.messageId, text: command.text})),
+        [{commandId: notice.commandId, messageId: notice.messageId, text: notice.text}], "only the explicit Stop notice reaches the main; no Start or introduction");
+    } else assert.equal(f.operativeSends().length, 0, change);
   }
 }), {timeout: 60_000});
 
