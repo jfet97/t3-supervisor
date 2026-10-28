@@ -216,12 +216,16 @@ it.live("CT-T3-04: binary and non-JSON frames fail with fixed messages and neste
 
   // a removed archive subscription id is not a second stream: earlier live chunks are acknowledged, then the watch stops
   const unknownAcknowledgements: string[] = [];
+  const unknownAcksSeen = Deferred.makeUnsafe<void>();
   const unknownServer = yield* mockT3((_request, response) => sendJson(response, 404, {}));
   unknownServer.webSockets.on("connection", (socket) => {
     socket.on("message", (data) => {
       const frame: unknown = JSON.parse(data.toString());
       if (!isRecord(frame)) return;
-      if (frame._tag === "Ack" && typeof frame.requestId === "string") unknownAcknowledgements.push(frame.requestId);
+      if (frame._tag === "Ack" && typeof frame.requestId === "string") {
+        unknownAcknowledgements.push(frame.requestId);
+        if (unknownAcknowledgements.length === 2) Deferred.doneUnsafe(unknownAcksSeen, Exit.void);
+      }
       if (frame._tag === "Request" && frame.tag === "orchestration.subscribeShell") {
         socket.send(JSON.stringify([[chunk("1", 1), [chunk("1", 2)]], [[[chunk("2", 3)]]], chunk("1", 4)]));
       }
@@ -235,6 +239,7 @@ it.live("CT-T3-04: binary and non-JSON frames fail with fixed messages and neste
   assert.ok(unknownRequest instanceof T3TransportError);
   assert.equal(unknownRequest.message, "T3 websocket message used an unsupported protocol frame");
   assert.deepEqual(unknownItems, [["active", 1], ["active", 2]]);
+  yield* within(Deferred.await(unknownAcksSeen), 2500, "acks for the live chunks");
   assert.deepEqual(unknownAcknowledgements, ["1", "1"]);
 
   // flattening visits every array and record; 8 * 1024 visits are accepted and one more rejects the frame
