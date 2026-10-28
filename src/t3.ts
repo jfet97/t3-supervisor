@@ -1,10 +1,10 @@
-import { Clock, Context, Data, Deferred, Duration, Effect, Layer, Option, Redacted, Ref, Schema, Stream } from "effect";
+import { Clock, Context, Data, Deferred, Duration, Effect, Layer, Option, Predicate, Redacted, Ref, Schema, Stream } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest, type HttpClientError, type HttpClientResponse } from "effect/http";
 import {
-  NativeEnvelope, NativeEnvelopeError, NativeFraming, nativeMaxPayload, type NativeFailure, type NativeServerFrame,
+  NativeEnvelope, NativeEnvelopeError, NativeFraming, NativeStep, nativeMaxPayload, type NativeFailure, type NativeServerFrame,
 } from "./native-envelope.js";
 import { ProjectionStreamError, readProjectionSnapshot } from "./t3-projection-stream.js";
-import type { JsonRecord, Projection, SourceItem } from "./types.js";
+import type { ArchiveCut, JsonRecord, Projection, SourceItem } from "./types.js";
 
 const ORCHESTRATION_PROTOCOL = 2;
 const MAX_HTTP_RESPONSE_BYTES = 32 * 1024 * 1024;
@@ -114,25 +114,25 @@ const ThreadRemoved = Schema.Struct({kind: Schema.Literal("thread.removed"), seq
 const shellSnapshot = {
   schemaVersion: Protocol, snapshotSequence: Sequence, projects: Schema.Array(Schema.Unknown), threads: Schema.Array(Schema.Unknown),
 };
-const isShellItem: Record<SourceItem["stream"], (value: unknown) => boolean> = {
-  active: Schema.is(Schema.Union([
-    Schema.Struct({kind: Schema.Literal("synchronized")}),
-    Schema.Struct({
-      kind: Schema.Literal("snapshot"),
-      snapshot: Schema.Struct({...shellSnapshot, archivedThreads: Schema.Array(Schema.Unknown)}),
-      resolvedRepositoryIdentityRoots: Schema.optional(Schema.Array(Schema.String)),
-    }),
-    ThreadUpdated,
-    ThreadRemoved,
-    Schema.Struct({kind: Schema.Literal("project.updated"), sequence: Sequence, project: Schema.Struct({id: NonBlank})}),
-    Schema.Struct({kind: Schema.Literal("project.removed"), sequence: Sequence, projectId: NonBlank}),
-  ])),
-  archive: Schema.is(Schema.Union([
-    Schema.Struct({kind: Schema.Literal("snapshot"), snapshot: Schema.Struct(shellSnapshot)}),
-    ThreadUpdated,
-    ThreadRemoved,
-  ])),
-};
+const isActiveShellItem = Schema.is(Schema.Union([
+  Schema.Struct({kind: Schema.Literal("synchronized")}),
+  Schema.Struct({
+    kind: Schema.Literal("snapshot"),
+    snapshot: Schema.Struct({...shellSnapshot, archivedThreads: Schema.Array(Schema.Unknown)}),
+    resolvedRepositoryIdentityRoots: Schema.optional(Schema.Array(Schema.String)),
+  }),
+  ThreadUpdated,
+  ThreadRemoved,
+  Schema.Struct({kind: Schema.Literal("project.updated"), sequence: Sequence, project: Schema.Struct({id: NonBlank})}),
+  Schema.Struct({kind: Schema.Literal("project.removed"), sequence: Sequence, projectId: NonBlank}),
+]));
+// archivedThreads is accepted and ignored: the shipped active snapshot leaves it empty while archived rows live in the unary snapshot
+const isArchivedShellSnapshot = Schema.is(Schema.Struct({
+  schemaVersion: Protocol,
+  snapshotSequence: Sequence,
+  projects: Schema.optional(Schema.Array(Schema.Unknown)),
+  threads: Schema.Array(Schema.Unknown).check(Schema.isMaxLength(10_000)),
+}));
 const isSequence = Schema.is(Sequence);
 const isNonBlank = Schema.is(NonBlank);
 const decodeJson = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown));
@@ -325,19 +325,42 @@ const make = (options: T3ClientOptions): Effect.Effect<T3ClientShape, never, Htt
         return next;
       }));
 
+    const endpoint = {baseUrl: settings.baseUrl, token: Redacted.value(settings.token)};
+    // a separate socket: the subscription socket stays paused until this read finishes, so the read cannot share it
+    const readArchivedShell = (): Effect.Effect<ArchiveCut, T3TransportError> => envelope.call({
+      endpoint,
+      request: {id: "archive", tag: "orchestration.getArchivedShellSnapshot", payload: {}},
+      maxPayload: nativeMaxPayload.t3,
+      handshakeTimeout: Duration.millis(settings.webSocketHandshakeTimeoutMs),
+      onExit: (exit) => exit._tag === "Success"
+        ? Effect.succeed(NativeStep.done(exit.value))
+        : Effect.fail(new T3TransportError("T3 archived shell snapshot failed")),
+    }).pipe(
+      Effect.mapError((error) => error instanceof T3TransportError ? error : websocketError(error)),
+      Effect.flatMap((value) => {
+        if (!isArchivedShellSnapshot(value)) {
+          return Effect.fail(new T3TransportError("T3 archived shell snapshot has an unsupported schema or shape"));
+        }
+        return Effect.succeed({snapshotSequence: value.snapshotSequence, threads: value.threads});
+      }),
+    );
+
     const watch = <E = never, R = never>(cursor: number | undefined, onItem: (item: SourceItem) => Effect.Effect<void, E, R>):
       Effect.Effect<never, T3TransportError | E, R> => {
       if (cursor !== undefined && !isSequence(cursor)) {
         return Effect.fail(new T3TransportError("T3 orchestration cursor must be a non-negative integer"));
       }
       return Effect.scoped(Effect.gen(function*() {
-        // one socket with both subscriptions bound to its open; reading pauses while a message is handled
+        // one live subscription; reading pauses while a message is handled, and the archive unary uses its own socket
         const connection = yield* envelope.open({
-          endpoint: {baseUrl: settings.baseUrl, token: Redacted.value(settings.token)},
-          requests: [
-            {id: "1", tag: "orchestration.subscribeShell", payload: cursor === undefined ? {} : {afterSequence: cursor}},
-            {id: "2", tag: "orchestration.subscribeArchivedShell", payload: {}},
-          ],
+          endpoint,
+          requests: [{
+            id: "1",
+            tag: "orchestration.subscribeShell",
+            payload: cursor === undefined
+              ? {requestCompletionMarker: true}
+              : {requestCompletionMarker: true, afterSequence: cursor},
+          }],
           maxPayload: nativeMaxPayload.t3,
           handshakeTimeout: Duration.millis(settings.webSocketHandshakeTimeoutMs),
           framing: NativeFraming.walk(MAX_BUFFERED_WEBSOCKET_FRAMES * 1024),
@@ -346,14 +369,28 @@ const make = (options: T3ClientOptions): Effect.Effect<T3ClientShape, never, Htt
         }).pipe(Effect.mapError(websocketError));
         const awaitingPong = yield* Ref.make(Option.none<Deferred.Deferred<void>>());
 
+        const archiveCutFor = (item: JsonRecord): Effect.Effect<ArchiveCut | undefined, T3TransportError> => {
+          if (item.kind !== "snapshot" || item.resolvedRepositoryIdentityRoots !== undefined) return Effect.succeed(undefined);
+          const snapshot = item.snapshot;
+          if (!Predicate.isObject(snapshot) || typeof snapshot.snapshotSequence !== "number") {
+            return Effect.fail(new T3TransportError("T3 subscription item has an unsupported schema or shape"));
+          }
+          const snapshotSequence = snapshot.snapshotSequence;
+          return Effect.flatMap(readArchivedShell(), (cut) => cut.snapshotSequence === snapshotSequence
+            ? Effect.succeed(cut)
+            : Effect.fail(new T3TransportError("T3 archived shell snapshot does not match the live shell")));
+        };
+
         // a chunk is acknowledged only after every item in it was validated and ingested
-        const ingest = (stream: SourceItem["stream"], requestId: string, values: ReadonlyArray<unknown>) =>
+        const ingest = (requestId: string, values: ReadonlyArray<unknown>) =>
           Effect.gen(function*() {
             for (const item of values) {
-              if (!isShellItem[stream](item)) {
+              if (!isActiveShellItem(item)) {
                 return yield* Effect.fail(new T3TransportError("T3 subscription item has an unsupported schema or shape"));
               }
-              yield* onItem({stream, item: item as JsonRecord});
+              const record = item as JsonRecord;
+              const archiveCut = yield* archiveCutFor(record);
+              yield* onItem(archiveCut === undefined ? {stream: "active", item: record} : {stream: "active", item: record, archiveCut});
             }
             yield* connection.send({_tag: "Ack", requestId}).pipe(Effect.mapError(websocketError));
           });
@@ -369,8 +406,7 @@ const make = (options: T3ClientOptions): Effect.Effect<T3ClientShape, never, Htt
             case "Exit": return Effect.fail(new T3TransportError("T3 subscription ended"));
             case "Defect": return Effect.fail(new T3TransportError("T3 subscription failed"));
             case "Chunk":
-              if (frame.requestId === "1") return ingest("active", frame.requestId, frame.values);
-              if (frame.requestId === "2") return ingest("archive", frame.requestId, frame.values);
+              if (frame.requestId === "1") return ingest(frame.requestId, frame.values);
               return Effect.fail(new T3TransportError("T3 websocket message used an unsupported protocol frame"));
             case "Other": return Effect.fail(new T3TransportError("T3 websocket message used an unsupported protocol frame"));
           }

@@ -68,7 +68,7 @@ it.live("catalog store creates only the generic T3 and activation tables", () =>
     return (yield* database.unsafe<{ readonly name: unknown }>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"))
       .map(row => String(row.name));
   }).pipe(Effect.provide(Layer.fresh(catalogDbLayer(directory))));
-  assert.deepEqual(tables, ["activations", "cursors", "environment_binding", "projects", "thread_revisions", "threads"]);
+  assert.deepEqual(tables, ["activations", "cursors", "environment_binding", "projects", "shell_coverage", "thread_revisions", "threads"]);
 }).pipe(Effect.provide(NodeFileSystem.layer)));
 
 it.live("metadata enrichment updates projects without replacing inventory or rewinding the cursor", () => Effect.gen(function* () {
@@ -106,6 +106,134 @@ it.live("archive removal keeps the known shell and advances the archived cursor"
   assert.equal(state.cursor, 6);
   assert.equal(state.shell?.id, "archived-1");
   assert.equal(state.catalog.threads.some(value => value.id === "archived-1"), false);
+}).pipe(Effect.provide(NodeFileSystem.layer)));
+
+it.live("an empty archivedThreads list keeps the unary archive on a cold store and a populated one", () => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory;
+  const archived = {...thread("x"), archivedAt: "2026-01-01T00:00:00.000Z"};
+  const live = thread("live");
+  const cut = (sequence: number, threads: ReadonlyArray<unknown>) => ({
+    stream: "active" as const,
+    item: {kind: "snapshot", snapshot: {
+      schemaVersion: 2, snapshotSequence: sequence, projects: [project()], threads: [live], archivedThreads: [],
+    }},
+    archiveCut: {snapshotSequence: sequence, threads},
+  });
+  const location = (id: string) => Effect.gen(function* () {
+    const database = yield* CatalogDb;
+    const rows = yield* database.unsafe<{readonly location: unknown}>(`SELECT location FROM threads WHERE id='${id}'`);
+    return rows[0] === undefined ? null : String(rows[0].location);
+  }).pipe(Effect.provide(Layer.fresh(catalogDbLayer(directory))));
+
+  yield* withStore(directory, store => Effect.gen(function* () {
+    const cold = yield* store.ingest(cut(5, [archived]));
+    assert.equal(cold.connected, true);
+    assert.equal(yield* store.coverage(), 5);
+    assert.equal(yield* store.cursor("active"), 5);
+    assert.deepEqual((yield* store.catalog()).threads.map(value => value.id), ["live"]);
+    assert.equal((yield* store.thread("x"))?.id, "x");
+  }));
+  assert.equal(yield* location("x"), "archive");
+
+  yield* withStore(directory, store => Effect.gen(function* () {
+    // a later snapshot that still carries no embedded archive rows does not remove x
+    const plain = yield* store.ingest(sourceItem("active", {kind: "snapshot", snapshot: {
+      schemaVersion: 2, snapshotSequence: 6, projects: [project()], threads: [live], archivedThreads: [],
+    }}));
+    assert.equal(plain.connected, false);
+    assert.equal(yield* store.coverage(), 5);
+    assert.equal(yield* store.cursor("active"), 6);
+    assert.equal((yield* store.thread("x"))?.id, "x");
+  }));
+  assert.equal(yield* location("x"), "archive");
+
+  yield* withStore(directory, store => Effect.gen(function* () {
+    const again = yield* store.ingest(cut(7, [archived]));
+    assert.equal(again.connected, true);
+    assert.equal(yield* store.coverage(), 7);
+    assert.equal((yield* store.thread("x"))?.id, "x");
+  }));
+  assert.equal(yield* location("x"), "archive");
+
+  yield* withStore(directory, store => Effect.gen(function* () {
+    const moved = yield* store.ingest(sourceItem("active", {
+      kind: "thread.updated", sequence: 8, location: "active", thread: {...thread("x"), archivedAt: "2026-01-01T00:00:00.000Z"},
+    }));
+    assert.equal(moved.connected, true);
+    assert.deepEqual((yield* store.catalog()).threads.map(value => value.id).sort(), ["live", "x"]);
+    const removed = yield* store.ingest(sourceItem("active", {kind: "thread.removed", sequence: 9, location: "archive", threadId: "x"}));
+    assert.equal(removed.connected, true);
+    const delayed = yield* store.ingest(cut(7, [archived]));
+    assert.equal(delayed.connected, false);
+    assert.equal(yield* store.cursor("active"), 9);
+    assert.equal(yield* store.coverage(), 7);
+  }));
+  assert.equal(yield* location("x"), "removed");
+  assert.equal(yield* withStore(directory, store => store.cursor("active")), 9);
+}).pipe(Effect.provide(NodeFileSystem.layer)));
+
+it.live("a covered completion marker connects without moving the archive, and an uncovered marker or enrichment does not", () => Effect.gen(function* () {
+  const bare = yield* temporaryDirectory;
+  yield* withStore(bare, store => Effect.gen(function* () {
+    const marker = yield* store.ingest(sourceItem("active", {kind: "synchronized"}));
+    assert.equal(marker.connected, false);
+    assert.equal(yield* store.coverage(), null);
+    assert.equal(yield* store.cursor("active"), 0);
+  }));
+
+  const directory = yield* temporaryDirectory;
+  const archived = {...thread("x"), archivedAt: "2026-01-01T00:00:00.000Z"};
+  yield* withStore(directory, store => store.ingest({
+    stream: "active",
+    item: {kind: "snapshot", snapshot: {
+      schemaVersion: 2, snapshotSequence: 8, projects: [project()], threads: [thread("live")], archivedThreads: [],
+    }},
+    archiveCut: {snapshotSequence: 8, threads: [archived]},
+  }).pipe(Effect.asVoid));
+  yield* withStore(directory, store => Effect.gen(function* () {
+    const marker = yield* store.ingest(sourceItem("active", {kind: "synchronized"}));
+    assert.equal(marker.connected, true);
+    assert.equal(yield* store.cursor("active"), 8);
+    assert.equal(yield* store.coverage(), 8);
+    assert.equal((yield* store.thread("x"))?.id, "x");
+    assert.deepEqual((yield* store.catalog()).threads.map(value => value.id), ["live"]);
+    const enriched = yield* store.ingest(sourceItem("active", {
+      kind: "snapshot", resolvedRepositoryIdentityRoots: ["/work/project-one"], snapshot: {
+        schemaVersion: 2, snapshotSequence: 100, projects: [project("project-1", "Renamed")], threads: [thread("live")], archivedThreads: [],
+      },
+    }));
+    assert.equal(enriched.connected, false);
+    assert.equal(yield* store.cursor("active"), 8);
+    assert.equal(yield* store.coverage(), 8);
+    assert.equal((yield* store.catalog()).projects[0]?.project.title, "Renamed");
+    assert.equal((yield* store.thread("x"))?.id, "x");
+  }));
+}).pipe(Effect.provide(NodeFileSystem.layer)));
+
+it.live("explicit location wins over archivedAt, and a partial cursor is not archive coverage", () => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory;
+  yield* withStore(directory, store => Effect.gen(function* () {
+    yield* store.ingest(sourceItem("active", {
+      kind: "thread.updated", sequence: 4, location: "active",
+      thread: {...thread("kept"), archivedAt: "2026-01-01T00:00:00.000Z"},
+    }));
+    yield* store.ingest(sourceItem("active", {
+      kind: "thread.updated", sequence: 5, location: "archive", thread: thread("filed"),
+    }));
+    assert.equal(yield* store.coverage(), null);
+    assert.equal(yield* store.cursor("active"), 5);
+    assert.deepEqual((yield* store.catalog()).threads.map(value => value.id), ["kept"]);
+    const overlap = yield* Effect.flip(store.ingest({
+      stream: "active",
+      item: {kind: "snapshot", snapshot: {
+        schemaVersion: 2, snapshotSequence: 6, projects: [], threads: [thread("kept")], archivedThreads: [],
+      }},
+      archiveCut: {snapshotSequence: 6, threads: [thread("kept")]},
+    })).pipe(Effect.mapError(() => new StoreError({message: "shell snapshot was stored"})));
+    assert.match(overlap.message, /active and archived/);
+    assert.equal(yield* store.cursor("active"), 5);
+    assert.equal(yield* store.coverage(), null);
+  }));
 }).pipe(Effect.provide(NodeFileSystem.layer)));
 
 it.live("failed shell ingestion leaves its cursor unacknowledged", () => Effect.gen(function* () {

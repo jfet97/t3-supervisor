@@ -135,9 +135,12 @@ export const runSupervisor = Effect.gen(function* () {
   }
 
   const watch = Effect.gen(function* () {
+    const covered = yield* store.coverage();
     const cursor = yield* store.cursor("active");
-    yield* t3.watch(cursor === 0 ? undefined : cursor, (item) => store.ingest(item).pipe(
-      Effect.tap(() => update(() => ({ t3Connected: true }))),
+    // a cursor left by a partial stream is not an archive bootstrap, so the next open asks for a full snapshot
+    const resume = covered === null || cursor === 0 ? undefined : cursor;
+    yield* t3.watch(resume, (item) => store.ingest(item).pipe(
+      Effect.flatMap((outcome) => outcome.connected ? update(() => ({ t3Connected: true })) : Effect.void),
     ));
   }).pipe(
     Effect.ensuring(update(() => ({ t3Connected: false }))),

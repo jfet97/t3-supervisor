@@ -51,8 +51,9 @@ it.live("CT-PROBE-T3-03: SIGINT during the watch interrupts the probe, removes i
   () => Effect.gen(function* () {
     const harness = yield* probeHarness({ activeThreads: 1, sendArchiveSnapshot: false });
     const child = yield* harness.start();
-    // the active snapshot is ingested and acknowledged; the archive snapshot never comes
-    yield* harness.fake.until((traffic) => traffic.acks.includes("1"), exitTimeoutMs, "the active snapshot ack");
+    // the live snapshot has been seen and the archive read is outstanding; neither half is acknowledged
+    yield* harness.fake.until((traffic) => traffic.requests.includes("orchestration.getArchivedShellSnapshot") && traffic.acks.length === 0,
+      exitTimeoutMs, "the archive snapshot request");
     process.kill(child.pid, "SIGINT");
     const interrupted = yield* child.closed(exitTimeoutMs);
     // BC-PROBE-02: runMain interrupts the program, whose scope removes the temp directory and its catalog, and exits 130
@@ -61,18 +62,18 @@ it.live("CT-PROBE-T3-03: SIGINT during the watch interrupts the probe, removes i
     assert.deepEqual(yield* harness.probeDirectories, []);
   }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-it.live("CT-PROBE-T3-04: the probe issues only the descriptor read, the two shell subscriptions and an Ack", () => Effect.gen(function* () {
+it.live("CT-PROBE-T3-04: the probe reads the descriptor, the live shell and the paired archive snapshot", () => Effect.gen(function* () {
   const harness = yield* probeHarness({ activeThreads: 1, archiveThreads: 1 });
   const result = yield* (yield* harness.start()).closed(exitTimeoutMs);
   privately("verified probe", [harness.token], () => assert.deepEqual(result, { code: 0, signal: null, stdout: verifiedLine(2), stderr: "" }));
-  // the archive chunk completes the probe inside its item handler, so only the active chunk is acknowledged
+  // verification aborts inside the paired snapshot's handler, after both halves were ingested and before the Ack
   assert.deepEqual(harness.fake.traffic, {
     http: ["GET /.well-known/t3/environment"],
-    requests: ["orchestration.subscribeShell", "orchestration.subscribeArchivedShell"],
-    acks: ["1"],
-    frames: ["Request", "Request", "Ack"],
+    requests: ["orchestration.subscribeShell", "orchestration.getArchivedShellSnapshot"],
+    acks: [],
+    frames: ["Request", "Request"],
     unauthorized: 0,
-    upgrades: 1,
+    upgrades: 2,
   });
 }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
@@ -82,7 +83,7 @@ it.live("CT-PROBE-T3-05: the fixed 30 s deadline ends a probe whose archive snap
     const child = yield* harness.start();
     const result = yield* child.closed(50_000);
     const elapsedMs = (yield* Clock.currentTimeMillis) - child.startedAt;
-    privately("expired probe", [harness.token], () => assert.deepEqual(result, { code: 1, signal: null, stdout: failedLine(true), stderr: "" }));
+    privately("expired probe", [harness.token], () => assert.deepEqual(result, { code: 1, signal: null, stdout: failedLine(false), stderr: "" }));
     assert.ok(elapsedMs >= 30_000 && elapsedMs < 45_000, `the probe ended after ${Math.round(elapsedMs)} ms`);
     assert.deepEqual(yield* harness.probeDirectories, []);
   }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });

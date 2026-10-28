@@ -355,8 +355,9 @@ export const openProjectSupervisor = (process: ConversationProcess, fake: FakeT3
   Effect.Effect<ProjectSupervisorProcess, never, Scope.Scope> => Effect.gen(function* () {
     const clock = yield* Effect.clockWith(Effect.succeed);
     const stamped = Layer.mergeAll(Layer.succeed(Clock.Clock, wallTimeClock(clock, natives.now)), Layer.succeed(NativeRpc, natives.read));
-    const catalog: StoreShape = { catalog: natives.catalog, activate: unused("catalog activation"), ingest: unused("catalog ingest"), cursor: unused("catalog cursor"),
-      thread: unused("catalog thread"), project: unused("catalog project"), stats: unused("catalog stats") };
+    const catalog: StoreShape = { catalog: natives.catalog, activate: unused("catalog activation"), ingest: unused("catalog ingest"),
+      coverage: unused("catalog coverage"), cursor: unused("catalog cursor"), thread: unused("catalog thread"),
+      project: unused("catalog project"), stats: unused("catalog stats") };
     const shell = NativeShell.of({ baseline: Effect.succeed(natives.baseline), threads: Effect.die(new Error("unused native lineage read")) });
     const stores = Context.pick(GuidanceDb, SupervisorIds, GuidanceStore, SupervisorOwnership, SupervisorStateReset, ProjectSupervisorStore, SupervisorConversationStore,
       ProjectSupervisorMonitorStore, SupervisorTeamStore, ThreadPolicyStore)(process.context);

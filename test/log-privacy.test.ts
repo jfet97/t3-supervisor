@@ -183,7 +183,7 @@ it.live("CT-REDACT-01: native transport failures carrying a token, a native erro
     yield* observation.until((lines) => lines.some((line) => line.includes("operation_deferred")), 5_000, "operation_deferred line").pipe(
       Effect.ensuring(Fiber.interrupt(watching)));
     assert.equal((yield* SubscriptionRef.get(watchStatus)).lastErrorPhase, "t3_stream");
-    assert.deepEqual(failing.traffic.requests, ["orchestration.subscribeShell", "orchestration.subscribeArchivedShell"]);
+    assert.deepEqual(failing.traffic.requests, ["orchestration.subscribeShell"]);
 
     assertNoLeak("console", observation.console, secrets);
     assertNoLeak("effect logs", observation.effectLogs, secrets);

@@ -23,13 +23,12 @@ const failureOf = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<unkno
   Effect.map(Effect.exit(effect), (exit) => Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined);
 
 const requestText = (id: string, tag: string, payload: unknown) => JSON.stringify({ _tag: "Request", id, tag, payload, headers: [] });
-const subscribeShell = (payload: unknown) => requestText("1", "orchestration.subscribeShell", payload);
-const subscribeArchive = requestText("2", "orchestration.subscribeArchivedShell", {});
+const subscribeShell = (afterSequence?: number) => requestText("1", "orchestration.subscribeShell",
+  afterSequence === undefined ? { requestCompletionMarker: true } : { requestCompletionMarker: true, afterSequence });
 const ackText = (requestId: string) => JSON.stringify({ _tag: "Ack", requestId });
 const pingText = '{"_tag":"Ping"}';
 const pongText = '{"_tag":"Pong"}';
-const isArchiveRequest = (frame: PeerFrame) => frame.frame._tag === "Request" && frame.frame.id === "2";
-const archiveSnapshot = { kind: "snapshot", snapshot: { schemaVersion: 2, snapshotSequence: 4, projects: [], threads: [] } };
+const isShellRequest = (frame: PeerFrame) => frame.frame._tag === "Request" && frame.frame.id === "1";
 
 const projectionBody = (threadId: string, padding: number): string => JSON.stringify({
   snapshotSequence: 3,
@@ -77,12 +76,12 @@ const shiftedMonotonic = Clock.clockWith((live) => Effect.sync(() => {
 const monotonicMillis = Effect.map(Clock.monotonicTimeNanos, (nanos) => Number(nanos) / 1_000_000);
 
 describe("T3 watch wire", () => {
-  it.live("T3-PORT-01: writes both Requests, answers Ping in order and acknowledges each chunk only after its items were ingested", () => Effect.gen(function*() {
+  it.live("T3-PORT-01: writes the shell subscription, answers Ping in order and acknowledges each chunk only after its items were ingested", () => Effect.gen(function*() {
     const peer = yield* envelopePeer((socket, frame) => {
-      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify([
+      if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify([
         { _tag: "Ping" },
         { _tag: "Chunk", requestId: "1", values: [{ kind: "synchronized" }, { kind: "thread.removed", sequence: 9, threadId: "thread-9" }] },
-        { _tag: "Chunk", requestId: "2", values: [archiveSnapshot] },
+        { _tag: "Chunk", requestId: "1", values: [{ kind: "thread.updated", sequence: 4, thread: { id: "thread-4" } }] },
       ]));
     });
     const client = yield* clientOf(peer.baseUrl);
@@ -98,22 +97,22 @@ describe("T3 watch wire", () => {
     yield* Deferred.await(holding);
     // a loopback round trip: anything the client wrote before it has been read by the peer
     yield* barrier(peer.baseUrl);
-    assert.deepEqual(peer.texts(), [subscribeShell({ afterSequence: 7 }), subscribeArchive, pongText]);
+    assert.deepEqual(peer.texts(), [subscribeShell(7), pongText]);
     assert.deepEqual(items.map((item) => item.item.kind), ["synchronized"]);
     yield* Deferred.succeed(release, undefined);
-    yield* peer.frame((frame) => frame.text === ackText("2"));
-    assert.deepEqual(peer.texts(), [subscribeShell({ afterSequence: 7 }), subscribeArchive, pongText, ackText("1"), ackText("2")]);
+    yield* peer.frame((frame) => frame.text === ackText("1") && peer.texts().filter((text) => text === ackText("1")).length === 2);
+    assert.deepEqual(peer.texts(), [subscribeShell(7), pongText, ackText("1"), ackText("1")]);
     assert.deepEqual(items.map((item) => [item.stream, item.item.kind]),
-      [["active", "synchronized"], ["active", "thread.removed"], ["archive", "snapshot"]]);
+      [["active", "synchronized"], ["active", "thread.removed"], ["active", "thread.updated"]]);
     assert.deepEqual(peer.upgrades, [{ url: "/ws?orchestrationProtocol=2", authorization: `Bearer ${token}` }]);
     yield* Fiber.interrupt(fiber);
     yield* peer.closed;
-    assert.equal(peer.texts().length, 5, "interruption writes no frame");
+    assert.equal(peer.texts().length, 4, "interruption writes no frame");
   }), { timeout: 10_000 });
 
   it.live("T3-PORT-02: an unsupported chunk value fails the watch without an Ack after the earlier items were ingested", () => Effect.gen(function*() {
     const peer = yield* envelopePeer((socket, frame) => {
-      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
+      if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
         values: [{ kind: "synchronized" }, { kind: "project.removed", sequence: 1, projectId: " " }] }));
     });
     const client = yield* clientOf(peer.baseUrl);
@@ -123,7 +122,7 @@ describe("T3 watch wire", () => {
     assert.equal(failure.message, "T3 subscription item has an unsupported schema or shape");
     assert.deepEqual(items, ["synchronized"]);
     yield* peer.closed;
-    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive]);
+    assert.deepEqual(peer.texts(), [subscribeShell()]);
   }), { timeout: 10_000 });
 });
 
@@ -134,10 +133,10 @@ describe("T3 watch heartbeat on the effect clock", () => {
     const peer = yield* envelopePeer();
     const client = yield* clientOf(peer.baseUrl, heartbeat);
     const fiber = yield* Effect.forkChild(failureOf(client.watch(undefined, () => Effect.void)));
-    yield* peer.frame(isArchiveRequest);
+    yield* peer.frame(isShellRequest);
     yield* TestClock.adjust("999 millis");
     yield* barrier(peer.baseUrl);
-    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive]);
+    assert.deepEqual(peer.texts(), [subscribeShell()]);
     yield* TestClock.adjust("1 millis");
     yield* peer.frame((frame) => frame.text === pingText);
     yield* TestClock.adjust("2499 millis");
@@ -147,7 +146,7 @@ describe("T3 watch heartbeat on the effect clock", () => {
     assert.ok(failure instanceof T3TransportError);
     assert.equal(failure.message, "T3 websocket heartbeat timed out");
     yield* peer.closed;
-    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive, pingText]);
+    assert.deepEqual(peer.texts(), [subscribeShell(), pingText]);
   }), { timeout: 10_000 });
 
   it.effect("T3-PORT-04: each answered Ping is followed by the next one a full interval later and the watch stays open", () => Effect.gen(function*() {
@@ -157,7 +156,7 @@ describe("T3 watch heartbeat on the effect clock", () => {
     });
     const client = yield* clientOf(peer.baseUrl, heartbeat);
     const fiber = yield* Effect.forkChild(client.watch(undefined, () => Effect.void));
-    yield* peer.frame(isArchiveRequest);
+    yield* peer.frame(isShellRequest);
     const acks = () => peer.texts().filter((text) => text === ackText("1")).length;
     for (let beat = 1; beat <= 3; beat++) {
       yield* TestClock.adjust("999 millis");
@@ -167,7 +166,7 @@ describe("T3 watch heartbeat on the effect clock", () => {
       yield* peer.frame((frame) => frame.text === ackText("1") && acks() === beat);
     }
     assert.equal(fiber.pollUnsafe(), undefined);
-    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive, pingText, ackText("1"), pingText, ackText("1"), pingText, ackText("1")]);
+    assert.deepEqual(peer.texts(), [subscribeShell(), pingText, ackText("1"), pingText, ackText("1"), pingText, ackText("1")]);
     yield* Fiber.interrupt(fiber);
     yield* peer.closed;
   }), { timeout: 10_000 });
@@ -291,39 +290,39 @@ describe("watch and read cleanup under the full detector", () => {
       { _tag: "Defect", requestId: "2", defect: { message: "private server detail" } },
     ]) {
       yield* Effect.scoped(Effect.gen(function*() {
-        const peer = yield* envelopePeer((socket, frame) => {if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify(terminal));});
+        const peer = yield* envelopePeer((socket, frame) => {if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify(terminal));});
         const client = yield* clientOf(peer.baseUrl);
         const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
         assert.ok(failure instanceof T3TransportError);
         assert.equal(failure.message.includes("private server detail"), false);
         yield* peer.closed;
-        assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive], terminal._tag);
+        assert.deepEqual(peer.texts(), [subscribeShell()], terminal._tag);
       }));
     }
   }), { timeout: 10_000 });
 
   it.live("T3-PORT-11: a shell snapshot with an unsupported schema version fails the watch without an Ack and ends the socket", () => Effect.gen(function*() {
     const peer = yield* envelopePeer((socket, frame) => {
-      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
+      if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
         values: [{ kind: "snapshot", snapshot: { schemaVersion: 3, snapshotSequence: 2, projects: [], threads: [], archivedThreads: [] } }] }));
     });
     const client = yield* clientOf(peer.baseUrl);
     const failure = yield* failureOf(client.watch(undefined, () => Effect.void));
     assert.ok(failure instanceof T3TransportError);
     yield* peer.closed;
-    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive]);
+    assert.deepEqual(peer.texts(), [subscribeShell()]);
   }), { timeout: 10_000 });
 
   it.live("T3-PORT-12: an ingestion failure fails the watch without acknowledging its chunk and ends the socket", () => Effect.gen(function*() {
     const peer = yield* envelopePeer((socket, frame) => {
-      if (frame._tag === "Request" && frame.id === "2") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
+      if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify({ _tag: "Chunk", requestId: "1",
         values: [{ kind: "thread.removed", sequence: 2, threadId: "thread-1" }] }));
     });
     const client = yield* clientOf(peer.baseUrl);
     const failure = yield* failureOf(client.watch(undefined, () => Effect.fail(new Error("durable store unavailable"))));
     assert.match(String(failure), /durable store unavailable/);
     yield* peer.closed;
-    assert.deepEqual(peer.texts(), [subscribeShell({}), subscribeArchive]);
+    assert.deepEqual(peer.texts(), [subscribeShell()]);
   }), { timeout: 10_000 });
 
   it.live("T3-PORT-13: a descriptor request past its timeout fails and aborts the request", () => Effect.gen(function*() {

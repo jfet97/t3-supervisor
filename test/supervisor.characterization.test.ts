@@ -21,7 +21,14 @@ import {eventConsole, pinnableClock, rootServices, statusView} from "./support/g
 
 const environment: T3EnvironmentDescriptor = {environmentId: "environment", serverVersion: "test", orchestrationProtocolVersion: 2};
 const project: ProjectInfo = {id: "project", title: "Project", workspaceRoot: "/work/project"};
-const projectItem = {stream: "active", item: {kind: "project.updated", sequence: 1, project}} as const;
+const projectItem = {
+  stream: "active" as const,
+  item: {
+    kind: "snapshot" as const,
+    snapshot: {schemaVersion: 2, snapshotSequence: 1, projects: [project], threads: [], archivedThreads: []},
+  },
+  archiveCut: {snapshotSequence: 1, threads: [] as readonly unknown[]},
+};
 const healthKeys = ["ok", "version", "revision", "readiness", "startedAt", "activation", "environmentId", "t3Connected", "storeState", "supervisionState", "heartbeat", "lastErrorPhase", "store"];
 
 const config = (directory: string, healthPort: number): SupervisorConfig => ({
