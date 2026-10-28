@@ -162,6 +162,10 @@ The Task view and Activity are observational. Read timestamps, stale/incomplete 
 assessments and source links. Refresh does not wake chats or write workflow state.
 Idle/no-AppRun mirrors do not prove completion. Quiet scopes may park while unresolved
 work stays unresolved; relevant activity reuses the same Supervisor identity.
+When a task's work is finished (no plan was needed, or its agreed workflow is completed)
+and the main has stayed quiet for a minute, the service settles the main chat too.
+To keep a main active, pin it, turn off its auto-settle or reactivate it in T3;
+Supervision shows why a main remains active.
 
 Monitoring check-ins become due after ten finished activities by default, or once the
 oldest has waited the chosen interval (one or two minutes in Project settings, two by

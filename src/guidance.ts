@@ -68,16 +68,12 @@ const makeGuidanceRuntime = (config: SupervisorSettings, source: Pick<StoreShape
     // the guidance and thread-policy reads in their baseline order, the guidance reads as one snapshot
     return yield* guidanceTransaction(db)(Effect.gen(function* (): Effect.fn.Return<GuidanceSnapshot, GuidanceStoreError | ThreadPolicyStoreError> {
       const classifications = yield* classifyCatalog(config, store, catalog.projects);
-      const settings = yield* store.settings();
       const threadPolicy = yield* policy.get();
       return {
         environmentId: current.descriptor?.environmentId ?? null,
         serverVersion: current.descriptor?.serverVersion ?? null,
         connected: current.connected,
         lastCycleAt: current.lastCycleAt,
-        sendingReady: false,
-        sendingReason: "Native project and workflow supervision uses T3 conversations.",
-        settings,
         threadPolicy,
         threads: catalog.threads
           .filter(thread => thread.lineage?.relationshipToParent !== "subagent" && !isSupervisorThread(owned, thread))
@@ -94,11 +90,8 @@ const makeGuidanceRuntime = (config: SupervisorSettings, source: Pick<StoreShape
           available,
           classification: classifications.get(project.id) ?? "unclassified",
         })),
-        rules: yield* store.rules(),
-        mutes: yield* store.mutes(),
         activity: yield* store.activities(),
         coverage: current.coverage,
-        tokensUsed: yield* store.used(),
       };
     }));
   });

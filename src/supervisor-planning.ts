@@ -32,6 +32,14 @@ export const startPlanningAttempt = (attempt: PlanningAttempt, now: number): Pla
 export const planningWaitOpen = (target: PlanningTarget): boolean =>
   target.state === "requested" || target.state === "acknowledged" || target.state === "quiescent";
 
+/**
+ * Whether reconciliation still observes a target: its ACK or quiescence is awaited (a quiet actor may still acknowledge, as an idle main
+ * does once it takes up the hold), or a hold or release is not yet confirmed. An acknowledged actor with a delivered hold has nothing
+ * left to observe; a decision that relies on it reads it afresh.
+ */
+export const planningTargetAwaited = (target: PlanningTarget): boolean => target.state === "requested" || target.state === "quiescent" ||
+  target.state === "release_pending" || target.hold.state === "sending" || target.hold.state === "uncertain";
+
 export const planningCanAdopt = (attempt: PlanningAttempt, now: number): boolean => attempt.state === "open" && now < attempt.deadline &&
   attempt.targets.every(target => target.state === "acknowledged" || target.state === "quiescent" || target.state === "closed");
 

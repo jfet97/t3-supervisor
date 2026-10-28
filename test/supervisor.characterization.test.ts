@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {request} from "node:http";
 import {connect} from "node:net";
+import {networkInterfaces} from "node:os";
 import {join} from "node:path";
 import {it} from "@effect/vitest";
 import {Clock, Console, Deferred, Effect, Exit, Fiber, Queue, SubscriptionRef} from "effect";
@@ -201,6 +202,38 @@ it.live("CT-HEALTH-01: enabled supervision that is not ready keeps /health at 50
   assert.equal(body.lastErrorPhase, "supervision");
   assert.deepEqual(body.readiness, {alive: true, ready: false, supervisionProgress: false});
   assert.equal((yield* get(port, "/live")).status, 200);
+}), {timeout: 10_000});
+
+// audit F2: health listened on every interface, so a bare process served /health and /live, with instance metadata and no
+// authentication, to its whole network although the documentation promises loopback. A peer is simulated by connecting to one of
+// this machine's own non-loopback addresses (on Linux any 127/8 address other than 127.0.0.1 also reaches only a wildcard listener)
+const outsideAddress = Object.values(networkInterfaces()).flat().find(item => item?.family === "IPv4" && !item.internal)?.address ?? "127.0.0.2";
+const connectVia = (host: string, port: number) => liveBound(Effect.callback<string | null, Error>((resume) => {
+  const socket = connect({host, port});
+  socket.once("connect", () => {socket.destroy();resume(Effect.succeed(null));});
+  socket.once("error", (error: NodeJS.ErrnoException) => resume(Effect.succeed(error.code ?? error.message)));
+  return Effect.sync(() => socket.destroy());
+}), `connect ${host}:${port}`);
+
+it.live("CT-HEALTH-02: health listens on loopback unless HEALTH_HOST opens it, as a container's published port needs", () => Effect.gen(function* () {
+  for (const [healthHost, outside] of [[undefined, "ECONNREFUSED"], ["0.0.0.0", null]] as const) {
+    yield* Effect.gen(function* () {
+      const port = yield* freePort;
+      const settings = {...config(yield* temporaryDirectory, port), ...(healthHost ? {healthHost} : {})};
+      const {ref} = yield* liveStatus(settings);
+      const watching = yield* Deferred.make<void>();
+      const {console} = yield* eventConsole();
+      const client: T3ClientShape = {
+        descriptor: () => Effect.succeed(environment),
+        projection: () => Effect.fail(new T3TransportError("No projection is expected")),
+        watch: (_cursor, onItem) => onItem(projectItem).pipe(Effect.andThen(Deferred.succeed(watching, undefined)), Effect.andThen(Effect.never)),
+      };
+      yield* startReal(settings, ref, client, console);
+      yield* withDeadline(Deferred.await(watching), 3_000, "watch start");
+      assert.equal((yield* get(port, "/live")).status, 200, "loopback answers in both settings");
+      assert.equal(yield* connectVia(outsideAddress, port), outside, `${healthHost ?? "default"} health listener reached through ${outsideAddress}`);
+    }).pipe(Effect.scoped);
+  }
 }), {timeout: 10_000});
 
 it.effect("CT-MAIN-04: a descriptor failure sets t3_authentication and retries exactly every 10 s", () => Effect.gen(function* () {

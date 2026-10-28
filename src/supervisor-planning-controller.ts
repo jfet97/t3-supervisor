@@ -24,7 +24,7 @@ import { WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel,
 import { workflowRequestHash } from "./workflow-write-evidence.js";
 import {
   acknowledgePlanningTarget, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs, expirePlanningAttempt,
-  markPlanningTargetQuiescent, startPlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningDelivery, planningCanAdopt, planningDraftNotice,
+  markPlanningTargetQuiescent, planningTargetAwaited, startPlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningDelivery, planningCanAdopt, planningDraftNotice,
   planningDraftSections, planningDraftViews, planningHasUnresolvedEffects, planningHoldText, planningReleaseText, planningWaitOpen, resolvePlanningAttempt,
   type PlanningAttempt, type PlanningDelivery, type PlanningTarget,
 } from "./supervisor-planning.js";
@@ -293,29 +293,41 @@ const make = Effect.gen(function* () {
     if (entry.state !== "pending") return denied("return_not_pending");
     const region = new Set(entry.regionNodeIds);
     const required = new Set([targetId, ...planEntities(document.document.plan).filter(node => region.has(node.nodeId)).flatMap(node => node.contributorThreadIds)]);
-    const projections = new Map<string, Projection>();
-    const main = yield* attempt(native.projection(binding.mainThreadId, cancel));
-    const task = yield* supervisors.task(binding.mainThreadId);
-    if (!main.ok || !task || !conversationAuthorityCurrent(task, main.value, yield* projectRequesterPolicy(supervisors, binding.projectId)))
-      return denied("return_task_not_authorised");
-    if (!document.document.sourceBinding || document.document.sourceBinding.taskId !== task.id ||
-      document.document.sourceBinding.sourceHash !== taskScopeRevision(task)) return denied("return_workflow_scope_changed");
-    projections.set(binding.mainThreadId, main.value);
-    const source = main.value.messages.find(message => message.id === task.sourceMessageId);
-    if (!source) return denied("return_source_unavailable");
-    for (const id of required) {
-      if (!scope.allowedIds.has(id)) return denied("return_contributor_outside_scope");
-      const observed = yield* attempt(native.projection(id, cancel));
-      if (!observed.ok || observed.value.thread.id !== id) return denied("return_actor_unavailable");
-      projections.set(id, observed.value);
-      const parentId = parents.get(id);
-      if (id !== binding.mainThreadId && parentId && !projections.has(parentId)) {
-        const parent = yield* attempt(native.projection(parentId, cancel));
-        if (!parent.ok) return denied("return_parent_unavailable");
-        projections.set(parentId, parent.value);
+    // point-in-time reads before the admitted commit (nothing is atomic with T3): the owner's is the last, so work it starts while its
+    // contributors are read is seen by the decision
+    const snapshot = Effect.gen(function* () {
+      const projections = new Map<string, Projection>();
+      const main = yield* attempt(native.projection(binding.mainThreadId, cancel));
+      const task = yield* supervisors.task(binding.mainThreadId);
+      if (!main.ok || !task || !conversationAuthorityCurrent(task, main.value, yield* projectRequesterPolicy(supervisors, binding.projectId)))
+        return denied("return_task_not_authorised");
+      if (!document.document.sourceBinding || document.document.sourceBinding.taskId !== task.id ||
+        document.document.sourceBinding.sourceHash !== taskScopeRevision(task)) return denied("return_workflow_scope_changed");
+      projections.set(binding.mainThreadId, main.value);
+      const source = main.value.messages.find(message => message.id === task.sourceMessageId);
+      if (!source) return denied("return_source_unavailable");
+      for (const id of [...[...required].filter(id => id !== targetId), targetId]) {
+        if (!scope.allowedIds.has(id)) return denied("return_contributor_outside_scope");
+        const observed = yield* attempt(native.projection(id, cancel));
+        if (!observed.ok || observed.value.thread.id !== id) return denied("return_actor_unavailable");
+        projections.set(id, observed.value);
+        const parentId = parents.get(id);
+        if (id !== binding.mainThreadId && parentId && !projections.has(parentId)) {
+          const parent = yield* attempt(native.projection(parentId, cancel));
+          if (!parent.ok) return denied("return_parent_unavailable");
+          projections.set(parentId, parent.value);
+        }
       }
-    }
-    return yield* gate.admit(guard => transaction(Effect.gen(function* () {
+      return {projections, task, source};
+    });
+    // the decision is made only on a snapshot that never waited for admission: while another section holds the gate, the call waits for it
+    // to end and reads again, a bounded number of times, and otherwise answers busy without committing anything
+    for (let pass = 0; pass < 3; pass++) {
+      if (pass > 0) yield* gate.admit(() => Effect.void);
+      const read = yield* snapshot;
+      if ("status" in read) return read;
+      const {projections, task, source} = read;
+      const decided = yield* gate.admitIfAvailable(guard => transaction(Effect.gen(function* () {
       if (!(yield* currentOwner(payload, binding, guard)) || !(yield* team.authorizeWrite(binding, payload.supervisorThreadId, targetId, parents, expected)))
         return denied("planning_scope_changed");
       const now = yield* Clock.currentTimeMillis;
@@ -388,6 +400,9 @@ const make = Effect.gen(function* () {
       return yield* states.applyReturn(owner, {operationId: payload.operationId!, workflowId: payload.workflowId!, expectedRevision: payload.expectedRevision!,
         returnId: payload.returnId!, note: payload.reason!, retiredRuns}, now);
     })));
+      if (Option.isSome(decided)) return decided.value;
+    }
+    return {status: "unavailable", reason: "return_admission_busy"};
   });
 
   /**
@@ -603,6 +618,7 @@ const make = Effect.gen(function* () {
           current = (yield* update(binding.projectId, current.id, row => closePlanningTarget(row, binding.mainThreadId, now)))!;
       }
       for (const target of current.targets) {
+        if (!planningTargetAwaited(target)) continue;
         const projection = yield* attempt(native.projection(target.threadId));
         const recipientProjection = target.recipientThreadId === target.threadId ? projection : yield* attempt(native.projection(target.recipientThreadId));
         current = (yield* currentAttempt(binding.projectId, selected.id))!;
@@ -628,7 +644,8 @@ const make = Effect.gen(function* () {
         for (const kind of ["hold", "release"] as const) {
           const freshTarget = current.targets.find(row => row.threadId === target.threadId)!;
           const delivery = kind === "hold" ? freshTarget.hold : freshTarget.release;
-          if (delivery && ["sending", "uncertain", "sent"].includes(delivery.state) && delivery.text && recipientProjection.ok &&
+          // a seen release releases its actor, even once sent; a hold already sent has nothing left to confirm
+          if (delivery && (kind === "release" ? ["sending", "uncertain", "sent"] : ["sending", "uncertain"]).includes(delivery.state) && delivery.text && recipientProjection.ok &&
             recipientProjection.value.messages.some(message => message.id === delivery.messageId && message.text === delivery.text &&
               message.creationSource === "server"))
             current = (yield* update(binding.projectId, current.id, row => replaceDelivery(row, target.threadId, kind, {...delivery, state: "sent"}, true)))!;

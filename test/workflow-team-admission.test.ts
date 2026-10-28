@@ -104,7 +104,8 @@ const setup = Effect.gen(function* () {
 // HelperTransport.receiptDocument is unused by these actions; the real transport would open its own tables and a socket.
 const services = (f: Fixture) => Effect.gen(function* () {
   const sections = yield* makeSupervisionGate(f.guard).pipe(Effect.provideService(GuidanceDb, f.sql));
-  const gate: SupervisionGateShape = {admit: (body) => Effect.andThen(Effect.sync(() => f.log.push("admit")), sections.admit(body))};
+  const gate: SupervisionGateShape = {admit: (body) => Effect.andThen(Effect.sync(() => f.log.push("admit")), sections.admit(body)),
+    admitIfAvailable: (body) => Effect.andThen(Effect.sync(() => f.log.push("admit")), sections.admitIfAvailable(body))};
   const dispatched: Array<Record<string, unknown>> = [];
   const native = WorkflowNativeAccess.of({
     listThreads: () => Effect.succeed(f.threads),

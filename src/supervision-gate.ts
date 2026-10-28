@@ -135,6 +135,9 @@ export interface SupervisionGateShape {
   // uninterruptible and contains only short guidance transactions and at most one native initiation; requested while a
   // guidance transaction is open on the calling fiber, it dies
   readonly admit: <A, E, R>(body: (guard: GateGuard) => Effect.Effect<A, E, R>) => Effect.Effect<A, E, R>;
+  // the same section only when it can be entered at once, else none and the body never runs: for a decision on native state read just
+  // before it, which must not wait behind another section with that snapshot
+  readonly admitIfAvailable: <A, E, R>(body: (guard: GateGuard) => Effect.Effect<A, E, R>) => Effect.Effect<Option.Option<A>, E, R>;
 }
 
 // one gate over the given predicates, on the run's guidance client whose transactions it is never entered from
@@ -145,6 +148,9 @@ export const makeSupervisionGate = (guard: GateGuard): Effect.Effect<Supervision
     admit: (body) => Effect.flatMap(Effect.serviceOption(db.transactionService), (open) => Option.isSome(open)
       ? Effect.die(new AdmissionInsideTransaction())
       : Semaphore.withPermits(admission, 1)(Effect.uninterruptible(Effect.suspend(() => body(guard))))),
+    admitIfAvailable: (body) => Effect.flatMap(Effect.serviceOption(db.transactionService), (open) => Option.isSome(open)
+      ? Effect.die(new AdmissionInsideTransaction())
+      : Semaphore.withPermitsIfAvailable(admission, 1)(Effect.uninterruptible(Effect.suspend(() => body(guard))))),
   };
 });
 

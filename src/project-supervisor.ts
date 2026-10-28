@@ -35,6 +35,7 @@ import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { WorkflowStateStore } from "./workflow-state-store.js";
 import type { NoProjectControlInput, GlobalDefinitionsControlInfo, GlobalDefinitionsControlInput, SupervisionControlInfo, SupervisionControlInput, SupervisionSetupInput } from "./supervisor-control-contract.js";
 import { admitSend, SupervisionGate, SupervisionScopeService, type GateGuard, type SendPreparation } from "./supervision-gate.js";
+import { configuredWorkflowToolRoutes } from "./workflow-write-evidence.js";
 import { genuineUserMessage, SupervisionControl } from "./supervision-control.js";
 import { ScopeLocks } from "./scope-locks.js";
 import { SupervisorIds } from "./ids.js";
@@ -1373,7 +1374,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       submission: {envelope: {supervisorThreadId: job.supervisorThreadId, bindingGeneration: receipt.attempt.bindingGeneration, taskId: receipt.attempt.taskId,
         attemptId: receipt.attemptId, sourcePin: receipt.attempt.source}, rawArguments: rawArguments.value, argumentsHash: receipt.argumentsHash},
       scope: {projectId: job.projectId, mainThreadId: job.threadId}, request: receipt.attempt, binding, ownedThreadIds: store.ownedIds,
-      projection: supervisorNow, itemId: receipt.proof.itemId, detail, retained: receipt.proof});
+      projection: supervisorNow, itemId: receipt.proof.itemId, detail, retained: receipt.proof, routes: configuredWorkflowToolRoutes(scope.config)});
   });
   // the fresh catalog threads a conversation pass reads, read when the pass runs
   const conversationThreads = Effect.suspend(() => Effect.map(source.catalog(), (catalog) => catalog.threads));

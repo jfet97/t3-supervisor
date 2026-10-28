@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { it } from "@effect/vitest";
 import { ConfigProvider, Effect } from "effect";
+import { parse } from "yaml";
 import { environment, loadDataDirectory, SupervisorConfig } from "../src/config.js";
 
 // the configuration as the process parses it: the SupervisorConfig layer over the current process environment
@@ -10,9 +12,9 @@ const loadConfig = Effect.suspend(() => SupervisorConfig.useSync((config) => con
 
 // every variable loadConfig reads, plus the two that locate the default data directory
 const variables = [
-  "DATA_DIRECTORY", "XDG_STATE_HOME", "HOME", "T3_URL", "T3_TOKEN_FILE", "EXCLUDED_THREAD_IDS", "HEALTH_PORT",
+  "DATA_DIRECTORY", "XDG_STATE_HOME", "HOME", "T3_URL", "T3_TOKEN_FILE", "EXCLUDED_THREAD_IDS", "HEALTH_PORT", "HEALTH_HOST",
   "SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID", "UI_PORT", "UI_HOST", "WORKFLOW_MCP_HOSTS", "WORKFLOW_MCP_BIND_HOST",
-  "WORKFLOW_MCP_PORT", "UI_ASSETS_DIRECTORY", "T3_GUIDANCE_TOKEN_FILE", "T3_PROJECT_WRITE_TOKEN_FILE",
+  "WORKFLOW_MCP_PORT", "WORKFLOW_MCP_SERVER_ALIASES", "WORKFLOW_MCP_GATEWAY_TOOLS", "UI_ASSETS_DIRECTORY", "T3_GUIDANCE_TOKEN_FILE", "T3_PROJECT_WRITE_TOKEN_FILE",
   "T3_PROJECT_COMMIT_TOKEN_FILE", "T3_GIT_PROBE_TOKEN_FILE", "T3_MANAGED_SCRATCH_ROOT",
 ] as const;
 type Variable = typeof variables[number];
@@ -43,6 +45,7 @@ it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig go
     t3TokenFile: "/run/secrets/t3-read-token",
     excludedThreadIds: [],
     healthPort: 9007,
+    healthHost: "127.0.0.1",
     uiPort: 9008,
     uiHost: "127.0.0.1",
     workflowMcpHosts: [],
@@ -66,6 +69,7 @@ it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig go
     T3_TOKEN_FILE: "/secrets/read",
     EXCLUDED_THREAD_IDS: " a, ,b ",
     HEALTH_PORT: "1234",
+    HEALTH_HOST: "0.0.0.0",
     SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: " helpers-1 ",
     UI_PORT: "5678",
     UI_HOST: "0.0.0.0",
@@ -85,6 +89,7 @@ it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig go
     t3TokenFile: "/secrets/read",
     excludedThreadIds: ["a", "b"],
     healthPort: 1234,
+    healthHost: "0.0.0.0",
     helperProviderInstanceId: "helpers-1",
     uiPort: 5678,
     uiHost: "0.0.0.0",
@@ -128,6 +133,7 @@ it.effect("CT-CONFIG-03: empty-string and non-numeric values keep their baseline
     t3TokenFile: "",
     excludedThreadIds: [],
     healthPort: 0,
+    healthHost: "",
     uiPort: 0,
     uiHost: "",
     workflowMcpHosts: [],
@@ -144,4 +150,40 @@ it.effect("CT-CONFIG-03: empty-string and non-numeric values keep their baseline
   assert.ok(Number.isNaN(nonNumeric.uiPort));
   assert.equal(Object.hasOwn(nonNumeric, "workflowMcpPort"), true);
   assert.ok(Number.isNaN(nonNumeric.workflowMcpPort));
+}), { timeout: 10_000 });
+
+// audit F2: a bare process keeps health on loopback, so the image opens it on the container's own interface, where only its published
+// port reaches it; the template publishes that port on host loopback, and a container listener on loopback alone is unreachable
+it("CT-CONFIG-04: the image opens health inside its container and the template publishes it on host loopback only", () => {
+  const runtime = readFileSync(new URL("../Dockerfile", import.meta.url), "utf8").split(/^FROM /mu).at(-1)!;
+  assert.match(runtime, /^ENV .*\bHEALTH_HOST=0\.0\.0\.0\b/mu);
+  const service = (parse(readFileSync(new URL("../compose.yaml", import.meta.url), "utf8")) as
+    {services: Record<string, {environment: Record<string, string>; ports: string[]}>}).services["t3-supervisor"]!;
+  assert.deepEqual({health: service.environment.HEALTH_HOST, ui: service.environment.UI_HOST}, {health: "0.0.0.0", ui: "0.0.0.0"});
+  assert.deepEqual(service.ports, ["127.0.0.1:9007:9007", "127.0.0.1:9008:9008"]);
+});
+
+// audit F7: the registrations a deployment configures replace the documented ones; each is an exact name, never a pattern
+it.effect("CT-CONFIG-05: server aliases and gateway call tools are exact names, trimmed, and an unset or blank list keeps the documented ones", () => Effect.gen(function* () {
+  const configured = yield* withEnvironment({ WORKFLOW_MCP_SERVER_ALIASES: " supervisor , t3_supervisor ",
+    WORKFLOW_MCP_GATEWAY_TOOLS: " mcp__other_gateway__call_tool , gateway.invoke " }, loadConfig);
+  assert.deepEqual({ server: configured.workflowMcpServerAliases, gateway: configured.workflowMcpGatewayTools },
+    { server: ["supervisor", "t3_supervisor"], gateway: ["mcp__other_gateway__call_tool", "gateway.invoke"] });
+  const documented = yield* withEnvironment({ WORKFLOW_MCP_GATEWAY_TOOLS: "mcpx.mcpx_call_tool,mcp__mcpx__mcpx_call_tool" }, loadConfig);
+  assert.deepEqual(documented.workflowMcpGatewayTools, ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"]);
+  for (const values of [{}, { WORKFLOW_MCP_SERVER_ALIASES: " , ", WORKFLOW_MCP_GATEWAY_TOOLS: "" }]) {
+    const unset = yield* withEnvironment(values, loadConfig);
+    assert.equal(Object.hasOwn(unset, "workflowMcpServerAliases") || Object.hasOwn(unset, "workflowMcpGatewayTools"), false);
+  }
+  for (const invalid of ["server.alias", "server__alias", "-server", "server-", "server alias", "*", "x".repeat(65)]) {
+    const failure: unknown = yield* Effect.flip(withEnvironment({ WORKFLOW_MCP_SERVER_ALIASES: invalid }, loadConfig));
+    assert.ok(failure instanceof Error && failure.message === "invalid_workflow_mcp_alias", invalid);
+  }
+  // a gateway call tool is one server's one tool: a bare tool, a pattern or a name with another delimiter is no exact name
+  for (const invalid of ["call_tool", "mcpx", "gateway.", ".call_tool", "gateway.call.tool", "mcp__gateway", "mcp__gateway__", "mcp____call_tool",
+    "mcp__other__gateway__call_tool", "mcp__gateway__call__tool", "gateway.call tool", "gateway.*", "mcp__*__call_tool", "gateway.call_tool;",
+    `gateway.${"x".repeat(121)}`]) {
+    const failure: unknown = yield* Effect.flip(withEnvironment({ WORKFLOW_MCP_GATEWAY_TOOLS: invalid }, loadConfig));
+    assert.ok(failure instanceof Error && failure.message === "invalid_workflow_mcp_gateway_tool", invalid);
+  }
 }), { timeout: 10_000 });

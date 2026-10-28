@@ -11,7 +11,7 @@ import { workflowIntroductionText } from "../../src/supervisor-conversation.js";
 import { prepareWorkflowRequest, validateWorkflowPlan, type WorkflowPlanValue } from "../../src/supervisor-workflow.js";
 import type { WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../../src/supervisor-native.js";
-import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
+import type { MessageInfo, Projection, RunInfo, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { compactProposalDigest } from "../../src/supervisor-workflow-agreement.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "../project-definitions-fixture.js";
 import { recordInterpretationSubmission } from "./interpretation-evidence-fixture.js";
@@ -255,6 +255,8 @@ export interface FixtureOptions {
   task?: boolean;
   operativeActive?: boolean;
   settings?: { intervalMinutes: number; activityThreshold: number };
+  /** the process settings over the run settings, as a deployment configures them */
+  config?: Partial<SupervisorSettings>;
 }
 
 /** The suite's wall time: the fake T3 stamps what it records with it; `setNow` moves the services' test clock with it. */
@@ -343,7 +345,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
   });
   const fake = yield* makeFakeT3({projections, answer, definitions: (loadedProjectId, threadId) => ({...definitionSnapshot, projectId: loadedProjectId, threadId})});
   /** a process on the suite's files over the fake T3: its own database clients and services, closed with the test */
-  const openProcess = openConversationProcess({directory, policyDirectory: threadPolicyDirectory, fake, eligible});
+  const openProcess = openConversationProcess({directory, policyDirectory: threadPolicyDirectory, fake, eligible, ...(options.config ? {config: options.config} : {})});
   const process = yield* openProcess;
   const projectStore = process.store;
   const binding = yield* projectStore.reserve(projectId, operativeThreadId, "Project A", defaultSupervisorModel, 10, clock.now);

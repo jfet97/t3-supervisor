@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { vi } from "vitest";
-import { submissionArguments } from "./support/interpretation-submit.js";
+import { installSubmission, submissionArguments, submissionDetail } from "./support/interpretation-submit.js";
 import { planFields, startInterpretationFixture, type InterpretationFixture } from "./support/interpretation-fixture.js";
 
 // the typed interpretation's finalization (plan 3.12 items 6, 7 and 9) over the production boundary: the real supervision cycle,
@@ -47,6 +47,34 @@ it.live("CT-ISUB-01: a valid submission in the exact request run is submitted, f
   assert.equal(f.operativeSends().length, 1, "one introduction to the bound main");
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 60_000});
+
+// audit F7: this crosses intake, retained finalization proof and conversation receipt revalidation over the real transport/stores.
+for (const toolName of ["mcp__other_gateway__call_tool", "gateway.invoke"]) {
+  it.live(`a submission through configured ${toolName} finalizes and its retained receipt introduces exactly once`, () => Effect.gen(function* () {
+    const f = yield* startInterpretationFixture({config: {workflowMcpServerAliases: ["supervisor"], workflowMcpGatewayTools: [toolName]}});
+    const task = yield* dispatched(f);
+    const args = submissionArguments(task, planFields(task));
+    const itemId = installSubmission(f.root(), task, args, {wrapper: "mcpx"});
+    const detail = submissionDetail(f.root(), itemId)!;
+    detail.toolName = toolName;
+    detail.input = {name: "supervisor__supervision_interpretation_submit", arguments: args};
+    f.native.details.set(itemId, detail);
+    const submitted = yield* f.submit(task, args, {install: false});
+    assert.equal(submitted.value.status, "submitted");
+    assert.equal(f.operativeSends().length, 0, "no introduction before the request run completes");
+    // retain the committed receipt across a process restart, then re-read its exact native call during finalization and introduction.
+    yield* f.restart();
+    f.endRun(task, "completed");
+    yield* f.runOnce();
+    const finalized = yield* f.task();
+    assert.equal(finalized.status, "inferred");
+    assert.equal(finalized.interpretationEvidence?.kind, "interpretation_submission");
+    assert.equal(f.operativeSends().length, 1);
+    yield* f.runOnce();
+    assert.equal(f.operativeSends().length, 1, "the configured route does not duplicate delivery");
+    assert.deepEqual(f.peer.unexpected, []);
+  }), {timeout: 30_000});
+}
 
 it.live("CT-ISUB-09: a completed run without a recorded submission closes unavailable; well-formed or malformed final-chat JSON and prose are ignored", () => Effect.gen(function* () {
   for (const finalText of ["well-formed", "malformed", "prose"] as const) {

@@ -144,7 +144,9 @@ it.live("CT-APP-02: interrupting the application closes the UI listener, cleans 
   assert.equal(closes.length, 1, "the startup cleanup ran before readiness");
   assert.deepEqual(closes[0]!.payload, {...pending, deleteHistory: true});
   assert.equal(closes[0]!.uiRefused, true, "the startup cleanup runs before the UI listens");
-  assert.deepEqual(logs, [JSON.stringify({event: "native_git_probe_cleanup_unavailable"})]);
+  // the shared event line: the Clock's time and the event, nothing of the failure
+  assert.deepEqual(logs.map(line => Object.keys(JSON.parse(line) as object)), [["time", "event"]]);
+  assert.deepEqual(logs.map(line => (JSON.parse(line) as {event: string}).event), ["native_git_probe_cleanup_unavailable"]);
   const status = yield* fetchWithin(app.origin + "/auth/status");
   assert.equal(status.status, 200);
   assert.deepEqual(JSON.parse(status.text), {authenticated: false});

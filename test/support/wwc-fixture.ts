@@ -19,7 +19,7 @@ import { readTeamViewData, supervisorTeamView } from "../../src/supervisor-team-
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/supervisor-workflow.js";
 import { T3Client, T3TransportError } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
-import type { Projection, ThreadInfo } from "../../src/types.js";
+import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import type { WorkflowOwner } from "../../src/workflow-state-contract.js";
 import { WorkflowNativeAccess, WorkflowWriteController, type SupervisorContextViewInput, type SupervisorContextViewResult, type WorkflowApplyPatch } from "../../src/workflow-write-controller.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
@@ -92,8 +92,9 @@ class WwcScope extends SupervisionScope {
     guidance: GuidanceStore["Service"],
     private readonly supervisors: ProjectSupervisorStore["Service"],
     private readonly stopped: (threadId: string) => boolean,
+    settings: Partial<SupervisorSettings> = {},
   ) {
-    super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0},
+    super({dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0, ...settings},
       {guidance, supervisors, policy: unusedPolicy}, true);
   }
   override scopeEnabled() {return Effect.succeed(true);}
@@ -129,6 +130,8 @@ export interface OpenWriteOptions {
   readonly contextViews?: {
     readContextView: (binding: BindingRecord, input: SupervisorContextViewInput) => Effect.Effect<SupervisorContextViewResult>;
   } | undefined;
+  // process settings the controller reads, such as the configured registration aliases
+  readonly settings?: Partial<SupervisorSettings> | undefined;
 }
 
 export interface WwcFixture {
@@ -251,7 +254,7 @@ export const makeFixture = (mainThread: ThreadInfo = thread("main-workflows", "p
 export const openWrite = (fixture: WwcFixture, options: OpenWriteOptions = {}) => Effect.gen(function* () {
   const native = options.native ?? fixture.native;
   const stopped = options.isChatStopped ?? (() => false);
-  const scope = new WwcScope(Context.get(fixture.context, GuidanceStore), fixture.supervisors, stopped);
+  const scope = new WwcScope(Context.get(fixture.context, GuidanceStore), fixture.supervisors, stopped, options.settings);
   const access = nativeAccess(native);
   const gate = yield* makeSupervisionGate(scope).pipe(Effect.provideService(GuidanceDb, fixture.db));
   const loader = options.loadDefinitions;

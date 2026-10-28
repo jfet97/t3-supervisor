@@ -68,11 +68,13 @@ const health = (path: "/health" | "/live") => Effect.gen(function* () {
     { status: healthy ? 200 : 503, contentType: "application/json" });
 });
 
-// /health and /live for every method on the health port; the http logger and the listen log stay disabled
+// /health and /live for every method on the health port; the http logger and the listen log stay disabled. Like the dashboard it
+// listens on loopback unless HEALTH_HOST names another address (the container image sets 0.0.0.0 inside its own network namespace,
+// where its published port decides the exposure); an empty value never widens it
 const healthServer = Layer.unwrap(SupervisorConfig.useSync((config) => HttpRouter.serve(
   Layer.mergeAll(HttpRouter.add("*", "/health", health("/health")), HttpRouter.add("*", "/live", health("/live"))),
   { disableLogger: true, disableListenLog: true },
-).pipe(Layer.provide(NodeHttpServer.layerServer(createServer, { port: config.healthPort, host: "0.0.0.0" })))));
+).pipe(Layer.provide(NodeHttpServer.layerServer(createServer, { port: config.healthPort, host: config.healthHost || "127.0.0.1" })))));
 
 export const runSupervisor = Effect.gen(function* () {
   const config = yield* SupervisorConfig;

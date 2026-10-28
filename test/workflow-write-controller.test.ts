@@ -81,6 +81,78 @@ it.effect("MCPX input unwrap is exact and the verified native item is stored wit
   } finally {yield* fixture.close;}
 }));
 
+// audit F7: the routes were a closed list of the documented registrations, so a deployment registering the server under another alias,
+// or calling it through another gateway, was denied every write. A configured server alias or exact gateway call tool is a supported
+// registration, matched exactly with every ownership gate kept; any other name stays unprovable and denied
+it.effect("a configured server alias and gateway call tool prove the bound root's own write exactly; other names, servers and arguments stay denied", () => Effect.gen(function* () {
+  const settings = {workflowMcpServerAliases: ["supervisor"], workflowMcpGatewayTools: ["mcp__other_gateway__call_tool", "gateway.invoke"]};
+  for (const [label, toolName, input] of [
+    ["direct alias", "mcp__supervisor__workflow_write", null],
+    ["dotted alias", "supervisor.workflow_write", null],
+    ["configured gateway", "mcp__other_gateway__call_tool", "supervisor__workflow_write"],
+    ["configured dotted gateway", "gateway.invoke", "supervisor__workflow_write"],
+  ] as const) {
+    const fixture = yield* makeFixture();
+    try {
+      const args = ensureArgs(fixture, `configured-${label.replace(/ /gu, "-")}`, "Create through a configured registration.");
+      const itemId = installEvidence(fixture, args, {toolName, snapshotInput: input === null ? args : {name: input, arguments: args},
+        ...(input === null ? {} : {input: {name: input, arguments: args}})});
+      const controller = yield* openWrite(fixture, {maxEvidenceWaitMs: 0, loadDefinitions: fixture.loadDefinitions, settings});
+      const result = yield* controller.write(args);
+      assert.equal(result.status, "created", `${label}: ${JSON.stringify(result)}`);
+      const proof = (yield* sqlGet(fixture.db, "SELECT item_id,native_evidence FROM supervisor_workflow_write_evidence WHERE operation_id=?",
+        args.operationId)) as {item_id: string; native_evidence: string} | undefined;
+      assert.equal(proof?.item_id, itemId, label);
+      assert.equal((JSON.parse(proof!.native_evidence) as {toolName: string}).toolName, toolName, label);
+    } finally {yield* fixture.close;}
+  }
+  for (const [label, toolName, input, observed] of [
+    ["the documented alias once others are configured", "mcp__t3-supervisor-workflows__workflow_write", null, "mcp__t3-supervisor-workflows__workflow_write"],
+    ["an alias with a suffix", "mcp__supervisor-x__workflow_write", null, "mcp__supervisor-x__workflow_write"],
+    ["a tool with a suffix", "mcp__supervisor__workflow_write_v2", null, "mcp__supervisor__workflow_write_v2"],
+    ["the documented gateway once others are configured", "mcpx.mcpx_call_tool", "supervisor__workflow_write", "mcpx.mcpx_call_tool"],
+    ["the configured operation on an unknown gateway", "mcp__unknown_gateway__call_tool", "supervisor__workflow_write", "mcp__unknown_gateway__call_tool"],
+    ["the configured gateway in an unconfigured form", "other_gateway.call_tool", "supervisor__workflow_write", "other_gateway.call_tool"],
+    ["the configured gateway naming another server", "gateway.invoke", "t3-supervisor-workflows__workflow_write", "t3-supervisor-workflows__workflow_write"],
+  ] as const) {
+    const fixture = yield* makeFixture();
+    try {
+      const args = ensureArgs(fixture, `unconfigured-${label.replace(/ /gu, "-")}`, "Never infer a registration from a name's shape.");
+      installEvidence(fixture, args, {toolName, snapshotInput: input === null ? args : {name: input, arguments: args},
+        ...(input === null ? {} : {input: {name: input, arguments: args}})});
+      const controller = yield* openWrite(fixture, {maxEvidenceWaitMs: 0, loadDefinitions: fixture.loadDefinitions, settings});
+      assert.deepEqual(yield* controller.write(args), {status: "denied", operationId: args.operationId, reason: "native_tool_name_unrecognized",
+        observedToolName: observed}, label);
+      assert.equal(yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null, label);
+    } finally {yield* fixture.close;}
+  }
+  // the configured gateway proves only the call whose arguments are the request's own, and only in the standard call envelope
+  for (const [label, input] of [
+    ["other arguments", (args: Record<string, unknown>) => ({name: "supervisor__workflow_write", arguments: {...args, description: "Another request."}})],
+    ["an extra envelope key", (args: Record<string, unknown>) => ({name: "supervisor__workflow_write", arguments: args, extra: true})],
+    ["another envelope", (args: Record<string, unknown>) => ({tool: "supervisor__workflow_write", arguments: args})],
+  ] as const) {
+    const fixture = yield* makeFixture();
+    try {
+      const args = ensureArgs(fixture, `configured-gateway-${label.replace(/ /gu, "-")}`, "Prove the exact arguments.");
+      installEvidence(fixture, args, {toolName: "mcp__other_gateway__call_tool", snapshotInput: input(args), input: input(args)});
+      const controller = yield* openWrite(fixture, {maxEvidenceWaitMs: 0, loadDefinitions: fixture.loadDefinitions, settings});
+      const result = yield* controller.write(args);
+      assert.equal(result.status, "pending", `${label}: ${JSON.stringify(result)}`);
+      assert.equal(yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId), null, label);
+    } finally {yield* fixture.close;}
+  }
+  // a configured alias still needs the root's own strong main-run item
+  const fixture = yield* makeFixture();
+  try {
+    const args = ensureArgs(fixture, "configured-nested", "A configured name cannot bypass ownership.");
+    installEvidence(fixture, args, {toolName: "mcp__supervisor__workflow_write", snapshotInput: args, parentItemId: "parent-item"});
+    const controller = yield* openWrite(fixture, {maxEvidenceWaitMs: 0, loadDefinitions: fixture.loadDefinitions, settings});
+    const result = yield* controller.write(args);
+    assert.equal(result.status === "denied" ? result.reason : result.status, "native_item_not_main_strong");
+  } finally {yield* fixture.close;}
+}), { timeout: 60_000 });
+
 it.effect("AppRun order selects new-provider evidence ahead of older provider item ordinals", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {

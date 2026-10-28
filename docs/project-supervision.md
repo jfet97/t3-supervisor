@@ -456,7 +456,13 @@ Ending the attempt cleans up its registered drafting task while retaining unknow
 native command outcomes. Late content never renews the pause or publishes itself.
 
 A reached `back_to` is applied through `supervision_planning apply_return` after
-current pause/quiescence checks. It preserves agreement and starts a new attempt;
+current pause/quiescence checks. The checks use point-in-time native reads taken just
+before the commit, the owner's last. A read never waits for another admitted operation
+before it is used. While one is in progress, the return waits for it to end and reads
+again; after a few busy passes it answers `unavailable` with `return_admission_busy`,
+writes nothing, and the identical call can be repeated. Work that starts in the instant
+between the last read and the commit is not seen, because nothing is atomic with T3.
+The return preserves agreement and starts a new attempt;
 real commitment changes still require a revised proposal. Old child runs are fenced
 using actual execution IDs. When a native child exposes no independent run ID, the
 return is refused rather than treating its shared parent run as an execution ID.
@@ -571,6 +577,18 @@ is needed. An unresolved interpretation starts no check-ins. Activity retained f
 earlier request, or a replaced request's known-unsent draft, stays as history and does
 not alone keep its Supervisor open. An incomplete activity scan or an introduction
 with an unknown outcome still does.
+The service also settles the operative main conversation itself once its work is
+finished, as users asked. This happens when the current task needed no supervised
+workflow, or when its agreed main workflow is completed: no pending return, and every
+applicable member settled. The main, its children and any unassessed activity must
+then stay quiet for 60 seconds while supervision of the main is active. A pinned main,
+one whose auto-settle is turned off, or one reactivated in T3 stays active; so does a
+main with pending input, active children, an incomplete scope or unassessed work. The
+first such gate is recorded as `mainSettlementBlockedBy` and shown in Supervision
+("Main conversation remains active"); Supervision also shows when the service settled
+the main. This settlement parks the main in T3, like a Supervisor's; it is not deletion.
+A stop never settles the main.
+
 An idle main's old lifecycle-unknown child can also permit
 standby after the quiet period when no known activity, attention issue or pending
 input requires action. Unknown work stays unresolved. Background monitoring

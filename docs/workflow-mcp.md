@@ -275,6 +275,20 @@ Register it under the exact server alias `t3-supervisor-workflows` when authoriz
 to configure a connection. MCPX connects directly to Supervisor; do not add HTTP
 proxies or relay sidecars to adapt the connection.
 
+A deployment that registers the server under another alias lists those exact aliases
+in `WORKFLOW_MCP_SERVER_ALIASES`: a comma-separated list of letters and digits joined
+by single `-` or `_`. A deployment whose agents call tools through another gateway
+lists the exact native names of that gateway's call tool in
+`WORKFLOW_MCP_GATEWAY_TOOLS`, one per form the providers record, such as
+`mcp__other_gateway__call_tool,other_gateway.call_tool`. Each name is
+`<server>.<tool>` or `mcp__<server>__<tool>`, with the server and the tool each letters
+and digits joined by single `-` or `_`; the default is
+`mcpx.mcpx_call_tool,mcp__mcpx__mcpx_call_tool`.
+A gateway is supported only when its call tool takes the standard MCP call envelope,
+exactly `{name, arguments}`, with object arguments. Any other input shape is not
+recognised. A list replaces the default, and an invalid name stops startup. A
+name that is not configured is denied like any unknown route.
+
 Every MCP request requires `Authorization: Bearer <workflow-token>`. The service
 creates the private token at `<DATA_DIRECTORY>/access/workflow-mcp-token` on first
 startup and preserves it across restarts. Configure this header privately in MCPX;
@@ -604,13 +618,16 @@ then reads complete input through T3's existing `orchestration.getTurnItem` API.
 The run, thread, provider thread, strong native reference and own main-node graph
 must match, with no parent item or non-execution marker. The supported native routes
 are a closed list, read by one resolver for evidence, re-validated receipts and read
-coverage: the provider-native direct names of the server alias `t3-supervisor-workflows`
-(`t3-supervisor-workflows.<tool>` and `mcp__t3-supervisor-workflows__<tool>`), and the one
-recognised MCP gateway call envelope (`mcpx.mcpx_call_tool` or `mcp__mcpx__mcpx_call_tool`
-with exactly `{name: "t3-supervisor-workflows__<tool>", arguments}`). T3's own thread reads
-are recognised on its `t3-code` routes the same way. Any other client alias or gateway is
-unsupported: its call is denied as unrecognised even when its arguments match, and no call
-is ever matched on argument shape alone. Portability across clients is therefore partial
+coverage: the provider-native direct names of each configured server alias, by default
+`t3-supervisor-workflows` (`<alias>.<tool>` and `mcp__<alias>__<tool>`), and a call through
+one of the configured gateway call tools, by default `mcpx.mcpx_call_tool` or
+`mcp__mcpx__mcpx_call_tool`, with exactly `{name: "<alias>__<tool>", arguments}`. T3's
+own thread reads, by the Supervisor and its helpers, are recognised on its `t3-code` direct
+routes and through the same configured gateway call tools naming exactly
+`t3-code__t3_thread_read`. Any other client alias, gateway call tool or envelope is
+unsupported: its call is denied as unrecognised even when its arguments match. No name
+is matched by prefix, suffix or argument shape, and another gateway's routing cannot
+prove provenance. Portability across clients is therefore partial
 until a further route is declared and reviewed; if T3 publishes a structured MCP server
 identity on tool items, routes should bind to that instead of names. Instructions name
 operations and tools only, with one neutral reminder that a connected gateway may expose

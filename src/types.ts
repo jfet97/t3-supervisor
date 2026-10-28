@@ -75,12 +75,15 @@ export interface SupervisorSettings {
   t3TokenFile: string;
   excludedThreadIds: string[];
   healthPort: number;
+  healthHost?: string;
   helperProviderInstanceId?: string;
   uiPort?: number;
   uiHost?: string;
   workflowMcpHosts?: ReadonlyArray<string>;
   workflowMcpBindHost?: string;
   workflowMcpPort?: number;
+  workflowMcpServerAliases?: ReadonlyArray<string>;
+  workflowMcpGatewayTools?: ReadonlyArray<string>;
   uiAssetsDirectory?: string;
   guidanceTokenFile?: string;
   projectWriteTokenFile?: string;

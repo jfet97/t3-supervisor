@@ -11,38 +11,11 @@ import { SupervisionControl, SupervisionControlSave, SupervisionControlResult, S
 
 const Text = Schema.String;
 const NullableText = Schema.NullOr(Text);
-export const RuleMode = Schema.Literals(["paused", "observe", "send"]);
-export const RuleInput = Schema.Struct({
-  id: NullableText,
-  expectedGeneration: Schema.Number,
-  name: Text,
-  condition: Text,
-  message: Text,
-  scope: Schema.Literals(["global", "project", "scratch"]),
-  projectId: NullableText,
-  mode: RuleMode,
-});
-export const Rule = Schema.Struct({
-  ...RuleInput.fields,
-  id: Text,
-  revision: Schema.Number,
-  generation: Schema.Number,
-  liveSince: Schema.Number,
-  updatedAt: Schema.Number,
-});
-export type GuidanceRule = typeof Rule.Type;
-export type GuidanceRuleInput = typeof RuleInput.Type;
+// the live projection of the stored guidance settings row: the classification generation and the evidence retention; fields of the
+// retired reminder rules stay in existing rows, unread
 export const Settings = Schema.Struct({
   generation: Schema.Number,
-  guidancePaused: Schema.Boolean,
-  monitoringPaused: Schema.Boolean,
-  allowFollowupRace: Schema.Boolean,
-  verifiedServerVersion: Schema.NullOr(Schema.String),
-  model: Text,
-  reasoning: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),
-  dailyTokenBudget: Schema.Number,
   evidenceHours: Schema.Number,
-  maxAnchorAgeSeconds: Schema.Number,
 });
 export type GuidanceSettings = typeof Settings.Type;
 export const Project = Schema.Struct({
@@ -65,28 +38,16 @@ export const Activity = Schema.Struct({
   episodeEpoch: Schema.optional(Schema.Number),
 });
 export type GuidanceActivity = typeof Activity.Type;
-export const guidanceScopeForSelection = (selected: string,projects: ReadonlyArray<typeof Project.Type>): string =>
-  projects.some(project=>project.id===selected && project.classification==="scratch") ? "scratch" : selected;
-export const guidanceScopeAfterClassification = (selected: string,classifiedProject: string): string =>
-  selected===classifiedProject ? "scratch" : selected;
-export const canResetActivity = (activity: GuidanceActivity): boolean =>
-  activity.threadId !== null && activity.ruleId !== null && Number.isSafeInteger(activity.episodeEpoch);
 export const Snapshot = Schema.Struct({
   environmentId: NullableText,
   serverVersion: NullableText,
   connected: Schema.Boolean,
   lastCycleAt: Schema.NullOr(Schema.Number),
-  sendingReady: Schema.Boolean,
-  sendingReason: Text,
-  settings: Settings,
   threadPolicy: ThreadPolicy,
   threads: Schema.Array(Schema.Struct({ id: Text, title: Text, projectId: NullableText, available: Schema.Boolean })),
   projects: Schema.Array(Project),
-  rules: Schema.Array(Rule),
-  mutes: Schema.Array(Schema.Struct({ ruleId: Text, scopeId: Text })),
   activity: Schema.Array(Activity),
   coverage: Text,
-  tokensUsed: Schema.Number,
 });
 export type GuidanceSnapshot = typeof Snapshot.Type;
 // the sign-in body: any other json value signs in with an empty token, which is refused

@@ -1195,8 +1195,10 @@ it.effect("an independent fork remains eligible when its old parent is absent fr
   assert.ok(yield* fixture.store.binding("project-a", "fork-main"));
 }));
 
-it.effect("repeated short passes rotate past a hung Supervisor and keep later mains progressing", () => Effect.gen(function* () {
-  const initial = Array.from({length: 9}, (_, index) => ({threadId: `main-${index}`, projectId: "project-a", turns: [{id: `old-${index}`, sequence: 9, text: "Old task"}]}));
+// audit F6: more bindings than four batches of four fit in one cycle's budget still all progress; the offset advances before each pass
+for (const count of [9, 20] as const)
+it.effect(`repeated short passes rotate past a hung Supervisor and keep later mains progressing (${count} bindings)`, () => Effect.gen(function* () {
+  const initial = Array.from({length: count}, (_, index) => ({threadId: `main-${index}`, projectId: "project-a", turns: [{id: `old-${index}`, sequence: 9, text: "Old task"}]}));
   const fixture = yield* makeFixture(initial);
   const ids = new Map<string, string>();
   const touched = new Set<string>();
@@ -1209,7 +1211,7 @@ it.effect("repeated short passes rotate past a hung Supervisor and keep later ma
   }
   const supervisor = yield* fixture.makeSupervisor();
   // the hung read suspends the pass; sibling batch work finishes on the node loop, then the pass is interrupted. twelve passes stay the bound.
-  for (let attempt = 0; attempt < 12 && touched.size < 9; attempt++) {
+  for (let attempt = 0; attempt < 12 && touched.size < count; attempt++) {
     const hung = yield* Deferred.make<void>();
     fixture.setHoldReads((id) => {
       const main = ids.get(id);
@@ -1221,7 +1223,7 @@ it.effect("repeated short passes rotate past a hung Supervisor and keep later ma
     yield* interruptHungPass(supervisor.cycle, hung, () => touched.size);
   }
   fixture.setHoldReads(null);
-  assert.equal(touched.size, 9, "the same slow first binding must not permanently hide tail mains");
+  assert.equal(touched.size, count, "the same slow first binding must not permanently hide tail mains");
 }));
 
 // real loopback socket so the production t3 client's buffered reader sees a body larger than its retained budget

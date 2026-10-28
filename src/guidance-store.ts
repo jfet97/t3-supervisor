@@ -8,24 +8,15 @@ import { decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, r
 import { SupervisorIds } from "./ids.js";
 import {
   Activity,
-  Rule,
   Settings,
   type GuidanceActivity,
-  type GuidanceRule,
   type GuidanceSettings,
 } from "./guidance-contract.js";
 
+// a new store's settings row: the classification generation and the evidence retention
 const defaults: GuidanceSettings = {
   generation: 1,
-  guidancePaused: false,
-  monitoringPaused: false,
-  allowFollowupRace: false,
-  verifiedServerVersion: null,
-  model: "gpt-6-luna",
-  reasoning: "high",
-  dailyTokenBudget: 100_000,
   evidenceHours: 24,
-  maxAnchorAgeSeconds: 60,
 };
 export const fingerprint = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -38,16 +29,11 @@ export class GuidanceConflictError extends Schema.TaggedError<GuidanceConflictEr
 const MetaValue = Schema.Struct({ value: Schema.String });
 const DocumentColumn = Schema.Struct({ document: Schema.String });
 const decodeSettingsRow = decodeGuidanceRow(Schema.Struct({ value: Schema.fromJsonString(Settings) }), "settings");
-const decodeRuleRow = decodeGuidanceRow(Schema.Struct({ document: Schema.fromJsonString(Rule) }), "rule");
 const decodeActivityDocument = decodeGuidanceRow(Schema.fromJsonString(Activity), "activity");
 const decodeActivityRow = decodeGuidanceRow(Schema.Struct({ id: Schema.String, document: Schema.String }), "activity");
 const decodeDocumentColumn = decodeGuidanceRow(DocumentColumn, "activity");
 const decodeMetaValue = decodeGuidanceRow(MetaValue, "meta");
-const decodeMuteRow = decodeGuidanceRow(Schema.Struct({ rule_id: Schema.String, scope_id: Schema.String }), "mute");
 const decodeClassificationRow = decodeGuidanceRow(Schema.Struct({ classification: Schema.String }), "classification");
-const decodeHashRow = decodeGuidanceRow(Schema.Struct({ hash: Schema.Unknown }), "observation");
-const decodeTokensRow = decodeGuidanceRow(Schema.Struct({ tokens: Schema.Number }), "budget");
-const decodeEpisodeRow = decodeGuidanceRow(Schema.Struct({ epoch: Schema.Number, object_id: Schema.NullOr(Schema.String) }), "episode");
 const NoticeColumns = Schema.Struct({
   id: Schema.String, thread_id: Schema.String, rule_id: Schema.String, run_id: Schema.String, epoch: Schema.Number, state: Schema.String,
   text: Schema.String, message_id: Schema.NullOr(Schema.String), created_at: Schema.Number, dispatch_started: Schema.Number,
@@ -57,29 +43,22 @@ const decodeNoticeRow = decodeGuidanceRow(NoticeColumns, "notice");
 const decodeUnresolvedRow = decodeGuidanceRow(NoticeColumns.mapFields((fields) => ({
   id: fields.id, thread_id: fields.thread_id, rule_id: fields.rule_id, run_id: fields.run_id, epoch: fields.epoch, created_at: fields.created_at,
 })), "notice");
-const decodeNoticeKeyRow = decodeGuidanceRow(Schema.Struct({ thread_id: Schema.String, rule_id: Schema.String, epoch: Schema.Number }), "notice");
 
 type GuidanceFailure = GuidanceStoreError | GuidanceConflictError;
 type RecordInput = Omit<GuidanceActivity, "id" | "createdAt"> & ({kind:"guidance";episodeEpoch:number;noticeId:string|null}|{kind:"owner_action"});
 
-/** The guidance store: dashboard settings, rules, classifications, observations, budget, activity and notice reconciliation. */
+/**
+ * The guidance store: the environment binding, project classifications, retained activity history and its retention. The tables of the
+ * retired reminder rules (rules, mutes, observations, episodes, notices, budget) stay as they are; only history and retention read them.
+ */
 export interface GuidanceStoreShape {
   readonly settings: () => Effect.Effect<GuidanceSettings, GuidanceStoreError>;
   readonly bind: (environmentId: string) => Effect.Effect<void, GuidanceFailure>;
-  readonly rules: () => Effect.Effect<GuidanceRule[], GuidanceStoreError>;
-  readonly rule: (id: string) => Effect.Effect<GuidanceRule | undefined, GuidanceStoreError>;
-  readonly saveSettings: (input: GuidanceSettings) => Effect.Effect<GuidanceSettings, GuidanceFailure>;
-  readonly mutes: () => Effect.Effect<Array<{ ruleId: string; scopeId: string }>, GuidanceStoreError>;
   readonly classification: (id: string) => Effect.Effect<"project" | "scratch" | "unclassified", GuidanceStoreError>;
   readonly classify: (id: string, classification: "project" | "scratch", generation: number) => Effect.Effect<void, GuidanceFailure>;
-  readonly observe: (threadId: string, hash: string, now: number) => Effect.Effect<boolean, GuidanceStoreError>;
-  readonly previousHash: (threadId: string) => Effect.Effect<string | null, GuidanceStoreError>;
-  readonly used: (now?: number) => Effect.Effect<number, GuidanceStoreError>;
   readonly record: (value: RecordInput, now?: number) => Effect.Effect<GuidanceActivity, GuidanceStoreError>;
   readonly activities: () => Effect.Effect<GuidanceActivity[], GuidanceStoreError>;
   readonly prune: (now?: number) => Effect.Effect<void, GuidanceStoreError>;
-  readonly episode: (threadId: string, ruleId: string) => Effect.Effect<{ epoch: number; objectId: string | null }, GuidanceStoreError>;
-  readonly reconcile: (id: string) => Effect.Effect<void, GuidanceStoreError>;
 }
 
 const schema = [
@@ -108,15 +87,6 @@ const makeGuidanceStore = Effect.gen(function* () {
 
   const readSettings = db`SELECT value FROM meta WHERE key='settings'`.pipe(
     Effect.flatMap(([row]) => decodeSettingsRow(row)), Effect.map((row) => row.value));
-  const readRules = db`SELECT document FROM rules ORDER BY id`.pipe(
-    Effect.flatMap(Effect.forEach((row) => decodeRuleRow(row))), Effect.map((rows) => rows.map((row) => row.document)));
-  const readRule = (id: string) => db`SELECT document FROM rules WHERE id=${id}`.pipe(
-    Effect.flatMap(([row]) => row === undefined ? Effect.succeed(undefined) : Effect.map(decodeRuleRow(row), (decoded) => decoded.document)));
-  const readEpisode = (threadId: string, ruleId: string) => db`SELECT epoch,object_id FROM episodes WHERE thread_id=${threadId} AND rule_id=${ruleId}`.pipe(
-    Effect.flatMap(([row]) => row === undefined ? Effect.succeed({ epoch: 0, objectId: null }) :
-      Effect.map(decodeEpisodeRow(row), (episode) => ({ epoch: episode.epoch, objectId: episode.object_id }))));
-  const readUsed = (now: number) => db`SELECT tokens FROM budget WHERE day=${budgetDay(now)}`.pipe(
-    Effect.flatMap(([row]) => row === undefined ? Effect.succeed(0) : Effect.map(decodeTokensRow(row), (budget) => budget.tokens)));
   const nowOr = (now: number | undefined) => now === undefined ? Clock.currentTimeMillis : Effect.succeed(now);
   const writeActivity = Effect.fnUntraced(function* (value: RecordInput, now: number) {
     const activity = { ...value, id: yield* ids.uuid, createdAt: now };
@@ -152,32 +122,6 @@ const makeGuidanceStore = Effect.gen(function* () {
     yield* db`INSERT OR IGNORE INTO meta VALUES('environment',${environmentId})`;
   })));
 
-  const rules = () => guidanceSql(readRules);
-  const rule = (id: string) => guidanceSql(readRule(id));
-
-  const saveSettings = (input: GuidanceSettings) => guidanceSql(Effect.gen(function* () {
-    if (input.model !== "gpt-6-luna" || !Number.isSafeInteger(input.dailyTokenBudget) || input.dailyTokenBudget < 1000 ||
-      input.dailyTokenBudget > 1_000_000 || ![24, 168].includes(input.evidenceHours) || !Number.isSafeInteger(input.maxAnchorAgeSeconds) ||
-      input.maxAnchorAgeSeconds < 10 || input.maxAnchorAgeSeconds > 600)
-      return yield* conflict("Choose supported monitoring settings.");
-    return yield* db.withTransaction(Effect.gen(function* () {
-      const old = yield* readSettings;
-      if (old.generation !== input.generation) return yield* conflict("Settings changed in another tab. Reload first.");
-      const next = { ...input, generation: old.generation + 1 };
-      yield* db`UPDATE meta SET value=${JSON.stringify(next)} WHERE key='settings'`;
-      if ((old.guidancePaused && !next.guidancePaused) || (old.monitoringPaused && !next.monitoringPaused) ||
-        (!old.allowFollowupRace && next.allowFollowupRace) || old.verifiedServerVersion !== next.verifiedServerVersion) {
-        const now = yield* Clock.currentTimeMillis;
-        for (const current of yield* readRules) yield* db`UPDATE rules SET document=${JSON.stringify({ ...current, liveSince: now })} WHERE id=${current.id}`;
-      }
-      yield* invalidate(null, old, next);
-      return next;
-    }));
-  }));
-
-  const mutes = () => guidanceSql(db`SELECT rule_id,scope_id FROM mutes`.pipe(
-    Effect.flatMap(Effect.forEach((row) => decodeMuteRow(row))), Effect.map((rows) => rows.map((row) => ({ ruleId: row.rule_id, scopeId: row.scope_id })))));
-
   const classification = (id: string) => guidanceSql(db`SELECT classification FROM classifications WHERE project_id=${id}`.pipe(
     Effect.flatMap(([row]) => row === undefined ? Effect.succeed(undefined) : Effect.map(decodeClassificationRow(row), (value) => value.classification)),
     Effect.map((value) => value === "project" || value === "scratch" ? value : "unclassified" as const)));
@@ -186,22 +130,10 @@ const makeGuidanceStore = Effect.gen(function* () {
     const current = yield* readSettings;
     if (current.generation !== generation) return yield* conflict("Settings changed. Reload first.");
     yield* db`INSERT INTO classifications VALUES(${id},${value}) ON CONFLICT(project_id) DO UPDATE SET classification=excluded.classification`;
-    yield* db`UPDATE meta SET value=${JSON.stringify({ ...current, generation: generation + 1 })} WHERE key='settings'`;
+    // only the generation moves; the row's other stored fields stay as they are
+    yield* db`UPDATE meta SET value=json_set(value,'$.generation',${generation + 1}) WHERE key='settings'`;
     yield* invalidate(projectKeys(id));
   })));
-
-  // CC-GDB-IMPLICIT: the read and the upsert commit together
-  const observe = (threadId: string, hash: string, now: number) => guidanceSql(db.withTransaction(Effect.gen(function* () {
-    const [row] = yield* db`SELECT hash FROM observations WHERE thread_id=${threadId}`;
-    const previous = row === undefined ? undefined : yield* decodeHashRow(row);
-    yield* db`INSERT INTO observations VALUES(${threadId},${hash},${now}) ON CONFLICT(thread_id) DO UPDATE SET hash=excluded.hash,observed_at=excluded.observed_at`;
-    return previous !== undefined && previous.hash !== hash;
-  })));
-
-  const previousHash = (threadId: string) => guidanceSql(db`SELECT hash FROM observations WHERE thread_id=${threadId}`.pipe(
-    Effect.flatMap(([row]) => row === undefined ? Effect.succeed(null) : Effect.map(decodeHashRow(row), (value) => typeof value.hash === "string" ? value.hash : null))));
-
-  const used = (now?: number) => guidanceSql(Effect.flatMap(nowOr(now), readUsed));
 
   const record = (value: RecordInput, now?: number) => guidanceSql(Effect.flatMap(nowOr(now), (at) => writeActivity(value, at).pipe(Effect.tap(() => invalidate(["snapshot"])))));
 
@@ -240,21 +172,7 @@ const makeGuidanceStore = Effect.gen(function* () {
     yield* db`DELETE FROM budget WHERE day<${budgetDay(at - 7 * 86400_000)}`;
   }))));
 
-  const episode = (threadId: string, ruleId: string) => guidanceSql(readEpisode(threadId, ruleId));
-
-  const reconcile = (id: string) => guidanceSql(db.withTransaction(Effect.gen(function* () {
-    const [raw] = yield* db`SELECT thread_id,rule_id,epoch FROM notices WHERE id=${id} AND state IN ('accepted','uncertain','uncertainty_accepted')`;
-    if (raw === undefined) return;
-    const row = yield* decodeNoticeKeyRow(raw);
-    yield* db`UPDATE notices SET state='visible' WHERE id=${id}`;
-    yield* invalidate(["snapshot"]);
-    yield* db`UPDATE episodes SET notified=1 WHERE thread_id=${row.thread_id} AND rule_id=${row.rule_id} AND epoch=${row.epoch}`;
-  })));
-
-  return GuidanceStore.of({
-    settings, bind, rules, rule, saveSettings, mutes, classification, classify, observe, previousHash, used, record, activities, prune, episode,
-    reconcile,
-  });
+  return GuidanceStore.of({settings, bind, classification, classify, record, activities, prune});
 });
 
 /**
@@ -284,15 +202,10 @@ export const checkGuidanceRows: Effect.Effect<StoredRowScan, SqlError.SqlError |
   const withNoticeDefaults = (row: Record<string, unknown>) => ({rule_generation: -1, settings_generation: -1, ...row});
   const findings = [
     ...yield* rowFindings(yield* rowsOf(db, "meta", "SELECT key,value FROM meta WHERE key='settings'"), {...call, table: "meta", kind: "settings"}, (row) => rowKey(row, ["key"]), decodeSettingsRow),
-    ...yield* rowFindings(yield* rowsOf(db, "rules", "SELECT id,document FROM rules"), {...call, table: "rules", kind: "rule"}, (row) => rowKey(row, ["id"]), decodeRuleRow),
     ...yield* rowFindings(yield* rowsOf(db, "activity", "SELECT id,document FROM activity"), {...call, table: "activity", kind: "activity"}, (row) => rowKey(row, ["id"]),
       (row) => Effect.flatMap(decodeActivityRow(row), (activity) => decodeActivityDocument(activity.document))),
-    ...yield* rowFindings(yield* rowsOf(db, "mutes", "SELECT rule_id,scope_id FROM mutes"), {...call, table: "mutes", kind: "mute"}, (row) => rowKey(row, ["rule_id", "scope_id"]), decodeMuteRow),
     ...yield* rowFindings(yield* rowsOf(db, "classifications", "SELECT project_id,classification FROM classifications"), {...call, table: "classifications", kind: "classification"},
       (row) => rowKey(row, ["project_id"]), decodeClassificationRow),
-    ...yield* rowFindings(yield* rowsOf(db, "budget", "SELECT day,tokens FROM budget"), {...call, table: "budget", kind: "budget"}, (row) => rowKey(row, ["day"]), decodeTokensRow),
-    ...yield* rowFindings(yield* rowsOf(db, "episodes", "SELECT * FROM episodes"), {...call, table: "episodes", kind: "episode"}, (row) => rowKey(row, ["thread_id", "rule_id"]),
-      (row) => decodeEpisodeRow({object_id: null, ...row})),
     ...yield* rowFindings(notices, {problem: "undecodable", table: "notices", kind: "notice", read: "call"}, (row) => rowKey(row, ["id"]),
       (row) => row.state === "committed" ? Effect.void : decodeNoticeRow(withNoticeDefaults(row))),
     ...yield* rowFindings(notices.filter((row) => row.state === "committed"), {problem: "undecodable", table: "notices", kind: "committed notice", read: "open"},

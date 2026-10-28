@@ -8,6 +8,7 @@ import { Effect, Exit, FileSystem } from "effect";
 import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
 import { TestClock } from "effect/testing";
 import { vi } from "vitest";
+import type { GuidanceSnapshot } from "../src/guidance-contract.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { clockedRegistry, scopedRegistry } from "./support/g7-page.js";
 import { json, liveSleep, makeBrowser, until, type SentRequest } from "./support/g7-browser.js";
@@ -52,11 +53,9 @@ beforeAll(() => Effect.gen(function* () {
 }));
 
 const session = "A".repeat(43);
-const snapshot = (environmentId = "environment", connected = true) => ({
-  environmentId, serverVersion: "build", connected, lastCycleAt: 1, sendingReady: true, sendingReason: "",
-  settings: { generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null, model: "model",
-    reasoning: "low", dailyTokenBudget: 1, evidenceHours: 1, maxAnchorAgeSeconds: 1 },
-  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], rules: [], mutes: [], activity: [], coverage: "", tokensUsed: 0,
+const snapshot = (environmentId = "environment", connected = true): GuidanceSnapshot => ({
+  environmentId, serverVersion: "build", connected, lastCycleAt: 1,
+  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], activity: [], coverage: "",
 });
 const overviewPage = { revision: "one", observedAt: 1, available: true, globallyEnabled: true, offset: 0, limit: 100, total: 0, availableTotal: 0, attention: [], query: {q: "", projectId: "", filter: "all" as const}, attentionTotal: 0,
   hasMore: false, projects: [], work: [] };

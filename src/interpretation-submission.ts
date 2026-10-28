@@ -13,7 +13,7 @@ import {
   type ProposalContext,
 } from "./supervisor-workflow.js";
 import type { Projection } from "./types.js";
-import { isRecord, verifyWorkflowToolEvidence, workflowRequestHash, workflowToolInputMaxBytes } from "./workflow-write-evidence.js";
+import { isRecord, verifyWorkflowToolEvidence, workflowRequestHash, workflowToolInputMaxBytes, type WorkflowToolRoutes } from "./workflow-write-evidence.js";
 import { workflowMutationLimits } from "./workflow-state-contract.js";
 import { ConversationDecision } from "./supervision-conversation-contract.js";
 
@@ -468,6 +468,8 @@ export type InterpretationProofInput = {
   readonly ownedThreadIds: ReadonlySet<string>;
   // the bound root's projection the item was found in
   readonly projection: Projection;
+  // the deployment's exact native routes of the tool (the documented registrations when absent)
+  readonly routes?: WorkflowToolRoutes;
   readonly itemId: string;
   // the native item detail
   readonly detail: unknown;
@@ -495,7 +497,7 @@ export const verifyInterpretationProof = (input: InterpretationProofInput): Inte
   if (projection.thread.id !== binding.threadId || projection.thread.projectId !== binding.projectId ||
     projection.thread.archivedAt != null || projection.thread.deletedAt != null) return denied("supervisor_projection_not_current");
   const check = verifyWorkflowToolEvidence({projection, supervisorThreadId: binding.threadId, itemId: input.itemId, detail: input.detail,
-    tool: "interpretation", arguments: submission.rawArguments});
+    tool: "interpretation", arguments: submission.rawArguments, ...(input.routes ? {routes: input.routes} : {})});
   if (check.status === "pending") return {status: "pending_proof", code: interpretationPendingProofCode(check.reason)};
   if (check.status === "denied") return denied(interpretationDeniedCode(check.reason));
   const evidence = check.evidence;

@@ -98,27 +98,56 @@ export const workflowRequestHash = (value: unknown): string =>
 export const workflowToolInputSize = (value: unknown): number =>
   Buffer.byteLength(canonicalJson(value), "utf8");
 
-const knownDirectToolNames = new Set<string>([
-  ...workflowToolNames.read.direct,
-  ...workflowToolNames.write.direct,
-  ...workflowToolNames.team.direct,
-  ...workflowToolNames.guide.direct,
-  ...workflowToolNames.stop.direct,
-  ...workflowToolNames.start.direct,
-  ...workflowToolNames.interpretation.direct,
-  ...workflowToolNames.planning.direct,
-]);
-const knownMcpxTargets = new Set<string>([
-  workflowToolNames.read.mcpxTarget,
-  workflowToolNames.write.mcpxTarget,
-  workflowToolNames.team.mcpxTarget,
-  workflowToolNames.guide.mcpxTarget,
-  workflowToolNames.stop.mcpxTarget,
-  workflowToolNames.start.mcpxTarget,
-  workflowToolNames.interpretation.mcpxTarget,
-  workflowToolNames.planning.mcpxTarget,
-]);
-const isMcpxCall = (toolName: string): boolean => workflowToolNames.mcpxCall.includes(toolName as never);
+const workflowToolIds: Readonly<Record<WorkflowEvidenceTool, string>> = {read: "workflow_read", write: "workflow_write", team: "supervision_team",
+  guide: "supervision_guide", stop: "supervision_stop", start: "supervision_start", plan: "supervision_plan",
+  interpretation: "supervision_interpretation_submit", planning: "supervision_planning"};
+const workflowTools = Object.keys(workflowToolIds) as WorkflowEvidenceTool[];
+
+/**
+ * The documented registrations: the server alias clients register this MCP server under and the exact native names of the MCPX
+ * gateway's call tool.
+ */
+export const defaultWorkflowServerAliases: readonly string[] = ["t3-supervisor-workflows"];
+export const defaultWorkflowGatewayTools: readonly string[] = workflowToolNames.mcpxCall;
+
+/**
+ * The supported native routes of the workflow tools, exact names only: per tool, the provider-native direct names under each server alias
+ * (`<alias>.<tool>`, `mcp__<alias>__<tool>`) and the `<alias>__<tool>` a gateway call names, and the exact native names of the gateway call
+ * tools. A gateway call is recognised only in the standard MCP call envelope, exactly `{name, arguments}` with object arguments; any other
+ * input fails closed. No name is ever matched by prefix, suffix or argument shape.
+ */
+export type WorkflowToolRoutes = {
+  readonly direct: Readonly<Record<WorkflowEvidenceTool, readonly string[]>>;
+  readonly targets: Readonly<Record<WorkflowEvidenceTool, readonly string[]>>;
+  readonly gatewayCalls: readonly string[];
+  readonly allDirect: ReadonlySet<string>;
+  readonly allTargets: ReadonlySet<string>;
+};
+
+export const workflowToolRoutes = (serverAliases: readonly string[] = defaultWorkflowServerAliases,
+  gatewayTools: readonly string[] = defaultWorkflowGatewayTools): WorkflowToolRoutes => {
+  const direct = Object.fromEntries(workflowTools.map(tool => [tool,
+    serverAliases.flatMap(alias => [`${alias}.${workflowToolIds[tool]}`, `mcp__${alias}__${workflowToolIds[tool]}`])])) as Record<WorkflowEvidenceTool, string[]>;
+  const targets = Object.fromEntries(workflowTools.map(tool => [tool, serverAliases.map(alias => `${alias}__${workflowToolIds[tool]}`)])) as
+    Record<WorkflowEvidenceTool, string[]>;
+  return {direct, targets, gatewayCalls: [...gatewayTools],
+    allDirect: new Set(workflowTools.flatMap(tool => direct[tool])), allTargets: new Set(workflowTools.flatMap(tool => targets[tool]))};
+};
+
+export const defaultWorkflowToolRoutes = workflowToolRoutes();
+
+// the routes of a process's configured registrations, built once per configuration
+const configuredRoutes = new WeakMap<object, WorkflowToolRoutes>();
+/** The routes of the configured registrations (WORKFLOW_MCP_SERVER_ALIASES, WORKFLOW_MCP_GATEWAY_TOOLS), the documented ones when unset. */
+export const configuredWorkflowToolRoutes = (config: {readonly workflowMcpServerAliases?: readonly string[];
+  readonly workflowMcpGatewayTools?: readonly string[]}): WorkflowToolRoutes => {
+  const known = configuredRoutes.get(config);
+  if (known) return known;
+  const routes = config.workflowMcpServerAliases === undefined && config.workflowMcpGatewayTools === undefined ? defaultWorkflowToolRoutes
+    : workflowToolRoutes(config.workflowMcpServerAliases, config.workflowMcpGatewayTools);
+  configuredRoutes.set(config, routes);
+  return routes;
+};
 const maxObservedToolNameLength = 128;
 
 const boundedObservedToolName = (toolName: string): string =>
@@ -150,18 +179,19 @@ export const workflowEvidenceCandidates = (
   supervisorThreadId: string,
   tool: WorkflowEvidenceTool,
   expectedArguments: Record<string, unknown>,
+  routes: WorkflowToolRoutes = defaultWorkflowToolRoutes,
 ): WorkflowEvidenceCandidate[] => {
-  const names = workflowToolNames[tool].direct;
+  const names = routes.direct[tool];
   const runs = new Map(projection.runs.map(run => [run.id, run]));
   const expectedCanonical = canonicalJson(expectedArguments);
   return (projection.turnItems ?? []).flatMap(item => {
     if (item.type !== "dynamic_tool" || item.threadId !== supervisorThreadId ||
       typeof item.runId !== "string" || typeof item.id !== "string" || typeof item.toolName !== "string") return [];
-    if (!names.includes(item.toolName as never) && !isMcpxCall(item.toolName) && knownDirectToolNames.has(item.toolName)) return [];
+    if (!names.includes(item.toolName) && !routes.gatewayCalls.includes(item.toolName) && routes.allDirect.has(item.toolName)) return [];
     const run = runs.get(item.runId);
     if (!run || run.threadId !== supervisorThreadId) return [];
     const snapshotInput = item.input;
-    if (!plausibleSnapshot(item, tool, expectedCanonical)) return [];
+    if (!plausibleSnapshot(item, tool, expectedCanonical, routes)) return [];
     let snapshotSignature: string;
     try {
       snapshotSignature = workflowRequestHash({id: item.id, runId: item.runId, providerThreadId: item.providerThreadId ?? null,
@@ -177,14 +207,14 @@ export const workflowEvidenceCandidates = (
 
 // whether a turn item's snapshot input can be the expected call: equal arguments under a recognised tool name or wrapper, or an input
 // only its detail read can settle (a truncated snapshot, or the string input of a recognised tool)
-const plausibleSnapshot = (item: Record<string, unknown>, tool: WorkflowEvidenceTool, expectedCanonical: string): boolean => {
-  const names = workflowToolNames[tool].direct;
+const plausibleSnapshot = (item: Record<string, unknown>, tool: WorkflowEvidenceTool, expectedCanonical: string, routes: WorkflowToolRoutes): boolean => {
+  const names = routes.direct[tool];
   const toolName = item.toolName as string;
   const snapshotInput = item.input;
-  const unknownToolName = !names.includes(toolName as never) && !isMcpxCall(toolName) && !knownDirectToolNames.has(toolName);
+  const unknownToolName = !names.includes(toolName) && !routes.gatewayCalls.includes(toolName) && !routes.allDirect.has(toolName);
   let plausible = false;
   if (isRecord(snapshotInput)) {
-    const snapshotArguments = recordedArguments(item, tool);
+    const snapshotArguments = recordedArguments(item, tool, routes);
     if (snapshotArguments) {
       try {plausible = canonicalJson(snapshotArguments.arguments) === expectedCanonical;}
       catch {plausible = false;}
@@ -197,7 +227,7 @@ const plausibleSnapshot = (item: Record<string, unknown>, tool: WorkflowEvidence
       const parsed = decodeSnapshotJson(snapshotInput);
       if (Exit.isSuccess(parsed) && isRecord(parsed.value)) {
         try {
-          const snapshotArguments = recordedArguments({...item, input: parsed.value}, tool);
+          const snapshotArguments = recordedArguments({...item, input: parsed.value}, tool, routes);
           plausible = snapshotArguments !== null && canonicalJson(snapshotArguments.arguments) === expectedCanonical;
         } catch {plausible = false;}
       }
@@ -216,14 +246,15 @@ export const providerTurnEvidenceCandidates = (
   threadId: string,
   tool: WorkflowEvidenceTool,
   expectedArguments: Record<string, unknown>,
+  routes: WorkflowToolRoutes = defaultWorkflowToolRoutes,
 ): WorkflowEvidenceCandidate[] => {
-  const names = workflowToolNames[tool].direct;
+  const names = routes.direct[tool];
   const expectedCanonical = canonicalJson(expectedArguments);
   return (projection.turnItems ?? []).flatMap(item => {
     if (item.type !== "dynamic_tool" || item.threadId !== threadId || item.runId != null || typeof item.providerTurnId !== "string" ||
       typeof item.id !== "string" || typeof item.toolName !== "string") return [];
-    if (!names.includes(item.toolName as never) && !isMcpxCall(item.toolName) && knownDirectToolNames.has(item.toolName)) return [];
-    if (!plausibleSnapshot(item, tool, expectedCanonical)) return [];
+    if (!names.includes(item.toolName) && !routes.gatewayCalls.includes(item.toolName) && routes.allDirect.has(item.toolName)) return [];
+    if (!plausibleSnapshot(item, tool, expectedCanonical, routes)) return [];
     let snapshotSignature: string;
     try {
       snapshotSignature = workflowRequestHash({id: item.id, providerTurnId: item.providerTurnId, providerThreadId: item.providerThreadId ?? null,
@@ -251,6 +282,7 @@ export const verifyProviderTurnToolEvidence = (input: {
   detail: unknown;
   tool: WorkflowEvidenceTool;
   arguments: Record<string, unknown>;
+  routes?: WorkflowToolRoutes;
 }): ProviderTurnEvidenceCheck => {
   if (!isRecord(input.detail)) return {status: "pending", reason: "native_item_unavailable"};
   const item = input.detail;
@@ -258,7 +290,7 @@ export const verifyProviderTurnToolEvidence = (input: {
   if (item.runId !== null && item.runId !== undefined) return {status: "denied", reason: "native_item_run_bound"};
   if (typeof item.providerTurnId !== "string" || typeof item.toolName !== "string" || !isRecord(item.input))
     return {status: "pending", reason: "native_input_incomplete"};
-  const recorded = recordedArguments(item, input.tool);
+  const recorded = recordedArguments(item, input.tool, input.routes ?? defaultWorkflowToolRoutes);
   if (!recorded) return {status: "pending", reason: "native_tool_name_or_wrapper_mismatch"};
   let expectedCanonical: string;
   let actualCanonical: string;
@@ -301,8 +333,8 @@ export const verifyProviderTurnToolEvidence = (input: {
   return {status: "verified", providerTurnId: turn.id};
 };
 
-/** One tool's recognised native routes: its direct names, and the name a recognised MCP call tool gives it in `{name, arguments}`. */
-type NativeToolRoutes = {readonly direct: readonly string[]; readonly target: string};
+/** One tool's recognised native routes: its direct names, the names a recognised MCP call tool gives it in `{name, arguments}`, and those call tools. */
+type NativeToolRoutes = {readonly direct: readonly string[]; readonly targets: readonly string[]; readonly gatewayCalls: readonly string[]};
 
 // the one reading of a native call's tool route, shared by evidence, re-validated receipts and read coverage: a direct name of the tool,
 // or a recognised MCP call naming it, is recognised; a route of another known tool is no candidate; anything else is unrecognised
@@ -313,37 +345,38 @@ const routedArguments = (item: Record<string, unknown>, routes: NativeToolRoutes
   if (typeof toolName !== "string") return null;
   if (routes.direct.includes(toolName)) return {arguments: item.input, recognized: true};
   if (otherDirect.has(toolName)) return null;
-  if (isMcpxCall(toolName)) {
+  if (routes.gatewayCalls.includes(toolName)) {
     if (!exactKeys(item.input, ["name", "arguments"]) || typeof item.input.name !== "string" ||
       !isRecord(item.input.arguments)) return null;
-    if (item.input.name === routes.target)
+    if (routes.targets.includes(item.input.name))
       return {arguments: item.input.arguments, recognized: true};
     if (otherTargets.has(item.input.name)) return null;
     return {arguments: item.input.arguments, recognized: false, observedToolName: item.input.name};
   }
-  if (exactKeys(item.input, ["name", "arguments"]) && item.input.name === routes.target && isRecord(item.input.arguments))
+  if (exactKeys(item.input, ["name", "arguments"]) && typeof item.input.name === "string" && routes.targets.includes(item.input.name) &&
+    isRecord(item.input.arguments))
     return {arguments: item.input.arguments, recognized: false, observedToolName: toolName};
   return {arguments: item.input, recognized: false, observedToolName: toolName};
 };
 
-const recordedArguments = (item: Record<string, unknown>, tool: WorkflowEvidenceTool): RecordedArguments | null =>
-  routedArguments(item, {direct: workflowToolNames[tool].direct, target: workflowToolNames[tool].mcpxTarget}, knownDirectToolNames, knownMcpxTargets);
+const recordedArguments = (item: Record<string, unknown>, tool: WorkflowEvidenceTool, routes: WorkflowToolRoutes): RecordedArguments | null =>
+  routedArguments(item, {direct: routes.direct[tool], targets: routes.targets[tool], gatewayCalls: routes.gatewayCalls}, routes.allDirect, routes.allTargets);
 
 /** The arguments of a recognised native call of a workflow tool, or null; re-validated receipts read their calls this way. */
-export const recognisedWorkflowCallArguments = (item: Record<string, unknown>, tool: WorkflowEvidenceTool): Record<string, unknown> | null => {
-  const recorded = recordedArguments(item, tool);
+export const recognisedWorkflowCallArguments = (item: Record<string, unknown>, tool: WorkflowEvidenceTool,
+  routes: WorkflowToolRoutes = defaultWorkflowToolRoutes): Record<string, unknown> | null => {
+  const recorded = recordedArguments(item, tool, routes);
   return recorded?.recognized ? recorded.arguments : null;
 };
 
-// this environment's own T3 server's thread read, recognised on the same routes
-const threadReadRoutes: NativeToolRoutes = {
-  direct: ["t3_thread_read", "mcp__t3_code__t3_thread_read", "mcp__t3-code__t3_thread_read", "t3-code.t3_thread_read"],
-  target: "t3-code__t3_thread_read",
-};
+// this environment's own T3 server's thread read: its direct names and the name a recognised gateway call gives it
+const threadReadDirect: readonly string[] = ["t3_thread_read", "mcp__t3_code__t3_thread_read", "mcp__t3-code__t3_thread_read", "t3-code.t3_thread_read"];
+const threadReadTargets: readonly string[] = ["t3-code__t3_thread_read"];
 
-/** The arguments of a recognised native T3 thread read, or null; read coverage counts only these. */
-export const recognisedThreadReadArguments = (item: Record<string, unknown>): Record<string, unknown> | null => {
-  const recorded = routedArguments(item, threadReadRoutes, new Set(), new Set());
+/** The arguments of a recognised native T3 thread read, or null; read coverage counts only these, through the same gateway call tools. */
+export const recognisedThreadReadArguments = (item: Record<string, unknown>,
+  routes: WorkflowToolRoutes = defaultWorkflowToolRoutes): Record<string, unknown> | null => {
+  const recorded = routedArguments(item, {direct: threadReadDirect, targets: threadReadTargets, gatewayCalls: routes.gatewayCalls}, new Set(), new Set());
   return recorded?.recognized ? recorded.arguments : null;
 };
 
@@ -357,12 +390,13 @@ export const verifyWorkflowToolEvidence = (input: {
   detail: unknown;
   tool: WorkflowEvidenceTool;
   arguments: Record<string, unknown>;
+  routes?: WorkflowToolRoutes;
 }): WorkflowEvidenceCheck => {
   if (!isRecord(input.detail)) return {status: "pending", reason: "native_item_unavailable"};
   const item = input.detail;
   if (typeof item.runId !== "string" || typeof item.toolName !== "string" || !isRecord(item.input))
     return {status: "pending", reason: "native_input_incomplete"};
-  const recorded = recordedArguments(item, input.tool);
+  const recorded = recordedArguments(item, input.tool, input.routes ?? defaultWorkflowToolRoutes);
   if (!recorded) return {status: "pending", reason: "native_tool_name_or_wrapper_mismatch"};
   let expectedCanonical: string;
   let actualCanonical: string;

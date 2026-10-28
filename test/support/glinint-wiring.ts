@@ -56,6 +56,8 @@ export type IntRunInput = {
   definitions?: IntDefinitions | undefined;
   // the platform fetch of the helper webhook POSTs, which a case may observe
   fetch?: typeof globalThis.fetch | undefined;
+  // settings over the run's own, as a deployment configures them
+  config?: Partial<SupervisorSettings> | undefined;
 };
 
 /** The services of one run, as the suites drive them. */
@@ -88,7 +90,7 @@ export interface IntRun {
 class IntSupervisorSeams extends Context.Service<IntSupervisorSeams, ProjectSupervisorSeams>()("test/IntSupervisorSeams") {}
 
 const settings = (input: IntRunInput): SupervisorSettings => ({dataDirectory: input.directory, t3Url: input.peerUrl, t3TokenFile: "unused",
-  excludedThreadIds: [], healthPort: 0, uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: input.directory});
+  excludedThreadIds: [], healthPort: 0, uiPort: 0, uiHost: "127.0.0.1", uiAssetsDirectory: input.directory, ...input.config});
 
 // the definitions service over the snapshot read; no other definitions operation is used and the global fingerprint is none
 const definitionsService = (definitions: IntDefinitions): ProjectDefinitions["Service"] => {
