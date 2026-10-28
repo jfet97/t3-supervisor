@@ -13,7 +13,7 @@ const repository = "jfet97/t3-supervisor";
 const manifest = '{\n  "name": "@jfet97/t3-supervisor",\n  "version": "0.0.4"\n}\n';
 const run = (id: number, head_sha: string, event: string, branch: string): typeof policy.CiRun.Type => ({id, workflow_id: 42, head_sha, head_branch: branch, event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
 const full = (id: number) => policy.requiredFullJobs.map(name => ({name, run_id: id, conclusion: "success"}));
-const release = (id: number) => ["plan", "static", "check", "harness", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "check"].includes(name) ? "success" : "skipped"}));
+const release = (id: number) => ["plan", "static", "startup", "check", "harness", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "startup", "check"].includes(name) ? "success" : "skipped"}));
 const pr = (merge: string | null, head: string, branch: string) => ({merged_at: merge ? "2026-10-25T00:00:00Z" : null, merge_commit_sha: merge, base: {ref: "main"}, head: {sha: head, ref: branch, repo: {full_name: repository}}});
 const rawChange = (path: string, status = "M") => `:100644 ${status === "D" ? "000000" : "100644"} ${B} ${status === "D" ? "0".repeat(40) : H} ${status}\0${path}\0`;
 
@@ -133,19 +133,25 @@ it.effect("the actual scope adapter preserves default full dispatch and selects 
   assert.equal(workflow.on.workflow_dispatch.inputs.validation.default, "full");
 }));
 
-it.live("the actual aggregate shell rejects missing proof, skipped static, failed suites and unknown modes", () => Effect.sync(() => {
+it.live("the actual aggregate shell rejects missing proof, skipped static, failed suites, a skipped or failed startup and unknown modes", () => Effect.sync(() => {
   const script = workflow.jobs.check.steps[0].run as string;
-  for (const [mode, plan, stat, main, harness, succeeds] of [
-    ["full", "success", "success", "success", "success", true],
-    ["release", "success", "success", "skipped", "skipped", true],
-    ["reuse", "success", "skipped", "skipped", "skipped", true],
-    ["release", "success", "skipped", "skipped", "skipped", false],
-    ["release", "success", "success", "failure", "skipped", false],
-    ["reuse", "failure", "skipped", "skipped", "skipped", false],
-    ["full", "success", "success", "skipped", "success", false],
-    ["", "success", "success", "success", "success", false],
+  for (const [mode, plan, stat, main, harness, startup, succeeds] of [
+    ["full", "success", "success", "success", "success", "success", true],
+    ["release", "success", "success", "skipped", "skipped", "success", true],
+    ["reuse", "success", "skipped", "skipped", "skipped", "success", true],
+    ["release", "success", "skipped", "skipped", "skipped", "success", false],
+    ["release", "success", "success", "failure", "skipped", "success", false],
+    ["reuse", "failure", "skipped", "skipped", "skipped", "success", false],
+    ["full", "success", "success", "skipped", "success", "success", false],
+    ["", "success", "success", "success", "success", "success", false],
+    ["full", "success", "success", "success", "success", "skipped", false],
+    ["full", "success", "success", "success", "success", "failure", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "failure", false],
+    ["release", "success", "success", "skipped", "skipped", "skipped", false],
+    ["release", "success", "success", "skipped", "skipped", "failure", false],
   ] as const) {
-    const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, MAIN_RESULT: main, HARNESS_RESULT: harness}});
-    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, main, harness}));
+    const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup}});
+    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, main, harness, startup}));
   }
 }));
