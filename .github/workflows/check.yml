@@ -117,7 +117,8 @@ jobs:
             VERSION=${{ steps.package.outputs.version }}
             REVISION=${{ github.event.pull_request.head.sha || github.sha }}
           cache-from: type=gha,scope=ci-image
-          cache-to: type=gha,mode=max,scope=ci-image
+          # a failed cache write stays in the log and never fails the build
+          cache-to: type=gha,mode=max,scope=ci-image,ignore-error=true
       - name: Verify the container artifact
         run: node --import tsx scripts/smoke-release.ts image t3-supervisor:ci-check
       - uses: docker/setup-qemu-action@v3
@@ -134,7 +135,7 @@ jobs:
             VERSION=${{ steps.package.outputs.version }}
             REVISION=${{ github.event.pull_request.head.sha || github.sha }}
           cache-from: type=gha,scope=ci-image-arm64
-          cache-to: type=gha,mode=max,scope=ci-image-arm64
+          cache-to: type=gha,mode=max,scope=ci-image-arm64,ignore-error=true
       - name: Verify the ARM64 container artifact
         env:
           SMOKE_PLATFORM: linux/arm64

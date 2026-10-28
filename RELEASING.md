@@ -105,6 +105,12 @@ the frozen pnpm lockfile. A normal npm/pnpm consumer install resolves transitive
 dependency ranges at installation time; use the image digest when an immutable
 dependency tree matters.
 
+The GitHub Actions layer cache only speeds up image builds. The published build is
+the only writer of the `release-image` cache scope; the local smoke build only reads
+it. A failed cache export is logged without failing or cancelling the build, the
+push or the publication steps after it. Failed builds, pushes, attestations, smoke
+checks and digest checks still stop the release.
+
 Publication is serialized with GitHub's queue (up to 100 pending runs) and does not
 replace pending releases or cancel publication in progress. Existing immutable
 versions/tags must identify the same source before a retry can continue. A failure

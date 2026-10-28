@@ -215,8 +215,8 @@ jobs:
           build-args: |
             VERSION=${{ steps.plan.outputs.version }}
             REVISION=${{ steps.plan.outputs.revision }}
+          # the published build owns the release-image cache scope; this local check only reads it
           cache-from: type=gha,scope=release-image
-          cache-to: type=gha,mode=max,scope=release-image
       - name: Smoke-test the container
         env:
           SMOKE_IMAGE: ${{ steps.image.outputs.smoke }}
@@ -249,7 +249,8 @@ jobs:
             VERSION=${{ steps.plan.outputs.version }}
             REVISION=${{ steps.plan.outputs.revision }}
           cache-from: type=gha,scope=release-image
-          cache-to: type=gha,mode=max,scope=release-image
+          # BuildKit runs this export alongside the push; a failed cache write stays in the log and never fails or cancels the build or push
+          cache-to: type=gha,mode=max,scope=release-image,ignore-error=true
       - name: Verify both published image variants by immutable digest
         if: ${{ env.PUBLISH == 'true' }}
         env:

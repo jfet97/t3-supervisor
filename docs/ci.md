@@ -16,6 +16,9 @@ Ordinary PRs and manual **Check Supervisor** dispatches run lint, both type chec
 build, package/container smoke checks, all four main-suite shards and the runner
 harness. Each test file runs in its native shard, with one worker per runner.
 The watchdog, test deadlines, leak gate, privacy guards and cleanup stay intact.
+Each container build reads and writes its own GitHub Actions layer-cache scope. The
+cache only speeds up builds, so a failed cache export is logged without failing the
+check.
 
 PRs explicitly check out their head commit. A successful check remains usable
 when main advances; do not update a branch solely to satisfy freshness. Changes
