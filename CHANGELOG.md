@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.14
+
+### Patch Changes
+
+- fd0bbdf: Workflow returns require `back_to(n)`, a maximum of successful backward jumps. An exhausted return stays visible instead of starting another attempt, and an enclosing return resets only strictly nested replay budgets.
+
 ## 0.0.13
 
 ### Patch Changes
