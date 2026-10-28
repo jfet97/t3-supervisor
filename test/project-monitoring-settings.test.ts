@@ -149,3 +149,20 @@ it.effect("the pending activity age is one or two minutes: both save, and a long
     const [row] = yield* db<{document: string}>`SELECT document FROM supervisor_project_settings WHERE project_id='saved-earlier'`;
     assert.deepEqual((JSON.parse(String(row?.document)) as {monitoring: unknown}).monitoring, {intervalMinutes: 2, activityThreshold: 24});
   })));
+
+
+it.effect("planning timeout changes are bounded, persistent and independent of model mutation", () =>
+  withStore((supervisor) => Effect.gen(function* () {
+    const initial = yield* supervisor.settings("project");
+    assert.equal(initial.planningTimeoutMs, 300_000);
+    const changed = yield* supervisor.saveSettings("project", initial.generation, initial.modelSelection, undefined, undefined, undefined, 20_000);
+    assert.equal(changed.planningTimeoutMs, 20_000);
+    assert.equal(changed.modelMutationGeneration, initial.modelMutationGeneration);
+    const retained = yield* supervisor.saveSettings("project", changed.generation, changed.modelSelection);
+    assert.equal(retained.planningTimeoutMs, 20_000);
+    for (const invalid of [9999, 3600001, 20_000.5]) {
+      const result = yield* Effect.flip(supervisor.saveSettings("project", retained.generation, retained.modelSelection, undefined, undefined, undefined, invalid));
+      assert.equal(result.reason, "invalid_planning_timeout");
+    }
+    assert.equal((yield* supervisor.settings("project")).planningTimeoutMs, 20_000);
+  })));

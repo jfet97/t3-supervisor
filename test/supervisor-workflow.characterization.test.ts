@@ -4,14 +4,17 @@ import { canonicalizeProposalDraft, prepareWorkflowRequest, seededNodeIds } from
 import { goldenDraft, goldenSeed, goldenSnapshot, sha256 } from "./support/c1-workflow-fixture.js";
 
 const verifySource = {origin: "project", path: ".t3-supervisor/steps/verify.md", sourceId: "project:verify"};
+// authored occurrences draw the seeded sequence in traversal order; the delivery members derive their IDs from the delivery
+// occurrence and their template paths, so they draw nothing
 const nodeIds = [
   "bd4bde5f-85e7-4826-85a9-ca6207432064",
   "450b89ca-0d6e-46ea-b578-0de9d045bd9b",
+  "8db04ce4-c9b8-8748-a37b-aa1bc5a200c3",
+  "ea97f69f-0b16-8f04-b9d4-e69d920153f7",
   "d697be1c-5471-4f9c-9464-89d20c530cf3",
   "74c841d9-68cd-457a-b008-95cd60191c02",
-  "05ffc344-d265-4fce-82dc-f49dedd94f27",
-  "5e40006b-eeb7-4e36-b685-33026e1ddf6e",
 ];
+const drawnNodeIds = [nodeIds[0]!, nodeIds[1]!, nodeIds[4]!, nodeIds[5]!];
 
 const canonicalWorkflow = {
   definitionsStatus: "ready",
@@ -45,34 +48,35 @@ it("CT-SW-01: canonical plan JSON, seeded node IDs and prompt digests are golden
   const taskText = "Check this task. token=github_pat_12345678901234567890";
   const prepared = prepareWorkflowRequest("thread-a", "message-a", taskText, goldenSnapshot);
   assert.ok(prepared.context);
-  // interpretation describes separate reference and skill string lists and the proportionate planning rule
-  assert.equal(prepared.requestText.length, 11881);
-  assert.equal(sha256(prepared.requestText), "94a097c9068777214689a6dd09abb4026752d8c99ea989c535f4e160663ff768");
+  // notifications contain lookup handles; canonical policy and plan hashes remain unchanged
+  assert.equal(prepared.requestText.length, 242);
+  // the request names the interpretation rules' version, so a deliberate rule change moves this digest and nothing else
+  assert.equal(sha256(prepared.requestText), "98f8c9dd4a10a4d6d8167a4b7f24d33cc575a9f15fe09ebdc9cb65ac44342c12");
   assert.equal(prepared.requestText.includes("github_pat_12345678901234567890"), false);
   assert.equal(sha256(JSON.stringify(prepared.context)), "4b22e3c45e9060410b2a752eea3eb602c960836021edd7c79e75d9d8d3e45f4f");
   assert.equal(sha256(JSON.stringify(prepared.workflow)), "a263f8572ef36eca2578bb7f9a3f3e0860a0690bca1f4869eba7ebf4b61d0db4");
 
-  // lifecycle authority and local-reader routing are rendered once; the typed variant adds the source-bound submission envelope.
+  // reader coordinates and task identity are handles; submission pins and source bodies remain on demand.
   const reader = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
-    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}]});
-  assert.equal(reader.requestText.length, 2304);
-  assert.equal(sha256(reader.requestText), "c059a4d6ed148620e9722bace62ef653542f3c63b6d11a726814f95580d6e3d7");
+    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}});
+  assert.equal(reader.requestText.length, 311);
+  assert.equal(sha256(reader.requestText), "615156be9a286afe371347b3ed28f41c00dc148c5ef5675f58042aaaf4b6de8e");
   assert.deepEqual(reader.context, prepared.context);
   assert.deepEqual(reader.workflow, prepared.workflow);
   const typed = prepareWorkflowRequest("thread-a", "message-a", "Check this task.", goldenSnapshot,
-    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3}, earlierMessages: [{messageId: "message-0", text: "Earlier request."}],
+    {reader: {supervisorThreadId: "supervisor-a", bindingGeneration: 3},
       submission: {supervisorThreadId: "supervisor-a", bindingGeneration: 3, taskId: "task-a", attemptId: "interpretation-attempt:00000000-0000-4000-8000-000000000001",
         sourcePin: {messageId: "message-a", runId: "run-a", ordinal: 1, hash: "0".repeat(64)}, startVerdict: true}});
-  assert.equal(typed.requestText.length, 3676);
-  assert.equal(sha256(typed.requestText), "b5d5631b4c0ef8b57274252fec401a7bea3603f81ff4cef0b636a197bd84c2f4");
+  assert.equal(typed.requestText.length, 329);
+  assert.equal(sha256(typed.requestText), "0f3e24040f993f8089328189ac47d34266554a0d2eb9fb7f2b21f7e6e20f03b9");
   assert.deepEqual(typed.context, prepared.context);
   assert.deepEqual(typed.workflow, prepared.workflow);
 
   const canonical = canonicalizeProposalDraft(goldenDraft, prepared.context, goldenSeed);
   assert.deepEqual(canonical, {ok: true, workflow: canonicalWorkflow});
   // key order and node ID traversal order are part of the golden
-  assert.equal(sha256(JSON.stringify(canonical)), "4bf1d1543e63acd2e3370ec115ff4cc1997a61ae1d2d7651843278fea9eecd08");
+  assert.equal(sha256(JSON.stringify(canonical)), "6d73739007242f09dbdd92b51eef1732b61bc6357bac722f05d28fc83f1a6e2e");
   const sequence = seededNodeIds(goldenSeed);
-  assert.deepEqual(nodeIds.map(() => sequence()), nodeIds);
+  assert.deepEqual(drawnNodeIds.map(() => sequence()), drawnNodeIds);
   assert.deepEqual(canonicalizeProposalDraft(goldenDraft, prepared.context, goldenSeed), canonical);
 });

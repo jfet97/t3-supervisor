@@ -110,14 +110,29 @@ const fixedInsertionExample = `sequence:
 
 const delegationExample = `name: Reviewer
 description: |
-  The main agent must assign this entire workflow to one or more independent
-  reviewer agents. Assigned reviewers execute the sequence below and return
-  findings. The main agent addresses findings and requests further review after
-  relevant fixes until important findings are resolved.
+  One assigned reviewer performs one independent pass and reports material
+  findings. On a repeated pass, retain earlier findings and avoid reopening
+  settled issues without new evidence.
 sequence:
   - step: inspect-change
   - step: e2e-testing
   - step: report-findings`;
+
+const reviewCallerExample = `name: Reviewed change
+description: |
+  Assign the two reviewer occurrences to independent reviewers. Collect both
+  reports before deciding whether corrections are needed. Reuse the same
+  reviewers for another pass when their conversations support it.
+sequence:
+  - step: implementation
+  - parallel:
+      - workflow: reviewer
+      - workflow: reviewer
+  - branch:
+      if: At least one review reports unresolved material findings.
+      then:
+        - back_to: implementation
+  - step: deployment`;
 
 function Example({label, value}: {label: string; value: string}) {
   return <figure className="guide-example">
@@ -159,7 +174,7 @@ const questions = [
   },
   {
     question: "Does a workflow reference launch a reviewer agent?",
-    answer: "No. `workflow: reviewer` includes that reusable workflow in the plan. Put whole-workflow delegation and follow-up expectations in the workflow description when that is required.",
+    answer: "No. `workflow: reviewer` includes one reviewer pass in the plan. Its caller describes who performs each occurrence and uses parallel for multiple reviews or back_to for a repeated pass.",
   },
   {
     question: "Can I define a workflow inline or use `steps:` for an ordered list?",
@@ -285,7 +300,7 @@ export function StepsAndWorkflowsGuide({topic}: {topic?: string | undefined}) {
       <Example label="A review that chooses its depth" value={branchExample}/>
       <p>Without <code>else</code>, a false condition skips the branch and work continues with the next member.</p>
       <Example label="An if-only branch" value={ifOnlyExample}/>
-      <p>The condition is one line of at most 300 characters, and each path needs at least one member. Use branches only for substantially different pieces of work. Keep finer conditions, iteration and completion rules in descriptions. There is no <code>elif</code>, jump, loop or <code>goto</code>; nest a branch inside a path when a second choice depends on the first. Branches belong to workflow composition only: a step file stays a description with no structural fields, and a negotiated task plan can add task-local branches in the same shape.</p>
+      <p>The condition is one line of at most 300 characters, and each path needs at least one member. Use branches only for substantially different pieces of work. Keep finer conditions and completion rules in descriptions. There is no <code>elif</code>, jump or <code>goto</code>; nest a branch inside a path when a second choice depends on the first, and end a path with <code>back_to: &lt;id&gt;</code> to repeat an earlier member of the same sequence as a new attempt. Branches belong to workflow composition only: a step file stays a description with no structural fields, and a negotiated task plan can add task-local branches in the same shape.</p>
       <p>Both paths are agreed commitments. When work reaches the branch, the agent working on that workflow decides which path applies from the actual context, without asking for approval, and records the decision with a short reason in its own reply:</p>
       <pre><code>{branchRecordExample}</code></pre>
       <p>The introduction gives the agent its task ID, each branch’s node ID and this exact format. A child conversation records the decisions for its own connected workflow. The Supervisor reads the decision and objects only to a concrete contradiction with the agreed condition, the evidence or an explicit human instruction; a human-pinned path wins. A changed decision uses the next revision. If the branch’s condition, else path or position later changes, the earlier selection no longer applies and the decision is pending again.</p>
@@ -323,10 +338,11 @@ skills:
       <p>Fixed members are never omitted: one that does not apply stays visible, labelled Not applicable with its reason for the current task, and is never shown as completed; it does not hold up the steps after it. An applicable commitment cannot be silently removed or weakened. Fixed does not make the workflow a project-wide requirement; <code>required</code> controls inclusion.</p>
     </Topic>
 
-    <Topic id="guide-delegation-title" title="Delegating a whole workflow to reviewers">
-      <p>Put the entire delegation obligation in the reusable workflow's description. It can tell the main agent to assign the complete workflow to independent reviewers, tell those reviewers to perform its sequence, and tell the main agent to address findings and request further review after fixes.</p>
-      <Example label="Reviewer delegation in the workflow description" value={delegationExample}/>
-      <p>When the reviewer workflow is required, the plan includes <code>workflow: reviewer</code>. The reference provides the plan contents; the description provides the whole-workflow delegation and iteration requirement. A reference in the plan does not prove that independent review or follow-up occurred.</p>
+    <Topic id="guide-delegation-title" title="One reviewer pass, composed by its caller">
+      <p>A reviewer workflow describes one reviewer's pass. Its caller owns the number of reviewers, their assignments and whether to repeat the work. Each reviewer can progress through its own sequence independently.</p>
+      <Example label="One independent reviewer pass" value={delegationExample}/>
+      <Example label="The caller composes two reviews and a return" value={reviewCallerExample}/>
+      <p><code>parallel</code> groups the two review occurrences; the description requires independent reviewers. A failed review can return to implementation, then repeat the reviews as a new attempt. The current journey returns to the earlier step while execution history keeps the earlier attempts. A workflow reference or a completed review turn does not prove that findings were resolved or the parent's work completed.</p>
     </Topic>
 
     <Topic id="guide-children-title" title="How child tasks contribute">

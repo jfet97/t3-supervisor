@@ -137,10 +137,10 @@ const progressSnapshot: WorkflowProgressSnapshot = {
   incompatibleWorkflows: [],
   workflows: [
     {workflowId: "main-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "task-thread", parentThreadId: null,
-      revision: 2, status: "underway", objective: "Review the source change", plan, updatedAt: 1_800_000_000_080,
+      revision: 2, status: "underway", objective: "Review the source change", plan, acceptedProposalId: "proposal-1", updatedAt: 1_800_000_000_080,
       parentNodeReferences: [], observations: [], contributions: []},
     {workflowId: "child-workflow", projectId: "project", mainThreadId: "task-thread", threadId: "child-one", parentThreadId: "task-thread",
-      revision: 1, status: "needs_attention", objective: "Review the integration", plan: null, updatedAt: 1_800_000_000_070,
+      revision: 1, status: "needs_attention", objective: "Review the integration", plan: null, acceptedProposalId: null, updatedAt: 1_800_000_000_070,
       parentNodeReferences: [
         {parentWorkflowId: "main-workflow", parentThreadId: "task-thread", nodeId: "step-inspect", nodeKind: "step", nodeName: "Inspect source"},
         {parentWorkflowId: "main-workflow", parentThreadId: "task-thread", nodeId: "step-local", nodeKind: "step", nodeName: "Check migration notes"},
@@ -159,14 +159,33 @@ const progressSnapshot: WorkflowProgressSnapshot = {
 };
 
 // the canonical task workspace for one main conversation, rendered from progress pages and the task as given
-const renderWorkspace = (pages: WorkflowProgressSnapshot[], task?: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(TaskWorkspace, {
-  snapshot, task, threadId: "task-thread", progress: {key: "progress-key", pages, loading: false, error: null}, connected: true, attention: [], stopped: false,
+const renderWorkspace = (pages: WorkflowProgressSnapshot[], task?: ProjectSupervisorInfo["tasks"][number], initialView: "plan" | "history" = "plan") => renderToStaticMarkup(createElement(TaskWorkspace, {
+  snapshot, task, initialView, threadId: "task-thread", progress: {key: "progress-key", pages, loading: false, error: null}, connected: true, attention: [], stopped: false,
   readAt: null, refreshing: false, onRefresh: () => {}, onLoadMore: () => {}}));
 
 const renderConnected = (pages: WorkflowProgressSnapshot[]) => {
   const view = progressView(pages);
   return renderToStaticMarkup(createElement(ConnectedWork, {threads: [...view.threadById.values()], mainThreadId: "task-thread", workflows: view.workflowByThreadId, coverage: view.coverageByThreadId, task: undefined, complete: view.complete}));
 };
+
+it("native reviewer turns remain in history while the same reviewer can start a fresh attempt", () => {
+  const returned = {returnId: "return-1", backToNodeId: "back-review", targetNodeId: "step-inspect", targetName: "Review", regionNodeIds: ["step-inspect"],
+    attempt: 1, state: "applied" as const, reason: "Material findings require another pass.", sourceThreadId: "task-thread", sourceMessageId: "decision-1",
+    requestedAt: 10, resolvedAt: 20, closed: [], note: "The affected work is quiet.",
+    retiredRuns: [{kind: "provider_turns" as const, threadId: "child-one", providerThreadId: "provider-child", providerTurnIds: ["old-turn"]}]};
+  const page: WorkflowProgressSnapshot = {...progressSnapshot, scope: {...progressSnapshot.scope!, threads: progressSnapshot.scope!.threads.map(thread =>
+    thread.threadId === "child-one" ? {...thread, observedProviderTurnId: "old-turn"} : thread)}, workflows: progressSnapshot.workflows.map(workflow =>
+    workflow.threadId === "task-thread" ? {...workflow, returns: [returned], attempts: [{nodeId: "step-inspect", attempt: 2}], history: [], historyComplete: true} : workflow)};
+  assert.match(renderConnected([page]), /latest observed review turn belongs to a closed attempt/);
+  assert.match(renderConnected([page]), /Attempt 2/);
+  assert.match(renderWorkspace([page], undefined, "history"), /this reviewer can continue in the same conversation/);
+  const fresh = {...page, scope: {...page.scope!, threads: page.scope!.threads.map(thread => thread.threadId === "child-one" ? {...thread, observedProviderTurnId: "fresh-turn"} : thread)}};
+  assert.doesNotMatch(renderConnected([fresh]), /latest observed review turn belongs to a closed attempt/);
+  const replaced = {...page, workflows: page.workflows.map(workflow => workflow.threadId === "task-thread" ? {...workflow, returns: [{...returned,
+    retiredRuns: [{kind: "thread" as const, threadId: "child-one", reason: "Separate review rounds cannot be identified."}]}]} : workflow)};
+  assert.match(renderConnected([replaced]), /reviewer must be replaced.*Carry its earlier findings/su);
+  assert.match(renderWorkspace([replaced], undefined, "history"), /a replacement reviewer is required; carry forward the earlier findings/);
+});
 
 const renderTaskView = (task: ProjectSupervisorInfo["tasks"][number]) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
@@ -224,7 +243,7 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
   assert.match(html, /id="supervisor-monitoring-threshold" type="number" min="3" max="100" step="1" required=""/);
   assert.match(html, /name="activityThreshold"/);
   assert.match(html, /aria-describedby="supervisor-monitoring-interval-help supervisor-monitoring-interval-error"/);
-  assert.match(html, /Supervisor cooldown:<\/strong> 30 seconds between monitoring sends/);
+  assert.match(html, /Active watch continuations bypass it/);
   assert.match(html, /Enter 1 or 2 minutes; 2 is the default and the upper bound/);
   assert.match(html, /Monitoring details and check-ins/);
   assert.match(html, /Status:<\/strong> busy/);
@@ -410,7 +429,7 @@ it("workflow proposal shows recursive requirements, nested plan groups, fixed om
     workflowProposalId: "proposal-draft-12",
   };
   const html = renderTaskView(task);
-  assert.match(html, /<h2 id="journey-title">Proposed plan<\/h2>/);
+  assert.match(html, /<h2 id="journey-title">Pending proposal<\/h2>/);
   assert.match(html, /Proposed the plan/);
   assert.match(html, /A plan was prepared from the current project definitions/);
   assert.match(html, /Proposed for acceptance\. No acceptance is recorded for this proposal/);
@@ -420,7 +439,7 @@ it("workflow proposal shows recursive requirements, nested plan groups, fixed om
   assert.match(html, /Included recursively within reviewer/);
   assert.match(html, /In parallel/);
   assert.match(html, /Inspect source/);
-  assert.match(html, /Reviewer<small>Workflow<\/small>/);
+  assert.match(html, /Reviewer<span class="step-flags"><small>Workflow<\/small><\/span>/);
   assert.match(html, /fixed workflow/);
   assert.match(html, /Not applicable in this plan/);
   assert.match(html, /The task does not change a security boundary/);
@@ -558,13 +577,15 @@ it("a stale agreement remains historical while a newer proposal stays current", 
     agreement: agreement({status: "stale", message: "The agreed definition revision is out of date."}),
   };
   const html = renderTaskView(task);
+  const history = renderWorkspace([], task, "history");
+  assert.doesNotMatch(html, /This acceptance is history/);
   assert.match(html, /Acceptance needs review/);
   assert.match(html, /Earlier acceptance is out of date/);
-  assert.match(html, /<h2 id="journey-title">Proposed plan<\/h2>/);
+  assert.match(html, /<h2 id="journey-title">Pending proposal<\/h2>/);
   assert.match(html, /A new proposal is ready for discussion/);
-  assert.match(html, /Earlier acceptance \(out of date\)/);
-  assert.match(html, /This acceptance is history\. The current plan still needs acceptance/);
-  assert.match(html, /In earlier plan/);
+  assert.match(renderWorkspace([], task, "history"), /Earlier acceptance \(out of date\)/);
+  assert.match(history, /This acceptance is history\. The current plan still needs acceptance/);
+  assert.match(history, /In earlier plan/);
   assert.match(html, /The agreed definition revision is out of date/);
   assert.doesNotMatch(html, /Plan accepted|Accepted this plan/);
 });
@@ -585,7 +606,7 @@ it("definition authorization and revert checks stay advisory beside the workflow
     assert.ok(reviewMarkup.includes(expectedText));
     assert.ok(reviewMarkup.includes(message));
     assert.doesNotMatch(reviewMarkup, /<(?:button|input|select|textarea)\b/i);
-    assert.match(html, /<h2 id="journey-title">Proposed plan<\/h2>/);
+    assert.match(html, /<h2 id="journey-title">Pending proposal<\/h2>/);
     assert.ok(html.indexOf("workflow-definition-review-title") < html.indexOf("journey-title"), "the review is attention before the journey");
   }
 });
@@ -963,9 +984,12 @@ it.effect("an expired dashboard session is a definite rejection and never repeat
 }).pipe(Effect.provide(onPage)));
 
 it("the task workspace separates an unlinked workflow from the current task and preserves child uncertainty", () => {
-  const html = renderWorkspace([progressSnapshot]) + renderConnected([progressSnapshot]);
-  assert.match(html, /Evidence and history/);
-  assert.match(html, /Statuses and notes are the Supervisor’s assessments of the conversation’s work; they are not independent proof of execution/);
+  const plan = renderWorkspace([progressSnapshot]);
+  assert.doesNotMatch(plan, /Earlier workflow:/);
+  const html = plan + renderWorkspace([progressSnapshot], undefined, "history") + renderConnected([progressSnapshot]);
+  assert.match(html, /aria-label="Task view"/);
+  assert.match(renderWorkspace([progressSnapshot], snapshot.tasks[0], "history"), /Sources and earlier plans/);
+  assert.match(renderWorkspace([progressSnapshot], snapshot.tasks[0], "history"), /Statuses and notes are the Supervisor’s assessments of the conversation’s work; they are not independent proof of execution/);
   assert.match(html, /Native child · Workflow: Needs attention/);
   assert.doesNotMatch(html, /native driver.*verified|workflow updates.*verified/i);
   assert.match(html, /Native child/);
@@ -1128,12 +1152,15 @@ it("external contributions render read-only per node with text labels, escaped t
     contribution({contributionId: "former", nodeId: "step-gone", nodeName: "Former step", inCurrentPlan: false, state: "result", revision: 1}),
   ];
   const task = {...snapshot.tasks[0]!, id: "task", sourceHash: "hash"};
-  const render = (withContributions: boolean) => renderWorkspace([{...progressSnapshot, workflows: progressSnapshot.workflows.map(item => item.workflowId !== "main-workflow" ? item
-    : {...item, assessment: {taskId: "task", sourceHash: "hash", status: "underway", summary: "Bound to the task.", updatedAt: 1}, ...(withContributions ? {contributions} : {})})}], task);
+  const render = (withContributions: boolean, initialView: "plan" | "history" = "plan") => renderWorkspace([{...progressSnapshot, workflows: progressSnapshot.workflows.map(item => item.workflowId !== "main-workflow" ? item
+    : {...item, assessment: {taskId: "task", sourceHash: "hash", status: "underway", summary: "Bound to the task.", updatedAt: 1}, ...(withContributions ? {contributions} : {})})}], task, initialView);
   const html = render(true);
   const baseline = render(false);
+  const history = render(true, "history");
+  assert.match(history, /No longer in the current plan|Contributions for steps no longer in the plan/);
+  assert.doesNotMatch(html, /Contributions for steps no longer in the plan/);
   for (const label of ["Awaiting external result", "External result received – awaiting assessment", "External result accepted", "Further work requested",
-    "External contribution withdrawn", "No longer in the current plan", "Contributions for steps no longer in the plan"])
+    "External contribution withdrawn"])
     assert.ok(html.includes(label), label);
   assert.match(html, /<strong>External contributions<\/strong><ul class="stack"><li class="workflow-progress-observation">/);
   assert.match(html, /Attach the reviewer findings\./);
@@ -1249,13 +1276,25 @@ it("task-path assessments keep unknown reads distinct from absence and retain as
 it("an earlier workflow cannot borrow the current task's agreement panel", () => {
   const task = {...snapshot.tasks[0]!, id: "new-task", sourceHash: "new-source", workflow: workflow(), workflowProposalId: "proposal-1", agreement: agreement({message: "Current task acceptance only"})};
   const html = renderWorkspace([progressSnapshot], task);
-  const history = html.indexOf('retained-workflow"');
+  const historical = renderWorkspace([progressSnapshot], task, "history");
+  assert.match(html, /Current task acceptance only/);
+  assert.doesNotMatch(html, /Earlier workflow: Review the source change/);
+  const history = historical.indexOf('retained-workflow"');
   assert.ok(history > 0);
-  assert.match(html.slice(0, history), /Current task acceptance only/);
-  assert.match(html.slice(0, history), /Accepted plan/);
-  assert.doesNotMatch(html.slice(0, history), /Proposed plan|>Proposed</);
-  assert.match(html.slice(history), /Earlier workflow: Review the source change/);
-  assert.doesNotMatch(html.slice(history), /Current task acceptance only|Agent and Supervisor/);
+  assert.match(html, /Current task acceptance only/);
+  assert.match(html, /Accepted plan/);
+  assert.doesNotMatch(html, /Proposed plan|>Proposed</);
+  assert.match(historical.slice(history), /Earlier workflow: Review the source change/);
+  assert.doesNotMatch(historical.slice(history), /Current task acceptance only|Agent and Supervisor/);
+});
+
+it("a returned task shows reopened implementation as current work, keeping future review choices out of Now", () => {
+  const journey = fixtureJourney("returned", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const html = renderWorkspace([journey.progress], journey.task);
+  assert.match(html, /Now: Implement within scope<\/p>/);
+  assert.doesNotMatch(html, /Now: [^<]*Decide:/);
+  assert.match(html, /1 branch decision pending/);
+  assert.match(html, /Attempt 2/);
 });
 
 it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {
@@ -1269,8 +1308,8 @@ it("the task workspace treats a pending branch decision as current work, counts 
   assert.match(selectedHtml, /Now: Single independent review/);
   assert.doesNotMatch(selectedHtml, /Decide:|branch decision pending/);
   assert.match(selectedHtml, /7 of 10 applicable steps assessed complete/);
-  assert.match(selectedHtml, /<h3>Branch decisions<\/h3>/);
-  assert.match(selectedHtml, /Then path selected for “The change is contained, well understood and low risk\.”/);
+  assert.match(renderWorkspace([selected.progress], selected.task, "history"), /<h3>Branch decisions<\/h3>/);
+  assert.match(renderWorkspace([selected.progress], selected.task, "history"), /Then path selected for “The change is contained, well understood and low risk\.”/);
   const connected = renderConnected([selected.progress]);
   assert.match(connected, /Reconstructed reviewer/);
   assert.match(connected, /aria-label="Branch: if The diff stays within the packing scan module\."/);
@@ -1302,8 +1341,8 @@ it("a completed child or nested workflow with a pending or changed decision is n
   const review = pending.plan!.nodes.find(node => node.kind === "workflow")!;
   const completedReview = {...pending.plan!, nodes: pending.plan!.nodes.map(node => node === review ? {...review, status: "completed" as const} : node)};
   const html = renderToStaticMarkup(createElement(PlanJourney, {node: completedReview, mode: "live", selections: []}));
-  const reviewHtml = html.slice(html.indexOf("Review<small>Workflow</small>"));
-  assert.match(reviewHtml, /^Review<small>Workflow<\/small><\/span><span class="step-state">Completed earlier · needs reassessment</);
+  const reviewHtml = html.slice(html.indexOf('Review<span class="step-flags"><small>Workflow</small>'));
+  assert.match(reviewHtml, /^Review<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Completed earlier · needs reassessment</);
   assert.match(reviewHtml, /its completion needs reassessment\. The recorded status stays as history\./);
   assert.match(reviewHtml, /class="step-state">Decision pending</);
 });
@@ -1316,7 +1355,7 @@ it("branch decision history names the condition each event answered, not the bra
     {...main.branchEvents![1]!, condition: "The change is contained, well understood and low risk."},
     {...main.branchEvents![1]!, id: "fixture-branch-event-legacy", condition: null},
   ], branchSelections: main.branchSelections!.map(item => ({...item, condition: "The change touches shared carton accounting."}))}]};
-  const html = renderWorkspace([replaced], task);
+  const html = renderWorkspace([replaced], task, "history");
   assert.match(html, /Else path selected for “The change touches shared carton accounting\.”/);
   assert.match(html, /Then path selected for “The change is contained, well understood and low risk\.”/);
   assert.match(html, /Then path selected \(condition not recorded with this event\)/);

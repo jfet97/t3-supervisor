@@ -55,6 +55,7 @@ function TemplateNode({node, definitions, ancestors = []}: {node: DefinitionNode
       </div>
     </div>;
   }
+  if ("back_to" in node) return <p className="branch-condition template-return"><span className="branch-label">Return</span> <span>Back to <code className="small">{node.back_to}</code>: a new attempt repeats that earlier member and everything after it</span></p>;
   if ("step" in node) {
     const step = typeof node.step === "string" ? definitions.steps.find(item => item.id === node.step) : node.step;
     return <EntityDetails icon="record" title={<>Step: {step?.name ?? String(node.step)}</>} className="template-node">
@@ -247,7 +248,7 @@ export function ProjectDefinitionsPanel({data, overview, route, navigate, guard,
   useEffect(() => {onDirtyChange?.(dirty || saving);}, [dirty, saving, onDirtyChange]);
   const projects = data.projects.filter(project => project.available);
   const projectId = projects.some(project => project.id === selection.projectId) ? selection.projectId : "";
-  const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId).sort((a, b) => a.id.localeCompare(b.id));
+  const threads = data.threads.filter(thread => thread.available && thread.projectId === projectId);
   const threadUnavailable = Boolean(projectId && selection.threadId && !threads.some(thread => thread.id === selection.threadId));
   const threadId = selection.threadId;
   const epoch = useAtomValue(authEpochAtom, epochOf);

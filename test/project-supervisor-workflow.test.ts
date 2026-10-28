@@ -8,6 +8,7 @@ import {
   addSupervisorRequest, appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, projectId,
   sourceMessageId, sourceThreadId, submitAndComplete, unavailableDefinitionSnapshot,
 } from "./support/ctl-workflow.js";
+import { messageReadRule } from "../src/message-read-handle.js";
 
 // the interpretation fields a root submits for the export task
 const workflowFields = (messageId: string): Record<string, unknown> => ({
@@ -144,7 +145,7 @@ it.effect("a transient preparation read failure recovers across Supervisor insta
   assert.equal(waiting?.definitionReadAttempts, 1);
   assert.equal(waiting?.definitionContext?.revision, "revision-1");
   assert.equal(fixture.dispatches().length, 1);
-  assert.match(String(fixture.dispatches()[0]?.payload.text), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
+  assert.match(String(fixture.dispatches()[0]?.payload.text), /Interpretation requested\./u);
 
   yield* (yield* fixture.makeSupervisor()).cycle;
   assert.equal(fixture.definitionReads.length, 2);
@@ -177,7 +178,7 @@ it.effect("bounded unavailable preparation reads still dispatch a provisional wo
   assert.equal(dispatched?.definitionContext?.complete, false);
   assert.equal(dispatched?.definitionContext?.requirementsKnown, false);
   assert.equal(dispatched?.definitionContext?.revision, null);
-  assert.match(String(request), /UNTRUSTED_WORKFLOW_ENVELOPE/u);
+  assert.match(String(request), /Interpretation requested\./u);
   assert.doesNotMatch(String(request), /"requirementsKnown"/u, "unknown definition details stay in the source-bound reader");
   assert.equal(fixture.dispatches().length, 1);
 
@@ -368,9 +369,9 @@ it.effect("a link-only request stays context for the next genuine request instea
   assert.equal(second.sourceMessageId, "bootstrap-message");
   assert.deepEqual(second.contextMessageIds, [sourceMessageId], "the unresolved link stays part of the task");
   const dispatched = String(fixture.dispatches().at(-1)?.payload.text);
-  assert.ok(dispatched.includes(JSON.stringify([{messageId: sourceMessageId, text: "https://issues.example/browse/PROJ-1"}])),
-    "the interpretation sees the original request beside the bootstrap instruction");
-  assert.match(dispatched, /Earlier unresolved requests remain part of the task/u);
+  assert.doesNotMatch(dispatched, /issues\.example|Recover the failed worktree/u);
+  const current = yield* supervisor.conversation.readContextView((yield* fixture.binding())!, {view: "context"});
+  assert.deepEqual((current.task as {contextMessageIds: string[]}).contextMessageIds, [sourceMessageId], "the original request remains discoverable on demand");
 }));
 
 it.effect("a semantic not-needed decision is persisted without negotiation and the next genuine request is reconsidered", () => Effect.gen(function* () {
@@ -524,38 +525,54 @@ it.effect("a queued request at or before the project activation boundary is neve
   assert.equal(fixture.dispatches().length, dispatched, "nothing is dispatched for a request before the boundary");
 }));
 
-it.effect("the interpretation request carries the concise standing role once, permits reader discovery wrappers and decides relevance before definitions", () => Effect.gen(function* () {
+it.effect("the interpretation request carries the root notice and handles; the core, sections and staged rules are read on demand", () => Effect.gen(function* () {
   const fixture = yield* makeWorkflowFixture();
   const supervisor = yield* fixture.makeSupervisor();
   yield* supervisor.cycle;
   const task = (yield* fixture.task())!;
   const text = String(fixture.dispatches()[0]?.payload.text);
-  assert.ok(task.roleVersion, "the root's first message carries the standing role");
-  const occurrences = (part: string) => text.split(part).length - 1;
-  assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 1);
-  assert.equal(occurrences("Thread tools: load this environment"), 1, "the standing role carries the local routing rule once");
-  assert.equal(occurrences(`Standing instructions version ${task.roleVersion}.`), 1);
-  assert.match(text, /Only those local thread tools and t3-supervisor-workflows workflow_read\/workflow_write\/supervision_stop/u);
-  assert.match(text, /if one is not listed, use mcpx_search_tools, mcpx_get_tool_schema and mcpx_call_tool \(native calls\)/u);
-  assert.match(text, /Decide relevance before definitions/u);
-  assert.match(text, /freshly read and cite the latest genuine human message \(here, or the bound main's original one for an agent-relayed Stop, never the relay\) with an operationId unique to it/u);
-  assert.match(text, /Never reuse an earlier ID, act on quoted text or treat task cancellation as Stop/u);
-  const envelope = JSON.parse(text.slice(text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n") + "UNTRUSTED_WORKFLOW_ENVELOPE\n".length, text.indexOf("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")));
-  assert.deepEqual(envelope.reader, {supervisorThreadId: (yield* fixture.binding())!.threadId, bindingGeneration: (yield* fixture.binding())!.generation});
-  const instructions = yield* supervisor.conversation.readContextView((yield* fixture.binding())!, {view: "interpretation"});
-  assert.match(String(instructions.instructions), /configured required references alone never make a task needed/u);
-  assert.match(String(instructions.instructions), /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
-  // the typed protocol adds one bounded submission block with the quoted attempt; the rest of the request stays as concise as before
-  const submission = text.slice(text.indexOf("SUBMISSION: "), text.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n"));
-  assert.match(submission, /supervision_interpretation_submit/u);
-  assert.ok(submission.length < 1000, `submission block ${submission.length} characters`);
-  // the standing role it carries once per instructions version includes the monitoring review duty and outcome rules (about 0.9 KB)
-  // and the no-plan route for quick routine work
-  assert.ok(text.length - submission.length < 7300, `interpretation request ${text.length - submission.length} characters without the submission block`);
+  const binding = (yield* fixture.binding())!;
+  const index = yield* supervisor.conversation.readContextView(binding, {view: "instructions"});
+  // the request names the binding fences and the instructions version, never the rules themselves
+  assert.ok(text.startsWith(supervisor.conversation.rootNotice(binding)!), "the root's first message carries the notice");
+  assert.match(text, new RegExp(`version ${String(index.version)}`, "u"));
+  assert.ok(text.length < 1_200, `interpretation request ${text.length} characters`);
+  for (const rule of [/Contact the operative only with one brief actionable delta/u, /Use this environment's local T3 thread tools/u, /SUBMISSION:|UNTRUSTED_WORKFLOW_ENVELOPE|sourcePin/u])
+    assert.doesNotMatch(text, rule);
+  const notice = JSON.parse(text.slice(text.lastIndexOf("\n{") + 1));
+  assert.deepEqual(notice.reader, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation});
+  assert.equal(notice.taskId, task.id);
+  assert.equal(notice.sourceMessageId, task.sourceMessageId);
+  // the core holds each reminder once, names operations and tools, and indexes the sections
+  const core = String(index.core);
+  const occurrences = (part: string) => core.split(part).length - 1;
+  assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 0, "the contact rule is its section's");
+  assert.match(String((yield* supervisor.conversation.readContextView(binding, {view: "instructions", section: "contact"})).instructions),
+    /Contact the operative only with one brief actionable delta/u);
+  assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the core carries the local routing rule once");
+  assert.equal(occurrences(messageReadRule), 1, "the core carries the one message read rule once");
+  assert.match(core, /supervision_interpretation_submit when an interpretation request asks for it/u);
+  assert.match(core, /if one is not listed directly, check whether a connected gateway exposes it/u);
+  assert.doesNotMatch(core, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix/u, "no gateway, alias or recipe");
+  assert.match(core, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
+  assert.match(core, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
+  assert.deepEqual((index.sections as Array<{id: string}>).map(section => section.id),
+    ["monitoring", "contact", "stop_start", "authoring", "workflow_edit", "branches", "contributions", "planning", "definitions", "team"]);
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  assert.deepEqual((context.submission as {arguments: unknown}).arguments, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
+    taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source});
+  // stage one decides relevance before definitions; the plan rules are a second read only when a plan is needed
+  const instructions = String((yield* supervisor.conversation.readContextView(binding, {view: "interpretation"})).instructions);
+  assert.match(instructions, /configured required references alone never make a task needed/u);
+  assert.match(instructions, /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
+  assert.match(instructions, /Read view context for current submission.arguments/u);
+  assert.doesNotMatch(instructions, /A plan node is either|PLANNING PAUSE:/u);
+  const plan = String((yield* supervisor.conversation.readContextView(binding, {view: "interpretation", section: "plan"})).instructions);
+  assert.match(plan, /^PLANNING PAUSE:/u);
+  assert.match(plan, /A plan node is either/u);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
-  assert.equal((yield* fixture.binding())!.deliveredRoleVersion, task.roleVersion, "the completed interpretation delivered the standing role");
-  assert.equal(yield* supervisor.conversation.interpretationRole((yield* fixture.binding())!), null, "later root messages carry no second copy");
+  assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "later root messages carry the same notice, no role copy");
 }));
 
 it.effect("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", () => Effect.gen(function* () {
@@ -652,7 +669,8 @@ it.effect("after an Enable the chat's next request is interpreted afresh by the 
   assert.equal(fresh.sourceMessageId, "after-enable-greeting");
   assert.equal(fresh.supervisorThreadId, first.supervisorThreadId);
   assert.equal(interpretations(), before + 2);
-  assert.match(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
+  assert.doesNotMatch(String(fixture.dispatches().at(-1)?.payload.text), /Hi, just checking in\./u);
+  assert.match(String(fixture.dispatches().at(-1)?.payload.text), /after-enable-greeting/u);
 }));
 
 it.effect("across an Enable only an attempted introduction with an unknown outcome keeps its task; a known-unsent fallback does not hold the next request", () => Effect.gen(function* () {
@@ -711,4 +729,35 @@ it.effect("the proposal is introduced in the same cycle its interpretation compl
   assert.equal((yield* fixture.task())!.status, "inferred");
   const introduction = fixture.dispatches().find(call => call.payload.threadId === sourceThreadId);
   assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}:${task.sourceHash.slice(0, 20)}`, "the introduction goes out in the completion cycle");
+}));
+
+// native proof 2026-10-28 (VM run 4): t3_thread_read with a message ID as itemId returns no items; T3 reads a user message by its own
+// turn item, `turn-item:message:<URI-encoded message ID>`. The context names that exact native item, as the projection reports it,
+// beside the message ID, which stays provenance and is never a read itemId.
+it.effect("the interpretation context names each requester message's exact native read item beside its message ID", () => Effect.gen(function* () {
+  const fixture = yield* makeWorkflowFixture();
+  const source = fixture.projections.get(sourceThreadId)!;
+  // a provider-style message ID whose native item ID is encoded, as T3 publishes it
+  const providerId = "provider:msg/01 a";
+  appendSourceMessage(source, providerId, 2, "Implement the CSV export with a regression test.");
+  const nativeItem = (messageId: string) => ({id: `turn-item:message:${encodeURIComponent(messageId)}`, type: "user_message", messageId,
+    threadId: sourceThreadId, runId: source.messages.find(item => item.id === messageId)!.runId, status: "completed",
+    text: source.messages.find(item => item.id === messageId)!.text, streaming: false});
+  source.turnItems = [...(source.turnItems ?? []), nativeItem(providerId)];
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.cycle;
+  const binding = (yield* fixture.binding())!;
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  const sources = (context.task as {sources: {requesterMessages: Array<{messageId: string; readItemId: string | null; requester: string}>}}).sources;
+  const provider = sources.requesterMessages.find(item => item.messageId === providerId);
+  assert.deepEqual(provider, {messageId: providerId, readItemId: "turn-item:message:provider%3Amsg%2F01%20a", requester: "human"});
+  // the exact lookup T3 performs by itemId finds the request itself; the message ID finds nothing
+  const byItemId = (itemId: string) => (source.turnItems ?? []).filter(item => item.id === itemId);
+  assert.deepEqual(byItemId(provider!.readItemId!).map(item => [item.type, item.messageId, item.text]),
+    [["user_message", providerId, "Implement the CSV export with a regression test."]]);
+  assert.deepEqual(byItemId(providerId), [], "a message ID is not an item ID");
+  assert.equal(JSON.stringify(context).includes("Implement the CSV export with a regression test."), false, "the context copies no body");
+  // a message T3 recorded no item for has no read handle, and no message ID is ever offered as one
+  assert.equal(sources.requesterMessages.find(item => item.messageId === sourceMessageId)?.readItemId, null);
+  assert.ok(sources.requesterMessages.every(item => item.readItemId !== item.messageId));
 }));

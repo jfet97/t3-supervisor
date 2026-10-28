@@ -48,21 +48,30 @@ const nodeIdsOf = (group: WorkflowPlanGroupInfo | null): string[] => {
         ids.push(node.nodeId);
         walk(node.then.nodes);
         if (node.else) walk(node.else.nodes);
-      } else walk(node.nodes);
+      } else if (node.kind === "back_to") ids.push(node.nodeId);
+      else walk(node.nodes);
     }
   };
   if (group) walk(group.nodes);
   return ids;
 };
 const take = (generator: () => string, count: number): string[] => Array.from({length: count}, () => generator());
+// a template member's ID is derived from its workflow occurrence and template path (UUID version 8); the generator's are version 4
+const derived = (id: string): boolean => id[14] === "8";
 
-it("plan builders allocate every new occurrence from the injected generator in traversal order", {timeout: 10_000}, () => {
+it("plan builders draw each authored occurrence from the injected generator and derive each template member from its occurrence", {timeout: 10_000}, () => {
   const context = contextFor(requiredDelivery);
   const plan = validateWorkflowPlan(draft, context, seededNodeIds("injected"));
   assert.ok(plan?.plan);
   const ids = nodeIdsOf(plan.plan);
   assert.equal(ids.length, 4);
-  assert.deepEqual(ids, take(seededNodeIds("injected"), ids.length));
+  // the delivery reference and the local step are authored; the two delivery members come from its template
+  assert.deepEqual(ids.map(derived), [false, true, true, false]);
+  assert.deepEqual(ids.filter(id => !derived(id)), take(seededNodeIds("injected"), 2));
+  // another occurrence of the same workflow derives other member IDs
+  const other = validateWorkflowPlan(draft, context, seededNodeIds("other"));
+  assert.ok(other?.plan);
+  assert.equal(new Set([...ids, ...nodeIdsOf(other.plan)]).size, 8);
   assert.deepEqual(plan.requirements.map(item => [item.id, item.state]), [["delivery", "included"], ["verify", "included"]]);
   // the same generator state yields the same plan, so nothing else draws ids
   assert.deepEqual(validateWorkflowPlan(draft, context, seededNodeIds("injected")), plan);
@@ -78,7 +87,8 @@ it("plan builders allocate every new occurrence from the injected generator in t
   const material = canonicalAuthoringMaterial(context, 24_000, seededNodeIds("authoring"));
   assert.ok(material.workflow?.plan);
   const materialIds = nodeIdsOf(material.workflow.plan);
-  assert.equal(material.localStepExample.nodeId, take(seededNodeIds("authoring"), materialIds.length + 1).at(-1));
+  const drawn = materialIds.filter(id => !derived(id)).length;
+  assert.equal(material.localStepExample.nodeId, take(seededNodeIds("authoring"), drawn + 1).at(-1));
   assert.equal(new Set([...materialIds, material.localStepExample.nodeId]).size, materialIds.length + 1);
 });
 
@@ -87,7 +97,8 @@ it("a compact draft with a required workflow takes the leading ids of its seeded
   const canonical = canonicalizeProposalDraft(draft, context, "task-a\0source-hash\0proposal-a");
   assert.ok(canonical.ok);
   const ids = nodeIdsOf(canonical.workflow.plan);
-  assert.deepEqual(ids, take(seededNodeIds("task-a\0source-hash\0proposal-a"), ids.length));
+  assert.deepEqual(ids.map(derived), [false, true, true, false]);
+  assert.deepEqual(ids.filter(id => !derived(id)), take(seededNodeIds("task-a\0source-hash\0proposal-a"), 2));
   assert.deepEqual(canonicalizeProposalDraft(draft, context, "task-a\0source-hash\0proposal-a"), canonical);
 });
 

@@ -97,13 +97,14 @@ it.live("CT-ISUB-04: concurrent, replayed, conflicting and retried submissions o
   yield* f.runOnce();
   const finalized = yield* f.task();
   assert.equal(finalized.status, "inferred");
-  const sends = f.commands.length;
+  const operativeEffects = () => f.commands.filter(command => command.threadId !== task.supervisorThreadId).length;
+  const sends = operativeEffects();
   assert.deepEqual(yield* f.submit(task, args, {install: false}), duplicate(task));
   yield* f.runOnce();
   const again = yield* f.task();
   assert.deepEqual([again.status, again.objective, again.attempt, again.interpretationEvidence, again.workflow],
     [finalized.status, finalized.objective, finalized.attempt, finalized.interpretationEvidence, finalized.workflow], "no re-finalization");
-  assert.equal(f.commands.length, sends, "a replay never sends");
+  assert.equal(operativeEffects(), sends, "a replay never duplicates operative effects; active observation may continue in the root");
   assert.equal(f.interpretationDispatches().length, 1);
 }), {timeout: 60_000});
 
@@ -264,7 +265,9 @@ it.live("CT-ISUB-01: a queued task prepared under the old prompt is prepared aga
   assert.equal(task.status, "waiting");
   assert.ok(task.attempt, "the old-prompt preparation is replaced by a typed one");
   assert.notEqual(task.requestText, legacyText);
-  assert.deepEqual(f.interpretationDispatches().map(command => String(command.text).includes(task.attempt!.attemptId)), [true]);
+  // the typed attempt is keyed to the exact prepared request, which names the task; its pins are read on demand, never pushed
+  assert.deepEqual(f.interpretationDispatches().map(command => String(command.text)), [task.requestText]);
+  assert.match(task.requestText, new RegExp(`Interpretation requested\\.[\\s\\S]*"taskId":"${task.id}"`, "u"));
   assert.equal(f.commands.some(command => command.text === legacyText), false, "the legacy text is never sent");
   // an in-flight request without a typed attempt and without a native run is never replayed with its stored text
   const root = f.root();

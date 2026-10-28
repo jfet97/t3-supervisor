@@ -620,14 +620,14 @@ it.live("CT-WSS-03: receipts and incompatible rows survive reopen and an exact r
 const goldenDraft = {
   formatVersion: 2, workflowId: "golden-workflow", projectId: "project-a", mainThreadId: "main-a", threadId: "main-a",
   parentWorkflowId: null, parentThreadId: null, revision: 1, status: "planned", objective: null, sourceBinding: null, requirements: [], issues: [],
-  plan: null, currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [],
+  plan: null, currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], returns: [],
   evidence: [{operationId: "golden-ensure", kind: "draft_created", targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: "planned",
     sourceThreadId: null, sourceRunId: null, sourceMessageId: null, agreementKey: null, note: "Start a golden draft.", sourceItemId: null,
     id: "00000000-0000-4000-8000-0000000000e1", recordedAt: 1000, actorSupervisorThreadId: "golden-supervisor"}],
   createdAt: 1000, updatedAt: 1000,
 };
-const goldenDraftStateHash = "ea75ced6d7d9765090837e1235c496ff1f638106071a6c4de83efb333d4b73a3";
-const goldenDraftWithoutContributionsStateHash = "d94e86f046bc05f8d41e6084c7592dd67850dbef926c398cdc6631dcc85da8d7";
+const goldenDraftStateHash = "f33e399aa57839f28ca22c4229898c34e47a0e626d0d8f1bc4228fed08ded318";
+const goldenDraftWithoutContributionsStateHash = "d561873ac2c87501b4c2e9f433582e3871af972edb9bc49ca804ffba26af065a";
 
 const keyShape = (value: unknown): unknown => Array.isArray(value) ? value.map(keyShape) :
   value !== null && typeof value === "object" ? Object.entries(value).map(([key, item]) => [key, keyShape(item)]) : typeof value;

@@ -80,7 +80,9 @@ export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) =>
 const noPlanNeeded = (task: TaskInterpretationInfo | undefined) => task?.supervision === "not_needed" && !task.agreement;
 
 /** The one-line agreement state for the task band. */
-export const alignmentLabel = (task: TaskInterpretationInfo | undefined) => hasCurrentAgreement(task) ? "Plan accepted"
+// changedSinceAcceptance: the displayed live plan no longer matches the accepted snapshot, so its contents are not accepted
+export const alignmentLabel = (task: TaskInterpretationInfo | undefined, changedSinceAcceptance = false) => hasCurrentAgreement(task)
+  ? changedSinceAcceptance ? "Changes not accepted" : "Plan accepted"
   : acceptedAgreement(task) ? "Update awaiting acceptance"
   : task?.agreement?.status === "stale" ? "Acceptance needs review"
   : noPlanNeeded(task) ? "No plan needed"
@@ -90,6 +92,7 @@ export const alignmentLabel = (task: TaskInterpretationInfo | undefined) => hasC
 // active work opens its workflow: an underway or flagged step, or a reached branch decision still pending
 const hasActiveNode = (node: WorkflowPlanNodeInfo, selected: ReadonlyMap<string, BranchPath>): boolean => isPlanGroup(node) ? node.nodes.some(child => hasActiveNode(child, selected))
   : node.kind === "branch" ? !selected.has(node.nodeId) || branchPathGroups(node).some(({path, group}) => selected.get(node.nodeId) === path && hasActiveNode(group, selected))
+  : node.kind === "back_to" ? false
   : node.status === "underway" || node.status === "needs_attention" || node.kind === "workflow" && node.plan !== null && hasActiveNode(node.plan, selected);
 
 const noNotes: StepNotes = {agreed: null, proposed: null, records: null, changed: new Set()};
@@ -142,6 +145,8 @@ type JourneyProps = {
   completions?: ReadonlyMap<string, number | null> | undefined;
   /** Occurrences of this live workflow settled by a current not-applicable assessment, with everything inside an assessed workflow. */
   notApplicable?: ReadonlySet<string> | undefined;
+  /** The current attempt of each occurrence of this live workflow that a return reopened. */
+  attempts?: ReadonlyMap<string, number> | undefined;
 };
 
 const pathLabel = {then: "Then path", else: "Else path"} as const;
@@ -152,7 +157,7 @@ const deeper = (outer: PlanReach, inner: PlanReach): PlanReach => {
 };
 
 /** A branch shows its condition, both labelled paths and, on a live workflow, the operative's decision; the next item follows it. */
-function BranchJourney({node, mode, notes, contributions, selections, completions, notApplicable, reach}: JourneyProps & {node: Extract<WorkflowPlanNodeInfo, {kind: "branch"}>; mode: JourneyMode; notes: StepNotes; reach: PlanReach}) {
+function BranchJourney({node, mode, notes, contributions, selections, completions, notApplicable, attempts, reach}: JourneyProps & {node: Extract<WorkflowPlanNodeInfo, {kind: "branch"}>; mode: JourneyMode; notes: StepNotes; reach: PlanReach}) {
   const live = mode === "live";
   const current = live ? selections?.find(item => item.nodeId === node.nodeId && item.current) : undefined;
   const earlier = live && !current ? selections?.find(item => item.nodeId === node.nodeId) : undefined;
@@ -167,7 +172,7 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
   const pathText: Record<PlanReach, string | null> = assessed ? {unconditional: null, selected: "Not applicable", undecided: "Not applicable", not_selected: "Not applicable"}
     : {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
   const childProps = {mode, notes, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
-    ...(notApplicable ? {notApplicable} : {})};
+    ...(notApplicable ? {notApplicable} : {}), ...(attempts ? {attempts} : {})};
   // the condition, the decision and its short reason stay primary; provenance, history and the plan note are inspectable details
   return <div className={`journey-branch${pending ? " decision-pending" : ""}`} role="group" aria-label={`Branch: if ${node.condition}`}>
     <div className="branch-head">
@@ -196,10 +201,10 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
 }
 
 /** Preserves sequence, parallel, branch and nested workflow boundaries without deriving parent completion from children. */
-export function PlanJourney({node, mode = "proposed", notes = noNotes, contributions, selections, completions, notApplicable, reach = "unconditional"}: JourneyProps) {
+export function PlanJourney({node, mode = "proposed", notes = noNotes, contributions, selections, completions, notApplicable, attempts, reach = "unconditional"}: JourneyProps) {
   const live = mode === "live";
   const passed = {mode, notes, reach, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
-    ...(notApplicable ? {notApplicable} : {})};
+    ...(notApplicable ? {notApplicable} : {}), ...(attempts ? {attempts} : {})};
   if (isPlanGroup(node)) {
     const List = node.kind === "parallel" ? "ul" : "ol";
     return <div className={`journey-group group-${node.kind}`}>
@@ -209,6 +214,11 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
     </div>;
   }
   if (node.kind === "branch") return <BranchJourney node={node} {...passed}/>;
+  if (node.kind === "back_to") return <div className="journey-branch journey-return" role="group" aria-label={`Return to ${node.target}`}>
+    <p className="branch-condition"><span className="branch-label">Return</span> <span>Back to <code>{node.target}</code>: a new attempt repeats it and what follows, up to here</span></p>
+    {node.reason && <p className="small">Plan note: {node.reason}</p>}
+  </div>;
+  const attempt = live ? attempts?.get(node.nodeId) : undefined;
   // the current not-applicable set takes precedence over the alternative labels of the paths inside an assessed occurrence
   const assessedNotApplicable = live && node.status === "planned" && notApplicable?.has(node.nodeId) === true;
   const alternative = live && !assessedNotApplicable && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
@@ -226,8 +236,8 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
   const changeProposed = notes.changed.has(node.nodeId);
   return <div className={`journey-stop state-${state}`}>
     <EntityDetails title={<>
-        <StepMark state={state}/><span className="step-name">{node.name}{node.kind === "workflow" && <small>Workflow</small>}
-          {(changeProposed || outsideAccepted) && <span className="step-flags">{changeProposed && <span className="pill blue">Update proposed</span>}{outsideAccepted && <span className="pill">Not in the accepted plan</span>}</span>}</span>
+        <StepMark state={state}/><span className="step-name">{node.name}
+          {(node.kind === "workflow" || changeProposed || outsideAccepted || attempt) && <span className="step-flags">{attempt && <span className="pill">Attempt {attempt}</span>}{node.kind === "workflow" && <small>Workflow</small>}{changeProposed && <span className="pill blue">Update proposed</span>}{outsideAccepted && <span className="pill">Not in the accepted plan</span>}</span>}</span>
         <span className="step-state">{label}</span>
       </>} className="journey-step" open={live && reach !== "not_selected" && hasActiveNode(node, currentBranchPaths({branchSelections: selections ?? []})) || undefined}
       summaryProps={{"aria-current":live && node.status === "underway" && reach !== "not_selected" ? "step" : undefined}}>
@@ -266,10 +276,13 @@ const proposalProgress: Record<WorkflowProposalInfo["status"], string> = {pendin
   unavailable: "Plan unavailable", invalid: "Plan needs correction", stale: "Plan needs review"};
 
 /** The actual proposal and acceptance records for the task, each stated once. */
-export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretationInfo | undefined; supervisorThreadId?: string}) {
+export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance = false}: {task: TaskInterpretationInfo | undefined; supervisorThreadId?: string;
+  changedSinceAcceptance?: boolean}) {
   const accepted = acceptedAgreement(task);
   const pending = pendingProposal(task);
-  const current = Boolean(accepted && !pending);
+  // an acceptance covers only the content it accepted; later changes to the live plan are not accepted
+  const changed = Boolean(accepted && !pending && changedSinceAcceptance);
+  const current = Boolean(accepted && !pending) && !changed;
   const stale = task?.agreement?.status === "stale";
   const historical = Boolean(task && ["expired", "not_supervised"].includes(task.status));
   const proposal = pending ?? task?.workflow ?? task?.agreement?.workflow;
@@ -280,6 +293,7 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
   // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance
   const proposalMessage = unneeded ? task?.reason ?? null : proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
   const agentLine = historical && task?.agreement ? "Earlier acceptance retained"
+    : changed ? "Accepted an earlier version; later changes are not accepted"
     : current ? "Accepted this plan"
     : update ? "Earlier plan accepted; update awaiting acceptance"
     : stale ? "Earlier acceptance is out of date"
@@ -319,7 +333,7 @@ export function TaskAlignment({task, supervisorThreadId}: {task: TaskInterpretat
 }
 
 const changeLabels: Record<PlanChangeField, string> = {name: "name", description: "description", note: "plan note", definition: "definition", references: "references",
-  skills: "skills", fixed: "fixed workflow", omissions: "not-applicable items", condition: "branch condition", paths: "branch paths", grouping: "grouping or branch path", order: "order"};
+  skills: "skills", fixed: "fixed workflow", omissions: "not-applicable items", condition: "branch condition", paths: "branch paths", target: "return target", grouping: "grouping or branch path", order: "order"};
 
 /** The actual differences between the accepted plan and the proposal awaiting acceptance. */
 export function PlanChanges({changes, proposal, proposalId}: {changes: readonly PlanChange[]; proposal: WorkflowProposalInfo; proposalId?: string | undefined}) {

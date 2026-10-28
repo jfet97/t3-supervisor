@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { GuidanceStore } from "../../src/guidance-store.js";
+import { ProjectDefinitions } from "../../src/project-definitions.js";
 import { ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
 import { SupervisionGate, SupervisionScope, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { HelperTransport } from "../../src/supervisor-helper-transport.js";
@@ -57,6 +58,8 @@ export type TeamControllerOptions = {
   readonly rpc?: NativeRpcShape | null | undefined;
   // a team store built again on the same client, as a recreated controller's own store
   readonly freshTeam?: boolean | undefined;
+  // the project definitions a workflow_write validates against; without them a definition-checked write is unavailable
+  readonly definitions?: ProjectDefinitions["Service"] | undefined;
 };
 
 /** The controllers over `stores` and `policy`, built in the current scope. */
@@ -75,9 +78,11 @@ export const teamControllers = (stores: SupervisionStores, policy: ThreadPolicyS
       Layer.provideMerge(scope),
       Layer.provideMerge(options.freshTeam ? Layer.fresh(SupervisorTeamStore.layer) : Layer.empty),
       Layer.provideMerge(Layer.mergeAll(readClients(native), options.rpc ? Layer.succeed(NativeOperateRpc, options.rpc) : Layer.empty,
+        options.definitions ? Layer.succeed(ProjectDefinitions, options.definitions) : Layer.empty,
         Layer.succeed(ThreadPolicyStore, policy), Layer.succeedContext(stores.context))));
     const context = yield* Layer.build(controllers).pipe(Effect.orDie);
     return {
+      context,
       controller: Context.get(context, SupervisorTeamController),
       workflows: Context.get(context, WorkflowWriteController),
       team: Context.get(context, SupervisorTeamStore),

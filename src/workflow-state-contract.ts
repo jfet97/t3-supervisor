@@ -193,11 +193,59 @@ export type BranchSelectionImportResult =
   | {status: "owner_mismatch" | "not_found"}
   | {status: "incompatible"; workflowId: string; formatVersion: number | null};
 
+/**
+ * An execution that belonged to an attempt a return closed, so whatever it reports later stays with that attempt: an AppRun; the native
+ * turns of a child without an AppRun of its own, named by the provider turn IDs T3 publishes for it; or a whole native child that
+ * publishes no per-execution identity, which nothing it reports can satisfy again.
+ */
+export type WorkflowReturnRun =
+  | {kind: "run"; threadId: string; runId: string}
+  | {kind: "provider_turns"; threadId: string; providerThreadId: string; providerTurnIds: string[]}
+  | {kind: "thread"; threadId: string; reason: string};
+
+/**
+ * One return of this workflow: a reached back_to asks to repeat its region, every occurrence from its target through the member that
+ * holds it, as a new attempt. It stays pending until the Supervisor applies it at a safe point or it is no longer reached, and is never
+ * removed: an applied return keeps the statuses, contributors and branch selections the closed attempt ended with and the child runs
+ * retired with it.
+ */
+export type WorkflowReturn = {
+  returnId: string;
+  backToNodeId: string;
+  targetNodeId: string;
+  regionNodeIds: string[];
+  /** the attempt of the back_to occurrence that reached it, which an applied return closes */
+  attempt: number;
+  state: "pending" | "applied" | "dismissed";
+  /** the reason of the selection that led to the back_to, or why it was reached unconditionally */
+  reason: string;
+  sourceThreadId: string | null;
+  sourceRunId: string | null;
+  sourceMessageId: string | null;
+  requestedAt: number;
+  resolvedAt: number | null;
+  closed: Array<{nodeId: string; status: WorkflowExecutionStatus; contributorThreadIds: string[]}> | null;
+  closedSelections: Array<{nodeId: string; revision: number; path: BranchSelectionPath}> | null;
+  retiredRuns: WorkflowReturnRun[];
+  resolution: {operationId: string; actorSupervisorThreadId: string; note: string} | null;
+};
+
+/** Applies one pending return; retiredRuns names the executions of the closed attempt whose later output must not count for the new one. */
+export type WorkflowReturnApplyInput = {
+  operationId: string;
+  workflowId: string;
+  expectedRevision: number;
+  returnId: string;
+  note: string;
+  retiredRuns?: WorkflowReturnRun[];
+};
+
 export type WorkflowStateEvidence = {
   id: string;
   operationId: string;
   kind: "draft_created" | "lineage_linked" | "agreement_imported" | "plan_updated" | "status_changed" | "node_removed" | "note" | "observation" |
-    "not_applicable" | "contribution_recorded" | "contribution_assessed" | "branch_selected" | "branch_selection_invalidated" | "branch_changed";
+    "not_applicable" | "contribution_recorded" | "contribution_assessed" | "branch_selected" | "branch_selection_invalidated" | "branch_changed" |
+    "return_requested" | "return_applied" | "return_dismissed";
   recordedAt: number;
   actorSupervisorThreadId: string;
   targetNodeId: string | null;
@@ -208,6 +256,10 @@ export type WorkflowStateEvidence = {
   sourceRunId: string | null;
   sourceMessageId: string | null;
   sourceItemId?: string | null;
+  // resolved by the service for a native child reference without an AppRun: the published provider turn behind the cited item or
+  // message and when it started; absent otherwise
+  sourceProviderTurnId?: string | null;
+  sourceProviderTurnStartedAt?: number | null;
   agreementKey: string | null;
   note: string;
   /** present only on not_applicable evidence: the task scope it assessed; a later scope needs a fresh assessment */
@@ -217,6 +269,8 @@ export type WorkflowStateEvidence = {
   // present only on selection evidence: the revision, its path and the condition it answered; changed is whether it replaced a different
   // or invalidated choice
   branch?: {revision: number; path: BranchSelectionPath; changed: boolean; condition?: string};
+  // present only on return evidence; the region, attempt and closed state stay on the return entry
+  return?: {returnId: string; regionNodeIds?: string[]};
 };
 
 export type WorkflowStateEvidenceInput = {
@@ -228,6 +282,9 @@ export type WorkflowStateEvidenceInput = {
   sourceRunId?: string | null;
   sourceMessageId?: string | null;
   sourceItemId?: string | null;
+  /** Resolved by the write controller from the cited native item or message and T3's published provider turns; never caller input. */
+  sourceProviderTurnId?: string | null;
+  sourceProviderTurnStartedAt?: number | null;
 };
 
 export type AcceptedWorkflowAgreementRecord = {
@@ -267,10 +324,20 @@ export type WorkflowStateDocument = {
   contributions: ExternalContribution[];
   // this workflow's own operative branch selections; a stored document without this field reads as empty
   branchSelections: BranchSelection[];
+  // every return this workflow's back_to nodes requested, in request order; a stored document without this field reads as empty
+  returns: WorkflowReturn[];
   evidence: WorkflowStateEvidence[];
   createdAt: number;
   updatedAt: number;
 };
+
+/**
+ * The proposal whose retained accepted snapshot the document's content still matches, or null once any later write changed that
+ * content: edited contents are never the accepted plan, while the earlier acceptance stays retained in acceptedAgreements.
+ */
+export const currentAcceptedProposalId = (document: Pick<WorkflowStateDocument, "currentAgreementKey" | "acceptedAgreements">): string | null =>
+  document.currentAgreementKey === null ? null
+    : document.acceptedAgreements.find(item => item.key === document.currentAgreementKey)?.agreement.proposalId ?? null;
 
 export type WorkflowStateIncompatible = {
   status: "incompatible";
@@ -372,6 +439,10 @@ export type WorkflowMutationLimits = {
   maxContributorsPerNode: number;
   maxEvidence: number;
   maxAcceptedAgreements: number;
+  /** Returns one workflow may request, pending, applied and dismissed together; a runaway loop stops here. */
+  maxReturns: number;
+  /** Child runs one applied return may retire. */
+  maxRetiredRuns: number;
   maxEvidencePerApply: number;
   maxTextLength: number;
   maxPlanTextLength: number;
@@ -388,6 +459,8 @@ export const workflowMutationLimits: WorkflowMutationLimits = {
   maxContributorsPerNode: 50,
   maxEvidence: 500,
   maxAcceptedAgreements: 100,
+  maxReturns: 100,
+  maxRetiredRuns: 50,
   maxEvidencePerApply: 50,
   maxTextLength: 2000,
   maxPlanTextLength: 8000,
@@ -406,8 +479,9 @@ export const storedPlanJsonDepth = 1 + 3 * workflowMutationLimits.maxPlanDepth +
 
 // stored shapes as the types above describe them; bounds, identities and cross-field rules stay with the store validators that run after decode
 const mutableArray = <S extends Schema.Top>(item: S) => Schema.mutable(Schema.Array(item));
-const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
-  "not_applicable", "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed"] as const;
+export const workflowEvidenceKinds = ["draft_created", "lineage_linked", "agreement_imported", "plan_updated", "status_changed", "node_removed", "note", "observation",
+  "not_applicable", "contribution_recorded", "contribution_assessed", "branch_selected", "branch_selection_invalidated", "branch_changed",
+  "return_requested", "return_applied", "return_dismissed"] as const;
 
 export const BranchSelectionSchema = Schema.Struct({
   nodeId: Schema.String,
@@ -488,6 +562,8 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   sourceRunId: Schema.NullOr(Schema.String),
   sourceMessageId: Schema.NullOr(Schema.String),
   sourceItemId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  sourceProviderTurnId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  sourceProviderTurnStartedAt: Schema.optionalKey(Schema.NullOr(Schema.Number)),
   agreementKey: Schema.NullOr(Schema.String),
   note: Schema.String,
   scopeRevision: Schema.optionalKey(Schema.String),
@@ -499,6 +575,32 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   })),
   branch: Schema.optionalKey(Schema.Struct({revision: Schema.Number, path: Schema.Literals(branchSelectionPaths), changed: Schema.Boolean,
     condition: Schema.optionalKey(Schema.String)})),
+  return: Schema.optionalKey(Schema.Struct({returnId: Schema.String, regionNodeIds: Schema.optionalKey(mutableArray(Schema.String))})),
+});
+
+export const WorkflowReturnRunSchema = Schema.Union([
+  Schema.Struct({kind: Schema.Literal("run"), threadId: Schema.String, runId: Schema.String}),
+  Schema.Struct({kind: Schema.Literal("provider_turns"), threadId: Schema.String, providerThreadId: Schema.String, providerTurnIds: mutableArray(Schema.String)}),
+  Schema.Struct({kind: Schema.Literal("thread"), threadId: Schema.String, reason: Schema.String}),
+]);
+
+export const WorkflowReturnSchema = Schema.Struct({
+  returnId: Schema.String,
+  backToNodeId: Schema.String,
+  targetNodeId: Schema.String,
+  regionNodeIds: mutableArray(Schema.String),
+  attempt: Schema.Number,
+  state: Schema.Literals(["pending", "applied", "dismissed"]),
+  reason: Schema.String,
+  sourceThreadId: Schema.NullOr(Schema.String),
+  sourceRunId: Schema.NullOr(Schema.String),
+  sourceMessageId: Schema.NullOr(Schema.String),
+  requestedAt: Schema.Number,
+  resolvedAt: Schema.NullOr(Schema.Number),
+  closed: Schema.NullOr(mutableArray(Schema.Struct({nodeId: Schema.String, status: WorkflowExecutionStatusSchema, contributorThreadIds: mutableArray(Schema.String)}))),
+  closedSelections: Schema.NullOr(mutableArray(Schema.Struct({nodeId: Schema.String, revision: Schema.Number, path: Schema.Literals(branchSelectionPaths)}))),
+  retiredRuns: mutableArray(WorkflowReturnRunSchema),
+  resolution: Schema.NullOr(Schema.Struct({operationId: Schema.String, actorSupervisorThreadId: Schema.String, note: Schema.String})),
 });
 
 export const AcceptedWorkflowAgreementRecordSchema = Schema.Struct({
@@ -537,6 +639,7 @@ export const WorkflowStateDocumentSchema = Schema.Struct({
   acceptedAgreements: mutableArray(AcceptedWorkflowAgreementRecordSchema),
   contributions: mutableArray(ExternalContributionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   branchSelections: mutableArray(BranchSelectionSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
+  returns: mutableArray(WorkflowReturnSchema).pipe(Schema.withDecodingDefaultKey(Effect.succeed([]))),
   evidence: mutableArray(WorkflowStateEvidenceSchema),
   createdAt: Schema.Number,
   updatedAt: Schema.Number,
@@ -563,5 +666,7 @@ const mirrors: [
   Same<typeof BranchSelectionSchema.Type, BranchSelection>,
   Same<typeof BranchSelectionRecordSchema.Type, BranchSelectionRecord>,
   Same<typeof AcceptedWorkflowAgreementRecordSchema.Type, AcceptedWorkflowAgreementRecord>,
-] = [true, true, true, true, true, true, true, true];
+  Same<typeof WorkflowReturnSchema.Type, WorkflowReturn>,
+  Same<typeof WorkflowReturnRunSchema.Type, WorkflowReturnRun>,
+] = [true, true, true, true, true, true, true, true, true, true];
 void mirrors;

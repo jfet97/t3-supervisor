@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { freshRuntimeRequestStatus, mainRunNodeReader, timestampMs } from "./domain.js";
 import { monitoringIntervalMinutes, type SupervisorMonitoringSettings } from "./project-supervisor-contract.js";
-import type { Projection, RunInfo } from "./types.js";
+import type { Projection, RunInfo, ThreadInfo } from "./types.js";
+import { messageReadItemId } from "./message-read-handle.js";
 
 // the oldest finished ordinary activity is due after at most two minutes, and a Supervisor gets its next check-in no sooner
 // than 30 seconds after the last one was sent
@@ -15,6 +16,12 @@ export const SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT = 20;
 export const SUPERVISOR_MONITOR_MAX_FROZEN_ITEMS_PER_BATCH = 10_000;
 export const SUPERVISOR_MONITOR_MAX_SELECTED_THREADS = 100;
 
+export const activeWatchInstructions = "Watch covered work continuously: read T3 activity now and forward by each target's cursor, completing cut-off text. " +
+  "Child lists are metadata; separately read verified children. Record explicit assessments; fetched is not assessed. " +
+  "After catching up, pace with local t3_thread_wait (about five seconds): it waits for run completion, not activity. " +
+  "Obey next/end-turn; the service continues active work. Otherwise end only on completion, standby or context rotation, with outcome and marker. " +
+  "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.";
+
 export type SupervisorMonitorPriority =
   | "user_instruction"
   | "run_finished"
@@ -22,6 +29,7 @@ export type SupervisorMonitorPriority =
   | "waiting_input";
 
 export type SupervisorMonitorTrigger =
+  | "active_watch"
   | "priority"
   | "activity_threshold"
   | "activity_age"
@@ -88,6 +96,11 @@ const finalizedStatuses = new Set(["completed", "failed", "cancelled", "interrup
 const nativeChildTerminalStatuses = new Set(["completed", "failed", "interrupted", "cancelled", "resolved", "expired"]);
 const terminalRuntimeRequestStatuses = new Set(["resolved", "expired", "cancelled"]);
 const runTerminalStatuses = new Set(["completed", "failed", "interrupted", "cancelled"]);
+const watchRunStatuses = new Set(["preparing", "queued", "starting", "running", "waiting"]);
+
+/** Native live-work hints start observation; scope and effect authority are checked separately. */
+export const hasActiveMonitoredRun = (thread: ThreadInfo): boolean => !thread.archivedAt && !thread.deletedAt &&
+  (watchRunStatuses.has(thread.activityRunStatus ?? "") || Boolean(thread.activeRunId) && !runTerminalStatuses.has(thread.activityRunStatus ?? ""));
 const countableTypes = new Set([
   "user_message",
   "assistant_message",
@@ -296,6 +309,7 @@ const messageActivity = (
   message: RecordLike,
   sourceOrdinal: number,
   now: number,
+  readItemId: string | null,
 ): SupervisorMonitorActivity | null => {
   const id = stringValue(message.id);
   const nodeId = stringValue(message.nodeId);
@@ -318,7 +332,7 @@ const messageActivity = (
   const updatedAt = stringValue(message.updatedAt);
   return activity({
     id: itemId,
-    readItemId: null,
+    readItemId,
     type: role === "user" ? "user_message" : "assistant_message",
     status,
     ordinal: run.ordinal,
@@ -483,7 +497,8 @@ export const collectSupervisorActivity = (
     if (!id) continue;
     const canonicalId = `message:${id}`;
     if (records.has(canonicalId) || (context.run.ordinal < ordinal && !trackedIds.has(canonicalId))) continue;
-    const record = messageActivity(projection.thread.id, context.run, context.nodeFor, value, ordinal, now);
+    // the message's published turn item is its exact read handle; until T3 publishes one, the message ID stays provenance only
+    const record = messageActivity(projection.thread.id, context.run, context.nodeFor, value, ordinal, now, messageReadItemId(projection, projection.thread.id, id));
     if (record && !isExcluded(record.id, id, excludedIds)) records.set(record.id, record);
   }
 
@@ -621,7 +636,7 @@ const priorityRank = (item: SupervisorMonitorActivity): number => {
 };
 
 const triggerRank = (trigger: SupervisorMonitorTrigger): number =>
-  trigger === "priority" ? 0 : trigger === "saturated" ? 1 : trigger === "activity_age" ? 2 : 3;
+  trigger === "priority" ? 0 : trigger === "active_watch" ? 1 : trigger === "saturated" ? 2 : trigger === "activity_age" ? 3 : 4;
 
 /** Applies the per-chat age/count/priority policy and project cooldown. */
 export const evaluateSupervisorMonitoring = (

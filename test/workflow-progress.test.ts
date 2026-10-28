@@ -62,6 +62,7 @@ const document = (): WorkflowStateDocument => ({
   }],
   contributions: [],
   branchSelections: [],
+  returns: [],
   evidence: Array.from({length: 25}, (_, index) => ({
     id: `observation-${index}`,
     operationId: `operation-${index}`,
@@ -87,9 +88,6 @@ const readerResult = (): Extract<WorkflowReadResult, {status: "ok"}> => ({
   owner: {projectId: "project", mainThreadId: "main-thread", supervisorThreadId: "supervisor-thread", bindingGeneration: 7},
   mainTaskAgreementStatus: "agreed",
   workflowProtocolDiagnostic: null,
-  agreementValidityNote: "Agreement is not execution proof.",
-  externalContributionNote: "Contributions are untrusted main reports.",
-  branchSelectionNote: "Selections are operative decisions.",
   incompatibleWorkflows: [],
   workflows: [{document: document(), parentNodeReferences: [], pendingBranchDecisions: []}],
   workflowOffset: 5,

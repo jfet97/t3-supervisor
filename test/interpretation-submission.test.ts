@@ -366,10 +366,12 @@ it.effect("CT-ISUB-05: invalid inputs fail with typed diagnostics, and a correct
 it.effect("CT-ISUB-05: the decode keeps today's semantic outcomes: formal, provisional, unavailable, not needed and the Start verdicts", () => Effect.gen(function* () {
   const context = yield* definitionContext;
   // the factored semantic step decides the outcome the deleted final-chat parser decided over the same fields and node ids: the
-  // canonical digests below are that parser's results, recorded once before it was removed
+  // canonical digests below are that parser's results, recorded once before it was removed. The first two were re-recorded when
+  // workflow template members began deriving their IDs from their occurrence: only those member IDs, and the generator IDs drawn
+  // after them, changed
   const parserDigests = [
-    "a2a8ba4bd64f8883001b94fbc220b0ecfe33a5d5bc0cb1f58398d432714859c6",
-    "4ff64e44bd7907199550801eb14aee0b0fccc3ac68f315e1b2720cb3c10c81de",
+    "f16b0ab023601b39302b81fa161c971dcc58a41120667ce8ecba62cd88e3fdab",
+    "d97f0d6780051669986a9a0b86078365c3f075f109148db1d6353410b3484476",
     "ea6c4c1ddddd11cbdc2eb95ca0ab34c8f0aba1a94c2ef9593c02638e44ee5578",
     "d80cc274844ad99927f3f2e820bfff21b5ba93351d42f41e6e8a7cf805174f7d",
     "a199d38e9c2ecc68375b8dcb1dd4bd37e45a16b3406fd7a978cf0cbf50340a38",

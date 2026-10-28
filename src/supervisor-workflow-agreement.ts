@@ -121,6 +121,7 @@ const fullyResolvedPlan = (workflow: WorkflowPlanValue): boolean => {
       case "step": return node.resolution === "resolved";
       case "workflow": return node.resolution === "resolved" && node.fixed !== null && node.plan !== null && walk(node.plan);
       case "branch": return walk(node.then) && (node.else === null || walk(node.else));
+      case "back_to": return node.targetNodeId !== null;
     }
   });
   return walk(workflow.plan);
@@ -167,10 +168,11 @@ const objectiveValue = (value: unknown): {text: string; sourceMessageIds: string
 /**
  * Resolves the compact chat protocol. A Supervisor draft names the task revision and definition revision it was authored
  * against; the service derives workspace and provenance from the trusted context and canonicalizes deterministically. A
- * reference names a service-prepared proposal or a stored immutable candidate by its digest.
+ * reference names a service-prepared proposal or a stored immutable candidate by its digest. A revision passes its
+ * authoritative base, the live plan or else the latest proposed plan, so unchanged occurrences keep their actual IDs.
  */
 export const resolveCompactProposal = (value: unknown, pins: CompactProposalPins, context: ProposalContext,
-  known: (proposalId: string) => StoredProposalDigest | null): CompactProposalResult => {
+  known: (proposalId: string) => StoredProposalDigest | null, base: WorkflowPlanGroupInfo | null = null): CompactProposalResult => {
   if (!record(value)) return failure("record_fields", null);
   if (value.taskId !== pins.taskId) return failure("task_mismatch", value.proposalId);
   if (exactFields(value, ["taskId", "proposalId", "digest"])) {
@@ -188,7 +190,7 @@ export const resolveCompactProposal = (value: unknown, pins: CompactProposalPins
   if (value.revision !== context.revision) return failure("source_pin_mismatch", value.proposalId, "/revision", String(context.revision));
   const objective = objectiveValue(value.objective);
   if (objective === false) return failure("record_fields", value.proposalId, "/objective", "{text, sourceMessageIds:[user message IDs]}");
-  const canonical = canonicalizeProposalDraft(value.draft, context, `${pins.taskId}\0${pins.taskRevision}\0${value.proposalId}`);
+  const canonical = canonicalizeProposalDraft(value.draft, context, `${pins.taskId}\0${pins.taskRevision}\0${value.proposalId}`, base);
   if (!canonical.ok) return failure("draft_invalid", value.proposalId, canonical.path, canonical.expected, canonical.code);
   const proposal = {taskId: pins.taskId, proposalId: value.proposalId, workspaceRoot: context.workspaceRoot, revision: context.revision, workflow: canonical.workflow};
   return {ok: true, proposal: {...proposal, digest: compactProposalDigest(pins, proposal), formal: formalRecord(canonical.workflow, context), objective}};

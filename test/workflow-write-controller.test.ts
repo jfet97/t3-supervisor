@@ -26,6 +26,13 @@ import {
   scriptedOperate, sequencePlan, snapshotWith, teamView, thread, type WwcFixture,
 } from "./support/wwc-fixture.js";
 
+// a guidance answer is its compact receipt; the stored receipt keeps the request, delivery identities and every attempt
+type StoredGuide = {requestId: string; messageId: string;
+  attempts: Array<{routedThreadId: string; commandId: string; messageId: string; targetRunId: string; status: string; dispatchFailureReplayAttempted?: boolean}>};
+const storedGuide = (db: Parameters<typeof sqlGet>[0], operationId: string) =>
+  Effect.map(sqlGet(db, "SELECT document FROM supervisor_team_tool_receipts WHERE operation_id=?", operationId),
+    (row) => JSON.parse(String(row?.document)) as StoredGuide);
+
 it.effect("unverified JSON stays pending without reserving an operation and a verified retry applies", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {
@@ -1425,6 +1432,68 @@ it.effect("activity references are scoped and stored as navigation evidence with
   } finally {yield* fixture.close;}
 }));
 
+it.effect("a run-less native reference records the provider turn T3 publishes with strong provenance behind it, never one it cannot verify", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const create = ensureArgs(fixture, "turn-evidence-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = yield* fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    // a native child's work has no AppRun: T3 publishes its provider turns, the nodes of its messages and run-less items
+    const main = fixture.projections.get(fixture.mainThreadId)!;
+    const startedAt = "2026-10-14T21:00:00.000Z";
+    const turn = (id: string, extra: Record<string, unknown> = {}) => ({id, providerThreadId: "child-provider-thread", nodeId: `${id}-root`, runAttemptId: null,
+      nativeTurnRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}, ordinal: 1, status: "completed", startedAt,
+      completedAt: "2026-10-14T21:01:00.000Z", ...extra});
+    main.providerTurns = [turn("turn-strong"), turn("turn-weak", {nativeTurnRef: {driver: "codex", nativeId: "native-weak", strength: "weak"}}),
+      turn("turn-unstarted", {status: "pending", startedAt: null}), turn("turn-elsewhere", {providerThreadId: "another-provider-thread"})];
+    main.nodes = [...(main.nodes as unknown[]), {id: "turn-strong-message", threadId: fixture.mainThreadId, runId: null, rootNodeId: "turn-strong-root",
+      kind: "assistant_message", status: "completed", providerThreadId: "child-provider-thread", providerTurnId: "turn-strong"}];
+    main.messages.push({id: "turn-message", threadId: fixture.mainThreadId, runId: null, nodeId: "turn-strong-message", role: "assistant", streaming: false,
+      text: "The review found nothing material.", createdAt: startedAt, updatedAt: startedAt});
+    const item = (id: string, providerTurnId: string) => ({id, type: "command_execution", threadId: fixture.mainThreadId, runId: null, status: "completed",
+      providerThreadId: "child-provider-thread", providerTurnId});
+    for (const [id, providerTurnId] of [["item-strong", "turn-strong"], ["item-weak", "turn-weak"], ["item-unpublished", "turn-missing"],
+      ["item-unstarted", "turn-unstarted"]]) fixture.details.set(id!, item(id!, providerTurnId!));
+    const current = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const observe = (note: string, reference: Record<string, string>) => ({kind: "observation" as const, note, ...reference});
+    const apply = yield* applyArgs(fixture, {operationId: "turn-evidence-apply", workflowId: created.workflowId, expectedRevision: current.revision,
+      status: "planned", objective: "Keep native turns verifiable.", note: "The Supervisor assessed the child's native work.",
+      plan: sequencePlan([localStep("Check evidence", "Assess the child's output semantically.", [fixture.mainThreadId])]),
+      evidence: [observe("A strongly published turn.", {sourceItemId: "item-strong"}), observe("The message's node names it.", {sourceMessageId: "turn-message"}),
+        observe("A weak turn.", {sourceItemId: "item-weak"}), observe("An unpublished turn.", {sourceItemId: "item-unpublished"}),
+        observe("A turn that has not started.", {sourceItemId: "item-unstarted"})]});
+    installEvidence(fixture, apply);
+    assert.equal((yield* fixture.controller.write(apply)).status, "applied");
+    const updated = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    assert.deepEqual(updated.evidence.filter(entry => entry.kind === "observation").map(entry =>
+      [entry.sourceItemId ?? entry.sourceMessageId, entry.sourceRunId, entry.sourceProviderTurnId ?? null, entry.sourceProviderTurnStartedAt ?? null]), [
+      ["item-strong", null, "turn-strong", Date.parse(startedAt)], ["turn-message", null, "turn-strong", Date.parse(startedAt)],
+      ["item-weak", null, null, null], ["item-unpublished", null, null, null], ["item-unstarted", null, null, null],
+    ]);
+
+    // an item and a message naming different turns, or a turn of another provider thread, disagree; nobody can name a turn for the service
+    fixture.details.set("item-elsewhere", item("item-elsewhere", "turn-elsewhere"));
+    const write = (operationId: string, evidence: unknown[]) => Effect.gen(function* () {
+      const latest = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+      const args = yield* applyArgs(fixture, {operationId, workflowId: latest.workflowId, expectedRevision: latest.revision, status: latest.status,
+        objective: latest.objective, plan: latest.plan, note: "Link more native work.", evidence: evidence as never});
+      installEvidence(fixture, args);
+      return yield* fixture.controller.write(args);
+    });
+    fixture.details.set("item-weak-again", item("item-weak-again", "turn-weak"));
+    assert.deepEqual(yield* write("turn-disagreement", [observe("Two turns.", {sourceMessageId: "turn-message", sourceItemId: "item-weak-again"})]),
+      {status: "invalid", operationId: "turn-disagreement", reason: "activity_reference_turn_mismatch"});
+    assert.deepEqual(yield* write("turn-elsewhere", [observe("Another provider thread.", {sourceItemId: "item-elsewhere"})]),
+      {status: "invalid", operationId: "turn-elsewhere", reason: "activity_reference_turn_mismatch"});
+    const invented = yield* write("turn-invented", [{...observe("An invented turn.", {sourceItemId: "item-weak"}), sourceProviderTurnId: "turn-strong",
+      sourceProviderTurnStartedAt: Date.parse(startedAt)}]);
+    assert.deepEqual([invented.status, (invented as {reason?: string}).reason, (invented as {diagnostic?: {code: string; path: string}}).diagnostic?.code,
+      (invented as {diagnostic?: {code: string; path: string}}).diagnostic?.path], ["invalid", "invalid_apply_input", "evidence_entry_invalid", "/input/evidence/0"]);
+  } finally {yield* fixture.close;}
+}));
+
 it.effect("activity references fail closed when their workflow target is absent", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {
@@ -1928,7 +1997,7 @@ it.effect("helper guidance resolves an omitted activeRunId and retains uncertain
       assignmentRootThreadId: target.id, assignmentEpoch: assignment.epoch,
       operationId: "uncertain-guidance", targetThreadId: target.id, text: "Reconsider the observed failed test before completing this step."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
-    const first = (yield* controller.guide(args)) as {status: string; messageId: string};
+    const first = (yield* controller.guide(args)) as {status: string};
     assert.equal(first.status, "uncertain");
     assert.deepEqual(sent[0]!.dispatchMode, {type: "steer_active", targetRunId: "guide-active"});
     assert.equal(sent[0]!.createdBy, "system");
@@ -1964,7 +2033,8 @@ it.effect("helper guidance resolves an omitted activeRunId and retains uncertain
       yield* team.acknowledgeNotification(f.binding, member.threadId, notification.id, ready.epoch);
     }
     assert.match((yield* Effect.flip(team.completeTransfer(f.binding, target.id, transfer.epoch))).message, /pending_effects/u);
-    targetProjection.messages.push({id: first.messageId, threadId: target.id, runId: "guide-active", nodeId: "guide-root", role: "user", text: args.text,
+    // the native message of the uncertain send, under the identity the stored request dispatched
+    targetProjection.messages.push({id: String(sent[0]!.messageId), threadId: target.id, runId: "guide-active", nodeId: "guide-root", role: "user", text: args.text,
       streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z", createdBy: "user", creationSource: "server"});
     yield* controller.reconcile(f.binding);
     assert.equal((yield* team.unresolvedRequests(f.binding)).length, 0);
@@ -2114,11 +2184,10 @@ it.effect("deferred owner guidance raises one stable attention after grace and r
       targetThreadId: target.id, text: "Recheck the target after its owner request is resolved."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
 
-    const deferred = (yield* controller.guide(args)) as {
-      status: string; reason?: string; requestId: string; attempts: Array<{commandId: string; status: string}>;
-    };
-    assert.equal(deferred.status, "needs_fallback");
-    assert.equal(deferred.reason, "target_pending_owner_input");
+    const answer = (yield* controller.guide(args)) as {status: string; reason?: string};
+    assert.equal(answer.status, "needs_fallback");
+    assert.equal(answer.reason, "target_pending_owner_input");
+    const deferred = yield* storedGuide(f.db, args.operationId);
     assert.equal(deferred.attempts[0]?.status, "rejected");
     assert.equal(sent.length, 1);
     assert.equal(sent[0]?.threadId, target.id);
@@ -2216,14 +2285,13 @@ it.live("helper guidance records a pre-open transport refusal as not sent withou
       targetThreadId: target.id, text: "Recheck the failing child before continuing."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
 
-    const result = (yield* controller.guide(args)) as {
-      status: string; reason: string; attempts: Array<{routedThreadId: string; status: string}>;
-    };
+    const result = (yield* controller.guide(args)) as {status: string; reason: string};
     assert.equal(result.status, "not_sent");
     assert.equal(result.reason, "native_transport_not_sent");
-    assert.equal(result.attempts.length, 1, "a pre-open failure does not create a second ancestor route");
-    assert.equal(result.attempts[0]?.routedThreadId, target.id);
-    assert.equal(result.attempts[0]?.status, "not_sent");
+    const stored = yield* storedGuide(f.db, args.operationId);
+    assert.equal(stored.attempts.length, 1, "a pre-open failure does not create a second ancestor route");
+    assert.equal(stored.attempts[0]?.routedThreadId, target.id);
+    assert.equal(stored.attempts[0]?.status, "not_sent");
     assert.equal(upgrades, 1);
     assert.equal((yield* team.unresolvedRequests(f.binding)).length, 0, "a command that never reached T3 does not retain a pending-effect fence");
     assert.equal(yield* team.authorizeWrite(f.binding, member.threadId, target.id, parents,
@@ -2309,9 +2377,7 @@ it.live("helper guidance replays a received dispatch failure with the exact comm
       targetThreadId: target.id, text: "Recheck the blocked test before marking this subtree complete."};
     installEvidence(actorFixture, args, {toolName: workflowToolNames.guide.direct[0]});
 
-    const result = (yield* controller.guide(args)) as {
-      status: string; attempts: Array<{routedThreadId: string; commandId: string; messageId: string; targetRunId: string; status: string; dispatchFailureReplayAttempted?: boolean}>;
-    };
+    const result = (yield* controller.guide(args)) as {status: string};
     assert.equal(result.status, "accepted");
     assert.equal(calls.length, 3);
     assert.deepEqual(calls[0], calls[1], "the server-failure replay must preserve the full native command payload");
@@ -2324,9 +2390,10 @@ it.live("helper guidance replays a received dispatch failure with the exact comm
     assert.notEqual(calls[2]!.commandId, calls[0]!.commandId);
     assert.notEqual(calls[2]!.messageId, calls[0]!.messageId);
     assert.deepEqual(calls[2]!.dispatchMode, {type: "steer_active", targetRunId: parent.activeRunId});
-    assert.equal(result.attempts[0]?.dispatchFailureReplayAttempted, true);
-    assert.equal(result.attempts[0]?.status, "rejected");
-    assert.equal(result.attempts[1]?.status, "accepted");
+    const stored = yield* storedGuide(f.db, args.operationId);
+    assert.equal(stored.attempts[0]?.dispatchFailureReplayAttempted, true);
+    assert.equal(stored.attempts[0]?.status, "rejected");
+    assert.equal(stored.attempts[1]?.status, "accepted");
   } finally {
     yield* Effect.callback<void>((resume) => {server.close(() => resume(Effect.void));});
     yield* f.close;
@@ -2624,7 +2691,8 @@ it.effect("a main contribution import and Supervisor writes race only through re
     const read = yield* f.controller.read(locator(f));
     assert.equal(read.status, "ok");
     if (read.status !== "ok") return;
-    assert.match(read.externalContributionNote, /untrusted/u);
+    // the meaning of contributions is said once, in section contributions, never repeated in each read
+    assert.equal("externalContributionNote" in read, false);
     const seen = read.workflows[0]!.document;
     assert.deepEqual(seen.contributions.map(item => [item.contributionId, item.state]), [["external-review", "awaiting_result"]]);
 
@@ -2674,6 +2742,40 @@ it.effect("workflow_write advertises the root-only review outcome record, which 
   assert.deepEqual(schema.properties.outcome.enum, ["progress_updated", "no_change", "needs_attention", "insufficient_evidence"]);
   assert.match(workflowWriteToolDefinition.description, /record_review is root-only/u);
   assert.match(workflowWriteToolDefinition.description, /It sends nothing; messaging the operative is a separate decision/u);
+}));
+
+it.live("workflow_read returns compact progress by default and complete records only when requested through MCP", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "read-default", "Create the workflow to inspect.");
+    installEvidence(fixture, ensure);
+    assert.equal((yield* fixture.controller.write(ensure)).status, "created");
+    const server = createServer();
+    yield* Layer.build(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
+      Layer.provide(workflowMcpLayer(fixture.controller)),
+      Layer.provide(NodeHttpServer.layer(() => server, {port: 0, host: "127.0.0.1"})),
+    ));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const results: unknown[] = [];
+    for (const fields of [{}, {view: "status"}, {view: "documents"}]) {
+      const response = yield* Effect.promise(() => fetch(`http://127.0.0.1:${address.port}/mcp/workflows`, {method: "POST",
+        headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"},
+        body: JSON.stringify({jsonrpc: "2.0", id: results.length, method: "tools/call",
+          params: {name: "workflow_read", arguments: {...locator(fixture), ...fields}}})}));
+      const body = (yield* Effect.promise(() => response.json())) as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
+      assert.notEqual(body.result?.isError, true);
+      results.push(JSON.parse(body.result?.content?.[0]?.text ?? "null"));
+    }
+    assert.deepEqual(results[0], results[1], "omitting view requests the same compact progress as explicit status");
+    assert.match(JSON.stringify(results[0]), /"view":"status"/u);
+    assert.doesNotMatch(JSON.stringify(results[0]), /"document"|"evidence"|"acceptedAgreements"/u);
+    assert.match(JSON.stringify(results[2]), /"document"/u);
+    assert.match(JSON.stringify(results[2]), /"evidence"/u);
+    assert.match(JSON.stringify(results[2]), /"draft_created"/u, "the complete read retains the actual creation event");
+    assert.deepEqual(yield* fixture.controller.readTool({...locator(fixture), definitionIds: ["check"]}),
+      {status: "invalid", reason: "invalid_read_arguments"}, "default progress never silently ignores a definition selector");
+  } finally {yield* fixture.close;}
 }));
 
 it.live("workflow_read view definitions accepts nonempty definitionIds through the real controller and MCP endpoint", () => Effect.gen(function* () {

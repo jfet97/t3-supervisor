@@ -9,6 +9,7 @@ import * as fx from "./support/s6e-prep-interpretation.js";
 import {
   interpretationFromFields,
   prepareWorkflowRequest,
+  readerWorkflowInstruction,
   workflowInterpretationOutcome,
   type ProposalContext,
   canonicalAuthoringMaterial,
@@ -161,7 +162,7 @@ it.effect("canonical authoring material keeps missing and cyclic required source
   assert.ok(material.issues.some(item => item.code === "workflow_cycle_in_plan" || item.code === "workflow_cycle_in_definition"));
 }));
 
-it.effect("the bounded request includes exact nested template paths for fixed-workflow insertions", () => Effect.gen(function* () {
+it.effect("fixed-workflow paths remain available on demand without being copied into a notification", () => Effect.gen(function* () {
   const {snapshot} = yield* load({
     ...commonSteps,
     "project.yaml": {required: [{workflow: "delivery"}]},
@@ -172,9 +173,10 @@ it.effect("the bounded request includes exact nested template paths for fixed-wo
 
   assert.ok(prepared.context);
   assert.equal(prepared.context.promptComplete, true);
-  assert.match(prepared.requestText, /"workflowTemplates"/u);
-  assert.match(prepared.requestText, /workflow:delivery\/root\/0\/workflow:reviewer\/root\/1/u);
-  assert.match(prepared.requestText, /"fixed":true/u);
+  assert.doesNotMatch(prepared.requestText, /workflowTemplates|templatePath|"fixed"/u);
+  const material = canonicalAuthoringMaterial(prepared.context);
+  assert.match(JSON.stringify(material.workflow), /workflow:delivery\/root\/0\/workflow:reviewer\/root\/1/u);
+  assert.match(JSON.stringify(material.workflow), /"fixed":true/u);
   assert.ok(prepared.requestText.length <= 120_000);
   const firstRequired = requiredReferences(snapshot.config)[0];
   assert.equal(prepared.workflow.requirements[0]?.id, firstRequired && "workflow" in firstRequired ? firstRequired.workflow : "");
@@ -558,7 +560,7 @@ it.effect("new workflow-reference wrappers keep null paths while their nested so
   assert.equal(wrapper.templatePath, null);
   assert.equal(wrapper.plan.templatePath, "workflow:reviewer/root");
   // the service expands a workflow reference itself: the instruction asks only for the compact reference, never for template paths
-  const instruction = prepared.requestText.slice(0, prepared.requestText.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE"));
+  const instruction = readerWorkflowInstruction;
   assert.match(instruction, /which the service expands and keeps intact/u);
   assert.doesNotMatch(instruction, /templatePath|omissions/u);
   assert.ok(validateWorkflowPlan({requirements: [], plan}, prepared.context));
@@ -726,26 +728,26 @@ it.effect("an invalid global config leaves readable local requirements included 
   assert.equal(result.workflow.requirementsKnown, false);
 }));
 
-it.effect("a long task excerpt does not erase known references or make the unchanged source snapshot stale", () => Effect.gen(function* () {
+it.effect("a long referenced task does not erase known definitions or make the unchanged snapshot stale", () => Effect.gen(function* () {
   const {snapshot} = yield* load({...commonSteps, "project.yaml": {required: [{step: "e2e"}]}});
   const task = `Fix this failure:\n${"x".repeat(80_000)}`;
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, task, snapshot);
   assert.ok(prepared.context);
 
   assert.ok(prepared.requestText.length <= 120_000);
-  assert.match(prepared.requestText, /"step":"e2e"/u);
+  assert.doesNotMatch(prepared.requestText, /"step":"e2e"|Fix this failure|x{100}/u);
   assert.deepEqual(prepared.workflow.requirements.map(item => item.id), ["e2e"]);
-  assert.equal(prepared.workflow.requirementsKnown, false);
-  assert.equal(prepared.context.promptComplete, false);
+  assert.equal(prepared.workflow.requirementsKnown, true);
+  assert.equal(prepared.context.promptComplete, true);
   assert.equal(proposalContextMatches(prepared.context, snapshot), true);
 
   const provisional = outcome(reply({requirements: [{kind: "step", id: "e2e", applies: true, reason: "Test the flow."}],
     plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "e2e", reason: "Include flow coverage."}]}}), prepared.context);
-  assert.equal(provisional.workflow.requirements[0]?.state, "unknown");
-  assert.equal(provisional.workflow.status, "provisional");
+  assert.equal(provisional.workflow.requirements[0]?.state, "included");
+  assert.ok(!provisional.workflow.issues.some(item => item.code === "supervisor_context_limit"), "a referenced body is not an omitted body");
 }));
 
-it.effect("long required descriptions stay complete while every configured reference remains in the prompt", () => Effect.gen(function* () {
+it.effect("long required descriptions stay complete on demand and never enter the notification", () => Effect.gen(function* () {
   const ids = Array.from({length: 12}, (_, index) => `step-${index}`);
   const files: Files = {
     "project.yaml": indexSource({steps: ids, required: ids.map(id => ({step: id}))}),
@@ -759,8 +761,8 @@ it.effect("long required descriptions stay complete while every configured refer
   assert.ok(prepared.requestText.length <= 120_000);
   assert.equal(prepared.context.promptComplete, true);
   assert.equal(prepared.workflow.requirementsKnown, true);
-  assert.ok(prepared.requestText.includes("detail detail detail"));
-  for (const id of ids) assert.match(prepared.requestText, new RegExp(`"step":"${id}"`, "u"));
+  assert.doesNotMatch(prepared.requestText, /detail detail detail/u);
+  for (const id of ids) assert.ok(prepared.context.steps.find(step => step.id === id)?.description.includes("detail detail detail"));
   assert.deepEqual(prepared.workflow.requirements.map(item => item.id), ids);
 }));
 
@@ -869,7 +871,9 @@ it.effect("a fixed workflow named by the task receives its exact template paths 
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Use the reviewer workflow to check the change", snapshot);
 
   assert.equal(prepared.context?.promptComplete, true);
-  assert.match(prepared.requestText, /workflow:reviewer\/root\/0/u);
+  const selected = outcome(reply({requirements: [], plan: {kind: "sequence", nodes: [{kind: "workflow", definitionId: "reviewer", reason: "Review this artifact."}]}}), prepared.context!);
+  assert.match(JSON.stringify(selected.workflow.plan), /workflow:reviewer\/root\/0/u);
+  assert.doesNotMatch(prepared.requestText, /workflow:reviewer/u);
 }));
 
 it.effect("apply validation retains existing occurrence IDs and execution state while assigning one ID to a new local step", () => Effect.gen(function* () {
@@ -1056,14 +1060,16 @@ it.effect("reader interpretation size is independent of catalog size and retains
     sequence: Array.from({length: 400}, () => ({step: "inspect"}))}))};
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Implement the export.", many as ProjectDefinitionSnapshot, {reader});
   assert.equal(prepared.requestText, baseline.requestText, "no catalog fields or summaries are pushed, regardless of catalog size");
-  const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
+  const envelope = JSON.parse(prepared.requestText.slice(prepared.requestText.lastIndexOf("\n{") + 1));
   assert.deepEqual(envelope.reader, reader);
-  assert.equal(envelope.text, "Implement the export.");
+  assert.equal(envelope.sourceMessageId, sourceMessageId);
+  assert.equal(envelope.mainThreadId, threadId);
+  assert.equal(envelope.text, undefined);
   assert.equal(envelope.definitions, undefined);
   assert.equal(prepared.context?.promptComplete, true, "the complete source-bound catalog remains stored for the reader");
 }));
 
-it.effect("reader-based interpretation carries earlier unresolved requests and reader coordinates instead of instructions and catalog", () => Effect.gen(function* () {
+it.effect("interpretation notifications contain only lookup handles even with large catalogs and earlier requests", () => Effect.gen(function* () {
   const guidance = (id: string) => `${id} guidance. ${"Preserve the requested outcome, the evidence and the completion rules. ".repeat(24)}END_${id}`;
   const stepIds = ["scope", "evidence", "design", "data", "implement", "prevent", "verify", "correctness", "fit", "findings", "deliver"];
   const files: Files = {"project.yaml": {required: [{step: "scope"}, {workflow: "review"}]}};
@@ -1076,18 +1082,17 @@ it.effect("reader-based interpretation carries earlier unresolved requests and r
   const inline = prepareWorkflowRequest(threadId, sourceMessageId, "Recover the failed worktree with Nix, then continue.", snapshot);
   const prepared = prepareWorkflowRequest(threadId, sourceMessageId, "Recover the failed worktree with Nix, then continue.", snapshot, {
     reader: {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3},
-    earlierMessages: [{messageId: "m0", text: "https://issues.example/browse/PROJ-1"}],
   });
   assert.ok(prepared.context?.promptComplete, "the complete catalog stays available through the reader");
   assert.ok(prepared.requestText.length < 12_000, `manifest interpretation stays small: ${prepared.requestText.length}`);
-  assert.ok(inline.requestText.length > prepared.requestText.length * 2, "the inline catalog is no longer pushed when the reader is available");
+  assert.doesNotMatch(inline.requestText, /END_scope|Preserve the requested outcome/u, "there is no bulk inline fallback");
   assert.equal(prepared.requestText.includes("END_scope"), false, "complete step guidance is read on demand");
   assert.match(prepared.requestText, /workflow_read/u);
   assert.doesNotMatch(prepared.requestText, /Do not use tools, MCP/u);
-  assert.match(prepared.requestText, /Earlier unresolved requests remain part of the task/u);
-  assert.match(prepared.requestText, /needed\|not_needed/u);
-  const envelope = JSON.parse(prepared.requestText.split("UNTRUSTED_WORKFLOW_ENVELOPE\n")[1]!.split("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE")[0]!);
-  assert.deepEqual(envelope.earlierMessages, [{messageId: "m0", text: "https://issues.example/browse/PROJ-1"}]);
+  assert.doesNotMatch(prepared.requestText, /SUBMISSION|sourcePin|requirements|workflow:null/u);
+  const envelope = JSON.parse(prepared.requestText.slice(prepared.requestText.lastIndexOf("\n{") + 1));
+  assert.equal(envelope.earlierMessages, undefined);
+  assert.doesNotMatch(prepared.requestText, /issues\.example|Recover the failed worktree/u);
   assert.deepEqual(envelope.reader, {supervisorThreadId: "supervisor-root:reader", bindingGeneration: 3});
   assert.equal(envelope.definitions, undefined, "the catalog manifest is fetched, not pushed");
   assert.ok(prepared.requestText.length < 2400, `interpretation request: ${prepared.requestText.length}`);

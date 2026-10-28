@@ -84,6 +84,25 @@ const makeDetachedChildProjection = (thread: ThreadInfo, events: readonly Detach
   return {thread, runs: [], messages, turnItems};
 };
 
+it("native observations distinguish successive review turns and never hide active work behind a terminal parent record", () => {
+  const child = makeDetachedChildProjection(nativeChild, []);
+  const turn = (id: string, at: number, status = "completed") => ({id, providerThreadId: "provider-child", nodeId: `node-${id}`,
+    status, startedAt: new Date(at).toISOString(), nativeTurnRef: {driver: "codex", nativeId: id, strength: "strong"}});
+  const first = turn("old-review", now - 1000), next = turn("new-review", now, "running");
+  child.providerTurns = [first, next];
+  const parent: Projection = {thread: mainThread, runs: [], messages: [], subagents: [{childThreadId: nativeChild.id, status: "completed"}]};
+  const read = () => observeScopeThread({thread: nativeChild, mainThreadId: mainThread.id, depth: 1, projection: child, parentProjection: parent, activityRefs: []});
+  assert.equal(read().lifecycle, "running");
+  assert.equal(read().observedProviderTurnId, next.id);
+  next.status = "completed";
+  assert.equal(read().lifecycle, "completed");
+  assert.equal(read().observedProviderTurnId, next.id);
+  next.nativeTurnRef.strength = "weak";
+  next.status = "pending";
+  assert.equal(read().lifecycle, "running");
+  assert.equal(read().observedProviderTurnId, null, "an unidentified active turn is never presented as an earlier completed turn");
+});
+
 const makeRunChildProjection = (thread: ThreadInfo, eventIds: readonly string[]): Projection => {
   const runId = `run-${thread.id}`;
   const rootNodeId = `root-${thread.id}`;
@@ -309,3 +328,17 @@ it.effect("acknowledged detached child history survives restart without waking o
     assert.deepEqual(stored, []);
   }));
 }));
+
+// native proof 2026-10-28: a message is read by its own native turn item, never by its message ID
+it("a message activity without a read handle resolves its exact native turn item, and its message ID stays provenance", () => {
+  const projection = {thread: mainThread, runs: [], nodes: [], messages: [{id: "provider:msg/01 a", threadId: mainThread.id, runId: "run-1", role: "user",
+    text: "Run the check.", streaming: false}], turnItems: [{id: "turn-item:message:provider%3Amsg%2F01%20a", type: "user_message",
+    messageId: "provider:msg/01 a", threadId: mainThread.id, runId: "run-1"}]} as unknown as Projection;
+  const activity = {id: "message:provider:msg/01 a", readItemId: null, type: "user_message", status: "completed", ordinal: 1, detectedAt: now,
+    updatedAt: null, priority: null, nodeId: "node-1", rootNodeId: "node-1"} as unknown as Parameters<typeof monitorActivityReference>[2];
+  const ref = monitorActivityReference(mainThread.id, projection, activity);
+  assert.equal(ref.sourceMessageId, "provider:msg/01 a");
+  assert.equal(ref.sourceItemId, "turn-item:message:provider%3Amsg%2F01%20a");
+  const without = monitorActivityReference(mainThread.id, {...projection, turnItems: []} as Projection, activity);
+  assert.equal(without.sourceItemId, null, "no item is reconstructed from the message ID");
+});

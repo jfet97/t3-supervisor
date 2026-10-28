@@ -54,4 +54,8 @@ it("native requests and active descendants keep a conversation classified as ong
   assert.equal(projectionHasOngoingWork(projection({runtimeRequests: [{id: "question", nodeId: "root", status: "pending"}]})), true);
   assert.equal(projectionHasOngoingWork(projection({subagents: [{status: "running"}]})), true);
   assert.equal(projectionHasOngoingWork(projection({runs: [{...run, status: "running"}]})), true);
+  assert.equal(projectionHasOngoingWork(projection({runs: [], providerTurns: [{status: "pending", nativeTurnRef: null}]})), true, "runless pending work cannot be treated as quiet even without a strong identity");
+  assert.equal(projectionHasOngoingWork(projection({runs: [], providerTurns: [{status: "running"}]})), true);
+  assert.equal(projectionHasOngoingWork(projection({runs: [], providerTurns: [{status: "completed"}]})), false);
+  assert.equal(projectionHasOngoingWork(projection({runs: [], providerTurns: [{status: "unrecognised"}]})), true, "unknown lifecycle never establishes quiescence");
 });

@@ -11,6 +11,7 @@ import { Store, type StoreError, type StoreShape } from "./store.js";
 import type { T3EnvironmentDescriptor } from "./t3.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
+import { timestampMs } from "./timestamp.js";
 
 // the connection state the supervision cycle publishes and every snapshot reads
 export interface RuntimeState {
@@ -80,6 +81,7 @@ const makeGuidanceRuntime = (config: SupervisorSettings, source: Pick<StoreShape
         threadPolicy,
         threads: catalog.threads
           .filter(thread => thread.lineage?.relationshipToParent !== "subagent" && !isSupervisorThread(owned, thread))
+          .sort((a, b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0) || a.id.localeCompare(b.id))
           .map(thread => ({
             id: thread.id,
             title: thread.title,

@@ -1,3 +1,4 @@
+import { defaultPlanningTimeoutMs, planningTimeoutBounds } from "./supervisor-planning.js";
 import { CheckoutObservation, type CheckoutObservationInfo } from "./checkout-observation.js";
 import { dashboardInvalidation } from "./dashboard-updates.js";
 import { projectKeys } from "./dashboard-events.js";
@@ -25,12 +26,12 @@ export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "co
 export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
 // superviseAgentCreatedThreads: whether the launching agent's requests in an ordinary agent-created main are supervised, off unless
 // saved; agentCreatedThreadsEnabledAt: when it was last turned on, so only agent requests written afterwards count
-export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; teamSettings?: {maxHelpersPerRoot: number}; superviseAgentCreatedThreads: boolean; agentCreatedThreadsEnabledAt: number | null; applyAttempts?: number; applicationMessage?: string | null};
+export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; planningTimeoutMs?: number; teamSettings?: {maxHelpersPerRoot: number}; superviseAgentCreatedThreads: boolean; agentCreatedThreadsEnabledAt: number | null; applyAttempts?: number; applicationMessage?: string | null};
 export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;
   state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "unconfirmed" | "superseded";
   text: string; visibilityMisses?: number; nextObserveAt?: number;
   dispatchMode?: {type: "steer_active"; targetRunId: string} | {type: "queue_after_active"}; rejectedAttempts?: Array<{messageId: string; commandId: string}>; error?: string | null};
-export type BindingRecord = SupervisorBinding & {stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number};
+export type BindingRecord = SupervisorBinding & {mainQuietSince?: number | null; mainQuietFingerprint?: string; mainSettlementBlockedBy?: string | null; mainSettlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number};
   /** The direct human resume that lifted the latest Stop from this Supervisor's own conversation; any later Stop or Enable replaces it. */
   supervisionResume?: SupervisionResume};
 /** A genuine human's direct request in the bound Supervisor conversation to resume its stopped main, as its verified supervision_start cited it. */
@@ -39,7 +40,7 @@ export type SupervisionResume = {callerThreadId: string; userMessageId: string; 
 export const prepareStopNotice = (ids: SupervisorIds["Service"], binding: Pick<BindingRecord, "threadId">, stoppedAt: number, enabledAt: number | null): Effect.Effect<SupervisorStopNotice> =>
   Effect.map(Effect.all([ids.uuid, ids.uuid]), ([messageUuid, commandUuid]) => ({
     messageId: `supervisor-notice:stop:${messageUuid}`, commandId: `supervisor-stop-notice:${commandUuid}`, stoppedAt, enabledAt, state: "ready",
-    text: `Supervision was stopped for this conversation at ${new Date(stoppedAt).toISOString()}. Stop sending updates, findings and workflow acceptances to Supervisor ${binding.threadId}. This does not change your task or the user's instructions; a later explicit Enable takes precedence. Do not reply to this notice.`,
+    text: `Supervision of this chat was stopped at ${new Date(stoppedAt).toISOString()}: stop sending updates, findings or workflow acceptances to Supervisor ${binding.threadId}. Your task and the user's instructions are unchanged; a later explicit Enable takes precedence. Do not reply.`,
   }));
 export type SupervisionStartRecord = {
   threadId: string; projectId: string; operationId: string; requestHash: string; route: "agent" | "ui";
@@ -51,7 +52,21 @@ export type SupervisionFolderPresence = {status: "present" | "missing" | "unavai
 /** Native positions from which workflow protocol records belong to a task source revision: the service prompt that gave the
  * Supervisor this revision (and its own native run once observed) and, after a source edit, the last main run and turn item seen with the edit. */
 export type ProtocolAnchor = {supervisorThreadId: string; sourceHash: string; promptMessageId: string; promptRun?: {id: string; ordinal: number}; editedAfter?: {runOrdinal: number; itemOrdinal: number | null} | null};
-export type TaskRecord = TaskInterpretationInfo & TaskInterpretationFields & {id: string; sourceHash: string; /** Earlier unresolved genuine requests in the same main that this task continues. */ contextMessageIds?: string[]; /** observedAt of the Supervisor protocol diagnostic last sent as a focused repair request. */ protocolRepairNoticeAt?: number; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null; protocolAnchor?: ProtocolAnchor; /** Version of the standing instructions the interpretation request carried; its completed run delivers them. */ roleVersion?: string};
+export type TaskRecord = TaskInterpretationInfo & TaskInterpretationFields & {id: string; sourceHash: string; /** Earlier unresolved genuine requests in the same main that this task continues. */ contextMessageIds?: string[]; /** observedAt of the Supervisor protocol diagnostic last sent as a focused repair request. */ protocolRepairNoticeAt?: number; agreementSourceHash?: string; requestText: string; supervisorThreadId: string; messageId: string; dispatchedAt: number | null; replayCount: number; supervisorRunId: string | null; sourceOrdinal: number; definitionContext?: ProposalContext | null; definitionSnapshot?: ProjectDefinitionSnapshot | null; definitionNoticeKey?: string; definitionReadAttempts?: number; revalidationAttempts?: number; workflowProtocolDiagnostic?: WorkflowProtocolDiagnostic | null; protocolAnchor?: ProtocolAnchor; /** The conversation handles the current interpretation reads on demand, prepared with its request. */ interpretationSources?: InterpretationSources};
+/**
+ * One conversation message the current interpretation reads natively: its message ID as provenance, and the exact native turn item T3
+ * reads it by (t3_thread_read itemId), as the projection names it; null when T3 recorded no item for it.
+ */
+export type InterpretationSourceMessage = {readonly messageId: string; readonly readItemId: string | null};
+/**
+ * Who asked for the current interpretation, and the genuine requester messages and operative replies since the activation floor that
+ * its root reads on demand.
+ */
+export type InterpretationSources = {
+  readonly requestedBy: {readonly kind: "human"} | {readonly kind: "launching_agent"; readonly threadId: string};
+  readonly requesterMessages: ReadonlyArray<InterpretationSourceMessage & {readonly requester: "human" | "launching_agent"}>;
+  readonly operativeMessages: ReadonlyArray<InterpretationSourceMessage>;
+};
 
 // the permanent root and helper ownership of the process: each supervision run's store layer adds the stored ids when it is
 // acquired, before that run filters the catalog, and adds a newly owned id after the commit that recorded it (cc-ownership)
@@ -80,7 +95,7 @@ const validMonitoringSettings = (value: SupervisorMonitoringSettings): boolean =
   Number.isInteger(value.activityThreshold) && value.activityThreshold >= 3 && value.activityThreshold <= 100;
 
 export type ProjectSupervisorStoreReason = "no_project_control_conflict" | "global_definitions_control_conflict" | "supervision_control_conflict" |
-  "supervision_control_baseline_required" | "project_settings_conflict" | "invalid_monitoring_settings" | "invalid_team_settings" |
+  "supervision_control_baseline_required" | "project_settings_conflict" | "invalid_planning_timeout" | "invalid_monitoring_settings" | "invalid_team_settings" |
   "supervisor_capacity" | "supervisor_not_missing" | "supervisor_task_capacity" | "supervision_store_unavailable" | "supervision_row_invalid";
 export type ProjectSupervisorRow = "meta" | "binding" | "task" | "project_settings" | "owned_thread" | "chat_enable" | "definition_save" | "count" | "table_info";
 
@@ -142,7 +157,7 @@ export interface ProjectSupervisorStoreShape {
   readonly enabled: (projectId: string) => StoreEffect<boolean>;
   readonly saveControl: (projectId: string | null, expectedGeneration: number, enabled: boolean, baseline?: SupervisorBaseline) => StoreEffect<SupervisionControlInfo>;
   readonly settings: (projectId: string) => StoreEffect<ProjectModelSettings>;
-  readonly saveSettings: (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}, superviseAgentCreatedThreads?: boolean) => StoreEffect<ProjectModelSettings>;
+  readonly saveSettings: (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}, superviseAgentCreatedThreads?: boolean, planningTimeoutMs?: number) => StoreEffect<ProjectModelSettings>;
   readonly modelState: (binding: BindingRecord) => StoreEffect<ProjectModelSettings>;
   readonly observeModel: (binding: BindingRecord, selection: SupervisorModelSelection, appliedGeneration?: number, message?: string | null) => StoreEffect<void>;
   readonly modelAttempt: (binding: BindingRecord, reset?: boolean) => StoreEffect<void>;
@@ -277,9 +292,9 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     // only an explicitly saved true with its enable time turns agent-created conversations on; a document without them reads as off
     const agentCreatedThreadsEnabledAt = stored?.superviseAgentCreatedThreads === true && typeof stored.agentCreatedThreadsEnabledAt === "number" &&
       Number.isFinite(stored.agentCreatedThreadsEnabledAt) ? stored.agentCreatedThreadsEnabledAt : null;
-    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: effectiveMonitoringSettings(stored.monitoring), teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5},
+    return stored ? {...stored, modelMutationGeneration: stored.modelMutationGeneration ?? stored.generation, monitoring: effectiveMonitoringSettings(stored.monitoring), planningTimeoutMs: stored.planningTimeoutMs ?? defaultPlanningTimeoutMs, teamSettings: stored.teamSettings ?? {maxHelpersPerRoot: 5},
       superviseAgentCreatedThreads: agentCreatedThreadsEnabledAt !== null, agentCreatedThreadsEnabledAt} : {
-      projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings}, teamSettings: {maxHelpersPerRoot: 5},
+      projectId, generation: 0, modelMutationGeneration: 0, modelSelection: defaultSupervisorModel, pending: false, monitoring: {...defaultMonitoringSettings}, planningTimeoutMs: defaultPlanningTimeoutMs, teamSettings: {maxHelpersPerRoot: 5},
       superviseAgentCreatedThreads: false, agentCreatedThreadsEnabledAt: null,
     } satisfies ProjectModelSettings;
   });
@@ -548,11 +563,14 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   const settings = (projectId: string) => run(settingsOf(projectId));
   // the settings generation CAS with range checks: monitoring 1..2 minutes and 3..100 activities, helpers 0..20; an omitted
   // field keeps its saved value
-  const saveSettings = (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}, superviseAgentCreatedThreads?: boolean) => write(Effect.gen(function* () {
+  const saveSettings = (projectId: string, expected: number, selection: SupervisorModelSelection, monitoring?: SupervisorMonitoringSettings, teamSettings?: {maxHelpersPerRoot: number}, superviseAgentCreatedThreads?: boolean, planningTimeoutMs?: number) => write(Effect.gen(function* () {
     const old = yield* settingsOf(projectId);
     if (old.generation !== expected) return yield* refuse("project_settings_conflict");
     const nextMonitoring = normalizeMonitoringSettings(monitoring ?? old.monitoring);
     if (!validMonitoringSettings(nextMonitoring)) return yield* refuse("invalid_monitoring_settings");
+    const nextPlanningTimeout = planningTimeoutMs ?? old.planningTimeoutMs ?? defaultPlanningTimeoutMs;
+    if (!Number.isSafeInteger(nextPlanningTimeout) || nextPlanningTimeout < planningTimeoutBounds.min || nextPlanningTimeout > planningTimeoutBounds.max)
+      return yield* refuse("invalid_planning_timeout");
     const nextTeamSettings = teamSettings ?? old.teamSettings ?? {maxHelpersPerRoot: 5};
     if (!Number.isSafeInteger(nextTeamSettings.maxHelpersPerRoot) || nextTeamSettings.maxHelpersPerRoot < 0 || nextTeamSettings.maxHelpersPerRoot > 20)
       return yield* refuse("invalid_team_settings");
@@ -567,6 +585,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
       modelMutationGeneration: old.modelMutationGeneration + (modelChanged ? 1 : 0),
       modelSelection: selection,
       monitoring: nextMonitoring,
+      planningTimeoutMs: nextPlanningTimeout,
       teamSettings: nextTeamSettings,
       superviseAgentCreatedThreads: agentCreatedThreads,
       agentCreatedThreadsEnabledAt,

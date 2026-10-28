@@ -1,4 +1,4 @@
-import { conversationMayContact, taskScopeRevision } from "./supervision-conversation.js";
+import { conversationMayContact, conversationMayObserve, taskScopeRevision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
 import { fingerprint } from "./guidance-store.js";
@@ -17,6 +17,7 @@ import { resolveSupervisorScope, type SupervisorScopeResolution } from "./superv
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle } from "./supervisor-observation.js";
 import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorIds } from "./ids.js";
+import { planningHasUnresolvedEffects } from "./supervisor-planning.js";
 import { admitSend, SupervisionGate, type GateGuard, type SendPreparation } from "./supervision-gate.js";
 
 export const SUPERVISOR_SETTLE_QUIET_MS = 60_000;
@@ -152,11 +153,13 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
 
   /** Returns the first gate that keeps the main supervision active, or null when settlement may proceed. */
   const mainAttention = (binding: BindingRecord, supervisor: Projection, main: Projection | null, closedMain: boolean, source: ThreadInfo | undefined,
-    teamWork: boolean) => Effect.gen(function* (): Effect.fn.Return<string | null, SupervisionStoreError> {
-    if (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread)) return "keep_active";
+    teamWork: boolean, keepSupervisorActive = true) => Effect.gen(function* (): Effect.fn.Return<string | null, SupervisionStoreError> {
+    if (keepSupervisorActive && (binding.manualKeepActive || userKeepsSupervisorActive(supervisor.thread))) return "keep_active";
     if ((yield* store.modelState(binding)).pending) return "model_change_pending";
     if (projectionNeedsAttention(supervisor)) return "supervisor_busy";
     if (teamWork) return "team_work";
+    if ((yield* requests.planningAttempts(binding.projectId)).some(attempt => attempt.mainThreadId === binding.mainThreadId && planningHasUnresolvedEffects(attempt)))
+      return "planning_wait_or_delivery";
     if (closedMain) return main && projectionNeedsAttention(main, source ?? main.thread) ? "main_busy" : null;
     if (!source) return "main_not_cataloged";
     const tasks = yield* store.tasksFor(binding);
@@ -196,6 +199,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
       if (!document) return false;
       const unsettled = unsettledOccurrences(document.plan, documentBranchSelections(document),
         notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null));
+      if (document.returns.some(item => item.state === "pending")) return true;
       if (document.status === "completed" && unsettled.length === 0) return false;
       // an open external result can coexist with the operative's own unfinished work, so only an explicit wait acknowledges the blocker
       const latest = owned.filter(request => request.kind === "review" && request.reviewPins).at(-1);
@@ -324,12 +328,15 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
 
   const check = (input: BindingRecord, threads: readonly ThreadInfo[]): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
-    const initial = yield* store.binding(input.projectId, input.mainThreadId);
+    let initial = yield* store.binding(input.projectId, input.mainThreadId);
     if (!initial || initial.threadId !== input.threadId || initial.state !== "ready" || !rpc) return;
     const supervisorRead = yield* attempt(projection(initial.threadId));
     if (!supervisorRead.ok) {yield* clearQuiet(initial, "supervisor_unreadable");return;}
     const supervisor = supervisorRead.value;
     if (supervisor.thread.id !== initial.threadId || supervisor.thread.projectId !== initial.projectId || supervisor.thread.archivedAt || supervisor.thread.deletedAt) return;
+    yield* settleCompletedMain(initial, supervisor, threads);
+    initial = (yield* store.binding(input.projectId, input.mainThreadId))!;
+    if (!initial || initial.threadId !== input.threadId || initial.generation !== input.generation) return;
     const teamWork = yield* teamWorkOf(initial);
     const teamEffects = yield* teamEffectsOf(initial);
     // the per-chat stop read, its bookkeeping and, for a stopped chat, the settlement gates up to the fresh Supervisor read run
@@ -510,35 +517,114 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
    * start in the same section, its reads and writes in one transaction, and the reply and its native readback are classified
    * outside it.
    */
-  const sendSettlement = (owner: BindingRecord, version: string, now: number, final: (guard: GateGuard) => Effect.Effect<BindingRecord | null, SupervisionStoreError>):
+  /** The main and Supervisor keep independent quiet windows and human keep-active choices. */
+  const settleCompletedMain = (input: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[]) => Effect.gen(function* () {
+    let binding = (yield* store.binding(input.projectId, input.mainThreadId))!;
+    const task = yield* store.task(binding.mainThreadId);
+    if (!task || task.status !== "inferred") return;
+    if (!(task.supervision === "not_needed" && conversationMayObserve(task))) {
+      if (!workflows || task.agreement?.status !== "agreed") return;
+      const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
+      if (!document || document.sourceBinding?.taskId !== task.id || document.sourceBinding.sourceHash !== taskScopeRevision(task) || document.status !== "completed" || document.returns.some(item => item.state === "pending") || unsettledOccurrences(document.plan, documentBranchSelections(document),
+        notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)).length !== 0) return;
+    }
+    const read = yield* attempt(readMain(binding));
+    if (!read.ok || !read.value || read.value.thread.archivedAt || read.value.thread.deletedAt) return;
+    const main = read.value;
+    const now = yield* Clock.currentTimeMillis;
+    const held = (reason: string) => transaction(Effect.gen(function* () {
+      const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
+      if (latest) yield* store.setBinding({...latest, mainQuietSince: null, mainSettlementBlockedBy: reason});
+    }));
+    if (main.thread.settledAt || main.thread.settledOverride === "settled") {
+      if (binding.mainSettlement && binding.mainSettlement.state !== "settled") yield* store.setBinding({...binding, mainSettlement: {...binding.mainSettlement, state: "settled"}});
+      return;
+    }
+    if (userKeepsSupervisorActive(main.thread)) {yield* held("keep_active");return;}
+    const source = threads.find(thread => thread.id === binding.mainThreadId && thread.projectId === binding.projectId);
+    const authorised = yield* admitted(guard => Effect.gen(function* () {
+      return !(yield* guard.supervisionStopped(binding.mainThreadId)) && (yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId));
+    }));
+    if (!authorised) return;
+    const attention = yield* mainAttention(binding, supervisor, main, false, source, yield* teamWorkOf(binding), false);
+    if (attention) {yield* held(attention);return;}
+    const scope = scopeFor(binding, main, threads);
+    if (!scope?.complete || !scope.main) {yield* held("scope_incomplete");return;}
+    const childRead = yield* attempt(relatedChildren(binding, main, threads, scope));
+    if (!childRead.ok || childRead.value.blocked) {yield* held("children_active_or_unavailable");return;}
+    const threadIds = [...scope.allowedIds];
+    const pending = yield* monitor.hasPendingReviewableActivity(binding.projectId, threadIds);
+    const workflow = yield* workflowAttention(binding, threadIds);
+    if (pending.status !== "complete" || pending.pending || workflow.blocked) {yield* held("unassessed_work");return;}
+    const version = fingerprint({main: activityVersion(main), children: childRead.value.version, workflow: workflow.version});
+    if (binding.mainSettlement?.state === "uncertain" && binding.mainSettlement.activityVersion !== version) {yield* held("uncertain_settlement");return;}
+    if (binding.mainQuietFingerprint !== version || binding.mainQuietSince == null) {
+      yield* store.setBinding({...binding, mainQuietFingerprint: version, mainQuietSince: now, mainSettlementBlockedBy: "quiet_window"});return;
+    }
+    if (now - binding.mainQuietSince < SUPERVISOR_SETTLE_QUIET_MS) return;
+    const freshRead = yield* attempt(readMain(binding));
+    const ownerRead = yield* attempt(projection(binding.threadId));
+    if (!freshRead.ok || !freshRead.value || !ownerRead.ok) return;
+    const freshMain = freshRead.value;
+    const freshChildren = yield* attempt(relatedChildren(binding, freshMain, threads, scopeFor(binding, freshMain, threads)));
+    if (!freshChildren.ok || freshChildren.value.blocked) {yield* held("children_active_or_unavailable");return;}
+    yield* sendSettlement(binding, version, now, guard => Effect.gen(function* () {
+      const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
+      if (!latest || latest.threadId !== input.threadId || latest.generation !== input.generation ||
+        (yield* guard.supervisionStopped(binding.mainThreadId)) || !(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId)) ||
+        userKeepsSupervisorActive(freshMain.thread) || freshMain.thread.archivedAt || freshMain.thread.deletedAt) return null;
+      const currentTask = yield* store.task(binding.mainThreadId);
+      if (!currentTask || currentTask.id !== task.id || taskScopeRevision(currentTask) !== taskScopeRevision(task)) return null;
+      const attention = yield* mainAttention(latest, ownerRead.value, freshMain, false, source, yield* teamWorkOf(latest), false);
+      if (attention) return null;
+      const freshPending = yield* monitor.hasPendingReviewableActivity(binding.projectId, threadIds);
+      const freshWorkflow = yield* workflowAttention(binding, threadIds);
+      if (freshPending.status !== "complete" || freshPending.pending || freshWorkflow.blocked ||
+        fingerprint({main: activityVersion(freshMain), children: freshChildren.value.version, workflow: freshWorkflow.version}) !== version) return null;
+      binding = latest;
+      return latest;
+    }), true);
+  });
+
+  const sendSettlement = (owner: BindingRecord, version: string, now: number, final: (guard: GateGuard) => Effect.Effect<BindingRecord | null, SupervisionStoreError>, main = false):
     Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
     if (!rpc) {yield* admitted(final);return;}
     const operate = rpc;
     const fresh = `supervisor-settle:${yield* ids.uuid}`;
+    const targetId = main ? owner.mainThreadId : owner.threadId;
+    const key = main ? "mainSettlement" : "settlement";
+    const blockedKey = main ? "mainSettlementBlockedBy" : "settlementBlockedBy";
     yield* admitSend(gate, {
-      identity: owner.threadId,
+      identity: targetId,
       inFlight: settlements,
       prepare: (guard) => transaction(Effect.gen(function* (): Effect.fn.Return<SendPreparation<void>, SupervisionStoreError> {
         const binding = yield* final(guard);
         if (!binding) return {_tag: "Answer", value: undefined};
-        const settlement = binding.settlement && ["pending", "uncertain"].includes(binding.settlement.state) ? binding.settlement : {commandId: fresh, state: "pending" as const, observedAt: now, activityVersion: version, attempts: 0};
+        const existing = binding[key];
+        const settlement = existing && ["pending", "uncertain"].includes(existing.state) ? existing : {commandId: fresh, state: "pending" as const, observedAt: now, activityVersion: version, attempts: 0};
         const sending = {...settlement, attempts: (settlement.attempts ?? 0) + 1, observedAt: now};
-        yield* store.setBinding({...binding, settlement: sending});
+        yield* store.setBinding({...binding, [key]: sending});
         // the settled check and the uncertain write are one transaction; a failed write is a defect of the in-flight operation
         const uncertain = transaction(Effect.gen(function* () {
-          if ((yield* store.binding(binding.projectId, binding.mainThreadId))?.settlement?.state !== "settled") yield* store.setBinding({...binding, settlement: {...sending, state: "uncertain"}});
+          const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
+          if (latest && latest[key]?.state !== "settled") yield* store.setBinding({...latest, [key]: {...sending, state: "uncertain"}});
         })).pipe(Effect.orDie);
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {type: "thread.settle", commandId: settlement.commandId, threadId: binding.threadId}), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {type: "thread.settle", commandId: settlement.commandId, threadId: targetId}), (flight) => ({
           result: Effect.gen(function* () {
             const outcome = yield* attempt(Effect.gen(function* () {
               const receipt = yield* flight.result;
               if (!record(receipt) || !Number.isSafeInteger(receipt.sequence)) return yield* new SupervisorRpcError("uncertain");
-              yield* store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: "settled"}}).pipe(Effect.orDie);
-              const current = yield* projection(binding.threadId);
-              yield* store.setBinding({...binding, settlementBlockedBy: null, settlement: {...sending, state: current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : current.thread.settledOverride === "active" ? "superseded" : "uncertain"}}).pipe(Effect.orDie);
+              const current = yield* projection(targetId);
+              yield* transaction(Effect.gen(function* () {
+                const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
+                if (latest) yield* store.setBinding({...latest, [blockedKey]: null, [key]: {...sending, state: current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : current.thread.settledOverride === "active" ? "superseded" : "uncertain"}});
+              })).pipe(Effect.orDie);
             }));
             if (outcome.ok) return;
-            if (outcome.cause instanceof SupervisorRpcError && outcome.cause.definiteRejection) yield* store.setBinding({...binding, quietSince: null, settlement: {...sending, state: "superseded"}}).pipe(Effect.orDie);
+            if (outcome.cause instanceof SupervisorRpcError && outcome.cause.definiteRejection) yield* transaction(Effect.gen(function* () {
+              const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
+              if (latest) yield* store.setBinding({...latest, [main ? "mainQuietSince" : "quietSince"]: null, [key]: {...sending, state: "superseded"}});
+            })).pipe(Effect.orDie);
             else yield* uncertain;
           }).pipe(Effect.onInterrupt(() => uncertain)),
           release: flight.release,

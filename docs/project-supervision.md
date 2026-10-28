@@ -81,7 +81,7 @@ Supervisor's lineage. Only such requests written after the setting was turned on
 count, so enabling it never sweeps up earlier launches; turning it off again makes
 an agent-sourced task no longer current. Other agents, Supervisor roots and helpers,
 anything they delegated, scheduled or service prompts and imported messages never
-become tasks. The interpretation request names the launching conversation
+become tasks. The interpretation context names the launching conversation
 (`requestedBy`), and the request is never presented as a human's. Human-created conversations are unchanged. While off, the chat origin remains excluded even after genuine human follow-ups.
 While on, the exact launcher and genuine humans can request work in an eligible
 ordinary main. The setting governs conversation eligibility: Start, Stop and definition approval still require a
@@ -90,12 +90,18 @@ genuine human message, and No Project modes and exclusions still apply.
 The Supervisor interprets the latest genuine request together with earlier unresolved
 requests in the same main, such as an issue link that did not yet establish an
 objective; a bootstrap, setup or recovery instruction is treated as a step toward
-that request, not its replacement. With the workflow MCP available, interpretation
-receives the `project.yaml` index once (each entry's id, name, summary, required
-flag and members by ID) and reads only the complete definitions it selects through
-`workflow_read` with `definitionIds`, each once, so full descriptions and expanded
-plans are not pushed into the prompt. A summary
-is navigation, not policy. The operative introduction says that
+that request, not its replacement. The interpretation request is a handle: the root
+notice with the instructions version, the task, the source message and the reader
+coordinates. The root reads its current pins, requester attribution and message handles
+with `workflow_read` view `context`, the source messages natively by each handle's exact
+`readItemId` (the message's published T3 turn item; a message ID is provenance and is
+matched while paging the thread's messages only when T3 has not published the item
+yet), and the classification rules with view `interpretation`; only when a plan
+is needed does it read the plan rules (section `plan`), the `project.yaml` index (each
+entry's id, name, summary, required flag and members by ID) and the complete
+definitions it selects with `definitionIds`, each once. No body, rule or catalog is
+pushed into the request. A summary
+is navigation, not policy. The operative's proposal read says that
 `.t3-supervisor/project.yaml` is the index and to read the listed full files
 it needs. The index is not a whitelist of task plans; negotiated local steps
 remain available. A manifest too large for
@@ -105,7 +111,9 @@ names, stating what it omitted.
 The existing task document retains a bounded understanding: objective, constraints,
 open questions, findings with actual conversation references and draft high-level
 duties. This quiet draft is separate from the operative proposal. Following sends
-no routine introduction, acceptance chatter or check-ins. A temporary `not_needed`
+no routine introduction or acceptance chatter to the operative. Internal observe-only
+check-ins follow actual work, including the final activity needed to assess completion.
+A temporary `not_needed`
 assessment does not close the task; later eligible requester messages are interpreted
 on the same task. Operative activity supplies bounded context rather than a model
 turn for each tool event.
@@ -177,6 +185,14 @@ not selected; undecided and not-selected steps are not counted as outstanding.
 A selection never proves work, and a completion recorded before a changed decision
 is shown as needing reassessment. See [branch selections](workflow-mcp.md#branch-selections).
 
+A return (`back_to`) repeats earlier work as a new attempt. When the operative's work
+reaches it, the region from its target through the member that holds it waits for the
+Supervisor, which applies the return at a safe point once the closed attempt's work has
+stopped. The closed attempt keeps its statuses, contributors, decisions and retired
+child runs as history; the reopened occurrences keep their contributor conversations
+and show their attempt. Output of the closed attempt never counts for the new one.
+See [returns and attempts](workflow-mcp.md#returns-and-attempts).
+
 Required controls inclusion; an applicable required item must be on every path of a
 branch to count as included. Fixed preserves original commitments, relative order,
 parallel relationships and branches with their conditions and paths. Added work may
@@ -202,18 +218,21 @@ changed scope whose plan, definitions and requirements are unchanged is noticed 
 with its new acceptance record; a revision of an agreed plan names the agreed proposal it
 replaces, and its read shows each member, omission and reason. The Supervisor does not
 repeat an acceptance request while the operative turn that received the proposal can
-still answer it. The operative receives a short notice: the obligation to agree a workflow for the
-authorized outcome promptly (earlier work may already exist; the Supervisor cannot block
-tools), the objective, the `.t3-supervisor/project.yaml` entry point and the exact
-`supervision_plan` call that returns its complete current proposal with the outline and
-the acceptance record. It reads that proposal on demand, also after agreement, and asks
-its Supervisor for the outline only when it cannot call the tool. Wakes carry the compact standing core once per
-version and afterwards a short pointer to it; the full reference, task context,
-definitions and dry-run checks are pulled on demand. The core names how to read native
-evidence from the supplied item references, small and forward from the last read, and
-limits messages to the operative to brief deltas or questions with source references. Each wake row has one
-activity list and per-task context with revision pins, proposal identity and digest,
-agreement and repair state. Oversized requests stop before delivery with a visible
+still answer it. The operative receives a short event: the proposal and task, whether it
+is provisional, the step it is asked to take, the exact `supervision_plan` call and the
+contact route. That call returns the complete current proposal: the agreement contract
+(no approval step or authority; the Supervisor cannot block tools), the objective and
+limits, the `.t3-supervisor/project.yaml` entry point, the outline with task-local
+duties and the acceptance record. The operative reads it on demand, also after
+agreement, and asks its Supervisor for the outline only when it cannot call the tool.
+Every root message carries one notice, the binding fences and the instructions version,
+never the rules: the root reads its core, the section index and the sections a message
+names (check-ins name `monitoring` and `contact`), and rereads only sections whose
+version changed; task context, definitions and dry-run checks are pulled on demand.
+Each check-in row has one activity list with exact native read handles, a contact route
+code and, once per task, its identity, revision pins, proposal identity and state,
+agreement state and attention codes; digests and diagnostics are read with view
+`context`. Oversized requests stop before delivery with a visible
 reason in the conversation's Task view; pending activity and uncertain delivery identities remain
 intact. Retry stays explicit. Blocked startup also stops automatic definition review
 and renewal until Retry. Readable definition changes during healthy startup, including
@@ -330,7 +349,7 @@ records, and a rejected record uses the single task diagnostic described above.
 The exact record, revision rules and assessment action are documented in
 [connected workflow editing](workflow-mcp.md#external-contributions).
 
-Interpretation turns have a no-tools role. Dialogue/check-ins permit native
+Interpretation turns use only the reads and the submission their rules name. Dialogue/check-ins permit native
 reading/messaging and scoped workflow MCP edits where available. New Supervisor
 chats use full-access/default for native message permissions. These instructions
 are not a tool sandbox; exact native evidence separately authorizes MCP writes.
@@ -346,29 +365,37 @@ reviews observed changes and actual user-message provenance. User-authorized
 changes can be adopted after fresh source checks and then require a replacement
 agreement. Unrequested agent edits prompt restoration of its own changes while
 preserving user work; ambiguous authorship remains uncertainty, not an accusation.
+The review request is a handle: the approved and observed revisions, the step, workflow
+and source entries that differ (compared before redaction), the user message IDs, the
+exact decision and proposal templates and the marker. The Supervisor reads the entries
+with `workflow_read` view `definitions` (`revision: "approved"` or `"observed"`) and the
+messages natively; its procedure is the instruction section `definitions`.
 
 A dashboard configuration save authorizes that local configuration only. It does
 not authorize independent step/workflow edits. Global effective policy remains
 separate from editable local projectConfig. Save intent, current review timing and
 fresh definition contents are checked before adoption. Definition review is
-advisory conversation, not filesystem prevention or a dashboard approval gate.
+advisory conversation, not filesystem prevention or a dashboard approval gate. Its
+request names the user messages with their `readItemId` for reading and their message
+IDs for the decision record to cite.
 
 ## Monitoring, recovery and lifecycle
 
-Ongoing checks observe the main and its verified native and delegated descendants,
-using the project age/count thresholds (ten finalized activities by default, or the
-oldest finished activity after at most two minutes: one or two minutes can be chosen,
-two is the default and the upper bound), one shared 30-second per-main cooldown and
-one service check-in in flight per Supervisor. These bound when a check-in becomes
-due, not when the model answers: a check-in still in flight, a busy root, Stop or
-unavailable native access still defers the wake. Forks remain separate scopes. Native child lifecycle comes from its
-direct parent's child record; an idle child mirror with no AppRun is not completion.
-Bounded activity batches identify their source and show incomplete reads explicitly.
-Completed, failed, interrupted and cancelled runs have terminal priority. Verified
-native-child terminal changes use the exact direct-parent record and are routed to
-the current root/helper responsible for that child. Priority bypasses age/count,
-while the existing cooldown and acknowledgement rules still apply. Repeated reads
-of the same terminal version do not create another review.
+Active work is followed through native T3 reads across the main and its verified
+children. The owner reads forward from each target's cursor, completes cut-off
+text and fetches plans or details only as needed. Child lists are metadata, not
+transcript reads. A bounded `t3_thread_wait` waits for run completion, not new
+activity; when T3 requires a yield, the service promptly continues verified active
+work. Active following bypasses the idle age/count thresholds and cooldown, and
+never steers into a Supervisor's ongoing thinking. One model turn runs per owner.
+
+Idle work retains the project age/count thresholds and 30-second fallback cooldown.
+Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;
+forks remain separate scopes. Native child lifecycle comes from its direct parent,
+not an idle mirror. Finished, failed, interrupted and cancelled runs have priority.
+Read coverage records successful native pages separately from explicit assessments;
+neither a read nor an assessment proves operative execution. Missing or cut-off
+coverage stays visible, and a helper report does not invent an exact read watermark.
 
 Each root monitoring check-in names its request and is pinned when it is prepared: the
 binding generation and, per included task, its revision and its main workflow (or the
@@ -393,6 +420,48 @@ so the next one follows the cooldown and the third consecutive miss requires Ret
 The dashboard's monitoring status shows the last confirmed outcome and the current one
 that is recorded, unconfirmed or missing. Recording sends nothing, and an outcome or
 guidance is the Supervisor's assessment, not evidence that the operative acted on it.
+
+### Planning pauses
+
+When planning changes what affected actors do next, `supervision_planning pause`
+requests a bounded hold for those actors. Each actor must acknowledge its own pause
+or be verified quiet; a parent acknowledgement holds its dispatch only. Native or
+idle children use a verified parent relay. Unrelated siblings keep working.
+
+One project-configurable deadline (default five minutes, ten seconds to one hour)
+starts at the first delivery attempt and covers acknowledgement, drafting and
+negotiation. Progress and later settings changes do not renew it. An independent
+service watchdog releases possibly delivered unresolved holds at expiry, including
+when an owner or original send is stuck. No-plan and explicit continue also release
+the wait. Human Stops, pauses, limits and approvals remain binding.
+
+The owner may start one new read-only app-owned drafting task alongside the pause,
+then register its actual task/thread IDs with `attach_draft`. This worker writes
+content only and has no monitoring, workflow-write, guidance or delegation authority.
+Its task is the pause answer's `draftInstruction`: the coordinates of its own read
+route, never a copy of the plan, rules or definitions. With `supervision_planning`
+action `draft_read`, the attempt's pins and its own executed call, before and after it
+is attached, it reads view `context` (compact by default; section `conversation` for
+the current intent and section `plan` for the current plan: the main's live workflow
+while it is bound to the task and its current scope, with its revision and whether its
+content is still the accepted plan, otherwise the current proposal, each task-local duty
+included), `definitions` and `plan_rules` (the shared plan authoring rules without the
+root's pause coordination). No section names the root's interpretation submission
+inputs, and a read changes, renews or attaches nothing. Its result queues an owner
+notification without steering its thinking; the notification names the exact
+`t3_thread_read` of the result's published turn item, and the message ID only as
+provenance. The owner
+re-reads current work before adoption; adoption waits for the relevant actors.
+Ending the attempt cleans up its registered drafting task while retaining unknown
+native command outcomes. Late content never renews the pause or publishes itself.
+
+A reached `back_to` is applied through `supervision_planning apply_return` after
+current pause/quiescence checks. It preserves agreement and starts a new attempt;
+real commitment changes still require a revised proposal. Old child runs are fenced
+using actual execution IDs. When a native child exposes no independent run ID, the
+return is refused rather than treating its shared parent run as an execution ID.
+Use supported ordinary reviewer continuations or fresh app-owned delegated passes
+carrying previous findings when execution provenance is needed.
 
 Fresh native request state controls waiting: resolved, expired or cancelled requests
 clear matching stale waiting summaries, while missing or mismatched evidence stays
@@ -497,10 +566,11 @@ no check-in or message is sent for it. Following, stopped and closed scopes keep
 parking rules. A request cancelled before it started executed nothing, so the
 latest executed run decides whether the main finished. The binding records the first
 gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown in Supervision.
-A not-needed or unresolved request gets no check-ins, so unreviewed activity retained from
-an earlier request, or a replaced request's known-unsent draft, does not keep its Supervisor
-open; both stay as history. An incomplete activity scan or an introduction with an unknown
-outcome still does.
+A following scope may stay open until its new activity is assessed, even when no plan
+is needed. An unresolved interpretation starts no check-ins. Activity retained from an
+earlier request, or a replaced request's known-unsent draft, stays as history and does
+not alone keep its Supervisor open. An incomplete activity scan or an introduction
+with an unknown outcome still does.
 An idle main's old lifecycle-unknown child can also permit
 standby after the quiet period when no known activity, attention issue or pending
 input requires action. Unknown work stays unresolved. Background monitoring

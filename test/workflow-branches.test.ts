@@ -94,8 +94,8 @@ it("malformed, ambiguous, excess or unbounded branch structure is rejected with 
     ["a then mapping instead of a path", workflow("  - branch:\n      if: Small.\n      then:\n        step: a\n"), branchReason],
     ["a multi-line condition", workflow("  - branch:\n      if: |\n        Small.\n        And simple.\n      then:\n        - step: a\n"), branchReason],
     ["an oversized condition", workflow(`  - branch:\n      if: ${"x".repeat(301)}\n      then:\n        - step: a\n`), branchReason],
-    ["a jump", workflow("  - goto: inspect\n"), /exactly one step, workflow, sequence, parallel or branch key/u],
-    ["a branch beside another key", workflow("  - branch:\n      if: Small.\n      then:\n        - step: a\n    step: b\n"), /exactly one step, workflow, sequence, parallel or branch key/u],
+    ["a jump", workflow("  - goto: inspect\n"), /exactly one step, workflow, sequence, parallel, branch or back_to key/u],
+    ["a branch beside another key", workflow("  - branch:\n      if: Small.\n      then:\n        - step: a\n    step: b\n"), /exactly one step, workflow, sequence, parallel, branch or back_to key/u],
     ["a duplicate local step across paths", workflow("  - branch:\n      if: Small.\n      then:\n        - step: {id: same, name: Same, description: First.}\n      else:\n        - step: {id: same, name: Same, description: Second.}\n"),
       /Local step identifiers must be unique/u],
   ];
@@ -412,6 +412,7 @@ it.live("a not-selected path neither raises attention nor counts as active work"
     if (node.kind === "step") return node.nodeId === elseStep.nodeId ? {...node, status: "needs_attention"} : node;
     if (node.kind === "workflow") return {...node, plan: node.plan ? {...node.plan, nodes: node.plan.nodes.map(visit)} : null};
     if (node.kind === "branch") return {...node, then: {...node.then, nodes: node.then.nodes.map(visit)}, else: node.else ? {...node.else, nodes: node.else.nodes.map(visit)} : null};
+    if (node.kind === "back_to") return node;
     return {...node, nodes: node.nodes.map(visit)};
   })});
   assert.equal((yield* apply(document, mark(document.plan!), "flag-unselected", 1100, {evidence: [{kind: "status_changed", note: "Earlier work stalled.", targetNodeId: elseStep.nodeId}]})).status, "applied");
@@ -475,16 +476,18 @@ it.live("a nested completion older than the retained observations still dates ag
     const progress = progressWorkflow(current, []);
     const html = renderToStaticMarkup(createElement(PlanJourney, {node: progress.plan!, mode: "live", selections: progress.branchSelections,
       notes: {agreed: null, proposed: null, records: recordsByStep(progress.observations), changed: new Set<string>()}, ...(withTimes ? {completions: completionTimes(progress)} : {})}));
-    return {progress, review: html.slice(html.indexOf(`${review.name}<small>Workflow</small>`))};
+    const reviewStart = html.indexOf(`${review.name}<span class="step-flags"><small>Workflow</small>`);
+    assert.ok(reviewStart >= 0, "the review row exists before its status is checked");
+    return {progress, review: html.slice(reviewStart)};
   };
   const fresh = render(yield* main());
   assert.ok(!fresh.progress.observations.some(item => item.targetNodeId === review.nodeId), "the completion record is outside the retained observations");
   assert.deepEqual(fresh.progress.completions, [{nodeId: review.nodeId, completedAt: 1200}], "the completion time is read before truncation");
-  assert.match(fresh.review, /^[^<]+<small>Workflow<\/small><\/span><span class="step-state">Completed</, "a completion after every decision inside it stays current");
+  assert.match(fresh.review, /^[^<]+<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Completed</, "a completion after every decision inside it stays current");
 
   assert.equal((yield* select(reviewBranch(document).nodeId, 2, "else", 1400, 1400)).status, "applied");
   const changed = render(yield* main());
-  assert.match(changed.review, /^[^<]+<small>Workflow<\/small><\/span><span class="step-state">Completed earlier · needs reassessment</);
+  assert.match(changed.review, /^[^<]+<span class="step-flags"><small>Workflow<\/small><\/span><\/span><span class="step-state">Completed earlier · needs reassessment</);
   assert.match(changed.review, /a branch decision inside it changed afterwards, so its completion needs reassessment\. The recorded status stays as history\./);
   const undated = render(yield* main(), false);
   assert.match(undated.review, /<span class="step-state">Completed earlier · needs reassessment</, "without a completion time, completion is not presented as current");

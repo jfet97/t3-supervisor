@@ -1,4 +1,3 @@
-import { completelyQuotedEarlierMessageIds, localThreadToolRules, redact } from "./supervisor-workflow.js";
 import { emptyConversation } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
@@ -12,7 +11,7 @@ import { GuidanceDb } from "./db.js";
 import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs, workspacePreparationPending } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
-import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
+import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type InterpretationSourceMessage, type InterpretationSources, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
 import { modelSelection, NativeOperateRpc, NativeRpc, NativeShell, sameModel, supervisorModels, validModelSelection, SupervisorRpcError } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
@@ -44,6 +43,7 @@ import { HelperTransport } from "./supervisor-helper-transport.js";
 import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorTeamController } from "./supervisor-team-controller.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
+import { messageReadItemId } from "./message-read-handle.js";
 
 type SetupCheckoutTarget = DefinitionCheckoutTarget;
 type DefinitionsFailure = DefinitionSourceFailure | DefinitionCheckoutUnavailable;
@@ -829,12 +829,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         !catalog.projects.some(item => item.available && item.project.id === thread.projectId)) return false;
       if (purpose === "start" ? !(yield* scope.isNoProject(thread.projectId)) : !(yield* relevant(thread.projectId, thread.id))) return false;
       return !search || thread.id.toLowerCase() === search || thread.title.toLowerCase().includes(search);
-    }))).sort((a,b) => (timestampMs(b.updatedAt) ?? 0) - (timestampMs(a.updatedAt) ?? 0) || a.id.localeCompare(b.id)).slice(0, 8);
+    }))).sort((a,b) => (timestampMs(b.createdAt) ?? 0) - (timestampMs(a.createdAt) ?? 0) || a.id.localeCompare(b.id)).slice(0, 8);
     return {exceptions, candidates: yield* Effect.forEach(rows, thread => Effect.gen(function* () {
       return {id: thread.id, projectId: thread.projectId!, title: thread.title,
         updatedAt: typeof thread.updatedAt === "string" ? thread.updatedAt : null, active: (yield* store.start(thread.id))?.status === "active" && !(yield* scope.supervisionStopped(thread.id)),
         excluded: yield* scope.supervisionStopped(thread.id)};
-    })), message: rows.length ? "Choose a chat. At most eight matches are shown." : "No matching available chat. Paste its native T3 link or change the search."};
+    })), message: rows.length ? "Choose a chat. Newest by creation time first; at most eight matches are shown." : "No matching available chat. Paste its native T3 link or change the search."};
   });
   const ensureBinding = (projectId: string, mainThreadId: string, title: string): Effect.Effect<BindingRecord, EnsureBindingError> => Effect.gen(function* () {
     if (!(yield* projectEnabled(projectId, mainThreadId))) return yield* new SupervisionDisabled();
@@ -1024,7 +1024,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       stoppedCallerThreadId: stop?.callerThreadId ?? null, stoppedUserMessageId: stop?.userMessageId ?? null,
       effectiveEnabled: yield* scope.scopeEnabled(projectId, mainThreadId), activation: (yield* scope.isNoProject(projectId)) ? (yield* store.start(mainThreadId))?.status ?? "not_started" : "automatic"} : null;
     const monitoringStatus = yield* conversation.status(projectId, binding?.threadId ?? null);
-    return {projectId, mainThreadId, ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus, binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
+    return {projectId, mainThreadId, planning: binding ? (yield* requests.planningAttempts(projectId)).filter(row => row.mainThreadId === binding.mainThreadId) : [], ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, planningTimeoutMs: current.planningTimeoutMs ?? 300_000, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus, binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, mainSettlementState: binding.mainSettlement?.state ?? null, mainSettlementBlockedBy: binding.mainSettlementBlockedBy ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
       tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic,conversation,supervision}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt, ...(supervision ? {supervision} : {}), ...(conversation ? {conversation} : {}), engagement: deriveConversationEngagement({task: {status, sourceHash, conversation}, enabled: chatSupervision?.effectiveEnabled ?? false, available, monitoringState: monitoringStatus.state, bindingState: binding?.state, stale: !catalog.projects.find(item => item.project.id === projectId)?.available}), workflow: workflow ?? null,
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
@@ -1035,7 +1035,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       yield* project(input.projectId);
       if (input.mainThreadId) yield* snapshot(input.projectId, input.mainThreadId);
       // the settings save inside the caller's section and transaction; null when it committed
-      const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings, input.superviseAgentCreatedThreads)), (saved): ProjectSupervisorSaveOutcome | null => {
+      const commit = Effect.map(attempt(store.saveSettings(input.projectId, input.expectedGeneration, input.modelSelection, input.monitoring, input.teamSettings, input.superviseAgentCreatedThreads, input.planningTimeoutMs)), (saved): ProjectSupervisorSaveOutcome | null => {
         if (saved.ok) return null;
         const cause = saved.cause;
         if (cause instanceof Error && cause.message === "invalid_team_settings") return {status: "invalid", message: "Choose a whole-number helper limit from 0 to 20.", snapshot: null};return cause instanceof Error && cause.message === "invalid_monitoring_settings" ? {status: "invalid", message: "Use an interval of 1–2 minutes and an activity threshold of 3–100, both whole numbers.", snapshot: null} : {status: "conflict", message: "Project Supervisor settings changed. Refresh before saving again.", snapshot: null};
@@ -1170,7 +1170,6 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         return {next: "done"};
       }
       if (job.supervisorRunId !== run.id) {job = {...job, supervisorRunId: run.id};yield* store.saveTask(job);}
-      if (run.status === "completed" && job.roleVersion) yield* conversation.roleDelivered(job.supervisorThreadId, job.roleVersion);
       if (run.status !== "completed") {
         if (["failed","interrupted","cancelled","rolled_back"].includes(run.status)) yield* complete(job, "unavailable", null, "The interpretation run did not complete successfully.");
         else if (run.status !== "queued" && run.status !== "preparing" && timestampMs(run.startedAt) !== null && now() - timestampMs(run.startedAt)! > 300_000) yield* complete(job, "unavailable", null, "The interpretation timed out or requires input. The service does not answer or interrupt Supervisor runs.");
@@ -1487,40 +1486,29 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const requesters = yield* requesterPolicy(preparing.projectId);
         // an agent request is introduced to the Supervisor as the launching agent's, never as the human's
         const requester = sourceRun ? taskRequester(source, sourceRun, message, requesters) : null;
-        // the earlier unresolved requests stay context; only genuine visible requests of this main's permitted requesters are carried
-        const earlierMessages = (preparing.contextMessageIds ?? []).flatMap(id => {
-          const earlier = source.messages.find(item => item.id === id && item.threadId === preparing.threadId);
-          const run = earlier?.runId ? source.runs.find(item => item.id === earlier.runId) : undefined;
-          return earlier && run && taskRequester(source, run, earlier, requesters) ? [{messageId: earlier.id, text: earlier.text}] : [];
-        });
-        const reader = yield* scope.workflowEditingEnabled(preparing.projectId, preparing.threadId, "status");
-        // the root's first message carries its concise standing role once, so no separate initialization turn is needed
-        const role = reader ? yield* conversation.interpretationRole(owner) : null;
+        // the request carries the root notice: the binding fences and the instructions handle, never the rules themselves
+        const notice = conversation.rootNotice(owner);
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
-        // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
+        // the genuine requester messages and operative replies since the activation floor, each with the exact native turn item T3 reads it
+        // by, as the projection names it; message IDs stay provenance and are never a read itemId
         const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
         const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
+        const ordinalOf = (runId: string | null | undefined) => source.runs.find(run => run.id === runId)?.ordinal;
+        const sourceMessage = (messageId: string): InterpretationSourceMessage => ({messageId, readItemId: messageReadItemId(source, preparing.threadId, messageId)});
+        const interpretationSources: InterpretationSources = {
+          requestedBy: requester?.kind === "agent" ? {kind: "launching_agent", threadId: requester.threadId} : {kind: "human"},
+          requesterMessages: requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal)
+            .slice(-12).map(item => ({...sourceMessage(item.messageId), requester: item.requester})),
+          operativeMessages: source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
+            (ordinalOf(item.runId) ?? Infinity) <= preparing.sourceOrdinal && (ordinalOf(item.runId) ?? -1) > (contextFloor ?? Infinity)).slice(-6)
+            .map(item => sourceMessage(item.id))};
+        // the request quotes its attempt: the attempt key pins the binding generation, the task, its source revision and this exact text
         const build = (attemptId: string) => {
-          // each exact source body is quoted once: a requester message the envelope already carries as the request text or as an earlier
-          // request keeps its identity and requester relationship and names where its body is
-          const quoted = new Map<string, "text" | "earlierMessages">([[preparing.sourceMessageId, "text"],
-            ...[...completelyQuotedEarlierMessageIds(earlierMessages)].map(id => [id, "earlierMessages"] as const)]);
-          const requesterMessages = requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal).slice(-12).map(item => {
-            const quotedIn = quoted.get(item.messageId);
-            return quotedIn ? {...item, quoted: quotedIn} : {...item, text: redact(source.messages.find(message => message.id === item.messageId)?.text ?? "").slice(0, 1600)};
-          });
-          const operativeMessages = source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
-            (source.runs.find(run => run.id === item.runId)?.ordinal ?? Infinity) <= preparing.sourceOrdinal &&
-            (source.runs.find(run => run.id === item.runId)?.ordinal ?? -1) > (contextFloor ?? Infinity)).slice(-6)
-            .map(item => ({messageId: item.id, runId: item.runId, text: redact(item.text).slice(0, 1600)}));
-          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {earlierMessages, conversationContext: {facts: preparing.conversation, requesterMessages, operativeMessages},
-            ...(requester?.kind === "agent" ? {requester: {kind: "agent" as const, threadId: requester.threadId}} : {}),
-            ...(reader ? {reader: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation}} : {}),
+          const request = prepareWorkflowRequest(preparing.threadId, preparing.sourceMessageId, message.text, loadedDefinitions, {
             submission: {supervisorThreadId: owner.threadId, bindingGeneration: owner.generation, taskId: preparing.id, attemptId,
               sourcePin: interpretationSourcePin(preparing), startVerdict}});
-          const requestText = role ? `${role.text}\n${request.requestText.startsWith(`${localThreadToolRules}\n`)
-            ? request.requestText.slice(localThreadToolRules.length + 1) : request.requestText}` : request.requestText;
+          const requestText = notice ? `${notice}\n${request.requestText}` : request.requestText;
           return {request, requestText, key: interpretationAttemptKey({bindingGeneration: owner.generation, task: preparing, requestMessageId: preparing.messageId, requestText})};
         };
         // an identical replay of the request keeps its attempt; a renewal, a source edit or any other request text mints a new one
@@ -1529,7 +1517,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const built = retained && replayed ? replayed : build(interpretationAttemptId(mintedUuid));
         const attempt: InterpretationAttempt = retained ?? {attemptId: interpretationAttemptId(mintedUuid), key: built.key};
         const next: TaskRecord = {...preparing, requestText: built.requestText, definitionContext: built.request.context,
-          definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, ...(role ? {roleVersion: role.roleVersion} : {})};
+          definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, interpretationSources};
         yield* store.saveTask(next);
         return next;
       }));

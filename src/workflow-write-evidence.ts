@@ -3,6 +3,7 @@ import { Exit, Schema } from "effect";
 import { mainRunNodeReader } from "./domain.js";
 import { canonicalJson } from "./canonical-json.js";
 import type { Projection, RunInfo } from "./types.js";
+import { providerTurnNode, readNativeProviderTurns } from "./workflow-native-turns.js";
 
 export {canonicalJson};
 
@@ -48,10 +49,14 @@ export const workflowToolNames = {
     direct: ["t3-supervisor-workflows.supervision_interpretation_submit", "mcp__t3-supervisor-workflows__supervision_interpretation_submit"],
     mcpxTarget: "t3-supervisor-workflows__supervision_interpretation_submit",
   },
+  planning: {
+    direct: ["t3-supervisor-workflows.supervision_planning", "mcp__t3-supervisor-workflows__supervision_planning"],
+    mcpxTarget: "t3-supervisor-workflows__supervision_planning",
+  },
   mcpxCall: ["mcpx.mcpx_call_tool", "mcp__mcpx__mcpx_call_tool"],
 } as const;
 
-export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop" | "start" | "plan" | "interpretation";
+export type WorkflowEvidenceTool = "read" | "write" | "team" | "guide" | "stop" | "start" | "plan" | "interpretation" | "planning";
 
 export type WorkflowEvidenceMatch = {
   itemId: string;
@@ -101,6 +106,7 @@ const knownDirectToolNames = new Set<string>([
   ...workflowToolNames.stop.direct,
   ...workflowToolNames.start.direct,
   ...workflowToolNames.interpretation.direct,
+  ...workflowToolNames.planning.direct,
 ]);
 const knownMcpxTargets = new Set<string>([
   workflowToolNames.read.mcpxTarget,
@@ -110,6 +116,7 @@ const knownMcpxTargets = new Set<string>([
   workflowToolNames.stop.mcpxTarget,
   workflowToolNames.start.mcpxTarget,
   workflowToolNames.interpretation.mcpxTarget,
+  workflowToolNames.planning.mcpxTarget,
 ]);
 const isMcpxCall = (toolName: string): boolean => workflowToolNames.mcpxCall.includes(toolName as never);
 const maxObservedToolNameLength = 128;
@@ -154,31 +161,7 @@ export const workflowEvidenceCandidates = (
     const run = runs.get(item.runId);
     if (!run || run.threadId !== supervisorThreadId) return [];
     const snapshotInput = item.input;
-    const unknownToolName = !names.includes(item.toolName as never) && !isMcpxCall(item.toolName) &&
-      !knownDirectToolNames.has(item.toolName);
-    let plausible = false;
-    if (isRecord(snapshotInput)) {
-      const snapshotArguments = recordedArguments(item, tool);
-      if (snapshotArguments) {
-        try {plausible = canonicalJson(snapshotArguments.arguments) === expectedCanonical;}
-        catch {plausible = false;}
-      }
-      if (!plausible && isTruncatedSnapshot(item)) plausible = true;
-    } else if (typeof snapshotInput === "string" && snapshotInput.trim().length > 0) {
-      if (!unknownToolName) {
-        plausible = true;
-      } else {
-        const parsed = decodeSnapshotJson(snapshotInput);
-        if (Exit.isSuccess(parsed) && isRecord(parsed.value)) {
-          try {
-            const snapshotArguments = recordedArguments({...item, input: parsed.value}, tool);
-            plausible = snapshotArguments !== null && canonicalJson(snapshotArguments.arguments) === expectedCanonical;
-          } catch {plausible = false;}
-        }
-        if (!plausible && isTruncatedSnapshot(item)) plausible = true;
-      }
-    }
-    if (!plausible) return [];
+    if (!plausibleSnapshot(item, tool, expectedCanonical)) return [];
     let snapshotSignature: string;
     try {
       snapshotSignature = workflowRequestHash({id: item.id, runId: item.runId, providerThreadId: item.providerThreadId ?? null,
@@ -192,27 +175,176 @@ export const workflowEvidenceCandidates = (
     right.itemOrdinal - left.itemOrdinal || right.itemId.localeCompare(left.itemId));
 };
 
-const recordedArguments = (
-  item: Record<string, unknown>,
+// whether a turn item's snapshot input can be the expected call: equal arguments under a recognised tool name or wrapper, or an input
+// only its detail read can settle (a truncated snapshot, or the string input of a recognised tool)
+const plausibleSnapshot = (item: Record<string, unknown>, tool: WorkflowEvidenceTool, expectedCanonical: string): boolean => {
+  const names = workflowToolNames[tool].direct;
+  const toolName = item.toolName as string;
+  const snapshotInput = item.input;
+  const unknownToolName = !names.includes(toolName as never) && !isMcpxCall(toolName) && !knownDirectToolNames.has(toolName);
+  let plausible = false;
+  if (isRecord(snapshotInput)) {
+    const snapshotArguments = recordedArguments(item, tool);
+    if (snapshotArguments) {
+      try {plausible = canonicalJson(snapshotArguments.arguments) === expectedCanonical;}
+      catch {plausible = false;}
+    }
+    if (!plausible && isTruncatedSnapshot(item)) plausible = true;
+  } else if (typeof snapshotInput === "string" && snapshotInput.trim().length > 0) {
+    if (!unknownToolName) {
+      plausible = true;
+    } else {
+      const parsed = decodeSnapshotJson(snapshotInput);
+      if (Exit.isSuccess(parsed) && isRecord(parsed.value)) {
+        try {
+          const snapshotArguments = recordedArguments({...item, input: parsed.value}, tool);
+          plausible = snapshotArguments !== null && canonicalJson(snapshotArguments.arguments) === expectedCanonical;
+        } catch {plausible = false;}
+      }
+      if (!plausible && isTruncatedSnapshot(item)) plausible = true;
+    }
+  }
+  return plausible;
+};
+
+/**
+ * A native child's own calls that no AppRun carries: each names a provider turn instead. Only the child's plan read inspects them;
+ * every write and the interpretation submission keep their AppRun proof.
+ */
+export const providerTurnEvidenceCandidates = (
+  projection: Projection,
+  threadId: string,
   tool: WorkflowEvidenceTool,
-): RecordedArguments | null => {
+  expectedArguments: Record<string, unknown>,
+): WorkflowEvidenceCandidate[] => {
+  const names = workflowToolNames[tool].direct;
+  const expectedCanonical = canonicalJson(expectedArguments);
+  return (projection.turnItems ?? []).flatMap(item => {
+    if (item.type !== "dynamic_tool" || item.threadId !== threadId || item.runId != null || typeof item.providerTurnId !== "string" ||
+      typeof item.id !== "string" || typeof item.toolName !== "string") return [];
+    if (!names.includes(item.toolName as never) && !isMcpxCall(item.toolName) && knownDirectToolNames.has(item.toolName)) return [];
+    if (!plausibleSnapshot(item, tool, expectedCanonical)) return [];
+    let snapshotSignature: string;
+    try {
+      snapshotSignature = workflowRequestHash({id: item.id, providerTurnId: item.providerTurnId, providerThreadId: item.providerThreadId ?? null,
+        updatedAt: item.updatedAt ?? null, status: item.status ?? null, toolName: item.toolName, input: item.input});
+    } catch {return [];}
+    return [{itemId: item.id, snapshotSignature, appRunOrdinal: -1, appRunTime: -1,
+      itemOrdinal: Number.isSafeInteger(item.ordinal) ? item.ordinal as number : -1}];
+  }).sort((left, right) => right.itemOrdinal - left.itemOrdinal || right.itemId.localeCompare(left.itemId));
+};
+
+export type ProviderTurnEvidenceCheck =
+  | {status: "verified"; providerTurnId: string}
+  | {status: "pending"; reason: string}
+  | {status: "denied"; reason: string; observedToolName?: string};
+
+/**
+ * A native child's own executed call that no AppRun carries: the exact arguments under a recognised tool name in its own strongly
+ * identified item, inside the graph of a provider turn the child's projection publishes with strong native provenance. It proves only
+ * the caller's own plan read, never a write or a submission.
+ */
+export const verifyProviderTurnToolEvidence = (input: {
+  projection: Projection;
+  callerThreadId: string;
+  itemId: string;
+  detail: unknown;
+  tool: WorkflowEvidenceTool;
+  arguments: Record<string, unknown>;
+}): ProviderTurnEvidenceCheck => {
+  if (!isRecord(input.detail)) return {status: "pending", reason: "native_item_unavailable"};
+  const item = input.detail;
+  // an item an AppRun carries is proven through that AppRun only
+  if (item.runId !== null && item.runId !== undefined) return {status: "denied", reason: "native_item_run_bound"};
+  if (typeof item.providerTurnId !== "string" || typeof item.toolName !== "string" || !isRecord(item.input))
+    return {status: "pending", reason: "native_input_incomplete"};
+  const recorded = recordedArguments(item, input.tool);
+  if (!recorded) return {status: "pending", reason: "native_tool_name_or_wrapper_mismatch"};
+  let expectedCanonical: string;
+  let actualCanonical: string;
+  try {
+    expectedCanonical = canonicalJson(input.arguments);
+    actualCanonical = canonicalJson(recorded.arguments);
+    canonicalJson(item.input);
+  } catch {
+    return {status: "pending", reason: "native_input_not_json"};
+  }
+  if (Buffer.byteLength(actualCanonical, "utf8") > workflowToolInputMaxBytes) return {status: "pending", reason: "native_input_too_large"};
+  if (Object.keys(recorded.arguments).length === 0) return {status: "pending", reason: "native_input_empty"};
+  if (actualCanonical !== expectedCanonical) return {status: "pending", reason: "native_input_does_not_match_request"};
+  if (item.id !== input.itemId || item.type !== "dynamic_tool" || item.threadId !== input.callerThreadId || typeof item.nodeId !== "string")
+    return {status: "denied", reason: "native_item_identity_mismatch"};
+  if (input.projection.thread.id !== input.callerThreadId) return {status: "denied", reason: "caller_projection_mismatch"};
+  if (item.parentItemId !== null || !isRecord(item.nativeItemRef) || item.nativeItemRef.strength !== "strong")
+    return {status: "denied", reason: "native_item_not_turn_strong"};
+  const providerDriver = item.nativeItemRef.driver;
+  if (typeof providerDriver !== "string" || !providerDriver || providerDriver.length > 128 || providerDriver.trim() !== providerDriver ||
+    typeof item.nativeItemRef.nativeId !== "string" || !item.nativeItemRef.nativeId ||
+    typeof item.ordinal !== "number" || !Number.isSafeInteger(item.ordinal) || item.ordinal < 0)
+    return {status: "denied", reason: "native_item_identity_incomplete"};
+  if (item.toolNonExecutionKind !== undefined && item.toolNonExecutionKind !== null)
+    return {status: "denied", reason: "native_item_not_executed"};
+  if (item.status === "rolled_back") return {status: "denied", reason: "native_tool_item_rolled_back"};
+  if (item.status !== "running" && item.status !== "completed")
+    return {status: "denied", reason: "native_item_not_running_or_completed"};
+  const turns = readNativeProviderTurns(input.projection);
+  if (turns === null) return {status: "pending", reason: "native_provider_turns_unreadable"};
+  const turn = turns.find(candidate => candidate.id === item.providerTurnId);
+  // a published turn without strong native provenance identifies nothing; an unpublished one may still appear
+  if (!turn) return Array.isArray(input.projection.providerTurns) &&
+    input.projection.providerTurns.some(candidate => isRecord(candidate) && candidate.id === item.providerTurnId)
+    ? {status: "denied", reason: "native_provider_turn_not_strong"} : {status: "pending", reason: "native_provider_turn_not_visible"};
+  if (turn.providerThreadId !== item.providerThreadId) return {status: "denied", reason: "native_provider_turn_mismatch"};
+  if (!providerTurnNode(input.projection, turn, item.nodeId)) return {status: "denied", reason: "native_item_outside_provider_turn"};
+  if (!recorded.recognized) return {status: "denied", reason: "native_tool_name_unrecognized",
+    ...(recorded.observedToolName ? {observedToolName: boundedObservedToolName(recorded.observedToolName)} : {})};
+  return {status: "verified", providerTurnId: turn.id};
+};
+
+/** One tool's recognised native routes: its direct names, and the name a recognised MCP call tool gives it in `{name, arguments}`. */
+type NativeToolRoutes = {readonly direct: readonly string[]; readonly target: string};
+
+// the one reading of a native call's tool route, shared by evidence, re-validated receipts and read coverage: a direct name of the tool,
+// or a recognised MCP call naming it, is recognised; a route of another known tool is no candidate; anything else is unrecognised
+const routedArguments = (item: Record<string, unknown>, routes: NativeToolRoutes, otherDirect: ReadonlySet<string>,
+  otherTargets: ReadonlySet<string>): RecordedArguments | null => {
   if (!isRecord(item.input)) return null;
   const toolName = item.toolName;
   if (typeof toolName !== "string") return null;
-  if (workflowToolNames[tool].direct.includes(toolName as never)) return {arguments: item.input, recognized: true};
-  if (knownDirectToolNames.has(toolName)) return null;
+  if (routes.direct.includes(toolName)) return {arguments: item.input, recognized: true};
+  if (otherDirect.has(toolName)) return null;
   if (isMcpxCall(toolName)) {
     if (!exactKeys(item.input, ["name", "arguments"]) || typeof item.input.name !== "string" ||
       !isRecord(item.input.arguments)) return null;
-    if (item.input.name === workflowToolNames[tool].mcpxTarget)
+    if (item.input.name === routes.target)
       return {arguments: item.input.arguments, recognized: true};
-    if (knownMcpxTargets.has(item.input.name)) return null;
+    if (otherTargets.has(item.input.name)) return null;
     return {arguments: item.input.arguments, recognized: false, observedToolName: item.input.name};
   }
-  if (exactKeys(item.input, ["name", "arguments"]) && item.input.name === workflowToolNames[tool].mcpxTarget &&
-    isRecord(item.input.arguments))
+  if (exactKeys(item.input, ["name", "arguments"]) && item.input.name === routes.target && isRecord(item.input.arguments))
     return {arguments: item.input.arguments, recognized: false, observedToolName: toolName};
   return {arguments: item.input, recognized: false, observedToolName: toolName};
+};
+
+const recordedArguments = (item: Record<string, unknown>, tool: WorkflowEvidenceTool): RecordedArguments | null =>
+  routedArguments(item, {direct: workflowToolNames[tool].direct, target: workflowToolNames[tool].mcpxTarget}, knownDirectToolNames, knownMcpxTargets);
+
+/** The arguments of a recognised native call of a workflow tool, or null; re-validated receipts read their calls this way. */
+export const recognisedWorkflowCallArguments = (item: Record<string, unknown>, tool: WorkflowEvidenceTool): Record<string, unknown> | null => {
+  const recorded = recordedArguments(item, tool);
+  return recorded?.recognized ? recorded.arguments : null;
+};
+
+// this environment's own T3 server's thread read, recognised on the same routes
+const threadReadRoutes: NativeToolRoutes = {
+  direct: ["t3_thread_read", "mcp__t3_code__t3_thread_read", "mcp__t3-code__t3_thread_read", "t3-code.t3_thread_read"],
+  target: "t3-code__t3_thread_read",
+};
+
+/** The arguments of a recognised native T3 thread read, or null; read coverage counts only these. */
+export const recognisedThreadReadArguments = (item: Record<string, unknown>): Record<string, unknown> | null => {
+  const recorded = routedArguments(item, threadReadRoutes, new Set(), new Set());
+  return recorded?.recognized ? recorded.arguments : null;
 };
 
 const getRun = (projection: Projection, runId: string): RunInfo | undefined =>

@@ -3,6 +3,7 @@ import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { workflowReadToolDefinition } from "../src/workflow-write-controller.js";
+import {taskScopeRevision} from "../src/supervision-conversation-contract.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { appendSourceMessage, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete } from "./support/ctl-workflow.js";
 
@@ -60,7 +61,7 @@ it.effect("definitions are served index-first: the index once, then each selecte
   assert.equal("$defs" in workflowReadToolDefinition.inputSchema, false, "the read tool advertises no plan schema it never references");
 }));
 
-it.effect("an interpretation envelope quotes each request body once and keeps every requester relationship", () => Effect.gen(function* () {
+it.effect("an interpretation request quotes no body, and its context keeps every requester relationship as handles", () => Effect.gen(function* () {
   const fixture = yield* makeWorkflowFixture(catalog());
   const source = fixture.projections.get(sourceThreadId)!;
   const link = "https://issues.example/browse/PROJ-1 needs the retry behavior described in the attached report.";
@@ -70,17 +71,51 @@ it.effect("an interpretation envelope quotes each request body once and keeps ev
   yield* submitAndComplete(fixture, supervisor, (yield* fixture.task())!, {objective: null, reason: "Only an issue link was supplied.", sourceMessageIds: [],
     supervision: "needed", workflow: null});
   yield* supervisor.cycle;
+  const previousReply = "PRIOR_OPERATIVE_DETAILS ".repeat(300);
+  source.messages.push({...source.messages[0]!, id: "prior-operative-reply", role: "assistant", text: previousReply, creationSource: "provider"});
   const request = "Recover the failed worktree manually with Nix, then continue with the retry fix from that issue.";
   appendSourceMessage(source, "bootstrap-message", 2, request);
   yield* supervisor.cycle;
   const dispatched = String(fixture.dispatches().at(-1)?.payload.text);
-  const envelope = JSON.parse(dispatched.slice(dispatched.indexOf("UNTRUSTED_WORKFLOW_ENVELOPE\n") + "UNTRUSTED_WORKFLOW_ENVELOPE\n".length,
-    dispatched.indexOf("\nEND_UNTRUSTED_WORKFLOW_ENVELOPE"))) as {text: string; earlierMessages: Array<{messageId: string; text: string}>;
-      conversation: {requesterMessages: Array<{messageId: string; requester: string; text?: string; quoted?: string}>}};
-  assert.equal(count(dispatched, request), 1, "the request text is quoted once");
-  assert.equal(count(dispatched, link), 1, "the earlier unresolved request is quoted once");
-  assert.equal(envelope.text, request);
-  assert.deepEqual(envelope.earlierMessages, [{messageId: sourceMessageId, text: link}]);
-  assert.deepEqual(envelope.conversation.requesterMessages.map(item => [item.messageId, item.requester, item.quoted ?? null, item.text ?? null]),
-    [[sourceMessageId, "human", "earlierMessages", null], ["bootstrap-message", "human", "text", null]], "each requester keeps its identity and relationship");
+  // the request quotes no body: the root reads them natively by the handles its context view names
+  for (const body of [request, link, "PRIOR_OPERATIVE_DETAILS"]) assert.equal(count(dispatched, body), 0, body);
+  assert.ok(dispatched.length < 1_200, `changed-request wake ${dispatched.length}`);
+  const pending = (yield* fixture.task())!;
+  const context = (yield* supervisor.conversation.readContextView((yield* fixture.binding())!, {view: "context"})) as unknown as {
+    task: {taskId: string; taskRevision: string; sourceMessageId: string; contextMessageIds: string[];
+      sources: {requestedBy: unknown; requesterMessages: Array<{messageId: string; requester: string}>; operativeMessages: Array<{messageId: string}>}}};
+  assert.equal(context.task.sourceMessageId, "bootstrap-message");
+  assert.deepEqual(context.task.contextMessageIds, [sourceMessageId], "the earlier unresolved request stays a handle");
+  assert.deepEqual(context.task.sources.requestedBy, {kind: "human"});
+  assert.deepEqual(context.task.sources.requesterMessages.map(item => [item.messageId, item.requester]),
+    [[sourceMessageId, "human"], ["bootstrap-message", "human"]], "each requester keeps its identity and relationship");
+  assert.deepEqual(context.task.sources.operativeMessages.map(item => item.messageId), ["prior-operative-reply"], "prior replies are read on demand");
+  assert.equal(JSON.stringify(context).includes("PRIOR_OPERATIVE_DETAILS"), false);
+  assert.equal(context.task.taskRevision, taskScopeRevision(pending), "planning pins name the current scope, never a guessed source-body hash");
+}));
+
+it.effect("view context is compact by default; conversation facts, the plan and diagnostics are sections read on demand", () => Effect.gen(function* () {
+  const fixture = yield* makeWorkflowFixture(catalog());
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.cycle;
+  const task = (yield* fixture.task())!;
+  yield* submitAndComplete(fixture, supervisor, task, {objective: "Implement the export", reason: "A substantive change.", sourceMessageIds: [sourceMessageId],
+    supervision: "needed", workflow: {requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The change needs a behavior check."},
+      {kind: "workflow", id: "missing-audit", applies: "unknown", reason: "The audit definition is missing."}],
+    plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify the export."}]}}});
+  yield* supervisor.cycle;
+  const binding = (yield* fixture.binding())!;
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  for (const key of ["requirements", "outline"]) assert.equal(key in context, false, key);
+  assert.equal("conversation" in (context.task as Record<string, unknown>), false);
+  assert.deepEqual(context.sections, ["conversation", "plan", "diagnostics"]);
+  assert.equal(typeof (context.definitions as {issues: unknown}).issues, "number", "issues are counted, read with section diagnostics");
+  const plan = yield* supervisor.conversation.readContextView(binding, {view: "context", section: "plan"});
+  assert.ok(Array.isArray(plan.requirements) && (plan.requirements as unknown[]).length > 0);
+  assert.match(String(plan.outline), /test-plan/u);
+  const conversation = yield* supervisor.conversation.readContextView(binding, {view: "context", section: "conversation"});
+  assert.ok("conversation" in conversation);
+  const diagnostics = yield* supervisor.conversation.readContextView(binding, {view: "context", section: "diagnostics"});
+  assert.ok(Array.isArray((diagnostics.definitions as {issues: unknown[]}).issues));
+  assert.equal((yield* supervisor.conversation.readContextView(binding, {view: "context", section: "other"})).status, "invalid");
 }));

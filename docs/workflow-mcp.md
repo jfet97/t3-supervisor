@@ -122,8 +122,9 @@ an accepted result never completes a step automatically. The Supervisor records
 completion with an ordinary `apply` and `status_changed` evidence, which may cite
 the main's result message through `sourceThreadId` and `sourceMessageId`.
 
-`workflow_read` returns the bounded contributions and current assessments with an
-`externalContributionNote`. Root check-in envelopes add `externalContributions`, a
+`workflow_read` returns the bounded contributions and current assessments; what
+they mean is stated once, in the root's instruction section `contributions`, not in
+each read. Root check-in envelopes add `externalContributions`, a
 compact index of open entries (`contributionId`, `nodeId`, `inCurrentPlan`,
 `state`, `revision`, current decision and `sourceMessageId`) without their summary
 or references. Summaries, references and `externalRef` are untrusted evidence,
@@ -181,7 +182,8 @@ path leave a selection current. Selections are not plan structure: they never cl
 the agreement pointer, change the agreement digest or alter requirement accounting.
 
 A reached branch without a current selection is a pending decision. `workflow_read`
-lists each workflow's `pendingBranchDecisions` with a `branchSelectionNote`, and root
+lists each workflow's `pendingBranchDecisions` (their meaning is in the root's
+instruction section `branches`), and root
 check-in envelopes add `branchDecisions`, holding pending decisions and current
 selections with their source message. An `apply` that assesses the workflow, or a
 workflow occurrence, as newly completed while a decision on its applicable path is
@@ -198,6 +200,73 @@ selected path's steps as usual. It never marks the not-selected path completed o
 removes it to tidy progress, and it never records or approves a selection itself.
 When a child's connected workflow contains a branch, the Supervisor tells that child
 its branch node ID, condition and paths, the task ID and this record format.
+
+## Returns and attempts
+
+A plan return is `{kind: "back_to", nodeId, templatePath, target, targetNodeId,
+reason}`; like a branch it has no status or contributors. `target` is the step, local
+step or workflow ID of an earlier member in the same sequential lane, and the service
+resolves `targetNodeId` in the composed plan, so drafts and applies omit it. A plan
+that cannot resolve a return is rejected with `back_to_target_not_found`,
+`back_to_target_ambiguous`, `back_to_unreachable_member` (a member follows it) or
+`back_to_no_exit_cycle`, and a pointer to the return.
+
+A return's region is every occurrence from its target through the member that holds
+it, nested ones included. When a return is reached, on the active path with every
+earlier member settled, the workflow document appends a pending entry to `returns`
+with `return_requested` evidence. It carries `returnId`, `backToNodeId`,
+`targetNodeId`, `regionNodeIds`, the `attempt` it closes, and the reason and source
+of the selection that led to it. While it is pending, an `apply` is rejected with
+`return_pending` when it changes a status in its region, enters an occurrence after
+the return, or completes the task or a workflow enclosing it. Observations remain
+possible. A pending entry whose return is no longer reached, or has left the plan, is
+dismissed with `return_dismissed` evidence. Entries are never removed, and a workflow
+holds at most 100.
+
+The Supervisor applies a pending, still reached return at a safe point. Applying it
+records `return_applied` evidence and keeps the closed attempt on the entry: `closed`
+holds each region occurrence's status and contributors, `closedSelections` the branch
+selections that were current, and `retiredRuns` the earlier child executions, at most
+50 entries. AppRun entries have `kind: "run"`, `threadId` and `runId`; every known
+earlier run is retired, including completed runs before the latest one. Native entries
+have `kind: "provider_turns"`, `threadId`, `providerThreadId` and `providerTurnIds`,
+or `kind: "thread"`, `threadId` and `reason` when separate rounds cannot be identified.
+An ACK covers its acknowledged execution; newly queued or other active runs still
+prevent the return, as do pending native turns with weak execution identity.
+Every occurrence in the region
+returns to `planned` with its contributors still linked, and each selection in the
+region is invalidated, so the operative decides again with the next revision. The
+plan and the agreement pointer are unchanged. The operation is idempotent by its
+operation ID and checks the expected revision.
+
+An occurrence's attempt is one more than the number of applied returns whose region
+holds it. View `status` adds `attempt` to reopened occurrences and lists each
+workflow's `pendingReturns`; the progress snapshot adds `returns` and `attempts`.
+Output of a closed attempt never counts for the next one. A branch-selection record
+from a message created before an applied return reopened its branch, or from a run
+that return retired, is `branch_record_outdated`. A `status_changed` or
+`not_applicable` entry about a reopened occurrence that cites a retired run is
+rejected with `retired_run_evidence`; it can still be recorded as an observation. When
+evidence cites a native message or item without its run, the service records the run
+that produced it, so the fence holds however the evidence cites it.
+
+Native reviewer children with published, strongly identified provider turns keep the
+same conversation across passes. Applying the return requires a terminal child and
+provider turns, no pending work, and its parent's dispatch ACK. It retires the exact
+earlier turn IDs. A new pass must cite a different turn started after the return;
+the service resolves this identity from native evidence rather than caller input.
+When a native provider exposes no per-execution identity, the return retires that
+whole child. Use a fresh managed reviewer carrying its earlier findings and record
+the replacement reason. Connected work and History show this distinction. Neither
+case removes the earlier reports or turns a failed review into a missing report.
+
+A revision keeps the identity of every occurrence it keeps. A proposal draft is
+canonicalized against the live plan, or the latest proposal before any plan is live:
+an occurrence without `nodeId` that matches exactly one existing occurrence keeps its
+ID, and a referenced workflow keeps the actual IDs of its existing members. A member
+new to an occurrence, such as one a revision includes again, gets an ID derived from
+the occurrence and the member's template path, the same in every proposal and apply.
+An `apply` still names each existing occurrence by its `nodeId`.
 
 ## MCP interface
 
@@ -232,27 +301,54 @@ A successful read through the installed gateway establishes transport/permission
 behavior, not a positive workflow edit or complete configured-project dialogue.
 
 `workflow_read` takes the Supervisor thread ID and binding generation as lookup
-coordinates. It returns bounded workflow state and native main/descendant lineage,
+coordinates. Its explicit document view includes bounded workflow state and native main/descendant lineage,
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
-With `view`, `workflow_read` returns bounded context for the verified binding instead of
+`workflow_read` defaults to compact `status`. Use `view: "documents"` only when complete
+records, history, evidence or accepted snapshots are needed; document and lineage pagination
+remain available in that view. Other `view` values return bounded context for the verified binding instead of
 workflow documents:
 
-- `context`: the current task, its revision pins, objective, earlier unresolved request
-  IDs, proposal identity and digest, agreement, requirement states and diagnostics,
-  with the definition read's identity but not the index. For a stopped chat it
-  returns supervision=stopped even without a current task or enabled project.
+- `context`: compact by default: the task's identity, revision pins, objective, status,
+  source and earlier unresolved request IDs, the proposal identity and digest, the
+  agreement state and attention codes, the current interpretation's submission pins
+  while one is in flight, the definition read's identity with an issue count, and the
+  conversation sources. Each source names a message ID, kept as provenance and source-pin
+  identity, and its `readItemId`: the exact native turn item T3 reads it by, joined from
+  the projection's `turnItems` on `messageId` and never constructed. A message T3
+  recorded no item for has no read handle: it is matched while paging that thread's
+  messages, never passed as an `itemId`; no body is copied. `section` reads the rest
+  on demand: `conversation` (the current conversation facts), `plan` (the live plan
+  bound to this task and scope, with its revision and current acceptance flag, or the
+  current proposal when no live plan matches; requirements, outline and task-local duties
+  are included) and `diagnostics` (definition issues, protocol repair,
+  operative record and definition review details). For a stopped chat it returns
+  supervision=stopped even without a current task or enabled project; a valid pending
+  Start returns supervision=pending_start.
 - `definitions`: the `project.yaml` index once, one row per entry with its id,
   summary, path, required flag, non-project provenance, name and a workflow's members
   by ID; a required entry whose file is missing keeps its row. With `definitionIds`
   it returns each requested definition once, complete, with its authored composition
   (inline local steps and branches included); a referenced step or workflow is read
   by its own ID. A summary is not the definition's policy text. Add
-  `includeSources` for raw definition files when diagnosing invalid definitions.
-- `instructions`: the full, self-contained Supervisor reference and its version, once,
-  without a second copy of the compact core that wakes carry.
-- `interpretation`: only the task interpretation instructions; the opening carries
-  source text, the minimal output contract and reader coordinates, without a catalog.
+  `includeSources` for raw definition files when diagnosing invalid definitions. By
+  default it serves the approved definitions the task was interpreted under;
+  `revision: "observed"` serves the checkout's current definitions, read fresh, for a
+  definition review.
+- `instructions`: without `section`, the root's compact core (identity, fences, permitted
+  tools with the one neutral gateway reminder, reader coordinates and section pointers)
+  and an index of sections, each with its id, version and purpose; with `section`, one
+  section: `monitoring`, `contact`, `stop_start`, `authoring`, `workflow_edit`,
+  `branches`, `contributions`, `planning`, `definitions`, and `isolation` and `team`
+  when present. Each rule exists once. One version covers the core and every section,
+  and each section also carries its own version, so the root rereads only what
+  changed. Every root message carries this version instead of the rules. A helper
+  reads its own single versioned reference here.
+- `interpretation`: stage one of every interpretation: classification, the supervision
+  decision and the submission rules. `section: "plan"` returns stage two, read only when
+  a plan is needed: the planning pause first, then definitions, required references and
+  the plan grammar. Both carry the rules' version, which the interpretation request
+  names.
 - `check`: a dry run of one compact `workflow-proposal` record, returning the outline,
   formal state, digest and `published`, or the first failing code, path and expected
   shape. It writes nothing and never returns acceptance coordinates. `published` is true
@@ -260,9 +356,10 @@ workflow documents:
   formal draft also gets `publish`, the exact block to put in the Supervisor's completed
   final answer, which is the only way to publish it.
 - `status`: each current workflow's occurrences with nodeId, kind, name, definition
-  reference, nesting, status, branch reach and visible omissions, plus pending
-  decisions, without descriptions, accepted snapshots or history. Use it to reconcile
-  statuses; the document read remains available for descriptions and history.
+  reference, nesting, status, branch reach (stated only off the unconditional path) and
+  visible omissions, plus pending decisions, without descriptions, accepted snapshots or
+  history. Use it to reconcile statuses; the document read remains available for
+  descriptions and history.
 
 `supervision_plan` is the operative main's read of its own current proposal. Its arguments
 are `callerThreadId`, `taskId` and `proposalId`, copied from the Supervisor notice. The
@@ -277,6 +374,18 @@ candidate, before or after its agreement. A notice names only an already recorde
 proposal, so `pending` means only that the caller's own call is not visible yet. Any other
 call, such as a forged, foreign, outdated or obsolete one, gets one refusal that names
 nothing; the read writes nothing and grants no Supervisor, helper or write authority.
+
+A native child of a supervised main reads its own scoped workflow with the same tool and
+the same proof of its own executed call: `taskId` is the main's current task and
+`proposalId` is the ID of the child's own workflow document, both from its notice. It
+answers only while the child is a live descendant on a complete subagent path of a main
+whose binding is ready, enabled and not stopped, under that main's current supervised
+task, after a fresh main read confirms that its requester messages remain unchanged and
+current. The child's linked document must be bound to that task's current scope under its
+native parent. The text includes each applicable member's full recorded duty, references
+and skills, relative to the named checkout root. It names each occurrence with its node ID, status, attempt and branch reach, then the returns
+pending. A child accepts nothing: its scoped plan is its Supervisor's to write, and every
+other call gets the same refusal.
 
 `supervision_stop` durably stops supervision of one chat on a genuine human request.
 Its arguments are `callerThreadId`, `targetThreadId`, `userMessageId` and
@@ -493,9 +602,20 @@ The service derives project/main scope from the current ready Supervisor binding
 It verifies an actual native `dynamic_tool` item in that Supervisor's own main run,
 then reads complete input through T3's existing `orchestration.getTurnItem` API.
 The run, thread, provider thread, strong native reference and own main-node graph
-must match, with no parent item or non-execution marker. Only exact configured
-direct aliases or the exact MCPX call wrapper/inner tool name are accepted. The
-full structured object input must equal the complete submitted arguments. The
+must match, with no parent item or non-execution marker. The supported native routes
+are a closed list, read by one resolver for evidence, re-validated receipts and read
+coverage: the provider-native direct names of the server alias `t3-supervisor-workflows`
+(`t3-supervisor-workflows.<tool>` and `mcp__t3-supervisor-workflows__<tool>`), and the one
+recognised MCP gateway call envelope (`mcpx.mcpx_call_tool` or `mcp__mcpx__mcpx_call_tool`
+with exactly `{name: "t3-supervisor-workflows__<tool>", arguments}`). T3's own thread reads
+are recognised on its `t3-code` routes the same way. Any other client alias or gateway is
+unsupported: its call is denied as unrecognised even when its arguments match, and no call
+is ever matched on argument shape alone. Portability across clients is therefore partial
+until a further route is declared and reviewed; if T3 publishes a structured MCP server
+identity on tool items, routes should bind to that instead of names. Instructions name
+operations and tools only, with one neutral reminder that a connected gateway may expose
+a tool that is not listed directly. The full structured object input must equal the
+complete submitted arguments. The
 provider driver is retained as bounded audit metadata; it does not decide whether
 the record can prove the call. Any provider can pass the same gate when T3 exposes
 the exact strong native item and its owning main-run graph. An unrecognized native

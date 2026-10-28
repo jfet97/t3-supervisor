@@ -69,6 +69,8 @@ export type InterpretationFixture = {
   // installs the root's native submission item for the arguments and calls the tool through the authenticated route
   submit(task: TaskRecord, args: Record<string, unknown>, options?: SubmissionItemOptions & {install?: boolean}): Effect.Effect<SubmitReply>;
   submitFields(task: TaskRecord, fields: Record<string, unknown>, options?: SubmissionItemOptions): Effect.Effect<SubmitReply>;
+  // the root's workflow_read through the authenticated route, as its own reader coordinates name it
+  read(args: Record<string, unknown>): Effect.Effect<Record<string, unknown>>;
   setItemStatus(itemId: string, status: "running" | "completed" | "rolled_back", nodeStatus?: "running" | "completed" | "rolled_back"): void;
   // the request run of the task ends with the given status; its final chat text is the given one
   endRun(task: TaskRecord, status: "completed" | "failed" | "interrupted" | "cancelled" | "rolled_back", finalText?: string): void;
@@ -193,6 +195,8 @@ export const startInterpretationFixture = (options: {mainThreadId?: string; noPr
       runOnce: () => current.run.supervisor.cycle.pipe(Effect.orDie),
       submit,
       submitFields: (task, fields, submitOptions) => submit(task, submissionArguments(task, fields), submitOptions),
+      read: (args) => Effect.map(Effect.suspend(() => mcpCall(current.endpoint, "workflow_read", {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, ...args})),
+        (reply) => reply.value as Record<string, unknown>),
       setItemStatus: (itemId, status, nodeStatus) => setSubmissionStatus(root(), itemId, status, nodeStatus),
       endRun: (task, status, finalText = "I submitted the interpretation through the tool.") => {
         const projection = root();

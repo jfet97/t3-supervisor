@@ -17,6 +17,7 @@ export const DefinitionNode = Schema.suspend((): Schema.Codec<DefinitionNode> =>
   Schema.Struct({sequence: Schema.Array(DefinitionNode)}),
   Schema.Struct({parallel: Schema.Array(DefinitionNode)}),
   Schema.Struct({branch: Schema.Struct({if: Schema.String, then: Schema.Array(DefinitionNode), else: Schema.optionalKey(Schema.Array(DefinitionNode))})}),
+  Schema.Struct({back_to: Schema.String}),
 ]));
 /** A coarse semantic branch: a condition, the then path and an optional else path; the next member of the enclosing group follows the whole branch. */
 export type DefinitionBranch = {readonly if: string; readonly then: readonly DefinitionNode[]; readonly else?: readonly DefinitionNode[]};
@@ -25,7 +26,9 @@ export type DefinitionNode =
   | {readonly workflow: string}
   | {readonly sequence: readonly DefinitionNode[]}
   | {readonly parallel: readonly DefinitionNode[]}
-  | {readonly branch: DefinitionBranch};
+  | {readonly branch: DefinitionBranch}
+  /** A return to the earlier step or workflow member with this ID in the same sequential lane of the composed plan; it ends its path. */
+  | {readonly back_to: string};
 
 export const DefinitionReference = Schema.Union([
   Schema.Struct({step: Schema.String}),

@@ -155,9 +155,9 @@ sequence:
 ```
 
 Use a branch only when the alternatives are substantially different pieces of work.
-Keep fine-grained conditions, iteration and completion rules in descriptions. There
-is no `elif`, jump, loop or `goto`; nest a branch inside a path when a second choice
-depends on the first. Branches belong to workflow composition only: a step file stays
+Keep fine-grained conditions and completion rules in descriptions. There is no `elif`,
+jump or `goto`; nest a branch inside a path when a second choice depends on the first,
+and repeat earlier work with a [return](#returns). Branches belong to workflow composition only: a step file stays
 a description with no structural fields. Negotiated task plans may add task-local
 branches in the same shape. Validation, reference checks, cycle detection, local ID
 uniqueness and the expansion bounds cover both paths, whichever is later selected.
@@ -177,6 +177,51 @@ applicable path is pending. A changed decision keeps the statuses and evidence
 already recorded on the earlier path as history, and a completion recorded before
 the change needs reassessment. Accepted and earlier plans show their agreed
 alternatives without a later selection.
+
+## Returns
+
+A `back_to:` member repeats earlier work. It names the step, local step or workflow
+ID of an earlier member in the same sequential lane: earlier in its own sequence or
+branch path, then in each enclosing sequence, branch path or workflow, up to the first
+enclosing parallel group. It ends its sequence or branch path, it is never a direct
+member of a parallel group, and the member that holds it must still be able to finish
+without returning, so a return belongs in a branch path:
+
+```yaml
+name: Reviewed change
+description: Implement, verify and review until no material findings remain.
+sequence:
+  - step: implement
+  - step: verify
+  - workflow: review
+  - branch:
+      if: The review left material findings.
+      then:
+        - back_to: implement
+  - step: deliver
+```
+
+When work reaches the return, on the selected path with every earlier member settled,
+the workflow asks for a new attempt of its region: every occurrence from the target
+through the member that holds the return, here `implement`, `verify`, `review`
+and the branch. Nothing after it, here `deliver`, starts while it waits, and the
+recorded statuses in the region stay as the attempt left them. The Supervisor applies
+the return at a safe point, after the closed attempt's work has stopped. The closed
+attempt stays as history: its statuses, contributors, branch decisions and the child
+runs it retired. Every occurrence in the region is planned again with the same
+contributor conversations linked, and the branch is decided again with the next
+selection revision. Output of a retired run, or a decision written before the return,
+stays with the closed attempt. A return that is no longer reached, because the
+operative selected the other path, is dismissed and kept as history.
+
+A reusable workflow may also return to an earlier member of the workflow that includes
+it, so a return's target resolves in the composed plan. A target that is missing,
+ambiguous, later in the plan or beyond a parallel group is rejected, and so is a
+cycle with no way out: an enclosing branch, in the same workflow or in one that
+includes it, must offer another way to continue. Use a return for iteration that
+changes the outcome: findings
+that do not affect correctness, safety or the agreed result do not justify another
+attempt.
 
 ## References and skills
 
@@ -333,29 +378,45 @@ A step whose description makes it conditional, such as prevention after a defect
 decided when the work reaches it. A manual workflow choice is not a waiver.
 Unclear applicability and broken definitions remain explicit outstanding issues.
 
-## Giving an entire workflow to reviewers
+## One reviewer pass, composed by its caller
 
-The delegation requirement can be entirely in the workflow description:
+A reviewer workflow describes one assigned reviewer's pass. Its caller owns reviewer
+count, assignments and any repeated work:
 
 ```yaml
 name: Reviewer
 description: |
-  The main agent must assign this entire workflow to one or more independent
-  reviewer agents. Assigned reviewers execute the sequence below and return
-  findings. The main agent addresses findings and requests further review after
-  relevant fixes until important findings are resolved.
+  One assigned reviewer performs one independent pass and reports material
+  findings. On a repeated pass, retain earlier findings and avoid reopening
+  settled issues without new evidence.
 sequence:
   - step: inspect-change
   - step: e2e-testing
   - step: report-findings
 ```
 
-If reviewer is required, the negotiated main plan includes `workflow: reviewer`.
-Its description supplies the obligation to delegate the whole workflow and repeat
-review, rather than adding a special wrapper step or another execution-policy field.
-The role-specific wording distinguishes main coordination from assigned reviewers'
-work. Semantic assessment needs actual independent reviews and follow-up, not merely
-a reference in a plan. Inclusion does not prove delegation or successful execution.
+For two independent reviewers, the caller uses two occurrences under `parallel` and
+assigns each to a different reviewer under the project's model policy. Wait for both
+reports before edits and findings accounting. Each reviewer follows its own sequence;
+one finishing does not complete the other's work. `parallel` does not launch agents.
+
+```yaml
+name: Paired review
+description: |
+  Assign each occurrence to an independent reviewer. Collect both reports before
+  editing or accounting for findings; preserve the project's model policy.
+parallel:
+  - workflow: reviewer
+  - workflow: reviewer
+```
+
+A completed pass can report important problems. The caller's acceptance rule remains
+open until the required findings are resolved or the requester explicitly decides
+them. If another pass is required, the caller uses a conditional `back_to` after the
+reviews join, as in [Returns](#returns), and reuses the same ordinary reviewer
+conversations where supported. Without a return, the plan continues to its following
+members; a reviewer description does not secretly restart earlier work. A reference
+or agreement does not prove delegation, execution or acceptance.
 
 ## Cycles and invalid definitions
 

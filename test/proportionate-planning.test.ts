@@ -58,7 +58,8 @@ const operativeSends = (fixture: WorkflowFixture) => fixture.dispatches().filter
 
 it("the complete interpretation instructions decide whether a plan helps first and keep unused catalog entries out", () => {
   const prepared = prepareWorkflowRequest("thread-a", "message-a", "Pull the latest changes, then refresh the local index.", catalog());
-  for (const text of [prepared.requestText, readerWorkflowInstruction]) {
+  assert.doesNotMatch(prepared.requestText, /Pull the latest changes|not_needed|requirements/u);
+  for (const text of [readerWorkflowInstruction]) {
     assert.equal(text.split(proportionatePlanRule).length - 1, 1, "the planning rule is stated once");
     assert.match(text, /Decide first, from the request itself and before reading or assessing any definitions, whether it warrants supervision/u);
     assert.match(text, /It is "not_needed" when a plan would add nothing: a communication, lookup or status request, or quick routine work the operative completes and checks itself/u);
@@ -106,7 +107,7 @@ it.effect("a proportionate plan reuses individual steps and adds local ones whil
   assert.match(introduction, /Update documentation/u);
   for (const name of catalogNames) assert.equal(introduction.includes(name), false, `${name} is absent, not listed as not applicable`);
   assert.doesNotMatch(introduction, /not applicable: /u);
-  assert.match(introduction, /The plan should hold only what this task needs; .+ If a commitment is unnecessary for this task, ask for a smaller plan instead of accepting\./u);
+  assert.match(introduction, /The plan holds only what this task needs: revise it as the work evolves, keeping applicable required and fixed commitments, and ask for a smaller plan rather than accepting an unnecessary commitment\./u);
 }));
 
 it.effect("an applicable required step left out of the plan stays unresolved instead of becoming a formal proposal", () => Effect.gen(function* () {
