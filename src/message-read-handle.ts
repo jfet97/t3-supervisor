@@ -12,4 +12,5 @@ export const messageReadItemId = (projection: Projection | null | undefined, thr
 
 /** The one rule every message pointer is read by: its exact read handle, or paging the thread when the message has none yet. */
 export const messageReadRule = "Read a named message with t3_thread_read itemId set to its exact readItemId; a messageId is provenance, never an itemId. " +
-  "Without a readItemId, page that thread's view messages with a small limit and afterPosition=nextPosition and match the messageId.";
+  "Without a readItemId, page that thread's view messages with a small limit and afterPosition=nextPosition and match the messageId. " +
+  "Use runLimit: 1 unless more run history is needed.";
