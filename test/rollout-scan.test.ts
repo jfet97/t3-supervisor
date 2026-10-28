@@ -31,7 +31,8 @@ const controllerTables = `
     request_hash TEXT NOT NULL,project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL,native_evidence TEXT NOT NULL,result TEXT NOT NULL,
     successful INTEGER NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(supervisor_thread_id,item_id));`;
 
-// one row of each failing kind, written with the raw driver after a run created the tables
+// one row of each failing kind, written with the raw driver after a run created the tables; the retired reminder rules' rows (rules,
+// budget, episodes) are never read any more, so the scan reports none of them
 const failingRows = `
   UPDATE meta SET value='{"${marker}":1}' WHERE key='settings';
   UPDATE meta SET value='main-v0' WHERE key='supervisor_scope_version';
@@ -80,8 +81,6 @@ const failingRows = `
 
 const expected = [
   "guidance.sqlite3 | activity | activity | undecodable | call | activity-bad",
-  "guidance.sqlite3 | budget | budget | undecodable | call | 2026-10-23",
-  "guidance.sqlite3 | episodes | episode | undecodable | call | thread-e rule-e",
   "guidance.sqlite3 | meta | activation baseline | undecodable | cycle | supervisor_activation_baseline",
   "guidance.sqlite3 | meta | auto control | undecodable | cycle | supervisor_control_auto:\"project-bad\"",
   "guidance.sqlite3 | meta | control | undecodable | cycle | supervisor_control:\"project-bad\"",
@@ -96,7 +95,6 @@ const expected = [
   "guidance.sqlite3 | meta | unbound stop | undecodable | call | supervisor_unbound_stop:main-bad",
   "guidance.sqlite3 | notices | committed notice | undecodable | open | notice-open",
   "guidance.sqlite3 | notices | notice | undecodable | call | notice-call",
-  "guidance.sqlite3 | rules | rule | undecodable | call | rule-bad",
   "guidance.sqlite3 | supervisor_chat_enables | chat enable | undecodable | call | thread-bad",
   "guidance.sqlite3 | supervisor_conversation_requests | request | undecodable | cycle | request-bad",
   "guidance.sqlite3 | supervisor_definition_user_saves | definition save | undecodable | call | project-bad /root",
@@ -196,7 +194,7 @@ it.live("the rollout scan reads a live writer's committed rows through its write
   const writer = new DatabaseSync(join(directory, "guidance.sqlite3"));
   yield* Effect.addFinalizer(() => Effect.sync(() => writer.close()));
   writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;");
-  writer.exec(`INSERT INTO rules VALUES('rule-live','{"${marker}":1}')`);
+  writer.exec(`INSERT INTO activity VALUES('activity-live','{"${marker}":1}',1)`);
   const scan = yield* rolloutScan(directory);
-  assert.deepEqual(flattened(scan), ["guidance.sqlite3 | rules | rule | undecodable | call | rule-live"]);
+  assert.deepEqual(flattened(scan), ["guidance.sqlite3 | activity | activity | undecodable | call | activity-live"]);
 }), {timeout: 30_000});

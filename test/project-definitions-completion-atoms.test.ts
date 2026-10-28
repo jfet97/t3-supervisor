@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { beforeAll, it } from "@effect/vitest";
 import { Effect, Fiber, Option } from "effect";
 import { AsyncResult, type Atom, AtomRegistry } from "effect/reactivity";
+import type { GuidanceSnapshot } from "../src/guidance-contract.js";
 import type { ProjectConfigurationInfo, ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { scopedRegistry } from "./support/g7-page.js";
 import { json, makeBrowser, until } from "./support/g7-browser.js";
@@ -30,11 +31,9 @@ beforeAll(() => Effect.gen(function* () {
 
 type Environment = "environment-a" | "environment-b";
 const savedText = "Saved project configuration to .t3-supervisor/project.yaml.";
-const snapshot = (environmentId: string) => ({
-  environmentId, serverVersion: "build", connected: true, lastCycleAt: 1, sendingReady: true, sendingReason: "",
-  settings: { generation: 1, guidancePaused: false, monitoringPaused: false, allowFollowupRace: false, verifiedServerVersion: null, model: "model",
-    reasoning: "low", dailyTokenBudget: 1, evidenceHours: 1, maxAnchorAgeSeconds: 1 },
-  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], rules: [], mutes: [], activity: [], coverage: "", tokensUsed: 0,
+const snapshot = (environmentId: string): GuidanceSnapshot => ({
+  environmentId, serverVersion: "build", connected: true, lastCycleAt: 1,
+  threadPolicy: { generation: 1, excludedThreadIds: [] }, threads: [], projects: [], activity: [], coverage: "",
 });
 const configuration = (summary: string): ProjectConfigurationInfo => ({workflows: [], steps: [{path: "steps/fixture-tests.md", summary, required: false}]});
 const definitionsOf = (revision: string, summary: string): ProjectDefinitionSnapshot => ({

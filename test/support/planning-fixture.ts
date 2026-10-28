@@ -1,6 +1,7 @@
 import { Context, Effect, Layer } from "effect";
 import { fingerprint } from "../../src/guidance-store.js";
 import { defaultSupervisorModel, type TaskRecord } from "../../src/project-supervisor-store.js";
+import { SupervisionGate } from "../../src/supervision-gate.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorPlanningController } from "../../src/supervisor-planning-controller.js";
 import type { NativeRpcShape } from "../../src/supervisor-native.js";
@@ -17,7 +18,10 @@ import { teamControllers } from "./g11-team.js";
  * The planning controller over the g11 production layers and the real conversation service (its read-only context views): a bound
  * root of main "main", an engaged task from a genuine human source and fake native reads whose projections a suite edits in place.
  */
-export const planningFixture = (rpc?: NativeRpcShape) => Effect.gen(function* () {
+export const planningFixture = (rpc?: NativeRpcShape, options: {
+  /** Each native projection read returns its own point-in-time copy and is reported, so a suite can change native state between reads. */
+  readonly onRead?: (threadId: string) => void;
+} = {}) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("planning-controller-");
   const stores = yield* supervisionStores(directory);
   const policy = Context.get(yield* Layer.build(policyLayer({dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused",
@@ -46,7 +50,12 @@ export const planningFixture = (rpc?: NativeRpcShape) => Effect.gen(function* ()
   // a definition-checked workflow_write reads the main task's own definition snapshot
   const definitions = definitionsService({load: () => Effect.flatMap(stores.supervisors.task("main"), current => current?.definitionSnapshot
     ? Effect.succeed(current.definitionSnapshot) : Effect.die(new Error("the main task has no definition snapshot")))});
-  const built = yield* teamControllers(stores, policy, {listThreads: () => Effect.succeed(threads), projection: id => Effect.succeed(projections.get(id)!),
+  const built = yield* teamControllers(stores, policy, {listThreads: () => Effect.succeed(threads), projection: id => Effect.sync(() => {
+    if (!options.onRead) return projections.get(id)!;
+    const read = structuredClone(projections.get(id)!);
+    options.onRead(id);
+    return read;
+  }),
     turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions});
   const views = Context.add(built.context, SupervisorConversation, Context.get(yield* Layer.build(SupervisorConversation.layer.pipe(
     Layer.provide(Layer.succeedContext(built.context)))), SupervisorConversation));
@@ -73,5 +82,6 @@ export const planningFixture = (rpc?: NativeRpcShape) => Effect.gen(function* ()
   const args = {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, taskId: task.id, taskRevision: task.sourceHash,
     action: "pause", operationId: "pause-a", targetThreadIds: ["main"], reason: "Prepare the requested plan"};
   return {stores, policy, binding, task, threads, projections, details, controller, args, proof, callAs, workflows: built.workflows,
+    gate: Context.get(built.context, SupervisionGate),
     states: Context.get(built.context, WorkflowStateStore), conversation: Context.get(views, SupervisorConversation)};
 });

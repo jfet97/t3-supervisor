@@ -268,17 +268,19 @@ const suiteScopeLayer = (eligible: (thread: ThreadInfo) => boolean) => Layer.eff
 // the workflow state store whose owner check admits every scope (as the baseline suites constructed it), the suite's scope
 // predicates with their admission gate, and the conversation over the fake's T3 client, credentials and definitions, with no
 // helper team
-const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: ThreadInfo) => boolean) => SupervisorConversation.layer.pipe(
-  Layer.provideMerge(SupervisionGate.layer),
-  Layer.provideMerge(suiteScopeLayer(eligible)),
-  Layer.provideMerge(WorkflowStateStore.layerWith(() => Effect.succeed(true))),
-  Layer.provideMerge(SupervisionStoresLive),
-  Layer.provideMerge(ThreadPolicyStore.layer),
-  Layer.provideMerge(GuidanceStore.layer),
-  Layer.provideMerge(Layer.mergeAll(supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()), Layer.succeed(SupervisorConfig, runSettings(directory)),
-    Layer.succeed(T3Client, fake.t3), Layer.succeed(NativeOperateRpc, fake.operate), Layer.succeed(NativeRpc, fake.read),
-    Layer.succeed(ProjectDefinitions, fake.definitions))),
-);
+const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: ThreadInfo) => boolean, config: Partial<SupervisorSettings> = {}) =>
+  SupervisorConversation.layer.pipe(
+    Layer.provideMerge(SupervisionGate.layer),
+    Layer.provideMerge(suiteScopeLayer(eligible)),
+    Layer.provideMerge(WorkflowStateStore.layerWith(() => Effect.succeed(true))),
+    Layer.provideMerge(SupervisionStoresLive),
+    Layer.provideMerge(ThreadPolicyStore.layer),
+    Layer.provideMerge(GuidanceStore.layer),
+    Layer.provideMerge(Layer.mergeAll(supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()),
+      Layer.succeed(SupervisorConfig, {...runSettings(directory), ...config}),
+      Layer.succeed(T3Client, fake.t3), Layer.succeed(NativeOperateRpc, fake.operate), Layer.succeed(NativeRpc, fake.read),
+      Layer.succeed(ProjectDefinitions, fake.definitions))),
+  );
 
 type ConversationServices = Layer.Success<ReturnType<typeof conversationLayer>> | GuidanceDb | PolicyDb;
 
@@ -298,14 +300,15 @@ export interface ConversationProcess {
   readonly crash: Effect.Effect<void>;
 }
 
-/** Opens one process on the files of `directory` (its thread policy in `policyDirectory`), closed with the scope. */
-export const openConversationProcess = (input: {directory: string; policyDirectory: string; fake: FakeT3; eligible: (thread: ThreadInfo) => boolean}):
+/** Opens one process on the files of `directory` (its thread policy in `policyDirectory`) and its settings over `config`, closed with the scope. */
+export const openConversationProcess = (input: {directory: string; policyDirectory: string; fake: FakeT3; eligible: (thread: ThreadInfo) => boolean;
+  config?: Partial<SupervisorSettings>}):
   Effect.Effect<ConversationProcess, never, Scope.Scope> => Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const clientScope = yield* Scope.fork(scope, "sequential");
     const clients = yield* Layer.buildWithScope(clientsLayer(input.directory, input.policyDirectory), clientScope);
     const context: Context.Context<ConversationServices> = yield* Layer.buildWithScope(
-      conversationLayer(input.directory, input.fake, input.eligible).pipe(Layer.provideMerge(Layer.succeedContext(clients))),
+      conversationLayer(input.directory, input.fake, input.eligible, input.config).pipe(Layer.provideMerge(Layer.succeedContext(clients))),
       yield* Scope.fork(scope, "sequential")).pipe(Effect.orDie);
     return {
       context, crash: Scope.close(clientScope, Exit.void),

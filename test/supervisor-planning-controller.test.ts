@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Clock, Deferred, Effect, Fiber } from "effect";
+import { Clock, Deferred, type Duration, Effect, Exit, Fiber, FiberMap, Option, Queue, Schedule } from "effect";
+import { vi } from "vitest";
+import { within as bounded } from "./support/g1b-conversation.js";
 import { TestClock } from "effect/testing";
 import { fingerprint } from "../src/guidance-store.js";
 import { createPlanningAttempt, planningDraftInstruction, planningHoldText, planningReleaseText, resolvePlanningAttempt, startPlanningAttempt } from "../src/supervisor-planning.js";
@@ -12,6 +14,12 @@ import {planBranches, planEntities, withOccurrenceStatuses} from "../src/workflo
 import type {WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 import type { ThreadInfo } from "../src/types.js";
 import { planningFixture as fixture } from "./support/planning-fixture.js";
+
+// a mutable namespace copy permits a scoped observer of the real watchdog fibers; every Effect implementation stays unchanged.
+vi.mock("effect", async importOriginal => {
+  const actual = await importOriginal<typeof import("effect")>();
+  return {...actual, FiberMap: {...actual.FiberMap}};
+});
 
 type Answer = {status: string; reason?: string; attempt: {attemptId: string; deadline: string; draftInstruction?: string}};
 
@@ -297,6 +305,211 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
   }
   assert.deepEqual(yield* f.controller.call(input), result, "identical retry returns the original receipt");
   assert.equal((yield* f.states.get("project", "main"))!.revision, returned.revision);
+}));
+
+// a pending return over [work, review by an AppRun reviewer child of main, a branch back_to work, deliver], its branch chosen, with main
+// paused and ACKed in its still-waiting source run; with `reviewerTarget` the reviewer is also a pause target. Every native read is a
+// point-in-time copy reported to `onRead`
+const pendingReturn = (onRead: (threadId: string) => void, reviewerTarget = false) => Effect.gen(function* () {
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: () =>
+    Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: 1})})};
+  const f = yield* fixture(rpc, {onRead});
+  const now = yield* Clock.currentTimeMillis;
+  const context = proposalContextFromDefinitions({...goldenSnapshot, projectId: "project", threadId: "main", steps: [], workflows: [], config: {steps: [], workflows: []}, projectConfig: {steps: [], workflows: []}});
+  const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The request needs ${id}.`});
+  const plan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [local("work"), local("review"),
+    {kind: "branch", condition: "Corrections are required.", reason: "Review determines the next work.", then: {kind: "sequence", nodes: [
+      {kind: "back_to", target: "work", reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
+  assert.ok(plan?.plan);
+  const proposal: WorkflowProposalInfo = {status: "proposed", message: "Complete the requested work.", workspaceRoot: "/work/project", revision: "revision-ready", globalRevision: null, ...plan};
+  const agreement = {status: "agreed" as const, message: "Accepted.", proposalId: "proposal-a", agreedAt: now,
+    evidence: {kind: "supervisor_message" as const, messageId: "proposal-message"}, agentMessageId: "acceptance-message", workflow: proposal};
+  yield* f.stores.supervisors.saveTask({...f.task, agreement, workflow: proposal});
+  const owner = {projectId: "project", mainThreadId: "main", supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  assert.equal((yield* f.states.importAcceptedAgreement(owner, {taskId: f.task.id, sourceThreadId: "main", sourceRunId: "source-run",
+    sourceMessageId: "request-a", sourceHash: f.task.sourceHash, objective: f.task.objective!, agreement}, now)).status, "applied");
+  let document = (yield* f.states.get("project", "main"))!;
+  const changed = planEntities(document.plan).filter(node => node.kind === "step" && node.localId !== "deliver");
+  const progress = withOccurrenceStatuses(document.plan!, changed.map(node => ({nodeId: node.nodeId, status: "completed" as const})));
+  assert.ok("plan" in progress);
+  progress.plan.nodes = progress.plan.nodes.map(node => node.kind === "step" && node.localId === "review" ? {...node, contributorThreadIds: ["reviewer"]} : node);
+  const advance = {pinnedContext: context, originalProposal: proposal, expectedTaskId: f.task.id, expectedProposalId: "proposal-a", expectedSourceHash: f.task.sourceHash,
+    acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null};
+  assert.equal((yield* f.states.apply(owner, {operationId: "initial-progress", workflowId: document.workflowId, expectedRevision: document.revision,
+    status: "underway", objective: document.objective, sourceBinding: document.sourceBinding!, requirements: [], issues: [], plan: progress.plan, note: "The first pass returned findings.",
+    evidence: [{kind: "status_changed", targetNodeId: null, note: "The task is underway."}, ...changed.map(node => ({kind: "status_changed" as const, targetNodeId: node.nodeId, note: "This pass completed."}))]},
+  advance, now + 1)).status, "applied");
+  document = (yield* f.states.get("project", "main"))!;
+  assert.equal((yield* f.states.recordBranchSelection(owner, {nodeId: planBranches(document.plan)[0]!.nodeId, revision: 1, path: "then",
+    reason: "The report requires corrections.", sourceThreadId: "main", sourceRunId: "source-run", sourceMessageId: "decision-message", sourceCreatedAt: now + 2}, now + 2)).status, "applied");
+  document = (yield* f.states.get("project", "main"))!;
+  const reviewer: ThreadInfo = {id: "reviewer", title: "Reviewer", projectId: "project", creationSource: "mcp",
+    lineage: {parentThreadId: "main", relationshipToParent: "subagent"}, runtimeMode: "full-access", interactionMode: "default"};
+  f.threads.push(reviewer);
+  const reviewRun = {id: "old-review-run", threadId: "reviewer", ordinal: 1, status: "completed", requestedAt: new Date(now).toISOString(), startedAt: new Date(now).toISOString(),
+    completedAt: new Date(now).toISOString(), rootNodeId: null};
+  f.projections.set(reviewer.id, {thread: reviewer, runs: [reviewRun], nodes: [], providerTurns: [], messages: [], turnItems: [], runtimeRequests: []});
+  const main = f.projections.get("main")!;
+  main.subagents = [{id: "review-task", childThreadId: "reviewer", origin: "app_owned", status: "completed", runId: "source-run"}];
+  if (reviewerTarget) f.args.targetThreadIds.push("reviewer");
+  f.proof(f.args);
+  const paused = (yield* f.controller.call(f.args)) as Answer;
+  const input = {...f.args, action: "apply_return", operationId: "return-a", attemptId: paused.attempt.attemptId, workflowId: document.workflowId,
+    expectedRevision: document.revision, returnId: document.returns[0]!.returnId, reason: "Apply the chosen return."};
+  delete (input as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(input);
+  yield* f.controller.reconcile(f.binding);
+  main.messages.push({id: "return-ack", threadId: "main", runId: "source-run", nodeId: "return-ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString()});
+  (main.nodes as Record<string, unknown>[]).push({id: "return-ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  yield* f.controller.reconcile(f.binding);
+  if (reviewerTarget) yield* f.controller.reconcile(f.binding);
+  main.runs[0]!.status = "waiting";
+  main.thread.activeRunId = "source-run";
+  return {f, input, main, now, owner, advance, document};
+});
+
+// audit F3: apply_return decides on point-in-time native reads taken before its admitted commit; the admission section reads nothing
+// native (supervision-gate) and nothing is atomic with T3. The owner used to be read first, so work it started while its contributors
+// were still being read was invisible to the decision
+it.effect("apply_return reads its owner last, so work the owner starts while contributors are read refuses the return", () => Effect.gen(function* () {
+  const reads: string[] = [];
+  let during = (_threadId: string) => {};
+  const r = yield* pendingReturn(threadId => {reads.push(threadId);during(threadId);});
+  // the control: with no new owner work the same call applies
+  reads.length = 0;
+  during = threadId => {
+    if (threadId === "reviewer" && !r.main.runs.some(run => run.id === "post-read-run"))
+      r.main.runs.push({...r.main.runs[0]!, id: "post-read-run", ordinal: 2, status: "running", startedAt: null, completedAt: null, rootNodeId: null});
+  };
+  const refused = (yield* r.f.controller.call(r.input)) as {status: string; reason?: string};
+  assert.equal(refused.reason, "return_actor_changed_run", JSON.stringify(refused));
+  assert.ok(reads.lastIndexOf("main") > reads.lastIndexOf("reviewer"), `the owner is read after its contributors: ${reads.join(", ")}`);
+  assert.equal((yield* r.f.states.get("project", "main"))!.returns[0]!.state, "pending");
+  during = () => {};
+  r.main.runs.pop();
+  assert.equal(((yield* r.f.controller.call(r.input)) as {status: string}).status, "applied", "without that work the same call applies");
+}));
+
+// audit F3 (integration follow-up): the decision also must not wait behind another admitted section with the snapshot it read; work
+// the owner starts during that wait would be committed over. Only the part after the last read, outside any wait, is the T3 boundary
+it.effect("apply_return never commits a snapshot that waited behind a busy admission gate", () => Effect.gen(function* () {
+  const reads: string[] = [];
+  const ownerRead = yield* Deferred.make<void>();
+  const admissionBusy = yield* Deferred.make<void>();
+  let watching = false;
+  const r = yield* pendingReturn(threadId => {
+    if (!watching) return;
+    reads.push(threadId);
+    if (threadId === "main" && reads.includes("reviewer")) Deferred.doneUnsafe(ownerRead, Effect.void);
+  });
+  const originalAdmission = r.f.gate.admitIfAvailable;
+  yield* Effect.acquireRelease(Effect.sync(() => vi.spyOn(r.f.gate, "admitIfAvailable").mockImplementation(body =>
+    originalAdmission(body).pipe(Effect.tap(result => Option.isNone(result) ? Deferred.succeed(admissionBusy, undefined) : Effect.void)))),
+  spy => Effect.sync(() => spy.mockRestore()));
+  const held = yield* Deferred.make<void>();
+  const release = yield* Deferred.make<void>();
+  const holder = yield* Effect.forkChild(r.f.gate.admit(() => Effect.andThen(Deferred.succeed(held, undefined), Deferred.await(release))));
+  yield* Deferred.await(held);
+  watching = true;
+  const applying = yield* Effect.forkChild(r.f.controller.call(r.input));
+  yield* Effect.gen(function* () {
+    yield* bounded(Deferred.await(ownerRead), 2_000, "the return reads its owner after its contributors");
+    yield* bounded(Deferred.await(admissionBusy), 2_000, "the return refuses admission behind the held gate");
+    // the owner starts work its ACK does not cover after this snapshot has actually refused admission
+    r.main.runs.push({...r.main.runs[0]!, id: "admission-wait-run", ordinal: 2, status: "running", startedAt: null, completedAt: null, rootNodeId: null});
+  }).pipe(Effect.ensuring(Deferred.succeed(release, undefined)));
+  yield* Fiber.join(holder);
+  const answer = (yield* Fiber.join(applying)) as {status: string; reason?: string};
+  assert.notEqual(answer.status, "applied", JSON.stringify(answer));
+  assert.equal(answer.reason, "return_actor_changed_run", JSON.stringify(answer));
+  assert.equal((yield* r.f.states.get("project", "main"))!.returns[0]!.state, "pending");
+  watching = false;
+  r.main.runs.pop();
+  assert.equal(((yield* r.f.controller.call(r.input)) as {status: string}).status, "applied", "without that work the same operation applies");
+}));
+
+// audit F4: a quiescent target stays held while it is quiet now, like an ACKed one whose later completed run does not block (an ACK
+// covers its execution; only queued or active work blocks). What the return must guarantee is that a contributor's work during the
+// pause, including a run it completed after its quiescence evidence, never counts for the new attempt
+it.effect("a quiescent contributor that ran again after its quiescence evidence has every known run retired by the return", () => Effect.gen(function* () {
+  const r = yield* pendingReturn(() => {}, true);
+  const target = (yield* r.f.stores.requests.planningAttempts("project"))[0]!.targets.find(row => row.threadId === "reviewer")!;
+  assert.deepEqual({state: target.state, runId: target.quiescence?.runId}, {state: "quiescent", runId: "old-review-run"});
+  const reviewer = r.f.projections.get("reviewer")!;
+  reviewer.runs.push({...reviewer.runs[0]!, id: "after-quiescence-run", ordinal: 2});
+  const applied = (yield* r.f.controller.call(r.input)) as {status: string};
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  const returned = (yield* r.f.states.get("project", "main"))!;
+  assert.deepEqual(returned.returns[0]!.retiredRuns, [{kind: "run", threadId: "reviewer", runId: "old-review-run"}, {kind: "run", threadId: "reviewer", runId: "after-quiescence-run"}]);
+  const review = planEntities(returned.plan).find(node => node.kind === "step" && node.localId === "review")!;
+  const next = withOccurrenceStatuses(returned.plan!, [{nodeId: review.nodeId, status: "completed"}]);
+  assert.ok("plan" in next);
+  const stale = yield* r.f.states.apply(r.owner, {operationId: "late-review-report", workflowId: returned.workflowId, expectedRevision: returned.revision,
+    status: "underway", objective: returned.objective, sourceBinding: returned.sourceBinding!, requirements: [], issues: [], plan: next.plan, note: "The run after quiescence claims the repeated review.",
+    evidence: [{kind: "status_changed", targetNodeId: review.nodeId, note: "A review result from the paused attempt.", sourceThreadId: "reviewer", sourceRunId: "after-quiescence-run"}]},
+  r.advance, r.now + 3);
+  assert.ok(stale.status === "invalid" && stale.reason === "retired_run_evidence", JSON.stringify(stale));
+}));
+
+// audit F5: the one-second watchdog also re-read every target of an open attempt on every pass, for the attempt's whole life (up to an
+// hour), each read a new native connection, though an acknowledged or quiescent actor with a delivered hold has nothing left to observe
+it.effect("an open planning attempt reads only actors it still waits for, while hold, ACK and deadline handling keep their one-second pace", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+    sent.push({...payload});
+    return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+  }};
+  // observe the actual fibers the production watchdog schedules, then join each pass before advancing the next second. SQL runs
+  // on workers: scheduler yields cannot establish that its I/O or the pass has completed. The wrapper retains FiberMap.run unchanged.
+  const passes = yield* Queue.unbounded<Effect.Effect<void, unknown>>();
+  const run = FiberMap.run;
+  let ownerThreadId = "";
+  const observeRun = <K, A, E, R, XE extends E, XA extends A>(map: FiberMap.FiberMap<K, A, E>, key: K,
+    effect: Effect.Effect<XA, XE, R>, options?: {onlyIfMissing?: boolean; propagateInterruption?: boolean; startImmediately?: boolean}) =>
+    run(map, key, effect.pipe(Effect.onExit(exit => key === ownerThreadId
+      ? Queue.offer(passes, Exit.isFailure(exit) ? Effect.failCause(exit.cause) : Effect.void) : Effect.void)), options);
+  // this controller calls the uncurried overload only; the observer delegates that exact call to the original implementation.
+  yield* Effect.acquireRelease(Effect.sync(() => vi.spyOn(FiberMap, "run").mockImplementation(observeRun as typeof FiberMap.run)),
+    spy => Effect.sync(() => spy.mockRestore()));
+  const reads: string[] = [];
+  const f = yield* fixture(rpc, {onRead: threadId => reads.push(threadId)});
+  ownerThreadId = f.binding.threadId;
+  const tick = (duration: Duration.Input = "1 second") => Effect.gen(function* () {
+    yield* TestClock.adjust(duration);
+    yield* bounded(Effect.flatten(Queue.take(passes)), 2_000, "the watchdog's real reconciliation completes");
+  });
+  const within = <E>(seconds: number, label: string, done: Effect.Effect<boolean, E>) => Effect.gen(function* () {
+    if (yield* done) return;
+    for (let second = 1; second <= seconds; second++) {
+      yield* tick();
+      if (yield* done) return;
+    }
+    assert.fail(`${label} within ${seconds} watchdog seconds`);
+  });
+  const target = Effect.map(f.stores.requests.planningAttempts("project"), rows => rows[0]!);
+  f.proof(f.args);
+  const paused = (yield* f.controller.call(f.args)) as Answer;
+  yield* within(2, "the hold goes out", Effect.sync(() => sent.some(item => String(item.messageId).includes(":hold:"))));
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  yield* within(2, "the ACK is recorded", Effect.map(target, row => row.targets[0]!.state === "acknowledged"));
+  // a minute in which the only actor has acknowledged its delivered hold: nothing is left to observe
+  reads.length = 0;
+  for (let second = 0; second < 60; second++) yield* tick();
+  assert.equal(reads.length, 0, `native projection reads in a settled minute: ${reads.length}`);
+  // the deadline still expires the attempt and releases its actor
+  const open = yield* target;
+  assert.equal(open.state, "open");
+  yield* tick(open.deadline - (yield* Clock.currentTimeMillis));
+  yield* TestClock.adjust("2 seconds");
+  // expiry forks release and observation independently. Wait for their stored/native result at this clock time, rather than
+  // demanding another observation pass after the release has already closed the attempt.
+  yield* bounded(TestClock.withLive(Effect.repeat(Effect.map(target, row => row.state !== "open" &&
+    sent.filter(item => String(item.messageId).includes(":release:")).length === 1),
+  {until: done => done, schedule: Schedule.spaced("10 millis")})), 2_000, "the deadline releases the actor within two watchdog seconds");
 }));
 
 it.effect("one new drafting task returns quietly to its owner and is cleaned up when its attempt ends", () => Effect.gen(function* () {

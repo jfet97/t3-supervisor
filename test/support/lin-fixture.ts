@@ -10,7 +10,7 @@ import { forgeDashboardToken } from "../../src/service-auth.js";
 import type { WorkflowIntroduction } from "../../src/supervisor-conversation-store.js";
 import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../../src/supervisor-monitor.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/supervisor-workflow.js";
-import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
+import type { MessageInfo, Projection, RunInfo, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
 import { execute, httpJson, intEndpoint, intRun, row, rows, temporaryDirectory, type HttpReply, type IntEndpoint, type IntRun } from "./glinint-wiring.js";
 import { intPeer, json, type HttpAnswer, type IntNativePeer, type PeerHttpEntry, type PeerRoutes, type PeerRpcEntry, type RpcAnswer } from "./int-native-peer.js";
@@ -199,7 +199,7 @@ export type LinFixture = {
   runOnce: Effect.Effect<void>;
 };
 
-export type LinOptions = {mainTurns?: Turn[]};
+export type LinOptions = {mainTurns?: Turn[]; config?: Partial<SupervisorSettings>};
 
 // a project scope "p" with global and project supervision enabled, a recorded activation boundary and an unstopped main chat
 export const startLinFixture = (options: LinOptions = {}): Effect.Effect<LinFixture, never, Scope.Scope> => Effect.gen(function* () {
@@ -212,7 +212,7 @@ export const startLinFixture = (options: LinOptions = {}): Effect.Effect<LinFixt
   const threads: ThreadInfo[] = [main.thread];
   const definitions = {current: (threadId: string | null) => missingDefinitions(threadId)};
   const core = yield* intRun({directory, peerUrl: peer.baseUrl, definitions: (_projectId, threadId) => Effect.sync(() => definitions.current(threadId)),
-    catalog: () => ({projects: [{project: {id: projectId, title: "Project P", workspaceRoot: "/work/p"}, available: true}], threads})});
+    catalog: () => ({projects: [{project: {id: projectId, title: "Project P", workspaceRoot: "/work/p"}, available: true}], threads}), config: options.config});
   const control = (scope: string | null) => execute(core.sql, "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     `supervisor_control:${JSON.stringify(scope)}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
   yield* control(null);

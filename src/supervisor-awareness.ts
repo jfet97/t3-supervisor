@@ -3,7 +3,7 @@ import { mainRunNodeReader, timestampMs } from "./domain.js";
 import { record } from "./supervisor-native.js";
 import type { ConversationRequest } from "./supervisor-conversation-store.js";
 import type { Projection } from "./types.js";
-import { recognisedThreadReadArguments } from "./workflow-write-evidence.js";
+import { recognisedThreadReadArguments, type WorkflowToolRoutes } from "./workflow-write-evidence.js";
 
 import { type NativeActivityRead } from "./supervisor-awareness-contract.js";
 export { NativeActivityRead } from "./supervisor-awareness-contract.js";
@@ -27,21 +27,22 @@ const toolValue = (input: unknown): unknown => {
   }
   return value;
 };
-// a read is recognised on the same native routes as every other call; its input may be recorded as JSON text
-const readArguments = (item: Record<string, unknown>): Record<string, unknown> | null => {
+// a read is recognised on the deployment's configured native routes, as every other call; its input may be recorded as JSON text
+const readArguments = (item: Record<string, unknown>, routes: WorkflowToolRoutes): Record<string, unknown> | null => {
   const input = decodedObject(item.input);
-  return record(input) ? recognisedThreadReadArguments({...item, input}) : null;
+  return record(input) ? recognisedThreadReadArguments({...item, input}, routes) : null;
 };
 
 /** A successful native read is a fetched page, never proof that its contents were assessed or earlier gaps were filled. */
-export const nativeActivityRead = (projection: Projection, detail: unknown, allowed: ReadonlySet<string>, now: number): NativeActivityRead | null => {
+export const nativeActivityRead = (projection: Projection, detail: unknown, allowed: ReadonlySet<string>, now: number,
+  routes: WorkflowToolRoutes): NativeActivityRead | null => {
   if (!record(detail) || detail.type !== "dynamic_tool" || detail.status !== "completed" || detail.threadId !== projection.thread.id ||
     typeof detail.id !== "string" || typeof detail.runId !== "string" || typeof detail.nodeId !== "string" ||
     (detail.toolNonExecutionKind !== undefined && detail.toolNonExecutionKind !== null)) return null;
   const run = projection.runs.find(run => run.id === detail.runId && run.status !== "rolled_back");
   const node = run ? mainRunNodeReader(projection, run)(detail.nodeId) : null;
   if (!node || (node.kind !== "dynamic_tool" && node.kind !== "tool_call") || node.status !== "completed") return null;
-  const input = readArguments(detail);
+  const input = readArguments(detail, routes);
   if (!input || typeof input.threadId !== "string" || !allowed.has(input.threadId)) return null;
   const result = Schema.decodeUnknownExit(ReadSnapshot)(toolValue(detail.output));
   if (Exit.isFailure(result) || result.value.thread.threadId !== input.threadId) return null;
@@ -54,19 +55,19 @@ export const nativeActivityRead = (projection: Projection, detail: unknown, allo
 
 /** Bounded native detail reads stay on the existing read adapter and request record, including during a busy owner turn. */
 export const collectNativeReads = <E>(request: ConversationRequest, projection: Projection,
-  read: (itemId: string) => Effect.Effect<unknown, E>, now: number) => Effect.gen(function* () {
+  read: (itemId: string) => Effect.Effect<unknown, E>, now: number, routes: WorkflowToolRoutes) => Effect.gen(function* () {
   const allowed = new Set(request.batch?.threads.map(item => item.threadId) ?? []);
   const run = projection.runs.find(run => run.id === request.runId || run.userMessageId === request.messageId);
   if (!run || !allowed.size) return [];
   const seen = new Set(request.nativeReadCallIds ?? request.nativeReads?.map(item => item.callItemId));
   const candidates = (projection.turnItems ?? []).filter(item => item.runId === run.id && item.threadId === projection.thread.id &&
-    item.type === "dynamic_tool" && item.status === "completed" && !seen.has(String(item.id)) && readArguments(item) !== null).slice(-8);
+    item.type === "dynamic_tool" && item.status === "completed" && !seen.has(String(item.id)) && readArguments(item, routes) !== null).slice(-8);
   const reads: NativeActivityRead[] = [];
   for (const item of candidates) {
     const result = yield* Effect.exit(read(String(item.id)));
     if (Exit.isFailure(result)) {if (Cause.hasInterruptsOnly(result.cause)) return yield* Effect.interrupt;continue;}
     const value = record(result.value) && "item" in result.value ? result.value.item : result.value;
-    const observation = nativeActivityRead(projection, value, allowed, now);
+    const observation = nativeActivityRead(projection, value, allowed, now, routes);
     if (observation) reads.push(observation);
   }
   return reads;

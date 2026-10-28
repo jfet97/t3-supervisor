@@ -9,7 +9,7 @@ export type PlanningDraftView = typeof planningDraftViews[number];
 export const planningDraftSections = ["conversation", "plan"] as const;
 export const planningInstructions = "Use supervision_planning pause with current task/binding pins, operationId, reason and affected targetThreadIds. " +
   "Require each actor's ACK or verified quiescence; parent ACK holds dispatch only. Root/helpers may use local orchestrator_capabilities/delegate_task for one read-only drafter created for this attempt, its task exactly the answer's draftInstruction, following model/isolation rules; attach_draft uses its childThreadId/taskId as draftThreadId/draftTaskId. It only reads and drafts. " +
-  "Reconcile ACKs, results and fresh work before adoption. For pending back_to, apply_return takes workflowId, workflowThreadId, expectedRevision, returnId, reason and open attemptId; it verifies pauses and retires old child runs. Main acceptance and child scoped plans remain. " +
+  "Reconcile ACKs, results and fresh work before adoption. For pending back_to, apply_return takes workflowId, workflowThreadId, expectedRevision, returnId, reason and open attemptId; it verifies pauses and retires old child runs; unavailable return_admission_busy wrote nothing, so repeat that identical call. Main acceptance and child scoped plans remain. " +
   "Release with continue/no_plan. The fixed deadline covers ACK, drafting and negotiation; late results never re-pause. Preserve human Stops, limits and approvals.";
 const Id = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(1024));
 const Time = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));

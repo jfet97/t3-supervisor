@@ -76,7 +76,7 @@ const pssBoundary = {snapshotSequence: 7, threads: [{id: "main-a", latestRunId: 
 
 // written by the baseline writers below with the clock fixed; this is the pre-migration on-disk format
 const pssMetaGolden: Array<[string, string]> = [
-  ["settings", "{\"generation\":1,\"guidancePaused\":false,\"monitoringPaused\":false,\"allowFollowupRace\":false,\"verifiedServerVersion\":null,\"model\":\"gpt-6-luna\",\"reasoning\":\"high\",\"dailyTokenBudget\":100000,\"evidenceHours\":24,\"maxAnchorAgeSeconds\":60}"],
+  ["settings", "{\"generation\":1,\"evidenceHours\":24}"],
   ["supervisor_activation_baseline", "{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}],\"version\":2}"],
   ["supervisor_activation_sequence", "7"],
   ["supervisor_control:\"project-a\"", "{\"generation\":1,\"enabled\":true,\"manual\":true,\"baseline\":{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}]}}"],

@@ -6410,6 +6410,21 @@ it.effect("a direct stop cites the freshly read latest human message with its ow
   assert.match(supervisionStopToolDefinition.description, /Cite the latest genuine human message that asks to stop, freshly read, with an operationId unique to it; never reuse an earlier stop's message ID or operationId/u);
 }));
 
+// audit F1: a definition review request names sections definitions and authoring; the definitions procedures told the root to send
+// the proposal to the operative itself, so the operative received it twice, beside the notice the service sends for every published one
+it.effect("a definition review publishes its proposal and leaves its delivery to the service, as section authoring says", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture({now: baseTime});
+  const definitionsSection = yield* sectionText(fixture, "definitions");
+  const authoring = yield* sectionText(fixture, "authoring");
+  assert.match(authoring, /Publishing is the delivery: once your completed answer is recorded, the service sends the operative main a short notice naming the proposal/u);
+  assert.match(authoring, /Send no notice, outline or record of your own/u);
+  // both procedures, changed and restored definitions, publish in the final answer and send no copy
+  assert.doesNotMatch(definitionsSection, /existing T3 tool|Send (that same|the identical) proposal/u);
+  assert.equal(definitionsSection.split("publishing delivers the proposal to the operative, so send no copy, outline or notice of your own").length - 1, 2);
+  // the one operative message of a definition review stays the same-chat correction of agent-authored edits
+  assert.match(definitionsSection, /send a normal correction in the same operative chat asking the agent to restore only those agent-authored edits/u);
+}));
+
 it.effect("every rendered root and operative payload stays bounded and carries no catalog, plan or second role copy", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
   const fixture = yield* makeFixture(clock);
