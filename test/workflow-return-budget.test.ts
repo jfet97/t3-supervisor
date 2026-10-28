@@ -705,6 +705,53 @@ it.live("a later acceptance adds a new return, and a fresh id does not refill a 
   assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.agreement.workflow.plan)[0]?.budgetId, freshBudget);
 }), {timeout: 30_000});
 
+it.live("an omitted ledger does not hide an applied jump after the return leaves the plan", () => Effect.gen(function* () {
+  const opened = yield* open([local("work"), branch("Findings remain.", [backTo("work", 1)])]);
+  yield* opened.complete(["work"], "work-omit");
+  yield* opened.choose("Findings remain.", "then");
+  yield* opened.jump("work", "spend-omit");
+  const spent = yield* opened.main();
+  const work = planOf(spent).nodes[0];
+  assert.equal(work?.kind, "step");
+  const removed = yield* opened.submit(spent, "drop-spent-return", opened.tick(), {kind: "sequence", templatePath: planOf(spent).templatePath, nodes: [work!]});
+  assert.equal(removed.status, "applied", JSON.stringify(removed));
+  const after = yield* opened.main();
+  assert.equal(planBackTos(after.plan).length, 0);
+  assert.equal(after.returns.filter(item => item.state === "applied").length, 1);
+  assert.ok((after.returnBudgets ?? []).length > 0);
+  assert.equal((yield* opened.box.stores.workflows.getState("project-a", "main-a")).status, "found");
+  const insert = (workflowId: string, edit: (value: Record<string, unknown>) => void) => Effect.gen(function* () {
+    const copy = storedCopy(after, workflowId, edit);
+    const text = JSON.stringify(copy);
+    yield* execute(opened.box.stores.sql, "INSERT INTO supervisor_workflow_state(workflow_id,project_id,main_thread_id,thread_id,parent_workflow_id,parent_thread_id,revision,document,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+      workflowId, "project-a", "main-a", workflowId, null, null, copy.revision, text, 10, 11);
+    return {copy, text};
+  });
+  const omitted = yield* insert("omitted-return-ledger", value => {delete value.returnBudgets;});
+  assert.deepEqual(yield* opened.box.stores.workflows.getState("project-a", "main-a", "omitted-return-ledger"),
+    {status: "incompatible", workflowId: "omitted-return-ledger", formatVersion: 2});
+  const repair = yield* opened.box.stores.workflows.apply(opened.owner, {operationId: "repair-omitted-ledger", workflowId: "omitted-return-ledger",
+    expectedRevision: Number(omitted.copy.revision), status: after.status, objective: after.objective, sourceBinding: opened.binding,
+    requirements: [], issues: [], plan: after.plan, note: "Attempt to repair an omitted ledger.", evidence: []}, opened.validation, opened.tick());
+  assert.equal(repair.status, "incompatible", JSON.stringify(repair));
+  assert.equal(String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "omitted-return-ledger"))[0]?.document), omitted.text);
+  const empty = yield* insert("empty-after-removal", value => {value.returnBudgets = [];});
+  assert.deepEqual(yield* opened.box.stores.workflows.getState("project-a", "main-a", "empty-after-removal"),
+    {status: "incompatible", workflowId: "empty-after-removal", formatVersion: 2});
+  assert.equal(String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "empty-after-removal"))[0]?.document), empty.text);
+  const stripped = yield* insert("stripped-after-removal", value => {
+    const rows = value.returnBudgets as Array<Record<string, unknown>>;
+    value.returnBudgets = rows.map(row => ({...row, events: []}));
+  });
+  assert.deepEqual(yield* opened.box.stores.workflows.getState("project-a", "main-a", "stripped-after-removal"),
+    {status: "incompatible", workflowId: "stripped-after-removal", formatVersion: 2});
+  assert.equal(String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "stripped-after-removal"))[0]?.document), stripped.text);
+  const quiet = yield* insert("omitted-without-applied", value => {delete value.returnBudgets; value.returns = [];});
+  assert.equal((yield* opened.box.stores.workflows.getState("project-a", "main-a", "omitted-without-applied")).status, "found");
+  assert.equal(String((yield* query(opened.box.stores.sql, "SELECT document FROM supervisor_workflow_state WHERE workflow_id=?", "omitted-without-applied"))[0]?.document), quiet.text);
+  assert.equal(quiet.text.includes("\"returnBudgets\""), false);
+}), {timeout: 30_000});
+
 it.live("an enclosing return resets the inner budget, and the inner return does not reset it", () => Effect.gen(function* () {
   const opened = yield* open([local("implement"), branch("Review findings.", [backTo("implement", 5)]), branch("CI failed.", [backTo("implement", 10)])]);
   const conditionOf = (document: WorkflowStateDocument, nodeId: string) => {

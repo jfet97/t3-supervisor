@@ -241,7 +241,8 @@ budget when the return is reordered or retitled. The executable plan's returns n
 a `returnBudgets` row, and an applied return needs its consumed event. A later
 accepted agreement is history: it keeps its own budget ids and does not mint a ledger
 row. A missing executable row, or a missing consumed event, stays on disk and is
-classified incompatible. An empty ledger is not repaired into an unused budget. A plan with no return may omit
+classified incompatible. An empty ledger is not repaired into an unused budget. Omitting
+the field does not hide an applied jump after its return leaves the plan. A plan with no return and no applied jump may omit
 the field. Two returns that both move and keep no nodeId or budgetId are rejected with
 `return_budget_identity_ambiguous` and write nothing. Two returns that claim one
 `budgetId` are rejected with `return_budget_duplicate` and write nothing.

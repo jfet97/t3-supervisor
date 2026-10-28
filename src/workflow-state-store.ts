@@ -298,17 +298,20 @@ const validReturnBudgets = (value: unknown): value is ReturnBudget[] => Array.is
   value.reduce((count, item) => count + (isRecord(item) && Array.isArray(item.events) ? item.events.length : 0), 0) <= workflowMutationLimits.maxEvidence &&
   value.every(item => isRecord(item) && validBudgetId(item.budgetId) && validText(item.address) && Array.isArray(item.events) &&
     item.events.every(event => isRecord(event) && (event.kind === "consumed" || event.kind === "reset") && validId(event.returnId) && Number.isFinite(event.at)));
-// the executable plan's budgets need rows, and every applied jump keeps its consumed event. a historical acceptance does not mint a budget. an empty list is not an unused budget
+const appliedReturnsCovered = (rows: readonly ReturnBudget[], returns: unknown): boolean => {
+  const consumed = new Set(rows.flatMap(item => item.events.filter(event => event.kind === "consumed").map(event => event.returnId)));
+  return !Array.isArray(returns) || returns.every(entry => !isRecord(entry) || entry.state !== "applied" ||
+    typeof entry.returnId === "string" && consumed.has(entry.returnId));
+};
+// the executable plan's budgets need rows, and every applied jump keeps its consumed event even after that return leaves the plan. an omitted ledger does not waive the jump. a historical acceptance does not mint a budget. an empty list is not an unused budget
 const returnBudgetCoverage = (value: Record<string, unknown>): boolean => {
   const needed = backToBudgetIds(value.plan);
-  if (value.returnBudgets === undefined) return needed.length === 0;
+  if (value.returnBudgets === undefined) return needed.length === 0 && appliedReturnsCovered([], value.returns);
   if (!validReturnBudgets(value.returnBudgets)) return false;
   const rows = value.returnBudgets;
   const covered = new Set(rows.map(item => item.budgetId));
   if (needed.some(id => !covered.has(id))) return false;
-  const consumed = new Set(rows.flatMap(item => item.events.filter(event => event.kind === "consumed").map(event => event.returnId)));
-  return !Array.isArray(value.returns) || value.returns.every(entry => !isRecord(entry) || entry.state !== "applied" ||
-    typeof entry.returnId === "string" && consumed.has(entry.returnId));
+  return appliedReturnsCovered(rows, value.returns);
 };
 
 const validPlan = (value: unknown): value is WorkflowStatePlan => {
