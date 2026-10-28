@@ -1,5 +1,12 @@
 # T3 Supervisor
 
+## 0.0.15
+
+### Patch Changes
+
+- 25adc24: A reconnect that already stored the archive snapshot becomes connected when the shell reports it is caught up, even when no later thread update arrives.
+- 25adc24: The live shell follows the installed T3 subscription. Archive membership comes from `getArchivedShellSnapshot` at the same sequence as the shell snapshot, including when that snapshot's `archivedThreads` list is empty. A reconnect resumes from the live cursor only after that archive snapshot has been stored.
+
 ## 0.0.14
 
 ### Patch Changes
