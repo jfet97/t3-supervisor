@@ -185,10 +185,15 @@ not selected; undecided and not-selected steps are not counted as outstanding.
 A selection never proves work, and a completion recorded before a changed decision
 is shown as needing reassessment. See [branch selections](workflow-mcp.md#branch-selections).
 
-A return (`back_to`) repeats earlier work as a new attempt. When the operative's work
-reaches it, the region from its target through the member that holds it waits for the
+A return (`back_to(n)`) repeats earlier work as a new attempt. `n` is that return's
+maximum number of successful jumps, an integer from 1 to 99. The first pass consumes
+none. Each occurrence has its own budget, including two uses of one workflow, and a
+preserved node keeps that budget when it is reordered or retitled. When the operative's work
+reaches it and jumps remain, the region from its target through the member that holds it waits for the
 Supervisor, which applies the return at a safe point once the closed attempt's work has
-stopped. The closed attempt keeps its statuses, contributors, decisions and retired
+stopped. Once `n` jumps have been applied, the unresolved failure stays visible and
+another jump does not start. An applied return resets only budgets whose replay region
+is strictly inside the region it reopens. The closed attempt keeps its statuses, contributors, decisions and retired
 child runs as history; the reopened occurrences keep their contributor conversations
 and show their attempt. Output of the closed attempt never counts for the new one.
 See [returns and attempts](workflow-mcp.md#returns-and-attempts).
@@ -455,7 +460,7 @@ re-reads current work before adoption; adoption waits for the relevant actors.
 Ending the attempt cleans up its registered drafting task while retaining unknown
 native command outcomes. Late content never renews the pause or publishes itself.
 
-A reached `back_to` is applied through `supervision_planning apply_return` after
+A reached `back_to` that still has jumps left is applied through `supervision_planning apply_return` after
 current pause/quiescence checks. The checks use point-in-time native reads taken just
 before the commit, the owner's last. A read never waits for another admitted operation
 before it is used. While one is in progress, the return waits for it to end and reads

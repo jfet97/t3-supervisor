@@ -12,7 +12,7 @@ it("preserving occurrence IDs keeps interpretation evidence current for a resolv
   const step = (id: string) => ({kind: "step", localId: id, definitionId: null, name: id, description: `Complete ${id}.`, reason: `The task needs ${id}.`});
   const draft = (target: string) => validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [step("work"), step("verify"),
     {kind: "branch", condition: "Corrections are needed.", reason: "The findings determine the next work.", then: {kind: "sequence", nodes: [
-      {kind: "back_to", target, reason: "Repeat the affected work."}]}}]}}, context)!;
+      {kind: "back_to", target, maximum: 5, reason: "Repeat the affected work."}]}}]}}, context)!;
   const submitted = draft("work");
   assert.ok(submitted.plan);
   const prior = JSON.parse(JSON.stringify(submitted.plan, (key, value: unknown) => key === "nodeId" ? `retained-${String(value)}` : value)) as WorkflowPlanGroupInfo;

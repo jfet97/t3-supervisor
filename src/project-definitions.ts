@@ -8,7 +8,7 @@ import type { StoreShape } from "./store.js";
 import type { T3ClientShape } from "./t3.js";
 import type { FreshGitProbe } from "./git-probe.js";
 import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult, type VcsInfo } from "./project-files.js";
-import {branchConditionMaxLength, branchConditionText, catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, workflowDefinitionExpansionLimits,
+import {branchConditionMaxLength, branchConditionText, catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, returnBudgetMaximum, workflowDefinitionExpansionLimits,
   type DefinitionCatalogEntry, type DefinitionFileInfo, type DefinitionStepInfo, type DefinitionWorkflowInfo, type EffectiveConfigurationInfo,
   type ProjectDefinitionSnapshot, type ProjectCheckoutInventoryInfo} from "./project-definitions-contract.js";
 import {definitionNodeChildren} from "./workflow-plan-tree.js";
@@ -208,8 +208,16 @@ const parseNode = (value: unknown, depth: number, budget: {count: number}): Defi
     if (typeof value.workflow === "string" && definitionId.test(value.workflow)) return {workflow: value.workflow};
     throw new Error("workflow must name a reusable workflow identifier.");
   }
-  if (Object.hasOwn(value, "back_to")) {
-    if (typeof value.back_to === "string" && definitionId.test(value.back_to)) return {back_to: value.back_to};
+  const returnKey = Object.keys(value).find(key => key === "back_to" || key.startsWith("back_to"));
+  if (returnKey) {
+    const wrapped = /^back_to\((.*)\)$/.exec(returnKey);
+    if (!wrapped) throw new Error(`back_to requires a maximum as back_to(n): <id>, where n is an integer from 1 to ${returnBudgetMaximum}.`);
+    const raw = wrapped[1] ?? "";
+    if (!/^[1-9][0-9]*$/u.test(raw)) throw new Error(`back_to maximum must be an integer from 1 to ${returnBudgetMaximum} with no sign, fraction, or leading zero.`);
+    const maximum = Number(raw);
+    if (!Number.isSafeInteger(maximum) || maximum > returnBudgetMaximum) throw new Error(`back_to maximum must be an integer from 1 to ${returnBudgetMaximum}.`);
+    const target = value[returnKey];
+    if (typeof target === "string" && definitionId.test(target)) return {back_to: target, maximum};
     throw new Error("back_to must name the step, local step or workflow ID of an earlier member.");
   }
   if (Object.hasOwn(value, "branch")) {
@@ -362,7 +370,7 @@ const namespaceGlobal = (global: DefinitionScopeRead, project: DefinitionScopeRe
     const rewrite = rewriteNode(locals);
     if ("step" in node) return typeof node.step === "string" ? {step: stepMap.get(node.step)!} : node;
     if ("workflow" in node) return {workflow: workflowMap.get(node.workflow)!};
-    if ("back_to" in node) return {back_to: locals.has(node.back_to) ? node.back_to : stepMap.get(node.back_to) ?? workflowMap.get(node.back_to) ?? node.back_to};
+    if ("back_to" in node) return {back_to: locals.has(node.back_to) ? node.back_to : stepMap.get(node.back_to) ?? workflowMap.get(node.back_to) ?? node.back_to, maximum: node.maximum};
     if ("sequence" in node) return {sequence: node.sequence.map(rewrite)};
     if ("branch" in node) return {branch: {if: node.branch.if, then: node.branch.then.map(rewrite),
       ...(node.branch.else ? {else: node.branch.else.map(rewrite)} : {})}};

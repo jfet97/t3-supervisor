@@ -635,6 +635,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     {view.latest?.scope && !view.latest.scope.complete && <p className="notice" role="status">Connected child observation is incomplete. Some lifecycle or activity details may be missing.{view.latest.scope.issues.length > 0 && <> {view.latest.scope.issues.map(issue => issue.message).join(" ")}</>}</p>}
     {record.kind === "live" && (record.workflow.returns ?? []).filter(item => item.state === "pending").map(item =>
       <p className="notice" key={item.returnId}>Return to {item.targetName ?? "an earlier step"} requested. The Supervisor must confirm affected work is paused or quiet before starting attempt {item.attempt + 1}.</p>)}
+    {record.kind === "live" && (record.workflow.returns ?? []).filter(item => item.state === "exhausted" && item.resolvedAt === null).map(item =>
+      <p className="notice" key={item.returnId}>Return to {item.targetName ?? "an earlier step"} has used every successful jump its maximum allows. The failure stays unresolved, and another jump does not start.</p>)}
     <div className="row task-view-switch" role="group" aria-label="Task view">
       <button type="button" aria-pressed={!historyVisible} onClick={() => setSelectedView({threadId, view: "plan"})}>Plan</button>
       <button type="button" aria-pressed={historyVisible} onClick={() => setSelectedView({threadId, view: "history"})}>History</button>

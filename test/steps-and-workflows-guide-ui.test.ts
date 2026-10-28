@@ -40,7 +40,7 @@ it("steps and workflows guide documents the approved layout, syntax and planning
   assert.match(html, /total expanded-node and depth bounds/);
   assert.match(html, /One assigned reviewer performs one independent pass/);
   assert.match(html, /- parallel:\n      - workflow: reviewer\n      - workflow: reviewer/);
-  assert.match(html, /if: At least one review reports unresolved material findings\.[\s\S]*back_to: implementation/);
+  assert.match(html, /if: At least one review reports unresolved material findings\.[\s\S]*back_to\(5\): implementation/);
   assert.doesNotMatch(html, /one or more independent|requests further review after/);
   assert.match(html, /Requirements apply once to the current main task/);
   assert.match(html, /Direct and indirect workflow cycles are errors/);

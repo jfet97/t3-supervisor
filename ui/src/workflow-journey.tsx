@@ -214,8 +214,8 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
     </div>;
   }
   if (node.kind === "branch") return <BranchJourney node={node} {...passed}/>;
-  if (node.kind === "back_to") return <div className="journey-branch journey-return" role="group" aria-label={`Return to ${node.target}`}>
-    <p className="branch-condition"><span className="branch-label">Return</span> <span>Back to <code>{node.target}</code>: a new attempt repeats it and what follows, up to here</span></p>
+  if (node.kind === "back_to") return <div className="journey-branch journey-return" role="group" aria-label={`Return to ${node.target}, at most ${node.maximum} successful jumps`}>
+    <p className="branch-condition"><span className="branch-label">Return</span> <span>Back to <code>{node.target}</code>, at most {node.maximum} successful {node.maximum === 1 ? "jump" : "jumps"}: a new attempt repeats it and what follows, up to here</span></p>
     {node.reason && <p className="small">Plan note: {node.reason}</p>}
   </div>;
   const attempt = live ? attempts?.get(node.nodeId) : undefined;
@@ -333,7 +333,7 @@ export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance 
 }
 
 const changeLabels: Record<PlanChangeField, string> = {name: "name", description: "description", note: "plan note", definition: "definition", references: "references",
-  skills: "skills", fixed: "fixed workflow", omissions: "not-applicable items", condition: "branch condition", paths: "branch paths", target: "return target", grouping: "grouping or branch path", order: "order"};
+  skills: "skills", fixed: "fixed workflow", omissions: "not-applicable items", condition: "branch condition", paths: "branch paths", target: "return target", maximum: "return maximum", grouping: "grouping or branch path", order: "order"};
 
 /** The actual differences between the accepted plan and the proposal awaiting acceptance. */
 export function PlanChanges({changes, proposal, proposalId}: {changes: readonly PlanChange[]; proposal: WorkflowProposalInfo; proposalId?: string | undefined}) {

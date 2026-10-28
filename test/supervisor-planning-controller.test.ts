@@ -10,7 +10,7 @@ import type { NativeRpcShape } from "../src/supervisor-native.js";
 import {helperInstructions, helperInstructionsVersion} from "../src/supervisor-helper-instructions.js";
 import {goldenSnapshot} from "./support/c1-workflow-fixture.js";
 import {proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
-import {planBranches, planEntities, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
+import {planBackTos, planBranches, planEntities, returnBudgetUsed, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import type {WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 import type { ThreadInfo } from "../src/types.js";
 import { planningFixture as fixture } from "./support/planning-fixture.js";
@@ -181,7 +181,7 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
   const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The request needs ${id}.`});
   const plan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [local("work"), local("review"),
     {kind: "branch", condition: "Corrections are required.", reason: "Review determines the next work.", then: {kind: "sequence", nodes: [
-      {kind: "back_to", target: "work", reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
+      {kind: "back_to", target: "work", maximum: 5, reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
   assert.ok(plan?.plan);
   const proposal: WorkflowProposalInfo = {status: "proposed", message: "Complete the requested work.", workspaceRoot: "/work/project", revision: "revision-ready", globalRevision: null, ...plan};
   const agreement = {status: "agreed" as const, message: "Accepted.", proposalId: "proposal-a", agreedAt: now,
@@ -310,7 +310,7 @@ it.effect(`a return requires the operative's real ACK and quiet ${execution} con
 // a pending return over [work, review by an AppRun reviewer child of main, a branch back_to work, deliver], its branch chosen, with main
 // paused and ACKed in its still-waiting source run; with `reviewerTarget` the reviewer is also a pause target. Every native read is a
 // point-in-time copy reported to `onRead`
-const pendingReturn = (onRead: (threadId: string) => void, reviewerTarget = false) => Effect.gen(function* () {
+const pendingReturn = (onRead: (threadId: string) => void, reviewerTarget = false, maximum = 5) => Effect.gen(function* () {
   const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: () =>
     Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: 1})})};
   const f = yield* fixture(rpc, {onRead});
@@ -319,7 +319,7 @@ const pendingReturn = (onRead: (threadId: string) => void, reviewerTarget = fals
   const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The request needs ${id}.`});
   const plan = validateWorkflowPlan({requirements: [], plan: {kind: "sequence", nodes: [local("work"), local("review"),
     {kind: "branch", condition: "Corrections are required.", reason: "Review determines the next work.", then: {kind: "sequence", nodes: [
-      {kind: "back_to", target: "work", reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
+      {kind: "back_to", target: "work", maximum, reason: "Correct the reviewed work."}]}}, local("deliver")]}}, context);
   assert.ok(plan?.plan);
   const proposal: WorkflowProposalInfo = {status: "proposed", message: "Complete the requested work.", workspaceRoot: "/work/project", revision: "revision-ready", globalRevision: null, ...plan};
   const agreement = {status: "agreed" as const, message: "Accepted.", proposalId: "proposal-a", agreedAt: now,
@@ -634,4 +634,50 @@ it.effect("an uncertain hold or release keeps its stored bytes and identities: n
   assert.deepEqual({commandId: dispatch!.commandId, messageId: dispatch!.messageId, text: dispatch!.text},
     {commandId: fresh.targets[0]!.hold.commandId, messageId: fresh.targets[0]!.hold.messageId, text: planningHoldText(anchored, anchored.targets[0]!)});
   assert.equal(anchored.targets[0]!.hold.text, dispatch!.text);
+}));
+
+it.effect("one successful jump replays without a second debit, and the next reach stays exhausted", () => Effect.gen(function* () {
+  const r = yield* pendingReturn(() => {}, false, 1);
+  const applied = (yield* r.f.controller.call(r.input)) as {status: string; reason?: string};
+  assert.equal(applied.status, "applied", JSON.stringify(applied));
+  const spent = (yield* r.f.states.get("project", "main"))!;
+  const usage = (document: typeof spent) => {
+    const node = planBackTos(document.plan).find(item => item.target === "work")!;
+    const events = document.returnBudgets?.find(item => item.budgetId === node.budgetId)?.events ?? [];
+    return {events, used: returnBudgetUsed(events)};
+  };
+  assert.equal(usage(spent).used, 1);
+  assert.equal(spent.returns.find(item => item.returnId === r.input.returnId)?.state, "applied");
+  const replay = (yield* r.f.controller.call(r.input)) as {status: string; reason?: string};
+  assert.equal(replay.status, "applied", JSON.stringify(replay));
+  const replayed = (yield* r.f.states.get("project", "main"))!;
+  assert.equal(replayed.revision, spent.revision, "replaying the applied operation writes nothing");
+  assert.equal(usage(replayed).used, 1);
+  assert.equal(usage(replayed).events.filter(event => event.kind === "consumed").length, 1);
+
+  const changed = planEntities(replayed.plan).filter(node => node.kind === "step" && node.localId !== "deliver");
+  const progress = withOccurrenceStatuses(replayed.plan!, changed.map(node => ({nodeId: node.nodeId, status: "completed" as const})));
+  assert.ok("plan" in progress);
+  progress.plan.nodes = progress.plan.nodes.map(node => node.kind === "step" && node.localId === "review" ? {...node, contributorThreadIds: ["reviewer"]} : node);
+  const again = yield* r.f.states.apply(r.owner, {operationId: "second-pass", workflowId: replayed.workflowId, expectedRevision: replayed.revision,
+    status: "underway", objective: replayed.objective, sourceBinding: replayed.sourceBinding!, requirements: [], issues: [], plan: progress.plan,
+    note: "The repeated pass returned findings.", evidence: changed.map(node => ({kind: "status_changed" as const, targetNodeId: node.nodeId, note: "This pass completed."}))},
+  r.advance, r.now + 10);
+  assert.equal(again.status, "applied", JSON.stringify(again));
+  const progressed = (yield* r.f.states.get("project", "main"))!;
+  const branch = planBranches(progressed.plan)[0]!;
+  assert.equal((yield* r.f.states.recordBranchSelection(r.owner, {nodeId: branch.nodeId, revision: 2, path: "then",
+    reason: "The report still requires corrections.", sourceThreadId: "main", sourceRunId: "source-run", sourceMessageId: "decision-again",
+    sourceCreatedAt: r.now + 11}, r.now + 11)).status, "applied");
+  const exhausted = (yield* r.f.states.get("project", "main"))!;
+  const row = exhausted.returns.find(item => item.state === "exhausted" && item.resolvedAt === null);
+  assert.ok(row, JSON.stringify(exhausted.returns.map(item => [item.state, item.resolvedAt])));
+  assert.equal(usage(exhausted).used, 1);
+  const retry = {...r.input, operationId: "return-again", expectedRevision: exhausted.revision, returnId: row.returnId};
+  r.f.proof(retry);
+  const refused = (yield* r.f.controller.call(retry)) as {status: string; reason?: string};
+  assert.equal(refused.reason, "return_not_pending", JSON.stringify(refused));
+  const after = (yield* r.f.states.get("project", "main"))!;
+  assert.equal(after.revision, exhausted.revision, "an exhausted refusal writes nothing");
+  assert.equal(usage(after).used, 1);
 }));
