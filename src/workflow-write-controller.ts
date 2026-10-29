@@ -48,6 +48,7 @@ import {
   providerTurnEvidenceCandidates,
   verifyProviderTurnToolEvidence,
   nativeCallRoute,
+  nativeItemExecution,
   verifyWorkflowToolEvidence,
   workflowEvidenceCandidates,
   workflowRequestHash,
@@ -612,6 +613,14 @@ const maxReceiptToolNameLength = 128;
 const boundedToolName = (name: string): string => name.length <= maxReceiptToolNameLength ? name : `${name.slice(0, maxReceiptToolNameLength - 3)}...`;
 // a receipt item nested by a harness or gateway is credited through its ancestors, each an item of the same root run inside its main run
 const maxReceiptItemDepth = 8;
+// the shared execution checks, named for the receipt they refuse
+const participantExecutionReasons = {
+  native_item_identity_incomplete: "participant_item_identity_incomplete", native_item_not_executed: "participant_item_not_completed_tool",
+  native_tool_item_rolled_back: "participant_item_not_completed_tool", native_item_not_running_or_completed: "participant_item_not_completed_tool",
+  native_run_identity_mismatch: "participant_item_run_mismatch", native_run_rolled_back: "participant_item_run_mismatch",
+  native_root_node_rolled_back: "participant_item_rolled_back", native_item_outside_main_run: "participant_item_outside_main_run",
+  native_tool_node_rolled_back: "participant_item_rolled_back",
+} as const;
 
 const statusEditsExpected = `at most ${maxStatusEditsPerApply} entries of exactly {nodeId, status}, each naming a distinct existing step or workflow occurrence`;
 // explicit occurrence status edits: bounded, distinct and shape-checked here; existence is checked against the current document
@@ -1727,15 +1736,16 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       if (detail.type !== "dynamic_tool" || typeof detail.toolName !== "string" || detail.status !== "completed" ||
         (detail.toolNonExecutionKind !== undefined && detail.toolNonExecutionKind !== null))
         return {status: "invalid", reason: "participant_item_not_completed_tool"};
-      if (!isRecord(detail.nativeItemRef) || detail.nativeItemRef.strength !== "strong") return {status: "invalid", reason: "participant_item_not_strong"};
+      if (!isRecord(detail.nativeItemRef) || detail.nativeItemRef.strength !== "strong" || typeof detail.nodeId !== "string") return {status: "invalid", reason: "participant_item_not_strong"};
       const projection = yield* readRootProjection();
       if (!projection) return {status: "pending", reason: "activity_reference_read_unavailable"};
-      const run = typeof detail.runId === "string" ? projection.runs.find(candidate => candidate.id === detail.runId && candidate.threadId === owner.supervisorThreadId) : undefined;
-      if (!run || run.status === "rolled_back") return {status: "invalid", reason: "participant_item_run_mismatch"};
+      // the execution and identity checks shared with the write proof: complete native identity, the run's provider thread, nothing rolled back
+      const execution = nativeItemExecution(projection, owner.supervisorThreadId, detail);
+      if (!execution.ok) return {status: "invalid", reason: participantExecutionReasons[execution.reason]};
+      const {run, node} = execution;
       if (item.sourceRunId != null && run.id !== item.sourceRunId) return {status: "invalid", reason: "activity_reference_item_run_mismatch"};
       const nodeOf = mainRunNodeReader(projection, run);
-      const node = typeof detail.nodeId === "string" ? nodeOf(detail.nodeId) : null;
-      if (!node || (node.kind !== "dynamic_tool" && node.kind !== "tool_call") || node.status !== "completed") return {status: "invalid", reason: "participant_item_outside_main_run"};
+      if ((node.kind !== "dynamic_tool" && node.kind !== "tool_call") || node.status !== "completed") return {status: "invalid", reason: "participant_item_outside_main_run"};
       // a nested item is the root's own only through its ancestors: each an item of this thread and run whose node lies in the same main
       // run and is not rolled back; an unreadable ancestor establishes nothing yet, a mismatching or missing one never does
       const chain = new Set<string>([item.sourceItemId]);
@@ -1753,8 +1763,9 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
         chain.add(parentItemId);
         parentItemId = ancestor.parentItemId;
       }
-      // the read is credited to the declaration and attempt window it belongs to: T3's own time for the item, never the write's time
-      const at = timestampMs(detail.completedAt) ?? timestampMs(detail.updatedAt) ?? timestampMs(run.completedAt);
+      // the read is credited to the declaration and attempt window it belongs to: T3's own time for the item itself, never the write's
+      // time and never its run's end, which a run spanning a return would lend to an older read
+      const at = timestampMs(detail.completedAt) ?? timestampMs(detail.updatedAt);
       if (at === null) return {status: "invalid", reason: "participant_item_undated"};
       const window = Math.max(contribution.recordedAt, ...(target.document.returns ?? [])
         .filter(entry => entry.state === "applied" && entry.resolvedAt !== null && entry.regionNodeIds.includes(contribution.nodeId)).map(entry => entry.resolvedAt!));

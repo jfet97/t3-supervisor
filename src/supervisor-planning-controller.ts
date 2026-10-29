@@ -138,12 +138,14 @@ const make = Effect.gen(function* () {
    * over it), and a parent's acknowledgement never counts for the child, whose own terminal lifecycle marks it quiescent.
    */
   const pausedDescendants = (binding: BindingRecord, scope: SupervisorScopeResolution, parents: ReadonlyMap<string, string | null>,
-    known: readonly string[], quiescent: ReadonlySet<string>, reason: string, now: number, cancel?: WorkflowCallCancel) => Effect.gen(function* () {
+    held: ReadonlySet<string>, quiescent: ReadonlySet<string>, reason: string, now: number, cancel?: WorkflowCallCancel) => Effect.gen(function* () {
     const targets: NewPlanningAttempt["targets"] = [];
     const uncovered: PlanningUncovered[] = [];
     const resolved: string[] = [];
     const unsettled: string[] = [];
-    const seen = new Set(known);
+    // only a held target is skipped: a listed descendant is re-evaluated by every fresh read, so one that is readable and busy again is
+    // held or stays listed, and only one found quiet settles its listing
+    const seen = new Set(held);
     for (const child of scope.descendants) {
       if (!scope.liveIds.has(child.id)) continue;
       const projection = yield* attempt(native.projection(child.id, cancel));
@@ -154,9 +156,9 @@ const make = Effect.gen(function* () {
         else if (!seen.has(child.id)) {uncovered.push({threadId: child.id, reason: "unavailable", observedAt: now}); seen.add(child.id);}
         continue;
       }
-      resolved.push(child.id);
-      if (quiescent.has(child.id) && projectionHasOngoingWork(projection.value, child)) unsettled.push(child.id);
-      if (seen.has(child.id) || !projectionHasOngoingWork(projection.value, child)) continue;
+      const busy = projectionHasOngoingWork(projection.value, child);
+      if (seen.has(child.id)) {if (quiescent.has(child.id) && busy) unsettled.push(child.id); continue;}
+      if (!busy) {resolved.push(child.id); continue;}
       const coverage = yield* team.coverage(binding, child.id, parents);
       if (coverage.state !== "root") {uncovered.push({threadId: child.id, reason: "assigned_to_helper", observedAt: now}); seen.add(child.id); continue;}
       const direct = childOrigin(child, undefined) === "delegated_child" && resolveSteerableRun(projection.value) !== null;
@@ -181,7 +183,7 @@ const make = Effect.gen(function* () {
     if (!listed.ok || !scope?.complete || !scope.main)
       return (yield* update(binding.projectId, current.id, row => refreshPlanningMembership(row, {targets: [], uncovered: [], resolved: [], unsettled: [], scopeAvailable: false}, now))) ?? current;
     const parents = new Map(listed.value.map(thread => [thread.id, thread.lineage.parentThreadId ?? null]));
-    const membership = yield* pausedDescendants(binding, scope, parents, [...current.targets.map(target => target.threadId), ...(current.uncovered ?? []).map(item => item.threadId)],
+    const membership = yield* pausedDescendants(binding, scope, parents, new Set(current.targets.map(target => target.threadId)),
       new Set(current.targets.filter(target => target.state === "quiescent").map(target => target.threadId)), current.reason, now, cancel);
     return (yield* update(binding.projectId, current.id, row => refreshPlanningMembership(row, {...membership, scopeAvailable: true}, now))) ?? current;
   });
@@ -314,7 +316,7 @@ const make = Effect.gen(function* () {
     // covers is listed as uncovered, never paused by the root's authority and never silently omitted
     const uncovered: PlanningUncovered[] = [];
     if (payload.supervisorThreadId === binding.threadId && targets.some(target => target.threadId === binding.mainThreadId)) {
-      const descendants = yield* pausedDescendants(binding, scope, parents, targets.map(target => target.threadId), new Set(), payload.reason, clockNow, cancel);
+      const descendants = yield* pausedDescendants(binding, scope, parents, new Set(targets.map(target => target.threadId)), new Set(), payload.reason, clockNow, cancel);
       targets.push(...descendants.targets);
       uncovered.push(...descendants.uncovered);
     }

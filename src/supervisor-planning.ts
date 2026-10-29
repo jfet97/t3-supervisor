@@ -67,7 +67,7 @@ export const addPlanningTargets = (attempt: PlanningAttempt, targets: NewPlannin
 export type PlanningMembership = {
   targets: NewPlanningAttempt["targets"];
   uncovered: readonly PlanningUncovered[];
-  /** Descendants whose projection was read this time: an earlier "unavailable" listing of them is settled, whether or not they are held. */
+  /** Descendants this read found quiet: whatever listed them (unavailable, helper-covered or over the limit) is settled by that evidence. */
   resolved: readonly string[];
   /** Quiescent targets whose fresh read found work again or could not be read: their quiescence is withdrawn and the attempt waits for them. */
   unsettled: readonly string[];
@@ -77,13 +77,14 @@ export type PlanningMembership = {
 
 /**
  * Applies a fresh membership read: an unreadable lineage marks the attempt scope-unavailable until a later read establishes it; a
- * readable one clears that mark, settles the "unavailable" listings it resolved, holds the new descendants and lists the rest.
+ * readable one clears that mark, settles the listings of descendants it found quiet or now holds, holds the new descendants and lists
+ * the rest again. A listing never expires on its own: only fresh evidence of quiet, or a hold, removes it.
  */
 export const refreshPlanningMembership = (attempt: PlanningAttempt, membership: PlanningMembership, now: number): PlanningAttempt => {
   if (attempt.state !== "open" || now >= attempt.deadline) return attempt;
   if (!membership.scopeAvailable) return planningScopeUnavailable(attempt) ? attempt : {...attempt, scopeUnavailableAt: now};
   const settled = new Set([...membership.resolved, ...membership.targets.map(target => target.threadId)]);
-  const kept = (attempt.uncovered ?? []).filter(item => !(item.reason === "unavailable" && settled.has(item.threadId)));
+  const kept = (attempt.uncovered ?? []).filter(item => !settled.has(item.threadId));
   const withdrawn = new Set(membership.unsettled);
   const targets = attempt.targets.map(target => target.state === "quiescent" && withdrawn.has(target.threadId)
     ? {...withoutQuiescence(target), state: "requested" as const} : target);

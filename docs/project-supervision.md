@@ -498,7 +498,10 @@ guidance is the Supervisor's assessment, not evidence that the operative acted o
 When planning changes what affected actors do next, `supervision_planning pause`
 requests a bounded hold for those actors. Each actor must acknowledge its own pause
 or be verified quiet; a parent acknowledgement holds its dispatch only. Native or
-idle children use a verified parent relay. Unrelated siblings keep working. A held
+idle children use a verified parent relay. Unrelated siblings keep working. A
+descendant the pause could not hold (unreadable, covered by a helper or beyond the
+target limit) stays listed and blocks adoption until a fresh read finds it quiet or
+holds it; one that becomes readable while busy is held, never dropped. A held
 descendant whose work finished is verified quiet by the release's own fresh read,
 never by its earlier reading: a finished child read busy or unreadable again is
 awaited again. Its relayed hold is released as a dispatch hold only, with no

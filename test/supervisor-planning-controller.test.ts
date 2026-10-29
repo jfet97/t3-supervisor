@@ -320,15 +320,16 @@ it.effect("a held child whose work resumes needs its linked, planned workflow to
 
 it.effect("a live child that cannot be read is listed as unavailable and blocks adoption past the main's ACK until a fresh read settles it; a release reads membership itself and a lineage outage marks the attempt until it recovers", () => Effect.gen(function* () {
   const sent: Record<string, unknown>[] = [];
-  const failures: PlanningReadFailures = {projections: new Set(["dark-child"]), listThreads: false};
+  const failures: PlanningReadFailures = {projections: new Set(["dark-child", "flaky-child"]), listThreads: false};
   const f = yield* fixture(acknowledgingRpc(sent), {readFailures: failures});
   const now = yield* Clock.currentTimeMillis;
   nativeChild(f, "dark-child", true, now);
+  nativeChild(f, "flaky-child", true, now);
   f.proof(f.args);
   const result = (yield* f.controller.call(f.args)) as PausedAnswer;
   assert.equal(result.status, "recorded", JSON.stringify(result));
   assert.deepEqual(result.attempt.targets.map(target => target.threadId), ["main"], "an unreadable child is never a target");
-  assert.deepEqual(result.attempt.uncovered, [{threadId: "dark-child", reason: "unavailable"}], "nothing about the unreadable child's work is established");
+  assert.deepEqual(result.attempt.uncovered, [{threadId: "dark-child", reason: "unavailable"}, {threadId: "flaky-child", reason: "unavailable"}], "nothing about the unreadable children's work is established");
   yield* f.controller.reconcile(f.binding);
   acknowledgeMain(f, result.attempt.attemptId);
   yield* f.controller.reconcile(f.binding);
@@ -339,19 +340,27 @@ it.effect("a live child that cannot be read is listed as unavailable and blocks 
   delete (release as {targetThreadIds?: unknown}).targetThreadIds;
   f.proof(release);
   assert.deepEqual(yield* f.controller.call(release), {status: "denied", reason: "planning_acks_incomplete"});
-  // the read recovers and the child turns out idle: the unavailable listing is settled by that fresh read, not by time
-  failures.projections.delete("dark-child");
+  // both reads recover: the idle child's listing is settled by that fresh read, not by time; the busy one is held, never silently dropped
+  failures.projections.clear();
   finishChild(f, "dark-child", now + 1);
   yield* f.controller.reconcile(f.binding);
+  const [recoveredBusy] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(recoveredBusy!.uncovered ?? [], [], "a fresh read settles the quiet child's listing and replaces the busy child's with a hold");
+  assert.deepEqual(recoveredBusy!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["flaky-child", "requested"]], "a readable busy child becomes a held target");
+  assert.equal(planningCanAdopt(recoveredBusy!, yield* Clock.currentTimeMillis), false, "the held busy child blocks adoption");
+  f.proof({...release, operationId: "release-busy"});
+  assert.deepEqual(yield* f.controller.call({...release, operationId: "release-busy"}), {status: "denied", reason: "planning_acks_incomplete"});
+  finishChild(f, "flaky-child", now + 1);
+  yield* f.controller.reconcile(f.binding);
   const [settled] = yield* f.stores.requests.planningAttempts("project");
-  assert.deepEqual(settled!.uncovered ?? [], [], "a fresh successful read settles the unavailable listing");
+  assert.deepEqual(settled!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["flaky-child", "quiescent"]], "the held child's own terminal lifecycle makes it quiescent");
   assert.equal(planningCanAdopt(settled!, yield* Clock.currentTimeMillis), true);
   // a child that starts after the last reconcile is held by the release's own membership read, with no reconcile in between
   nativeChild(f, "late-starter", true, now + 2);
   f.proof({...release, operationId: "release-late"});
   assert.deepEqual(yield* f.controller.call({...release, operationId: "release-late"}), {status: "denied", reason: "planning_acks_incomplete"});
   const [withLate] = yield* f.stores.requests.planningAttempts("project");
-  assert.deepEqual(withLate!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["late-starter", "requested"]], "the release itself held the late child");
+  assert.deepEqual(withLate!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["flaky-child", "quiescent"], ["late-starter", "requested"]], "the release itself held the late child");
   // a lineage outage establishes nothing: the release's own membership read marks the attempt and refuses, a reconcile pass under the
   // same outage keeps the mark, and only a later successful read of the lineage clears it
   finishChild(f, "late-starter", now + 3);
@@ -378,7 +387,7 @@ it.effect("a live child that cannot be read is listed as unavailable and blocks 
   // the native descendant has no workflow of its own: its relayed release carries no scoped-plan hint and the main's is unchanged
   yield* f.controller.reconcile(f.binding);
   const relayed = sent.filter(item => String(item.messageId).includes(":release:")).map(item => String(item.text));
-  assert.equal(relayed.length, 2, JSON.stringify(relayed));
+  assert.equal(relayed.length, 3, JSON.stringify(relayed));
   assert.ok(relayed.some(text => text.startsWith("Relay to child late-starter: planning pause") && text.includes("releases your dispatch hold only") && !text.includes("Continue your authorised task")), JSON.stringify(relayed));
   assert.ok(relayed.some(text => text.startsWith(`Planning pause ${result.attempt.attemptId} released (planning resolved). This release grants no implementation permission`)), JSON.stringify(relayed));
 }));
@@ -420,6 +429,17 @@ it.effect("the combined target limit is the existing 100: overflow at pause time
   const answer = (yield* f.controller.call(read)) as {status: string; attempts: PausedAnswer["attempt"][]};
   assert.equal(answer.status, "ready");
   assert.deepEqual(answer.attempts[0]?.uncovered.map(item => [item.threadId, item.reason]).sort(), [["helper-child", "assigned_to_helper"], ["late-child", "limit"]], "the read lists what the pause could not hold");
+  // a listing is settled only by fresh evidence of quiet: the helper-covered child finishes, the one beyond the limit stays listed while busy
+  finishChild(f, "helper-child", now + 2);
+  yield* f.controller.reconcile(f.binding);
+  const [helperQuiet] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(helperQuiet!.uncovered?.map(item => [item.threadId, item.reason]), [["late-child", "limit"]], "the quiet helper-covered child is settled; the busy over-limit child is not");
+  assert.equal(planningCanAdopt(helperQuiet!, yield* Clock.currentTimeMillis), false);
+  finishChild(f, "late-child", now + 3);
+  yield* f.controller.reconcile(f.binding);
+  const [allQuiet] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(allQuiet!.uncovered ?? [], [], "the over-limit child's listing is settled by its own quiet read");
+  assert.equal(planningCanAdopt(allQuiet!, yield* Clock.currentTimeMillis), true);
 }), {timeout: 30_000});
 
 // the main's prepared proposal as the task carries it before acceptance, and the same proposal recorded as its agreement

@@ -137,8 +137,9 @@ participant as `apply` evidence of kind `observation` with
 `unsupported`. For `read` and `lifecycle` the entry cites the root's own completed
 native tool item (`sourceItemId` on the root thread): the service verifies the
 caller and that item with the same provenance fences as its own write proof (a
-completed `dynamic_tool` item with strong native identity, in a main run of the
-root that is not rolled back, whose node completed). An item a harness or gateway
+completed `dynamic_tool` item with strong and complete native identity, in a run of
+the root whose provider thread it names, with neither the run nor its root node
+rolled back, and its node completed inside that main run). An item a harness or gateway
 nests under a parent item is the root's own only through its ancestors: each must
 be an item of the same thread and run whose node lies in that main run and is not
 rolled back, within a bounded depth (`participant_item_chain_mismatch` otherwise;
@@ -149,8 +150,8 @@ digest; no other inner target is inferred and no foreign semantics are
 interpreted. A T3 wait, list, search or queue call under any prefix, directly or
 through a configured gateway call, is accepted as `lifecycle` only and refused as
 `read` (`participant_item_lifecycle_only`).
-The item is credited to the window it belongs to: T3's own time for the item
-(`participant_item_undated` without one) must not precede the current revision's
+The item is credited to the window it belongs to: T3's own time for the item itself,
+never its run's end (`participant_item_undated` without one), must not precede the current revision's
 record or the latest applied return that reopened the contribution's occurrence
 (`participant_item_before_window`), so a read made before a return cannot be
 recorded after it even from the same Supervisor run, while a read from an earlier

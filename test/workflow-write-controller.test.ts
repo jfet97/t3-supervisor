@@ -1508,8 +1508,8 @@ it.effect("activity references are scoped and stored as navigation evidence with
 
 // the root's own completed main-run tool item with strong native identity, dated by T3; variants break one fence each
 const rootItemDetail = (fixture: {supervisorThreadId: string}, id: string, toolName: string, input: Record<string, unknown>, overrides: Record<string, unknown> = {}) => ({
-  id, type: "dynamic_tool", threadId: fixture.supervisorThreadId, runId: "supervisor-run-current", nodeId: `node-${id}`, parentItemId: null,
-  nativeItemRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}, status: "completed", toolNonExecutionKind: null, toolName, input,
+  id, type: "dynamic_tool", threadId: fixture.supervisorThreadId, runId: "supervisor-run-current", nodeId: `node-${id}`, parentItemId: null, providerThreadId: "provider-thread-current",
+  ordinal: 100, nativeItemRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}, status: "completed", toolNonExecutionKind: null, toolName, input,
   completedAt: "2026-10-14T00:00:02.000Z", ...overrides});
 const rootItemNode = (fixture: {supervisorThreadId: string}, id: string, runId = "supervisor-run-current", rootNodeId = "supervisor-root", status = "completed") => ({
   id: `node-${id}`, kind: "dynamic_tool", threadId: fixture.supervisorThreadId, runId, rootNodeId, providerThreadId: "provider-thread-current", parentNodeId: rootNodeId, status});
@@ -1570,6 +1570,12 @@ it.effect("a participant observation is the root's own completed main-run item w
     rootItem("rolled-back-read", "mcp__github__get_pull_request", {number: 42}, {runId: "rolled-back-run", nodeId: "node-rolled-back-read"});
     rootItem("undated-read", "mcp__github__get_pull_request", {number: 42}, {runId: "undated-run", nodeId: "node-undated-read", completedAt: null, updatedAt: null});
     rootItem("stale-read", "mcp__github__get_pull_request", {number: 42}, {completedAt: "1970-01-01T00:00:00.500Z"});
+    // the shared execution fences, each on its own: an undated item in a run that ended later, a rolled-back root under a completed run, a
+    // foreign provider thread and a native reference with strength alone
+    rootItem("undated-late-run-read", "mcp__github__get_pull_request", {number: 42}, {runId: "late-run", nodeId: "node-undated-late-run-read", completedAt: null, updatedAt: null});
+    rootItem("rolled-root-read", "mcp__github__get_pull_request", {number: 42}, {runId: "rolled-root-run", nodeId: "node-rolled-root-read"});
+    rootItem("foreign-provider-read", "mcp__github__get_pull_request", {number: 42}, {providerThreadId: "provider-thread-other"});
+    rootItem("strength-only-read", "mcp__github__get_pull_request", {number: 42}, {nativeItemRef: {strength: "strong"}});
     const observe = (operationId: string, evidence: Array<Record<string, unknown>>) => Effect.gen(function* () {
       const document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
       const apply = yield* applyArgs(fixture, {operationId, workflowId: created.workflowId, expectedRevision: document.revision, status: document.status,
@@ -1578,10 +1584,16 @@ it.effect("a participant observation is the root's own completed main-run item w
       // the root's projection carries the cited items' main-run nodes and the runs they name
       fixture.projection.runs.push(
         {id: "rolled-back-run", ordinal: 2, status: "rolled_back", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: "2026-10-14T00:00:00.000Z", completedAt: null, rootNodeId: "rolled-back-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"},
-        {id: "undated-run", ordinal: 3, status: "completed", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: null, completedAt: null, rootNodeId: "undated-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"});
+        {id: "undated-run", ordinal: 3, status: "completed", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: null, completedAt: null, rootNodeId: "undated-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"},
+        {id: "late-run", ordinal: 4, status: "completed", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: "2026-10-14T00:00:00.000Z", completedAt: "2026-10-14T00:00:09.000Z", rootNodeId: "late-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"},
+        {id: "rolled-root-run", ordinal: 5, status: "completed", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: "2026-10-14T00:00:00.000Z", completedAt: "2026-10-14T00:00:03.000Z", rootNodeId: "rolled-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"});
       (fixture.projection.nodes as Array<Record<string, unknown>>).push(
         {id: "rolled-back-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "rolled-back-run", rootNodeId: "rolled-back-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "rolled_back"},
         {id: "undated-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "undated-run", rootNodeId: "undated-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "completed"},
+        {id: "late-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "late-run", rootNodeId: "late-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "completed"},
+        {id: "rolled-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "rolled-root-run", rootNodeId: "rolled-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "rolled_back"},
+        rootItemNode(fixture, "undated-late-run-read", "late-run", "late-root"),
+        rootItemNode(fixture, "rolled-root-read", "rolled-root-run", "rolled-root"),
         ...items.filter(item => item.runId === "supervisor-run-current").map(item => rootItemNode(fixture, item.id as string)),
         ...["foreign-outer", "rolled-outer", "cycle-a", "cycle-b"].map(id => rootItemNode(fixture, id)),
         rootItemNode(fixture, "rolled-back-read", "rolled-back-run", "rolled-back-root"),
@@ -1642,6 +1654,8 @@ it.effect("a participant observation is the root's own completed main-run item w
     // nested read whose ancestor chain leaves the root's own run
     for (const [id, reason] of [["running-read", "participant_item_not_completed_tool"], ["weak-read", "participant_item_not_strong"],
       ["old-run-read", "participant_item_run_mismatch"], ["rolled-back-read", "participant_item_run_mismatch"], ["undated-read", "participant_item_undated"], ["stale-read", "participant_item_before_window"],
+      ["undated-late-run-read", "participant_item_undated"], ["rolled-root-read", "participant_item_rolled_back"], ["foreign-provider-read", "participant_item_run_mismatch"],
+      ["strength-only-read", "participant_item_identity_incomplete"],
       ["nested-foreign-parent", "participant_item_chain_mismatch"], ["nested-old-run-parent", "participant_item_chain_mismatch"], ["nested-rolled-parent", "participant_item_chain_mismatch"],
       ["nested-outside-parent", "participant_item_chain_mismatch"], ["nested-missing-parent", "participant_item_chain_mismatch"], ["nested-cyclic-parent", "participant_item_chain_mismatch"]] as const)
       assert.deepEqual(yield* observe(`observe-${id}`, [{kind: "observation", note: "Read it.", participantContributionId: "review:ext", observation: "read", sourceItemId: id}]),

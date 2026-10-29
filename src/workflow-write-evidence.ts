@@ -395,6 +395,38 @@ export const nativeCallRoute = (item: Record<string, unknown>, routes: WorkflowT
 const getRun = (projection: Projection, runId: string): RunInfo | undefined =>
   projection.runs.find(run => run.id === runId);
 
+export type NativeItemExecution = {ok: true; run: RunInfo; node: Record<string, unknown>; driver: string} | {ok: false; reason:
+  "native_item_identity_incomplete" | "native_item_not_executed" | "native_tool_item_rolled_back" | "native_item_not_running_or_completed" |
+  "native_run_identity_mismatch" | "native_run_rolled_back" | "native_root_node_rolled_back" | "native_item_outside_main_run" | "native_tool_node_rolled_back"};
+
+/**
+ * The execution and identity checks the write proof and participant receipts share for a strong native item: complete native identity
+ * (driver, native id, ordinal), an executed item that is running or completed, a run of this thread whose provider thread the item names,
+ * neither the run nor its root node rolled back, and the item's node inside that main run and not rolled back. The caller fences the
+ * item's own identity, strength, nesting and route first.
+ */
+export const nativeItemExecution = (projection: Projection, supervisorThreadId: string, item: Record<string, unknown>): NativeItemExecution => {
+  const ref = isRecord(item.nativeItemRef) ? item.nativeItemRef : {};
+  const providerDriver = ref.driver;
+  if (typeof providerDriver !== "string" || !providerDriver || providerDriver.length > 128 || providerDriver.trim() !== providerDriver ||
+    typeof ref.nativeId !== "string" || !ref.nativeId ||
+    typeof item.ordinal !== "number" || !Number.isSafeInteger(item.ordinal) || item.ordinal < 0)
+    return {ok: false, reason: "native_item_identity_incomplete"};
+  if (item.toolNonExecutionKind !== undefined && item.toolNonExecutionKind !== null) return {ok: false, reason: "native_item_not_executed"};
+  if (item.status === "rolled_back") return {ok: false, reason: "native_tool_item_rolled_back"};
+  if (item.status !== "running" && item.status !== "completed") return {ok: false, reason: "native_item_not_running_or_completed"};
+  const run = typeof item.runId === "string" ? getRun(projection, item.runId) : undefined;
+  if (!run || run.threadId !== supervisorThreadId || typeof run.providerThreadId !== "string" || item.providerThreadId !== run.providerThreadId)
+    return {ok: false, reason: "native_run_identity_mismatch"};
+  if (run.status === "rolled_back") return {ok: false, reason: "native_run_rolled_back"};
+  const root = Array.isArray(projection.nodes) ? projection.nodes.find(node => isRecord(node) && node.id === run.rootNodeId) : undefined;
+  if (isRecord(root) && root.status === "rolled_back") return {ok: false, reason: "native_root_node_rolled_back"};
+  const node = mainRunNodeReader(projection, run)(item.nodeId as string);
+  if (!node) return {ok: false, reason: "native_item_outside_main_run"};
+  if (node.status === "rolled_back") return {ok: false, reason: "native_tool_node_rolled_back"};
+  return {ok: true, run, node, driver: providerDriver};
+};
+
 export const verifyWorkflowToolEvidence = (input: {
   projection: Projection;
   supervisorThreadId: string;
@@ -430,28 +462,9 @@ export const verifyWorkflowToolEvidence = (input: {
   if (item.parentItemId !== null) return {status: "denied", reason: "native_item_not_main_strong"};
   if (!isRecord(item.nativeItemRef) || item.nativeItemRef.strength !== "strong")
     return {status: "denied", reason: "native_item_not_main_strong"};
-  const providerDriver = item.nativeItemRef.driver;
-  if (typeof providerDriver !== "string" || !providerDriver || providerDriver.length > 128 || providerDriver.trim() !== providerDriver ||
-    typeof item.nativeItemRef.nativeId !== "string" || !item.nativeItemRef.nativeId ||
-    typeof item.ordinal !== "number" || !Number.isSafeInteger(item.ordinal) || item.ordinal < 0)
-    return {status: "denied", reason: "native_item_identity_incomplete"};
-  if (item.toolNonExecutionKind !== undefined && item.toolNonExecutionKind !== null)
-    return {status: "denied", reason: "native_item_not_executed"};
-  if (item.status === "rolled_back") return {status: "denied", reason: "native_tool_item_rolled_back"};
-  if (item.status !== "running" && item.status !== "completed")
-    return {status: "denied", reason: "native_item_not_running_or_completed"};
-  const run = getRun(input.projection, item.runId);
-  if (!run || run.threadId !== input.supervisorThreadId || typeof run.providerThreadId !== "string" ||
-    item.providerThreadId !== run.providerThreadId)
-    return {status: "denied", reason: "native_run_identity_mismatch"};
-  if (run.status === "rolled_back") return {status: "denied", reason: "native_run_rolled_back"};
-  const root = Array.isArray(input.projection.nodes)
-    ? input.projection.nodes.find(node => isRecord(node) && node.id === run.rootNodeId)
-    : undefined;
-  if (isRecord(root) && root.status === "rolled_back") return {status: "denied", reason: "native_root_node_rolled_back"};
-  const node = mainRunNodeReader(input.projection, run)(item.nodeId);
-  if (!node) return {status: "denied", reason: "native_item_outside_main_run"};
-  if (node.status === "rolled_back") return {status: "denied", reason: "native_tool_node_rolled_back"};
+  const execution = nativeItemExecution(input.projection, input.supervisorThreadId, item);
+  if (!execution.ok) return {status: "denied", reason: execution.reason};
+  const providerDriver = execution.driver;
   if (!recorded.recognized) return {status: "denied", reason: "native_tool_name_unrecognized",
     ...(recorded.observedToolName ? {observedToolName: boundedObservedToolName(recorded.observedToolName)} : {})};
   return {
@@ -464,7 +477,7 @@ export const verifyWorkflowToolEvidence = (input: {
       nativeInputCanonical,
       providerThreadId: item.providerThreadId as string,
       ordinal: item.ordinal as number,
-      status: item.status,
+      status: item.status as "running" | "completed",
       nativeItemRef: {
         driver: providerDriver,
         nativeId: item.nativeItemRef.nativeId as string,
