@@ -6882,7 +6882,7 @@ it.effect("check-ins carry the watch contract and the outcome record without a f
   const clock = yield* pinnedClock(baseTime);
   const {fixture, request} = yield* pinnedReview(clock, "watch-contract");
   // the outcome belongs to the watch's own ending, never to a count of waits or to "the end of the turn"
-  assert.ok(request.text.includes(`When the watch ends (section monitoring says when; timed-out waits while the main still runs are not an ending), record its one outcome with workflow_write record_review, requestId ${JSON.stringify(request.id)}, then the turn end marker: ${request.completionMarker}.`));
+  assert.ok(request.text.includes(`At a permitted watch ending (section monitoring), record its one outcome with workflow_write record_review, requestId ${JSON.stringify(request.id)}; final marker: ${request.completionMarker}.`));
   assert.doesNotMatch(request.text, /Before the marker|End your final response with this exact marker|at the end of the turn/u);
   const monitoring = yield* sectionText(fixture, "monitoring");
   assert.match(monitoring, /This check-in is the watch of the whole task, not a finite report/u);
@@ -6955,7 +6955,7 @@ it.effect("an operative run ending with agreed work unfinished gets one liveness
   assert.match(first.text, /Liveness check-in for main "operative-a": run "operative-active-run" completed, workflow revision \d+, repeat 0; agreed work unfinished, no wait recorded\. Read it with workflow_read \{"supervisorThreadId":"[^"]+","bindingGeneration":\d+,"view":"request","requestId":"[^"]+"\}, then resume the watch under sections monitoring and contact\./u);
   assert.deepEqual(first.envelope, {kind: "liveness", ...first.liveness, unsettled: (first.envelope as {unsettled: string[]}).unsettled}, "the wake's frozen envelope is its key and the unsettled occurrences");
   assert.ok(((first.envelope as {unsettled: string[]}).unsettled).length > 0, "the agreed work still unsettled is named by node id");
-  assert.ok(first.text.includes(`When the watch ends (section monitoring says when; timed-out waits while the main still runs are not an ending), record its one outcome with workflow_write record_review, requestId ${JSON.stringify(first.id)}, then the turn end marker: ${first.completionMarker}.`));
+  assert.ok(first.text.includes(`At a permitted watch ending (section monitoring), record its one outcome with workflow_write record_review, requestId ${JSON.stringify(first.id)}; final marker: ${first.completionMarker}.`));
   assert.doesNotMatch(first.text, /at the end of the turn/u);
   assert.ok(rootCalls().length > 0 && rootCalls().every(call => (call.payload.dispatchMode as {type: string}).type === "queue_after_active"),
     "every root wake is queued behind an active turn, never steered into it");
@@ -7400,12 +7400,11 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
   const route = Buffer.byteLength(toolRouteReminder, "utf8");
   for (const label of ["root notice, full (first wake of an instructions version)", "interpretation request, task a", "routine check-in, first wake", "definition review wake, dispatched, first change"])
     assert.ok(row(label).ruleBytes <= route, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
-  // one line each: identities, counts, read route, the watch-ending outcome sentence and the marker (the liveness repeat wake measured 1018
-  // bytes with the explicit "timed-out waits are not an ending" wording, which is the point of the sentence, not payload)
+  // one line each: identities, counts, read route, the short outcome reference and the marker
   for (const label of ["root notice, pointer (later wakes)", "routine check-in, second wake", "liveness wake, first", "liveness wake, repeat", "protocol repair wake, attempt 1", "protocol repair wake, attempt 2",
     "interpretation request, dispatched, later request of the same binding (pointer)"]) {
     assert.equal(row(label).ruleBytes, 0, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
-    assert.ok(row(label).bytes < 1_100, `${label}: ${row(label).bytes} bytes`);
+    assert.ok(row(label).bytes < 1_000, `${label}: ${row(label).bytes} bytes`);
   }
   for (const sample of samples.filter(item => ["N3", "L", "N4", "N5"].includes(item.path) && item.text))
     assert.doesNotMatch(sample.text, /"readItemId"|"taskContext"|"fallbackAncestors"|"decisionTemplate"|"userMessages"|UNTRUSTED|"unsettled"|"expected"|"detail"|Rejection:/u, `${sample.label} pushes retrievable payload`);
@@ -7436,7 +7435,7 @@ it.effect("workflow_read view request returns the root's own frozen check-in env
   const priorityKinds = [...new Set(request.batch.threads.flatMap(thread => thread.priorityKinds))];
   assert.equal(request.text, `${fixture.conversation.rootNotice(fixture.binding)}\nCheck-in for main "operative-a": change index (${request.batch.trigger}; pending ${request.batch.pendingItemCount}; threads ${envelope.threads.length}${priorityKinds.length ? `; priority ${priorityKinds.join(", ")}` : ""}). ` +
     `Read it with workflow_read ${JSON.stringify({...reader, view: "request", requestId: request.id})}, then act under sections monitoring and contact. ` +
-    `When the watch ends (section monitoring says when; timed-out waits while the main still runs are not an ending), record its one outcome with workflow_write record_review, requestId ${JSON.stringify(request.id)}, then the turn end marker: ${request.completionMarker}.`);
+    `At a permitted watch ending (section monitoring), record its one outcome with workflow_write record_review, requestId ${JSON.stringify(request.id)}; final marker: ${request.completionMarker}.`);
   assert.doesNotMatch(request.text, /taskContext|fallbackAncestors|readItemId|UNTRUSTED|"threads"|maxHelpersPerRoot/u, "rows, routes, handles and team policy are read, not pushed");
   assert.equal(fixture.calls.find(call => call.payload.messageId === request.messageId)?.payload.text, request.text, "the native send carries the one-line wake");
   // the frozen envelope carries what the wake used to: rows with identities, counts, handles, lifecycle and routes, and the team policy

@@ -36,7 +36,7 @@ it("root and helper share one loop, pacing and ending rules, and only the root c
     assert.ok(helperWatchInstructions.includes(sentence), `helper: ${sentence.slice(0, 40)}`);
   }
   assert.match(activeWatchInstructions, /^This check-in is the watch of the whole task, not a finite report\./u);
-  // Lab finding (root run ended after seven timed-out waits with the main still running): a timed-out wait and a running main are never endings
+  // lab finding (a root run ended after seven timed-out waits with the main still running): a timed-out wait and a running main are never endings
   assert.match(activeWatchInstructions, /a main whose run is still running with agreed work unfinished is never an ending, however many waits timed out/u);
   for (const text of [activeWatchInstructions, helperWatchInstructions]) {
     assert.match(text, /a timed-out wait while the target still runs is neither: read forward and wait again/u);
