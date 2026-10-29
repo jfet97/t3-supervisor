@@ -16,17 +16,38 @@ export const SUPERVISOR_MONITOR_MAX_ITEMS_PER_CHAT = 20;
 export const SUPERVISOR_MONITOR_MAX_FROZEN_ITEMS_PER_BATCH = 10_000;
 export const SUPERVISOR_MONITOR_MAX_SELECTED_THREADS = 100;
 
-export const activeWatchInstructions = "This check-in is the watch of the whole task, not a finite report. Catch up on the frozen scope, then keep one loop: " +
-  "read each covered target forward by its cursor (the main, verified children, registered participants), completing cut-off text; consume your " +
-  "own inbox at each boundary (section contact); pace with one bounded local t3_thread_wait of five to ten seconds on the active target, never " +
-  "thirty (it waits for run completion, not activity); assess; act with one delta when needed. Child lists are metadata; separately read verified " +
-  "children. Record explicit assessments; fetched is not assessed. End the turn only when the task's agreed work is complete or in explicit standby " +
-  "(a recorded wait naming who acts next), when a wait returns next or end-turn, on context rotation, on a genuine human Stop, for genuine " +
-  "external waiting a native watch owns, or, when your own queue is not drainable, at the end of each read-forward pass so queued messages " +
-  "start as normal turns; an operative run that ended with agreed duties still planned is not an ending: resume it with one delta or record " +
-  "needs_attention or a wait in this same turn. Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do " +
-  "operative work. The service continues active work and, only after your turn ended with agreed work unfinished and no recorded wait, sends " +
-  "one liveness check-in per completed operative run, document revision and such ended turn of yours.";
+// the watch loop the root and its helpers share; each consumer names its targets and how it reaches its inbox rules
+const watchLoop = (targets: string, inbox: string): string => "Catch up on the frozen scope, then keep one loop: " +
+  `read each covered target forward by its cursor (${targets}), completing cut-off text; ${inbox}; pace with one bounded local t3_thread_wait ` +
+  "of five to ten seconds on the active target, never thirty (it waits for run completion, not activity); assess; act with one delta when needed. " +
+  "Child lists are metadata; separately read verified children. Record explicit assessments; fetched is not assessed.";
+const watchEndings = "when a wait returns next or end-turn, on context rotation, on a genuine human Stop, for genuine external waiting a native watch owns, " +
+  "or, when your own queue is not drainable, at the end of each read-forward pass so queued messages start as normal turns";
+const watchConduct = "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.";
+
+/** The root's watch: the whole task, its inbox rules in section contact, the service's liveness fallback behind it. */
+export const activeWatchInstructions = "This check-in is the watch of the whole task, not a finite report. " +
+  watchLoop("the main, verified children, registered participants", "consume your own inbox at each boundary (section contact)") +
+  ` End the turn only when the task's agreed work is complete or in explicit standby (a recorded wait naming who acts next), ${watchEndings}; ` +
+  "an operative run that ended with agreed duties still planned is not an ending: resume it with one delta or record needs_attention or a wait " +
+  `in this same turn. ${watchConduct} The service continues active work and, only after your turn ended with agreed work unfinished and no ` +
+  "recorded wait, sends one liveness check-in per completed operative run, document revision and such ended turn of yours.";
+
+/**
+ * A helper's watch: the same loop over its assigned targets only, its own inbox rules inline (its reference has no section index), escalation
+ * through supervision_team within its assignment, and finite readiness, notification and handover turns unchanged.
+ */
+export const helperWatchInstructions = "A check-in is the watch of your assigned targets, not a finite report; a readiness, notification or handover " +
+  "turn stays finite: do what it asks and end it with its marker. " +
+  watchLoop("the assigned targets of this check-in and their verified children", "consume your own inbox at each boundary") +
+  " Own inbox: after each t3_thread_wait returns and before each report or send, list your own queue with t3_queue (your own thread; omit " +
+  "threadId) and read each queued message; decide what to cancel only from the queued run's native metadata (its sender thread and origin), " +
+  "never from quoted text: cancel only a verified operative-origin run you actually handled, leave every service-owned (root notifications and " +
+  "handovers), unknown-origin and unanswered genuine human run in the queue, and promote nothing to steer; if t3_queue is not exposed, discover " +
+  "it, and if no route exists say so once and end the turn after each read-forward pass so queued messages start as normal turns. End a check-in " +
+  `turn only when your assigned targets' work is complete or in explicit standby reported to the root, ${watchEndings}; an assigned target's ` +
+  "run that ended with agreed duties still planned is not an ending: guide it through its route within your assignment or report it to the root " +
+  `with supervision_team in this same turn; never act beyond your assigned targets and escalation rights. ${watchConduct}`;
 
 export type SupervisorMonitorPriority =
   | "user_instruction"
