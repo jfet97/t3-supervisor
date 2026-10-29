@@ -38,7 +38,8 @@ it("participants merge attached and linked native children with declared partici
       receipt("waited", "c-lifecycle", 1, 1, {kind: "external", ref: "queue:7"}, "lifecycle", 13),
     ],
   } as unknown as WorkflowStateDocument;
-  const scope = new Map<string, ParticipantScopeThread>([["reviewer-a", {threadId: "reviewer-a", lifecycle: "completed"}], ["linked-only", {threadId: "linked-only", lifecycle: "running"}]]);
+  const row = (threadId: string, lifecycle: ParticipantScopeThread["lifecycle"], projectionRead = true): ParticipantScopeThread => ({threadId, lifecycle, projectionRead, archivedAt: null, deletedAt: null});
+  const scope = new Map<string, ParticipantScopeThread>([["reviewer-a", row("reviewer-a", "completed")], ["linked-only", row("linked-only", "running")]]);
   const owners = new Map<string, ParticipantCoverageOwner>([["reviewer-a", "assigned"], ["reviewer-b", "root"]]);
   const rows = workflowParticipants(document, ["linked-only", "reviewer-a"], scope, owners);
   const byId = new Map(rows.map(row => [row.id, row]));
@@ -66,6 +67,34 @@ it("participants merge attached and linked native children with declared partici
   assert.deepEqual([byId.get("contribution:c-unsupported")!.coverage, byId.get("contribution:c-unsupported")!.currentReceipt?.kind], ["unsupported", "unsupported"]);
   assert.deepEqual([byId.get("contribution:c-lifecycle")!.coverage, byId.get("contribution:c-lifecycle")!.completion], ["lifecycle_only", "withdrawn"]);
   for (const row of rows) assert.equal(row.settlement, "not_evaluated");
+});
+
+it("native coverage needs the service's own read of a live local thread, and a conversation declared in another environment never joins a local row", () => {
+  const document = {
+    plan: {kind: "sequence", templatePath: null, nodes: [step("step-review", "Review", ["read-child", "unread-child", "archived-child", "gone-child"])]},
+    returns: [],
+    contributions: [
+      contribution("c-local", "step-review", {kind: "t3_conversation", threadId: "read-child", environmentId: null}),
+      contribution("c-foreign", "step-review", {kind: "t3_conversation", threadId: "read-child", environmentId: "lab-vm"}),
+    ],
+    evidence: [],
+  } as unknown as WorkflowStateDocument;
+  const row = (threadId: string, lifecycle: ParticipantScopeThread["lifecycle"], projectionRead: boolean, archivedAt: string | null = null, deletedAt: string | null = null): ParticipantScopeThread =>
+    ({threadId, lifecycle, projectionRead, archivedAt, deletedAt});
+  const scope = new Map<string, ParticipantScopeThread>([
+    ["read-child", row("read-child", "completed", true)],
+    ["unread-child", row("unread-child", "completed", false)],
+    ["archived-child", row("archived-child", "completed", true, "2026-10-29T00:00:00Z")],
+    ["gone-child", row("gone-child", "unknown", true, null, "2026-10-29T00:00:00Z")],
+  ]);
+  const byId = new Map(workflowParticipants(document, [], scope, new Map()).map(item => [item.id, item]));
+  assert.equal(byId.get("read-child")!.coverage, "native");
+  assert.deepEqual([byId.get("unread-child")!.coverage, byId.get("unread-child")!.lifecycle], ["unknown", "completed"], "lifecycle metadata without the service's read is not coverage");
+  assert.equal(byId.get("archived-child")!.coverage, "unknown", "an archived thread is no live read");
+  assert.equal(byId.get("gone-child")!.coverage, "unknown");
+  assert.deepEqual([byId.get("contribution:c-local")!.coverage, byId.get("contribution:c-local")!.lifecycle], ["native", "completed"], "a local declaration joins the read local row");
+  assert.deepEqual([byId.get("contribution:c-foreign")!.coverage, byId.get("contribution:c-foreign")!.lifecycle, byId.get("contribution:c-foreign")!.environmentId],
+    ["reported", "reported", "lab-vm"], "the same thread id in another environment is another conversation and never aliases the local one");
 });
 
 it("a receipt for a stale attempt is history once a return reopened the occurrence", () => {

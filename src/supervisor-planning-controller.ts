@@ -24,8 +24,8 @@ import { NativeOperateRpc, record, SupervisorRpcError } from "./supervisor-nativ
 import { WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel, type WorkflowLocator } from "./workflow-write-controller.js";
 import { workflowRequestHash } from "./workflow-write-evidence.js";
 import {
-  acknowledgePlanningTarget, addPlanningTargets, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs, expirePlanningAttempt,
-  markPlanningTargetQuiescent, planningTargetAwaited, startPlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningDelivery, planningCanAdopt, planningDraftNotice,
+  acknowledgePlanningTarget, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs, expirePlanningAttempt, refreshPlanningMembership,
+  markPlanningTargetQuiescent, planningTargetAwaited, startPlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningDelivery, planningCanAdopt, planningDraftNotice, planningScopeUnavailable,
   planningDraftSections, planningDraftViews, planningHasUnresolvedEffects, planningHoldText, planningReleaseText, planningWaitOpen, resolvePlanningAttempt, unacceptedProposal,
   type PlanningAttempt, type PlanningDelivery, type PlanningTarget,
 } from "./supervisor-planning.js";
@@ -138,19 +138,30 @@ const make = Effect.gen(function* () {
    * over it), and a parent's acknowledgement never counts for the child, whose own terminal lifecycle marks it quiescent.
    */
   const pausedDescendants = (binding: BindingRecord, scope: SupervisorScopeResolution, parents: ReadonlyMap<string, string | null>,
-    known: readonly string[], reason: string, now: number, cancel?: WorkflowCallCancel) => Effect.gen(function* () {
+    known: readonly string[], quiescent: ReadonlySet<string>, reason: string, now: number, cancel?: WorkflowCallCancel) => Effect.gen(function* () {
     const targets: NewPlanningAttempt["targets"] = [];
     const uncovered: PlanningUncovered[] = [];
+    const resolved: string[] = [];
+    const unsettled: string[] = [];
     const seen = new Set(known);
     for (const child of scope.descendants) {
-      if (!scope.liveIds.has(child.id) || seen.has(child.id)) continue;
+      if (!scope.liveIds.has(child.id)) continue;
       const projection = yield* attempt(native.projection(child.id, cancel));
-      if (!projection.ok || !projectionHasOngoingWork(projection.value, child)) continue;
+      // a live child that cannot be read now is listed as unavailable, never skipped: nothing about its work is established; a quiescent
+      // target that cannot be read, or has work again, is awaited again rather than adopted on its earlier reading
+      if (!projection.ok) {
+        if (quiescent.has(child.id)) unsettled.push(child.id);
+        else if (!seen.has(child.id)) {uncovered.push({threadId: child.id, reason: "unavailable", observedAt: now}); seen.add(child.id);}
+        continue;
+      }
+      resolved.push(child.id);
+      if (quiescent.has(child.id) && projectionHasOngoingWork(projection.value, child)) unsettled.push(child.id);
+      if (seen.has(child.id) || !projectionHasOngoingWork(projection.value, child)) continue;
       const coverage = yield* team.coverage(binding, child.id, parents);
       if (coverage.state !== "root") {uncovered.push({threadId: child.id, reason: "assigned_to_helper", observedAt: now}); seen.add(child.id); continue;}
       const direct = childOrigin(child, undefined) === "delegated_child" && resolveSteerableRun(projection.value) !== null;
       const recipientThreadId = direct ? child.id : child.lineage.parentThreadId;
-      if (!recipientThreadId || !scope.allowedIds.has(recipientThreadId)) continue;
+      if (!recipientThreadId || !scope.allowedIds.has(recipientThreadId)) {uncovered.push({threadId: child.id, reason: "unavailable", observedAt: now}); seen.add(child.id); continue;}
       seen.add(child.id);
       targets.push({threadId: child.id, recipientThreadId, scope: `Descendant of the paused main: ${reason}`,
         assignmentRootThreadId: coverage.assignmentRootThreadId, assignmentEpoch: coverage.assignmentEpoch});
@@ -161,7 +172,18 @@ const make = Effect.gen(function* () {
       targets.push({threadId: target.recipientThreadId, recipientThreadId: target.recipientThreadId, scope: `Dispatch to affected child ${target.threadId}`,
         assignmentRootThreadId: coverage.assignmentRootThreadId, assignmentEpoch: coverage.assignmentEpoch});
     }
-    return {targets, uncovered};
+    return {targets, uncovered, resolved, unsettled};
+  });
+  // one fresh read of the paused main's descendant membership for an open root attempt, applied to the stored attempt
+  const refreshMembership = (binding: BindingRecord, current: PlanningAttempt, now: number, cancel?: WorkflowCallCancel) => Effect.gen(function* () {
+    const listed = yield* attempt(native.listThreads(cancel));
+    const scope = listed.ok ? resolveSupervisorScope(listed.value, binding.projectId, binding.mainThreadId, supervisors.ownedIds) : null;
+    if (!listed.ok || !scope?.complete || !scope.main)
+      return (yield* update(binding.projectId, current.id, row => refreshPlanningMembership(row, {targets: [], uncovered: [], resolved: [], unsettled: [], scopeAvailable: false}, now))) ?? current;
+    const parents = new Map(listed.value.map(thread => [thread.id, thread.lineage.parentThreadId ?? null]));
+    const membership = yield* pausedDescendants(binding, scope, parents, [...current.targets.map(target => target.threadId), ...(current.uncovered ?? []).map(item => item.threadId)],
+      new Set(current.targets.filter(target => target.state === "quiescent").map(target => target.threadId)), current.reason, now, cancel);
+    return (yield* update(binding.projectId, current.id, row => refreshPlanningMembership(row, {...membership, scopeAvailable: true}, now))) ?? current;
   });
   const currentAttempt = (projectId: string, id: string) => Effect.map(requests.planningAttempts(projectId), rows => rows.find(row => row.id === id) ?? null);
   const update = (projectId: string, id: string, change: (current: PlanningAttempt) => PlanningAttempt) => transaction(Effect.gen(function* () {
@@ -227,20 +249,29 @@ const make = Effect.gen(function* () {
         })));
         return attached ? {status: "recorded", attempt: answer(attached)} : denied("planning_scope_changed");
       }
-      if (payload.resolution !== "no_plan" && !planningCanAdopt(selected, clockNow)) return denied("planning_acks_incomplete");
+      // a release reads the membership afresh: a descendant that started after the last reconcile, or one that cannot be read, is held or
+      // listed before adoption is judged
+      const refreshed = payload.resolution !== "no_plan" && selected.ownerThreadId === binding.threadId && selected.targets.some(target => target.threadId === binding.mainThreadId)
+        ? yield* refreshMembership(binding, selected, clockNow, cancel) : selected;
+      if (payload.resolution !== "no_plan" && planningScopeUnavailable(refreshed)) return denied("planning_scope_unavailable");
+      if (payload.resolution !== "no_plan" && !planningCanAdopt(refreshed, clockNow)) return denied("planning_acks_incomplete");
       const released = yield* gate.admit(guard => transaction(Effect.gen(function* () {
         if (!(yield* currentOwner(payload, binding, guard))) return null;
         const current = yield* currentAttempt(binding.projectId, selected.id);
         if (!current || payload.resolution !== "no_plan" && !planningCanAdopt(current, clock.currentTimeMillisUnsafe())) return null;
+        // a child whose work will resume is pointed to its linked, planned workflow and cannot continue without one; a child whose work
+        // finished, or whose result was accepted, has only a hold to release and needs no plan fabricated for it
         const scopedIds = new Map<string, string>();
         if (payload.resolution !== "no_plan") for (const target of current.targets.filter(target => target.threadId !== binding.mainThreadId)) {
+          if (target.state === "quiescent" || target.state === "closed") continue;
           const child = yield* states.getState(binding.projectId, binding.mainThreadId, target.threadId);
-          if (child.status !== "found" || child.document.plan === null || !child.document.parentWorkflowId) return null;
+          if (child.status !== "found" || child.document.plan === null || !child.document.parentWorkflowId) return "unscoped" as const;
           scopedIds.set(target.threadId, child.document.workflowId);
         }
         return yield* update(binding.projectId, selected.id, row => resolvePlanningAttempt({...row, targets: row.targets.map(target =>
           scopedIds.has(target.threadId) ? {...target, scopedWorkflowId: scopedIds.get(target.threadId)!} : target)}, payload.resolution ?? "continue", clockNow));
       })));
+      if (released === "unscoped") return denied("planning_target_unscoped");
       return released ? {status: "recorded", attempt: answer(released)} : denied("planning_scope_changed");
     }
     if (!payload.targetThreadIds?.length || !payload.reason || new Set(payload.targetThreadIds).size !== payload.targetThreadIds.length)
@@ -283,7 +314,7 @@ const make = Effect.gen(function* () {
     // covers is listed as uncovered, never paused by the root's authority and never silently omitted
     const uncovered: PlanningUncovered[] = [];
     if (payload.supervisorThreadId === binding.threadId && targets.some(target => target.threadId === binding.mainThreadId)) {
-      const descendants = yield* pausedDescendants(binding, scope, parents, targets.map(target => target.threadId), payload.reason, clockNow, cancel);
+      const descendants = yield* pausedDescendants(binding, scope, parents, targets.map(target => target.threadId), new Set(), payload.reason, clockNow, cancel);
       targets.push(...descendants.targets);
       uncovered.push(...descendants.uncovered);
     }
@@ -660,17 +691,10 @@ const make = Effect.gen(function* () {
           task.agreement.proposalId !== current.baselineAgreementId)
           current = (yield* update(binding.projectId, current.id, row => closePlanningTarget(row, binding.mainThreadId, now)))!;
       }
-      // a child that appeared after the pause of its main is held the same way while the attempt is open; one that cannot be held is listed
-      if (current.state === "open" && current.ownerThreadId === binding.threadId && current.targets.some(target => target.threadId === binding.mainThreadId)) {
-        const listed = yield* attempt(native.listThreads());
-        const scope = listed.ok ? resolveSupervisorScope(listed.value, binding.projectId, binding.mainThreadId, supervisors.ownedIds) : null;
-        if (listed.ok && scope?.complete && scope.main) {
-          const parents = new Map(listed.value.map(thread => [thread.id, thread.lineage.parentThreadId ?? null]));
-          const late = yield* pausedDescendants(binding, scope, parents, [...current.targets.map(target => target.threadId), ...(current.uncovered ?? []).map(item => item.threadId)],
-            current.reason, now);
-          if (late.targets.length || late.uncovered.length) current = (yield* update(binding.projectId, current.id, row => addPlanningTargets(row, late.targets, late.uncovered, now)))!;
-        }
-      }
+      // a child that appeared after the pause of its main is held the same way while the attempt is open; one that cannot be read or held
+      // is listed, and an unreadable lineage marks the attempt until a later read establishes membership again
+      if (current.state === "open" && current.ownerThreadId === binding.threadId && current.targets.some(target => target.threadId === binding.mainThreadId))
+        current = yield* refreshMembership(binding, current, now);
       for (const target of current.targets) {
         if (!planningTargetAwaited(target)) continue;
         const projection = yield* attempt(native.projection(target.threadId));

@@ -24,8 +24,13 @@ const time = (value: number) => {
   return Number.isNaN(date.valueOf()) ? "Unknown time" : date.toLocaleString();
 };
 
+// a declared conversation in another environment is a different conversation: it gets its full identity and no local link, because this
+// dashboard has no environment-qualified browser route; a local link would open the wrong conversation
+const foreign = (participant: WorkflowProgressParticipant, localEnvironmentId: string | null | undefined): boolean =>
+  participant.environmentId !== null && participant.environmentId !== localEnvironmentId;
+
 /** Every participant of a workflow with its role, lifecycle, completion, coverage and receipt as distinct facts; settlement is not evaluated here. */
-export function WorkflowParticipants({workflow}: {workflow: WorkflowProgressWorkflow | undefined}) {
+export function WorkflowParticipants({workflow, localEnvironmentId}: {workflow: WorkflowProgressWorkflow | undefined; localEnvironmentId?: string | null | undefined}) {
   const participants = workflow?.participants ?? [];
   return <section className="stack workflow-participants" aria-labelledby="workflow-participants-title">
     <h3 id="workflow-participants-title">Participants</h3>
@@ -40,8 +45,10 @@ export function WorkflowParticipants({workflow}: {workflow: WorkflowProgressWork
         return <li key={participant.id} className="workflow-participant">
           <div className="row between">
             <div className="text-group">
-              <strong>{participant.threadId ? <a href={threadHref(participant.threadId)}>{participant.handle}</a> : participant.handle ?? "No handle reported"}</strong>
-              <p className="muted small">{kindText[participant.kind]}{participant.environmentId ? ` · environment ${participant.environmentId}` : ""}
+              <strong>{participant.threadId && !foreign(participant, localEnvironmentId) ? <a href={threadHref(participant.threadId)}>{participant.handle}</a>
+                : participant.handle ? <span className="participant-identity">{participant.handle}</span> : "No handle reported"}</strong>
+              <p className="muted small">{kindText[participant.kind]}
+                {participant.environmentId ? foreign(participant, localEnvironmentId) ? <> · environment <code>{participant.environmentId}</code> (another environment; open it there, no local link)</> : ` · environment ${participant.environmentId}` : ""}
                 {participant.contributionId ? ` · contribution ${participant.contributionId} revision ${participant.revision}` : ""}</p>
             </div>
             <span className={`pill ${coverage.tone}`}>Coverage: {coverage.label}</span>
@@ -55,10 +62,12 @@ export function WorkflowParticipants({workflow}: {workflow: WorkflowProgressWork
           <EntityDetails title="Coverage receipt"><div className="text-group small">
             <p>{coverage.detail}</p>
             {participant.currentReceipt
-              ? <p>Latest receipt: {participant.currentReceipt.kind} · {time(participant.currentReceipt.recordedAt)} · by{" "}
+              ? <><p>Latest receipt: {participant.currentReceipt.kind} · {time(participant.currentReceipt.recordedAt)} · by{" "}
                 <a href={threadHref(participant.currentReceipt.actorSupervisorThreadId)}>this Supervisor</a>
                 {participant.currentReceipt.toolName ? <> · tool <code>{participant.currentReceipt.toolName}</code></> : null}
-                {participant.currentReceipt.sourceItemId ? <> · item <code>{participant.currentReceipt.sourceItemId}</code></> : null}</p>
+                {participant.currentReceipt.sourceItemId ? <> · item <code>{participant.currentReceipt.sourceItemId}</code></> : null}
+                {participant.currentReceipt.repeats > 1 ? <> · repeated {participant.currentReceipt.repeats} times since {time(participant.currentReceipt.firstRecordedAt)}</> : null}</p>
+              <p className="muted">A receipt records a read at its time. Whether the same route is available now is not verified.</p></>
               : <p>No receipt for the current declaration, revision and attempt.</p>}
             {participant.priorReceipts > 0 && <p className="muted">{participant.priorReceipts} earlier receipt{participant.priorReceipts === 1 ? "" : "s"} belong to a
               previous revision, declaration or attempt and stay in history.</p>}

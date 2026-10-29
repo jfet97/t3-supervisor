@@ -370,10 +370,12 @@ A record may name its participant generically: a T3 conversation (local or in a
 linked environment), an opaque external handle, or unknown. The declaration is
 untrusted and grants nothing. The root may attribute its own observation of a
 participant by citing its own completed native tool call; a wait, list or search
-call establishes lifecycle only, never a transcript read. The task page's
+call establishes lifecycle only, never a transcript read, and a read is credited
+only to the declaration and attempt it was made in. The task page's
 Participants section shows every participant's role and attempt, conversation
 lifecycle, completion and coverage as distinct facts, and states when nothing was
-observed or no route exists; settlement is evaluated separately.
+observed or no route exists; a conversation in another environment is shown with
+its environment and no local link; settlement is evaluated separately.
 
 Scope is the main workflow only. A local child that used external help reports
 the outcome to the main, which relays it with its own record; no child or external
@@ -496,7 +498,14 @@ guidance is the Supervisor's assessment, not evidence that the operative acted o
 When planning changes what affected actors do next, `supervision_planning pause`
 requests a bounded hold for those actors. Each actor must acknowledge its own pause
 or be verified quiet; a parent acknowledgement holds its dispatch only. Native or
-idle children use a verified parent relay. Unrelated siblings keep working.
+idle children use a verified parent relay. Unrelated siblings keep working. A held
+descendant whose work finished is verified quiet by the release's own fresh read,
+never by its earlier reading: a finished child read busy or unreadable again is
+awaited again. Its relayed hold is released as a dispatch hold only, with no
+instruction to continue; a finished child held directly gets no notice at all, since
+a message would start new work; and no workflow is fabricated for it. A child whose
+work resumes under `continue` needs its own linked, planned workflow
+(`planning_target_unscoped` otherwise); `no_plan` frees it without one.
 
 One project-configurable deadline (default five minutes, ten seconds to one hour)
 starts at the first delivery attempt and covers acknowledgement, drafting and

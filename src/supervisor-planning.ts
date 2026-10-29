@@ -41,8 +41,11 @@ export const planningWaitOpen = (target: PlanningTarget): boolean =>
 export const planningTargetAwaited = (target: PlanningTarget): boolean => target.state === "requested" || target.state === "quiescent" ||
   target.state === "release_pending" || target.hold.state === "sending" || target.hold.state === "uncertain";
 
+// the mark is a timestamp, so it is tested for presence rather than truthiness
+export const planningScopeUnavailable = (attempt: PlanningAttempt): boolean => typeof attempt.scopeUnavailableAt === "number";
+
 export const planningCanAdopt = (attempt: PlanningAttempt, now: number): boolean => attempt.state === "open" && now < attempt.deadline &&
-  (attempt.uncovered?.length ?? 0) === 0 &&
+  (attempt.uncovered?.length ?? 0) === 0 && !planningScopeUnavailable(attempt) &&
   attempt.targets.every(target => target.state === "acknowledged" || target.state === "quiescent" || target.state === "closed");
 
 /**
@@ -60,6 +63,39 @@ export const addPlanningTargets = (attempt: PlanningAttempt, targets: NewPlannin
   return {...attempt, targets: [...attempt.targets, ...added], ...(listed.length ? {uncovered: listed} : {})};
 };
 
+/** One fresh membership read of the paused main's descendants: what it could hold, what it could not, what it now settled. */
+export type PlanningMembership = {
+  targets: NewPlanningAttempt["targets"];
+  uncovered: readonly PlanningUncovered[];
+  /** Descendants whose projection was read this time: an earlier "unavailable" listing of them is settled, whether or not they are held. */
+  resolved: readonly string[];
+  /** Quiescent targets whose fresh read found work again or could not be read: their quiescence is withdrawn and the attempt waits for them. */
+  unsettled: readonly string[];
+  /** False when the lineage itself could not be read or was incomplete: nothing about membership is established now. */
+  scopeAvailable: boolean;
+};
+
+/**
+ * Applies a fresh membership read: an unreadable lineage marks the attempt scope-unavailable until a later read establishes it; a
+ * readable one clears that mark, settles the "unavailable" listings it resolved, holds the new descendants and lists the rest.
+ */
+export const refreshPlanningMembership = (attempt: PlanningAttempt, membership: PlanningMembership, now: number): PlanningAttempt => {
+  if (attempt.state !== "open" || now >= attempt.deadline) return attempt;
+  if (!membership.scopeAvailable) return planningScopeUnavailable(attempt) ? attempt : {...attempt, scopeUnavailableAt: now};
+  const settled = new Set([...membership.resolved, ...membership.targets.map(target => target.threadId)]);
+  const kept = (attempt.uncovered ?? []).filter(item => !(item.reason === "unavailable" && settled.has(item.threadId)));
+  const withdrawn = new Set(membership.unsettled);
+  const targets = attempt.targets.map(target => target.state === "quiescent" && withdrawn.has(target.threadId)
+    ? {...withoutQuiescence(target), state: "requested" as const} : target);
+  const cleared = withoutScopeUnavailable(kept.length ? {...attempt, targets, uncovered: kept} : withoutUncovered({...attempt, targets}));
+  return addPlanningTargets(cleared, membership.targets, membership.uncovered, now);
+};
+
+// a reading a fresh one withdraws is removed, not set to undefined, so the stored row stays exact
+const withoutQuiescence = ({quiescence: _quiescence, ...target}: PlanningTarget): PlanningTarget => target;
+const withoutUncovered = ({uncovered: _uncovered, ...attempt}: PlanningAttempt): PlanningAttempt => attempt;
+const withoutScopeUnavailable = ({scopeUnavailableAt: _unavailable, ...attempt}: PlanningAttempt): PlanningAttempt => attempt;
+
 /** A parent can acknowledge its own dispatch hold, never an active child's pause. */
 export const acknowledgePlanningTarget = (attempt: PlanningAttempt, acknowledgement: PlanningAcknowledgement,
   evidence: NonNullable<PlanningTarget["acknowledgement"]>, now: number): PlanningAttempt => {
@@ -67,7 +103,8 @@ export const acknowledgePlanningTarget = (attempt: PlanningAttempt, acknowledgem
     evidence.sourceThreadId !== acknowledgement.targetThreadId) return attempt;
   const target = attempt.targets.find(target => target.threadId === acknowledgement.targetThreadId);
   if (!target || target.state !== "requested" && target.state !== "quiescent" || target.hold.state === "prepared" || target.hold.state === "not_sent") return attempt;
-  return {...attempt, targets: attempt.targets.map(item => item === target ? {...item, state: "acknowledged", acknowledgement: evidence} : item)};
+  // an actor that answers is live: an earlier quiescence reading no longer describes it
+  return {...attempt, targets: attempt.targets.map(item => item === target ? {...withoutQuiescence(target), state: "acknowledged", acknowledgement: evidence} : item)};
 };
 
 /** The caller has verified terminal native work and that its parent's dispatch is held. */
@@ -94,7 +131,9 @@ export const resolvePlanningAttempt = (attempt: PlanningAttempt, reason: NonNull
   if (attempt.state !== "open" && !(attempt.state === "releasing" && (reason === "timeout" || reason === "superseded"))) return attempt;
   const targets = attempt.targets.map(target => {
     if (!planningWaitOpen(target)) return target;
-    const possibleDelivery = target.hold.state !== "prepared" && target.hold.state !== "not_sent";
+    // a finished child held directly gets no notice: its work ended and a message would start new work; a relayed hold is released at its parent
+    const finishedDirect = target.state === "quiescent" && target.threadId !== attempt.mainThreadId && target.threadId === target.recipientThreadId;
+    const possibleDelivery = !finishedDirect && target.hold.state !== "prepared" && target.hold.state !== "not_sent";
     return {...target, state: possibleDelivery ? "release_pending" as const : "closed" as const,
       ...(possibleDelivery ? {release: planningDelivery(attempt.id, target.threadId, "release")} : {closedAt: now})};
   });
@@ -153,7 +192,11 @@ export const unacceptedProposal = (attempt: Pick<PlanningAttempt, "mainThreadId"
  * only acceptance route, the exact record in the operative's own completed reply; a timeout or no-plan release continues the task.
  */
 export const planningReleaseText = (attempt: PlanningAttempt, target: PlanningTarget, pending: PlanningReleasePending | null = null): string => {
-  const released = `${target.threadId !== target.recipientThreadId ? `Relay to child ${target.threadId}: planning` : "Planning"} pause ${attempt.id} released (${releaseNotes[attempt.resolution ?? "continue"]}).`;
+  const relayed = target.threadId !== target.recipientThreadId;
+  const released = `${relayed ? `Relay to child ${target.threadId}: planning` : "Planning"} pause ${attempt.id} released (${releaseNotes[attempt.resolution ?? "continue"]}).`;
+  // a finished child's relayed hold is a dispatch hold only: releasing it resumes nothing and re-tasks nothing under the old result
+  if (relayed && target.quiescence && target.threadId !== attempt.mainThreadId)
+    return `${released} Child ${target.threadId} had finished its work: this releases your dispatch hold only. Do not restart it or re-task it under its earlier result; new work for it needs its own assignment. Human Stops and limits still apply.`;
   if (pending) {
     const route = pending.proposalId
       ? `workflow proposal ${pending.proposalId} is not agreed; read it with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: pending.taskId, proposalId: pending.proposalId})} and, if you agree, put its exact acceptance record in your own completed reply`
@@ -180,6 +223,7 @@ export const planningAttemptAnswer = (attempt: PlanningAttempt, withDraftInstruc
   attemptId: attempt.id, state: attempt.state, deadline: deadlineText(attempt), resolution: attempt.resolution,
   targets: attempt.targets.map(target => ({threadId: target.threadId, state: target.state, ack: target.acknowledgement?.messageId ?? null})),
   uncovered: (attempt.uncovered ?? []).map(item => ({threadId: item.threadId, reason: item.reason})),
+  scopeUnavailable: planningScopeUnavailable(attempt),
   draft: attempt.draft ? {state: attempt.draft.state, taskId: attempt.draft.taskId} : null,
   ...(withDraftInstruction && attempt.state === "open" && !attempt.draft ? {draftInstruction: planningDraftInstruction(attempt)} : {}),
 });

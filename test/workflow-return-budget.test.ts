@@ -9,6 +9,7 @@ import {workflowMutationLimits, type WorkflowAgreementImport, type WorkflowApply
 import {backToContext, occurrenceAttempts, planBackTos, planBranches, planEntities, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import {effectiveIndex, indexSource, projectIndex} from "./project-definitions-fixture.js";
 import {execute, openWorkflowStores, query, temporaryDirectory} from "./support/g12-stores.js";
+import {guidanceTransaction} from "../src/guidance-sql.js";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {progressWorkflow} from "../src/workflow-progress.js";
@@ -802,6 +803,49 @@ it.live("a status-only apply after a new task agreed the same fixed workflow kee
   assert.equal(kept.returnBudgets?.some(item => item.budgetId === "ef".repeat(32)), false);
   assert.equal(returnBudgetUsed(kept.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1);
 }), {timeout: 30_000});
+
+// G: continuous observation never consumes the evidence history: an identical receipt is one entry that counts its repeats, and an
+// observation-only apply records no plan update, so far more reads than the evidence cap stay writable with history intact
+it.live("repeated identical receipts compact into one counted entry and observation-only applies add no plan_updated, so reads never exhaust the evidence cap", () => Effect.gen(function* () {
+  const run = yield* open([local("work")]);
+  const document = yield* run.main();
+  const work = planEntities(document.plan).find(node => node.kind === "step")!;
+  const recorded = yield* guidanceTransaction(run.box.stores.sql)(run.box.stores.workflows.recordContribution(run.owner, {contributionId: "ext:1", nodeId: work.nodeId, revision: 1,
+    state: "awaiting_result", summary: "External work.", references: [], externalRef: null, participant: {kind: "external", ref: "agent:1"},
+    sourceThreadId: "main-a", sourceRunId: "run-main", sourceMessageId: "message-1"}, 500));
+  assert.equal(recorded.status, "applied", JSON.stringify(recorded));
+  const before = yield* run.main();
+  const receipt = {contributionId: "ext:1", revision: 1, attempt: 1, participant: {kind: "external" as const, ref: "agent:1"}, receipt: {kind: "read" as const, toolName: "mcp__agent__status", inputDigest: "digest"}};
+  const observe = (index: number) => Effect.gen(function* () {
+    const current = yield* run.main();
+    return yield* run.box.stores.workflows.apply(run.owner, {operationId: `observe-${index}`, workflowId: current.workflowId, expectedRevision: current.revision, status: current.status,
+      objective: current.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: current.plan!,
+      note: `Read ${index}.`, evidence: [{kind: "observation", note: `Read ${index}.`, participantContributionId: "ext:1", observation: "read", sourceItemId: `item-${index}`, participantReceipt: receipt}]},
+    run.validation, 1_000 + index);
+  });
+  for (let index = 1; index <= workflowMutationLimits.maxEvidence + 100; index++) {
+    const result = yield* observe(index);
+    assert.equal(result.status, "applied", `read ${index}: ${JSON.stringify(result)}`);
+  }
+  const after = yield* run.main();
+  assert.equal(after.evidence.length, before.evidence.length + 1, "all reads are one receipt entry");
+  const entry = after.evidence.find(item => item.participant)!;
+  assert.deepEqual([entry.participant!.repeats, entry.participant!.firstRecordedAt, entry.recordedAt, entry.sourceItemId, entry.note],
+    [workflowMutationLimits.maxEvidence + 100, 1_001, 1_000 + workflowMutationLimits.maxEvidence + 100, `item-${workflowMutationLimits.maxEvidence + 100}`, `Read ${workflowMutationLimits.maxEvidence + 100}.`]);
+  assert.equal(after.evidence.filter(item => item.kind === "plan_updated").length, before.evidence.filter(item => item.kind === "plan_updated").length, "observation-only applies record no plan update");
+  assert.equal(after.revision, before.revision + workflowMutationLimits.maxEvidence + 100, "every apply still advanced the revision");
+  // a different fact (another tool) is its own entry; a status change still records its plan update
+  const other = yield* run.box.stores.workflows.apply(run.owner, {operationId: "observe-other", workflowId: after.workflowId, expectedRevision: after.revision, status: after.status,
+    objective: after.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: after.plan!, note: "Another tool.",
+    evidence: [{kind: "observation", note: "Another tool.", participantContributionId: "ext:1", observation: "read", sourceItemId: "item-other",
+      participantReceipt: {...receipt, receipt: {...receipt.receipt, toolName: "mcp__agent__log"}}}]}, run.validation, 9_000);
+  assert.equal(other.status, "applied", JSON.stringify(other));
+  const final = yield* run.main();
+  assert.equal(final.evidence.length, after.evidence.length + 1);
+  const progressed = yield* run.advance(final, "work-underway", 9_100, {work: "underway"}, "underway");
+  assert.equal(progressed.status, "applied", JSON.stringify(progressed));
+  assert.equal((yield* run.main()).evidence.filter(item => item.kind === "plan_updated").length, before.evidence.filter(item => item.kind === "plan_updated").length + 1);
+}), {timeout: 60_000});
 
 // H: the real store's return output, projected and rendered: the returned target is ready, not absent; earlier outcomes on an unselected
 // path are neutral history; previous attempts keep their closed status and selection with reason and source after a fresh selection;

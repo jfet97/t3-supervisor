@@ -98,7 +98,7 @@ export const WorkflowProgressParticipantSchema = Schema.Struct({
   completion: Schema.Literals(["none", "native_completed", "result_reported", "accepted", "needs_more", "withdrawn"]),
   coverage: Schema.Literals(participantCoverageStates),
   currentReceipt: Schema.NullOr(Schema.Struct({kind: Schema.Literals(participantReceiptKinds), recordedAt: Schema.Number, actorSupervisorThreadId: Schema.String,
-    sourceItemId: NullableText, toolName: NullableText, evidenceId: Schema.String})),
+    sourceItemId: NullableText, toolName: NullableText, evidenceId: Schema.String, repeats: Schema.Number, firstRecordedAt: Schema.Number})),
   priorReceipts: Schema.Number,
   settlement: Schema.Literal("not_evaluated"),
 });
@@ -362,7 +362,10 @@ const currentAttemptObservations = (document: WorkflowStateDocument): WorkflowSt
   return document.evidence.filter(item => observationKinds.has(item.kind) && ids.has(item.id));
 };
 
-export type ParticipantScopeThread = Pick<ProjectSupervisorScopeThread, "threadId" | "lifecycle">;
+export type ParticipantScopeThread = Pick<ProjectSupervisorScopeThread, "threadId" | "lifecycle" | "projectionRead" | "archivedAt" | "deletedAt">;
+// a native read of a local thread: the service read its projection in this snapshot and it is neither archived nor deleted; lifecycle
+// metadata without that read is not coverage
+const nativelyRead = (thread: ParticipantScopeThread | undefined): boolean => thread?.projectionRead === true && !thread.archivedAt && !thread.deletedAt;
 export type ParticipantCoverageOwner = "root" | "assigned" | "transfer" | "observe_only" | "unknown";
 const participantDigest = (participant: ExternalContributionParticipant | null | undefined): string => JSON.stringify(participant ?? null);
 const ownerOf = (state: ParticipantCoverageOwner | undefined): WorkflowProgressParticipant["owner"] =>
@@ -389,7 +392,7 @@ export const workflowParticipants = (document: WorkflowStateDocument, linkedChil
     const thread = scopeThreads.get(threadId);
     return {id: threadId, source: "native", kind: "native_child", handle: threadId, environmentId: null, threadId, contributionId: null, revision: null,
       roles: roles.get(threadId) ?? [], owner: ownerOf(coverage.get(threadId)), lifecycle: thread?.lifecycle ?? "unknown", reportedState: null,
-      completion: thread?.lifecycle === "completed" ? "native_completed" : "none", coverage: thread ? "native" : "unknown",
+      completion: thread?.lifecycle === "completed" ? "native_completed" : "none", coverage: nativelyRead(thread) ? "native" : "unknown",
       currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated"};
   };
   const native = [...new Set([...roles.keys(), ...linkedChildren])].map(nativeRow);
@@ -402,8 +405,10 @@ export const workflowParticipants = (document: WorkflowStateDocument, linkedChil
       participantDigest(item.participant!.participant) === participantDigest(participant));
     const latest = current[0];
     const threadId = participant?.kind === "t3_conversation" ? participant.threadId : null;
-    const thread = threadId ? scopeThreads.get(threadId) : undefined;
-    const coverageState: ParticipantCoverageState = thread ? "native" : latest?.participant!.receipt.kind === "read" ? "supervisor_observed"
+    // a declared conversation joins a local scope row only when it is declared local (no environment): the same thread id in another
+    // environment is a different conversation and never aliases a local one
+    const thread = threadId && participant?.kind === "t3_conversation" && participant.environmentId === null ? scopeThreads.get(threadId) : undefined;
+    const coverageState: ParticipantCoverageState = nativelyRead(thread) ? "native" : latest?.participant!.receipt.kind === "read" ? "supervisor_observed"
       : latest?.participant!.receipt.kind === "lifecycle" ? "lifecycle_only" : latest?.participant!.receipt.kind === "unsupported" ? "unsupported"
       : participant ? "reported" : "unknown";
     return {id: `contribution:${contribution.contributionId}`, source: "declared",
@@ -415,7 +420,8 @@ export const workflowParticipants = (document: WorkflowStateDocument, linkedChil
         ? contribution.assessment?.decision === "accepted" ? "accepted" : contribution.assessment?.decision === "needs_more" ? "needs_more" : "result_reported" : "none",
       coverage: coverageState,
       currentReceipt: latest ? {kind: latest.participant!.receipt.kind, recordedAt: latest.recordedAt, actorSupervisorThreadId: latest.actorSupervisorThreadId,
-        sourceItemId: latest.sourceItemId ?? null, toolName: latest.participant!.receipt.toolName, evidenceId: latest.id} : null,
+        sourceItemId: latest.sourceItemId ?? null, toolName: latest.participant!.receipt.toolName, evidenceId: latest.id,
+        repeats: latest.participant!.repeats ?? 1, firstRecordedAt: latest.participant!.firstRecordedAt ?? latest.recordedAt} : null,
       priorReceipts: receipts.length - current.length, settlement: "not_evaluated"};
   });
   return [...native, ...declared];

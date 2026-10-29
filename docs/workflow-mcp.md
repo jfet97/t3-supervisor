@@ -136,13 +136,34 @@ participant as `apply` evidence of kind `observation` with
 `participantContributionId` and `observation` set to `read`, `lifecycle` or
 `unsupported`. For `read` and `lifecycle` the entry cites the root's own completed
 native tool item (`sourceItemId` on the root thread): the service verifies the
-caller and that item, records its tool name and an input digest verbatim, and
-interprets no foreign semantics; a T3 wait, list, search or queue call is accepted
-as `lifecycle` only and refused as `read` (`participant_item_lifecycle_only`).
-`unsupported` cites no item and states that no route exists. Each receipt is
-stored on the evidence with the exact participant, contribution revision and
-occurrence attempt it concerns; a later revision, a changed declaration or an
-applied return retires earlier receipts into history. Helpers cannot record
+caller and that item with the same provenance fences as its own write proof (a
+completed `dynamic_tool` item with strong native identity, in a main run of the
+root that is not rolled back, whose node completed). An item a harness or gateway
+nests under a parent item is the root's own only through its ancestors: each must
+be an item of the same thread and run whose node lies in that main run and is not
+rolled back, within a bounded depth (`participant_item_chain_mismatch` otherwise;
+an unreadable ancestor is pending). The call is recorded as the configured native
+routes read it: a configured gateway call tool naming exactly `{name, arguments}`
+stands for that target, any other wrapper for itself, verbatim and with an input
+digest; no other inner target is inferred and no foreign semantics are
+interpreted. A T3 wait, list, search or queue call under any prefix, directly or
+through a configured gateway call, is accepted as `lifecycle` only and refused as
+`read` (`participant_item_lifecycle_only`).
+The item is credited to the window it belongs to: T3's own time for the item
+(`participant_item_undated` without one) must not precede the current revision's
+record or the latest applied return that reopened the contribution's occurrence
+(`participant_item_before_window`), so a read made before a return cannot be
+recorded after it even from the same Supervisor run, while a read from an earlier
+run inside the current attempt counts. `unsupported` cites no item and states that
+no route exists. Each receipt is stored on the evidence with the exact participant,
+contribution revision and occurrence attempt it concerns; a later revision, a
+changed declaration or an applied return retires earlier receipts into history. An
+identical receipt (same actor, declaration, revision, attempt, kind and tool) updates
+its entry's time, item and `repeats` count in place, and an observation-only apply
+that changes no plan, status, node, branch or selection records no `plan_updated`
+event, so continuous observation never consumes the evidence history. A receipt is
+evidence of a read at its time; whether the route is available now is not
+re-verified. Helpers cannot record
 receipts (`participant_observation_root_only`), a receipt for an unknown
 contribution is invalid (`participant_contribution_unknown`), and a cited item that
 is not the root's own completed tool call is refused. Receipts grant no write or
@@ -153,6 +174,11 @@ handle, roles (occurrence, attempt, replaced by an applied return), owner,
 lifecycle, reported state, completion, coverage (`native`, `supervisor_observed`,
 `lifecycle_only`, `reported`, `unsupported`, `unknown`), the current receipt and the
 count of earlier receipts; settlement is `not_evaluated` until the settlement slice.
+`native` requires the service's own projection read of a live local thread in that
+snapshot (`projectionRead` on the scope row; lifecycle metadata of an unread,
+archived or deleted thread is `unknown`), and a conversation declared with an
+`environmentId` is another environment's conversation: it never joins a local row
+by thread id and the dashboard shows its full identity without a local link.
 
 `workflow_read` returns the bounded contributions and current assessments; what
 they mean is stated once, in the root's instruction section `contributions`, not in

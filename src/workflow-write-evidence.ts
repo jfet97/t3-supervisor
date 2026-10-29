@@ -380,6 +380,18 @@ export const recognisedThreadReadArguments = (item: Record<string, unknown>,
   return recorded?.recognized ? recorded.arguments : null;
 };
 
+/**
+ * The call a native item records, as the configured routes read it: a configured gateway call tool naming exactly `{name, arguments}`
+ * stands for that target, any other item stands for itself; no other wrapper is unwrapped.
+ */
+export const nativeCallRoute = (item: Record<string, unknown>, routes: WorkflowToolRoutes = defaultWorkflowToolRoutes): {toolName: string; input: unknown} | null => {
+  if (typeof item.toolName !== "string") return null;
+  if (routes.gatewayCalls.includes(item.toolName) && isRecord(item.input) && exactKeys(item.input, ["name", "arguments"]) &&
+    typeof item.input.name === "string" && isRecord(item.input.arguments))
+    return {toolName: item.input.name, input: item.input.arguments};
+  return {toolName: item.toolName, input: item.input};
+};
+
 const getRun = (projection: Projection, runId: string): RunInfo | undefined =>
   projection.runs.find(run => run.id === runId);
 

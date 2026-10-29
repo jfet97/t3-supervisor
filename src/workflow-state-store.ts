@@ -39,6 +39,7 @@ import {
   type ExternalContributionParticipant,
   type ExternalContributionRecord,
   type WorkflowContributionAssessmentInput,
+  type WorkflowEvidenceParticipant,
   type ReturnBudget,
   type ReturnBudgetEvent,
   type WorkflowAgreementImport,
@@ -255,7 +256,11 @@ const validEvidenceContribution = (value: unknown): boolean => value === undefin
 const validEvidenceParticipant = (value: unknown): boolean => value === undefined || isRecord(value) &&
   validContributionId(value.contributionId) && validContributionRevision(value.revision) && Number.isSafeInteger(value.attempt) && Number(value.attempt) >= 1 &&
   validParticipant(value.participant) && isRecord(value.receipt) && typeof value.receipt.kind === "string" && (participantReceiptKinds as readonly string[]).includes(value.receipt.kind) &&
-  (value.receipt.toolName === null || validText(value.receipt.toolName)) && (value.receipt.inputDigest === null || validText(value.receipt.inputDigest));
+  (value.receipt.toolName === null || validText(value.receipt.toolName)) && (value.receipt.inputDigest === null || validText(value.receipt.inputDigest)) &&
+  (value.repeats === undefined || Number.isSafeInteger(value.repeats) && Number(value.repeats) >= 1) && (value.firstRecordedAt === undefined || Number.isFinite(value.firstRecordedAt));
+// the identity of one receipt fact: the same actor observing the same declaration, revision and attempt the same way
+const receiptKey = (actor: string, value: WorkflowEvidenceParticipant): string =>
+  JSON.stringify([actor, value.contributionId, value.revision, value.attempt, normalizeParticipant(value.participant), value.receipt.kind, value.receipt.toolName]);
 
 const validContributionImport = (value: unknown): value is ExternalContributionImport => isRecord(value) &&
   exactRecordKeysWithOptional(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"], "participant") &&
@@ -1446,6 +1451,21 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       const nodeId = item.targetNodeId ?? null;
       const previous = nodeId ? previousNodes.get(nodeId) : null;
       const next = nodeId ? nextNodes.get(nodeId) : null;
+      // a repeated identical receipt is one continuing fact: its entry keeps its place and first time, and records the latest read and
+      // the count, so continuous observation never consumes the evidence history
+      if (item.kind === "observation" && item.participantReceipt) {
+        const key = receiptKey(owner.supervisorThreadId, item.participantReceipt);
+        const index = evidence.findIndex(entry => entry.kind === "observation" && entry.participant && entry.actorSupervisorThreadId === owner.supervisorThreadId &&
+          receiptKey(entry.actorSupervisorThreadId, entry.participant) === key);
+        if (index >= 0) {
+          const existing = evidence[index]!;
+          evidence[index] = {...existing, operationId: input.operationId, recordedAt: at, note: item.note,
+            sourceThreadId: item.sourceThreadId ?? existing.sourceThreadId, sourceRunId: item.sourceRunId ?? null, sourceMessageId: item.sourceMessageId ?? null,
+            sourceItemId: item.sourceItemId ?? null,
+            participant: {...item.participantReceipt, repeats: (existing.participant!.repeats ?? 1) + 1, firstRecordedAt: existing.participant!.firstRecordedAt ?? existing.recordedAt}};
+          continue;
+        }
+      }
       evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: item.kind, now: at,
         targetNodeId: nodeId, targetNodeName: next?.name ?? previous?.name ?? null,
         statusFrom: previous?.status ?? (nodeId === null ? current.status : null),
@@ -1456,7 +1476,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         ...(typeof item.sourceProviderTurnId === "string"
           ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
         ...(item.kind === "status_changed" && nodeId !== null && boundary.repaired.has(nodeId) ? {repair: true as const} : {}),
-        ...(item.kind === "observation" && item.participantReceipt ? {participant: item.participantReceipt} : {}),
+        ...(item.kind === "observation" && item.participantReceipt ? {participant: {...item.participantReceipt, repeats: 1, firstRecordedAt: at}} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1479,7 +1499,11 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
 
     const oldPlanHash = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan);
     const newPlanHash = workflowPlanSignature(validatedInput.objective, validatedInput.sourceBinding, validatedInput.requirements, validatedInput.issues, nextPlan);
-    evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
+    // an observation-only apply that changes no plan, status, node, branch or selection records its observations alone
+    const observationOnly = evidenceInputs.length > 0 && evidenceInputs.every(item => item.kind === "observation") && oldPlanHash === newPlanHash &&
+      current.status === validatedInput.status && branchState.invalidated.length === 0 && changedBranches(current.plan, nextPlan).length === 0 &&
+      [...previousNodes.values()].every(node => nextNodes.has(node.nodeId)) && [...nextNodes.values()].every(node => previousNodes.get(node.nodeId)?.status === node.status);
+    if (!observationOnly) evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
       targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: validatedInput.status,
       sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
     const synced = syncedReturns({workflowId: current.workflowId, plan: nextPlan, branchSelections: branchState.selections, returns: current.returns, evidence,

@@ -521,15 +521,15 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
 const unfinishedWorkStandby = "The main chat is idle, but its agreed workflow is unfinished and no current wait for the requester or another party is recorded. The Supervisor stays out of standby without new check-ins; new activity or a message in the main chat resumes its reviews, or you can stop supervision.";
 const settlementText = {pending: "Parking this idle Supervisor is pending.", uncertain: "It is not confirmed whether this idle Supervisor was parked.", settled: "This idle Supervisor is parked.", superseded: "The earlier parking request no longer applies."} as const;
 
-export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata, awareness}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
-  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode; awareness?: SupervisorMonitoringStatus["awareness"]}) {
+export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata, awareness, localEnvironmentId}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
+  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode; awareness?: SupervisorMonitoringStatus["awareness"]; localEnvironmentId?: string | null | undefined}) {
   const children = threads.filter(thread => thread.threadId !== mainThreadId);
   const mainCoverage = coverage.get(mainThreadId);
 
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
     <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><HelpDisclosure title="About child conversations and contributions"><p><GuideLink topic="connected-child">Native and delegated children</GuideLink> are different ways of connecting conversations. A contribution links work to a parent step; a <GuideLink topic="helper">Supervisor assignment</GuideLink> identifies who follows it. Neither a finished conversation nor an assignment proves that a parent step is complete. <GuideLink topic="children">How child tasks contribute</GuideLink>.</p></HelpDisclosure><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
-    <WorkflowParticipants workflow={workflows.get(mainThreadId)}/>
+    <WorkflowParticipants workflow={workflows.get(mainThreadId)} localEnvironmentId={localEnvironmentId}/>
     <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
       const workflow = workflows.get(thread.threadId);
@@ -741,8 +741,11 @@ export function ProjectSupervisorView({
   chatSupervisionLocked = false,
   chatSupervisionMessage = null,
   onChatSupervision = () => {},
+  localEnvironmentId,
 }: {
   attentionEnabled?: boolean;
+  /** The T3 environment this dashboard reads; a participant declared in another environment is never linked locally. */
+  localEnvironmentId?: string | null | undefined;
   chatSupervisionBusy?: boolean;
   chatSupervisionLocked?: boolean;
   chatSupervisionMessage?: string | null;
@@ -811,7 +814,7 @@ export function ProjectSupervisorView({
       onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}/>}
     {section === "connected" && threadId && (() => {
       const view = progressView(workflowProgress?.pages ?? []);
-      return <div className="stack"><ConnectedWork awareness={snapshot.monitoringStatus?.awareness} metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
+      return <div className="stack"><ConnectedWork localEnvironmentId={localEnvironmentId} awareness={snapshot.monitoringStatus?.awareness} metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
     })()}
     {(section === "supervision" || section === "connected") && <ConversationStatus engagement={selectedTask?.engagement} fresh={connected && snapshot.available && currentRead} explicitlyStopped={Boolean(snapshot.chatSupervision?.stopped)}/>}
     {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
@@ -1443,6 +1446,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
     {projectId && connected && loadError && <p className="panel" role="alert">{activeSnapshot ? "Could not refresh Supervisor state. The previous snapshot remains visible." : "Could not load Supervisor state. No snapshot is available."} <button type="button" onClick={refresh}>Retry Supervisor read</button></p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       section={section}
+      localEnvironmentId={environmentId}
       attentionEnabled={attentionEnabled}
       snapshot={activeSnapshot}
       currentRead={!loadError && !AsyncResult.isFailure(refreshed)}

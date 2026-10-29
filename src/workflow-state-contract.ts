@@ -51,6 +51,9 @@ export type WorkflowEvidenceParticipant = {
   attempt: number;
   participant: ExternalContributionParticipant | null;
   receipt: {kind: ParticipantReceiptKind; toolName: string | null; inputDigest: string | null};
+  /** An identical later receipt (same declaration, revision, attempt, kind, tool and actor) updates this entry: how many times, since when. */
+  repeats?: number;
+  firstRecordedAt?: number;
 };
 
 export const externalContributionLimits = {
@@ -588,6 +591,8 @@ export const WorkflowEvidenceParticipantSchema = Schema.Struct({
   attempt: Schema.Number,
   participant: Schema.NullOr(ExternalContributionParticipantSchema),
   receipt: Schema.Struct({kind: Schema.Literals(participantReceiptKinds), toolName: Schema.NullOr(Schema.String), inputDigest: Schema.NullOr(Schema.String)}),
+  repeats: Schema.optionalKey(Schema.Number),
+  firstRecordedAt: Schema.optionalKey(Schema.Number),
 });
 
 export const ExternalContributionSchema = Schema.Struct({

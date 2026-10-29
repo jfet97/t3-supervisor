@@ -40,12 +40,14 @@ import {
 import type { Projection, ThreadInfo } from "./types.js";
 import {resolveSupervisorScope, type SupervisorScopeResolution} from "./supervisor-scope.js";
 import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.js";
+import {mainRunNodeReader, timestampMs} from "./domain.js";
 import {
   canonicalJson,
   isRecord,
   configuredWorkflowToolRoutes,
   providerTurnEvidenceCandidates,
   verifyProviderTurnToolEvidence,
+  nativeCallRoute,
   verifyWorkflowToolEvidence,
   workflowEvidenceCandidates,
   workflowRequestHash,
@@ -603,15 +605,13 @@ const evidenceDiagnostic = (evidence: unknown): WorkflowApplyDiagnostic | null =
   return null;
 };
 const contributionIdPattern = /^[A-Za-z0-9._:-]{1,64}$/u;
-// T3's own wait, list, search and queue tools prove lifecycle only, under any registered prefix or gateway name; nothing else is classified
+// T3's own wait, list, search and queue tools prove lifecycle only, under any registered prefix; nothing else is classified
 const lifecycleOnlyTool = /(?:^|__|\.)t3_(?:thread_wait|thread_list|thread_search|queue)$/u;
 const maxReceiptToolNameLength = 128;
-// the name a native item reports for its call, or the target name a recognised gateway call wraps; recorded verbatim, never interpreted
-const observedToolName = (item: Record<string, unknown>): string | null => {
-  const inner = isRecord(item.input) && typeof item.input.name === "string" && isRecord(item.input.arguments) ? item.input.name : null;
-  const name = inner ?? (typeof item.toolName === "string" ? item.toolName : null);
-  return name === null ? null : name.length <= maxReceiptToolNameLength ? name : `${name.slice(0, maxReceiptToolNameLength - 3)}...`;
-};
+// the name the configured routes read for a native call, recorded verbatim and bounded; an unconfigured wrapper's inner target is never inferred
+const boundedToolName = (name: string): string => name.length <= maxReceiptToolNameLength ? name : `${name.slice(0, maxReceiptToolNameLength - 3)}...`;
+// a receipt item nested by a harness or gateway is credited through its ancestors, each an item of the same root run inside its main run
+const maxReceiptItemDepth = 8;
 
 const statusEditsExpected = `at most ${maxStatusEditsPerApply} entries of exactly {nodeId, status}, each naming a distinct existing step or workflow occurrence`;
 // explicit occurrence status edits: bounded, distinct and shape-checked here; existence is checked against the current document
@@ -1693,6 +1693,14 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     if (target.document.threadId !== owner.mainThreadId) return {status: "invalid", reason: "participant_workflow_not_main"};
     const attempts = occurrenceAttempts(target.document.returns ?? []);
     const resolved = [...evidence];
+    // the root's own projection, read once: a receipt item must be a completed main-run tool call of the root with strong native identity
+    let rootProjection: Projection | null | undefined;
+    const readRootProjection = Effect.fnUntraced(function* (): Effect.fn.Return<Projection | null> {
+      if (rootProjection !== undefined) return rootProjection;
+      const read = yield* settled(native.projection(owner.supervisorThreadId, cancel));
+      rootProjection = Option.isNone(read) || read.value.thread.id !== owner.supervisorThreadId ? null : read.value;
+      return rootProjection;
+    });
     for (const [index, item] of evidence.entries()) {
       if (item.participantContributionId === undefined && item.observation === undefined) continue;
       if (item.kind !== "observation" || item.participantContributionId === undefined || item.observation === undefined)
@@ -1714,19 +1722,52 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       const detail = response.value.item;
       if (!isRecord(detail)) return {status: "invalid", reason: "activity_reference_item_not_found"};
       if (detail.id !== item.sourceItemId || detail.threadId !== owner.supervisorThreadId) return {status: "invalid", reason: "activity_reference_item_mismatch"};
-      // a successful completed tool call of the root's own; its tool name is recorded as T3 reports it
+      // the same provenance fences as the root's own write proof: a completed tool call with strong native identity in a main run of the
+      // root that is not rolled back, whose node completed
       if (detail.type !== "dynamic_tool" || typeof detail.toolName !== "string" || detail.status !== "completed" ||
         (detail.toolNonExecutionKind !== undefined && detail.toolNonExecutionKind !== null))
         return {status: "invalid", reason: "participant_item_not_completed_tool"};
-      if (item.sourceRunId != null && detail.runId !== item.sourceRunId) return {status: "invalid", reason: "activity_reference_item_run_mismatch"};
-      const toolName = observedToolName(detail) ?? detail.toolName;
-      if (item.observation === "read" && lifecycleOnlyTool.test(toolName)) return {status: "invalid", reason: "participant_item_lifecycle_only"};
+      if (!isRecord(detail.nativeItemRef) || detail.nativeItemRef.strength !== "strong") return {status: "invalid", reason: "participant_item_not_strong"};
+      const projection = yield* readRootProjection();
+      if (!projection) return {status: "pending", reason: "activity_reference_read_unavailable"};
+      const run = typeof detail.runId === "string" ? projection.runs.find(candidate => candidate.id === detail.runId && candidate.threadId === owner.supervisorThreadId) : undefined;
+      if (!run || run.status === "rolled_back") return {status: "invalid", reason: "participant_item_run_mismatch"};
+      if (item.sourceRunId != null && run.id !== item.sourceRunId) return {status: "invalid", reason: "activity_reference_item_run_mismatch"};
+      const nodeOf = mainRunNodeReader(projection, run);
+      const node = typeof detail.nodeId === "string" ? nodeOf(detail.nodeId) : null;
+      if (!node || (node.kind !== "dynamic_tool" && node.kind !== "tool_call") || node.status !== "completed") return {status: "invalid", reason: "participant_item_outside_main_run"};
+      // a nested item is the root's own only through its ancestors: each an item of this thread and run whose node lies in the same main
+      // run and is not rolled back; an unreadable ancestor establishes nothing yet, a mismatching or missing one never does
+      const chain = new Set<string>([item.sourceItemId]);
+      let parentItemId: unknown = detail.parentItemId;
+      while (parentItemId !== null && parentItemId !== undefined) {
+        if (typeof parentItemId !== "string" || chain.has(parentItemId) || chain.size > maxReceiptItemDepth) return {status: "invalid", reason: "participant_item_chain_mismatch"};
+        if (yield* Deferred.isDone(cancel)) return {status: "pending", reason: "activity_reference_read_interrupted"};
+        const ancestorRead = yield* settled(native.getTurnItem({threadId: owner.supervisorThreadId, itemId: parentItemId}, cancel));
+        if (Option.isNone(ancestorRead)) return {status: "pending", reason: "activity_reference_read_unavailable"};
+        const ancestor = ancestorRead.value.item;
+        const ancestorNode = isRecord(ancestor) && typeof ancestor.nodeId === "string" ? nodeOf(ancestor.nodeId) : undefined;
+        if (!isRecord(ancestor) || ancestor.id !== parentItemId || ancestor.threadId !== owner.supervisorThreadId || ancestor.runId !== run.id ||
+          ancestor.status === "rolled_back" || !ancestorNode || ancestorNode.status === "rolled_back")
+          return {status: "invalid", reason: "participant_item_chain_mismatch"};
+        chain.add(parentItemId);
+        parentItemId = ancestor.parentItemId;
+      }
+      // the read is credited to the declaration and attempt window it belongs to: T3's own time for the item, never the write's time
+      const at = timestampMs(detail.completedAt) ?? timestampMs(detail.updatedAt) ?? timestampMs(run.completedAt);
+      if (at === null) return {status: "invalid", reason: "participant_item_undated"};
+      const window = Math.max(contribution.recordedAt, ...(target.document.returns ?? [])
+        .filter(entry => entry.state === "applied" && entry.resolvedAt !== null && entry.regionNodeIds.includes(contribution.nodeId)).map(entry => entry.resolvedAt!));
+      if (at < window) return {status: "invalid", reason: "participant_item_before_window"};
+      // the call as the configured routes read it: a configured gateway call stands for its named target, any other wrapper for itself
+      const route = nativeCallRoute(detail, routes);
+      if (!route) return {status: "invalid", reason: "participant_item_not_completed_tool"};
+      const toolName = boundedToolName(route.toolName);
+      if (item.observation === "read" && lifecycleOnlyTool.test(route.toolName)) return {status: "invalid", reason: "participant_item_lifecycle_only"};
       let inputDigest: string | null = null;
-      try {inputDigest = detail.input === undefined ? null : workflowRequestHash({input: detail.input});} catch {inputDigest = null;}
+      try {inputDigest = route.input === undefined ? null : workflowRequestHash({input: route.input});} catch {inputDigest = null;}
       const kind: ParticipantReceiptKind = item.observation;
-      resolved[index] = {...item, sourceThreadId: owner.supervisorThreadId,
-        ...(item.sourceRunId == null && typeof detail.runId === "string" ? {sourceRunId: detail.runId} : {}),
-        participantReceipt: {...receiptBase, receipt: {kind, toolName, inputDigest}}};
+      resolved[index] = {...item, sourceThreadId: owner.supervisorThreadId, sourceRunId: run.id, participantReceipt: {...receiptBase, receipt: {kind, toolName, inputDigest}}};
     }
     return {status: "ready", evidence: resolved};
   });

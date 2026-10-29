@@ -1506,7 +1506,15 @@ it.effect("activity references are scoped and stored as navigation evidence with
   } finally {yield* fixture.close;}
 }));
 
-it.effect("a participant observation is the root's own completed item: read and lifecycle receipts, an unsupported statement, and the fences that stay", () => Effect.gen(function* () {
+// the root's own completed main-run tool item with strong native identity, dated by T3; variants break one fence each
+const rootItemDetail = (fixture: {supervisorThreadId: string}, id: string, toolName: string, input: Record<string, unknown>, overrides: Record<string, unknown> = {}) => ({
+  id, type: "dynamic_tool", threadId: fixture.supervisorThreadId, runId: "supervisor-run-current", nodeId: `node-${id}`, parentItemId: null,
+  nativeItemRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}, status: "completed", toolNonExecutionKind: null, toolName, input,
+  completedAt: "2026-10-14T00:00:02.000Z", ...overrides});
+const rootItemNode = (fixture: {supervisorThreadId: string}, id: string, runId = "supervisor-run-current", rootNodeId = "supervisor-root", status = "completed") => ({
+  id: `node-${id}`, kind: "dynamic_tool", threadId: fixture.supervisorThreadId, runId, rootNodeId, providerThreadId: "provider-thread-current", parentNodeId: rootNodeId, status});
+
+it.effect("a participant observation is the root's own completed main-run item with strong identity: direct, configured-gateway and nested reads, lifecycle receipts, an unsupported statement, no other wrapper inference, and the fences that stay", () => Effect.gen(function* () {
   const fixture = yield* makeFixture();
   try {
     const create = ensureArgs(fixture, "participant-create", "Create a workflow.");
@@ -1526,18 +1534,58 @@ it.effect("a participant observation is the root's own completed item: read and 
       state: "awaiting_result", summary: "An external reviewer works the step.", references: [], externalRef: null, participant: {kind: "external", ref: "github:pr-42"},
       sourceThreadId: fixture.mainThreadId, sourceRunId: "source-run-current", sourceMessageId: "source-message-current"}, 1000));
     assert.equal(recorded.status, "applied", JSON.stringify(recorded));
-    // the root's own items: a generic external read, a T3 wait directly and through a gateway, and a call still running
-    const rootItem = (id: string, toolName: string, input: Record<string, unknown>, status = "completed") => fixture.details.set(id, {id, type: "dynamic_tool",
-      threadId: fixture.supervisorThreadId, runId: "supervisor-run-current", nodeId: `node-${id}`, status, toolNonExecutionKind: null, toolName, input});
+    const items: Array<Record<string, unknown>> = [];
+    const rootItem = (id: string, toolName: string, input: Record<string, unknown>, overrides: Record<string, unknown> = {}) => {
+      const detail = rootItemDetail(fixture, id, toolName, input, overrides);
+      fixture.details.set(id, detail);
+      items.push(detail);
+    };
     rootItem("read-pr", "mcp__github__get_pull_request", {owner: "example", repo: "app", number: 42});
     rootItem("wait-reviewer", "mcp__t3-code__t3_thread_wait", {threadId: "reviewer-thread", timeoutSeconds: 10});
-    rootItem("gateway-wait", "mcpx_call", {name: "t3-code__t3_thread_wait", arguments: {threadId: "reviewer-thread"}});
-    rootItem("running-read", "mcp__github__get_pull_request", {number: 42}, "running");
+    // an unconfigured wrapper stands for itself; a configured gateway call stands for the exact target it names
+    rootItem("harness-wait", "harness_call", {name: "t3-code__t3_thread_wait", arguments: {threadId: "reviewer-thread"}});
+    rootItem("gateway-read", workflowToolNames.mcpxCall[0]!, {name: "t3-code__t3_thread_read", arguments: {threadId: "reviewer-thread"}});
+    rootItem("gateway-wait", workflowToolNames.mcpxCall[0]!, {name: "t3-code__t3_thread_wait", arguments: {threadId: "reviewer-thread"}});
+    // reads nested by a harness are the root's own through their ancestors, each an item of the same run inside its main run
+    rootItem("harness-outer", "harness_call", {name: "batch", arguments: {}});
+    rootItem("harness-inner", "harness_call", {name: "batch", arguments: {}}, {parentItemId: "harness-outer"});
+    rootItem("nested-read", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "harness-outer"});
+    rootItem("deep-read", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "harness-inner"});
+    rootItem("running-read", "mcp__github__get_pull_request", {number: 42}, {status: "running"});
+    rootItem("weak-read", "mcp__github__get_pull_request", {number: 42}, {nativeItemRef: {driver: "codex", nativeId: "weak", strength: "weak"}});
+    rootItem("old-run-read", "mcp__github__get_pull_request", {number: 42}, {runId: "old-run", nodeId: "node-old-run-read"});
+    // a nested read whose ancestor is another thread's, another run's, rolled back, outside the main run, missing or cyclic is no proof
+    const ancestorOnly = (id: string, overrides: Record<string, unknown>) => fixture.details.set(id, rootItemDetail(fixture, id, "harness_call", {name: "batch", arguments: {}}, overrides));
+    ancestorOnly("foreign-outer", {threadId: fixture.mainThreadId});
+    ancestorOnly("rolled-outer", {status: "rolled_back"});
+    ancestorOnly("outside-outer", {nodeId: "node-not-in-projection"});
+    ancestorOnly("cycle-a", {parentItemId: "cycle-b"});
+    ancestorOnly("cycle-b", {parentItemId: "cycle-a"});
+    rootItem("nested-foreign-parent", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "foreign-outer"});
+    rootItem("nested-old-run-parent", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "old-run-read"});
+    rootItem("nested-rolled-parent", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "rolled-outer"});
+    rootItem("nested-outside-parent", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "outside-outer"});
+    rootItem("nested-missing-parent", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "no-such-item"});
+    rootItem("nested-cyclic-parent", "mcp__github__get_pull_request", {number: 42}, {parentItemId: "cycle-a"});
+    rootItem("rolled-back-read", "mcp__github__get_pull_request", {number: 42}, {runId: "rolled-back-run", nodeId: "node-rolled-back-read"});
+    rootItem("undated-read", "mcp__github__get_pull_request", {number: 42}, {runId: "undated-run", nodeId: "node-undated-read", completedAt: null, updatedAt: null});
+    rootItem("stale-read", "mcp__github__get_pull_request", {number: 42}, {completedAt: "1970-01-01T00:00:00.500Z"});
     const observe = (operationId: string, evidence: Array<Record<string, unknown>>) => Effect.gen(function* () {
       const document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
       const apply = yield* applyArgs(fixture, {operationId, workflowId: created.workflowId, expectedRevision: document.revision, status: document.status,
         objective: document.objective, plan: document.plan, note: "Observe the participant.", evidence: evidence as never});
       installEvidence(fixture, apply);
+      // the root's projection carries the cited items' main-run nodes and the runs they name
+      fixture.projection.runs.push(
+        {id: "rolled-back-run", ordinal: 2, status: "rolled_back", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: "2026-10-14T00:00:00.000Z", completedAt: null, rootNodeId: "rolled-back-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"},
+        {id: "undated-run", ordinal: 3, status: "completed", requestedAt: "2026-10-14T00:00:00.000Z", startedAt: null, completedAt: null, rootNodeId: "undated-root", threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"});
+      (fixture.projection.nodes as Array<Record<string, unknown>>).push(
+        {id: "rolled-back-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "rolled-back-run", rootNodeId: "rolled-back-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "rolled_back"},
+        {id: "undated-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "undated-run", rootNodeId: "undated-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "completed"},
+        ...items.filter(item => item.runId === "supervisor-run-current").map(item => rootItemNode(fixture, item.id as string)),
+        ...["foreign-outer", "rolled-outer", "cycle-a", "cycle-b"].map(id => rootItemNode(fixture, id)),
+        rootItemNode(fixture, "rolled-back-read", "rolled-back-run", "rolled-back-root"),
+        rootItemNode(fixture, "undated-read", "undated-run", "undated-root"));
       return yield* fixture.controller.write(apply);
     });
     const read = yield* observe("observe-read", [{kind: "observation", note: "The pull request was read.", participantContributionId: "review:ext", observation: "read", sourceItemId: "read-pr"}]);
@@ -1547,24 +1595,57 @@ it.effect("a participant observation is the root's own completed item: read and 
     assert.ok(receipt?.participant);
     assert.equal(typeof receipt.participant.receipt.inputDigest, "string");
     assert.deepEqual(receipt.participant, {contributionId: "review:ext", revision: 1, attempt: 1, participant: {kind: "external", ref: "github:pr-42"},
-      receipt: {kind: "read", toolName: "mcp__github__get_pull_request", inputDigest: receipt.participant.receipt.inputDigest}});
+      receipt: {kind: "read", toolName: "mcp__github__get_pull_request", inputDigest: receipt.participant.receipt.inputDigest}, repeats: 1, firstRecordedAt: receipt.recordedAt});
     assert.equal(receipt.sourceThreadId, fixture.supervisorThreadId, "the receipt cites the root's own thread");
     assert.equal(receipt.sourceItemId, "read-pr");
-    assert.equal(receipt.sourceRunId, "supervisor-run-current", "the item's run is recorded as navigation");
-    // a wait proves lifecycle only, directly or through a recognised gateway call; declared as a read it is refused
+    assert.equal(receipt.sourceRunId, "supervisor-run-current", "the item's verified run is recorded as navigation");
+    assert.equal(document.evidence.filter(item => item.kind === "plan_updated").length, 1, "an observation-only apply records no plan update");
+    // the same read again is one continuing fact: the entry keeps its place and first time and counts the repeat
+    const again = yield* observe("observe-read-again", [{kind: "observation", note: "The pull request was read again.", participantContributionId: "review:ext", observation: "read", sourceItemId: "read-pr"}]);
+    assert.equal(again.status, "applied", JSON.stringify(again));
+    const repeated = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    assert.equal(repeated.evidence.length, document.evidence.length, "a repeated identical receipt appends nothing");
+    const entry = repeated.evidence.find(item => item.participant)!;
+    assert.deepEqual([entry.id, entry.participant!.repeats, entry.participant!.firstRecordedAt], [receipt.id, 2, receipt.recordedAt]);
+    // a wait is lifecycle only; declared as a read it is refused, directly or through a configured gateway call; an unconfigured wrapper's
+    // inner name is never inferred, its own name is recorded verbatim
     assert.deepEqual(yield* observe("observe-wait-as-read", [{kind: "observation", note: "Waited.", participantContributionId: "review:ext", observation: "read", sourceItemId: "wait-reviewer"}]),
       {status: "invalid", operationId: "observe-wait-as-read", reason: "participant_item_lifecycle_only"});
     assert.deepEqual(yield* observe("observe-gateway-wait-as-read", [{kind: "observation", note: "Waited.", participantContributionId: "review:ext", observation: "read", sourceItemId: "gateway-wait"}]),
       {status: "invalid", operationId: "observe-gateway-wait-as-read", reason: "participant_item_lifecycle_only"});
-    const lifecycle = yield* observe("observe-wait", [{kind: "observation", note: "Waited for the reviewer.", participantContributionId: "review:ext", observation: "lifecycle", sourceItemId: "gateway-wait"}]);
+    const latestReceipt = () => Effect.map(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), current => current!.evidence.filter(item => item.participant).at(-1)!);
+    const wrapped = yield* observe("observe-harness-read", [{kind: "observation", note: "Read through a wrapper.", participantContributionId: "review:ext", observation: "read", sourceItemId: "harness-wait"}]);
+    assert.equal(wrapped.status, "applied", JSON.stringify(wrapped));
+    assert.equal((yield* latestReceipt()).participant?.receipt.toolName, "harness_call", "the wrapper's own name, nothing inferred");
+    const gatewayRead = yield* observe("observe-gateway-read", [{kind: "observation", note: "Read through the gateway.", participantContributionId: "review:ext", observation: "read", sourceItemId: "gateway-read"}]);
+    assert.equal(gatewayRead.status, "applied", JSON.stringify(gatewayRead));
+    assert.equal((yield* latestReceipt()).participant?.receipt.toolName, "t3-code__t3_thread_read", "a configured gateway call stands for the target it names");
+    const gatewayWait = yield* observe("observe-gateway-wait", [{kind: "observation", note: "Waited through the gateway.", participantContributionId: "review:ext", observation: "lifecycle", sourceItemId: "gateway-wait"}]);
+    assert.equal(gatewayWait.status, "applied", JSON.stringify(gatewayWait));
+    assert.equal((yield* latestReceipt()).participant?.receipt.toolName, "t3-code__t3_thread_wait");
+    // a read nested by a harness is credited through its ancestor chain, at any depth within the bound, under its own name and run
+    for (const id of ["nested-read", "deep-read"]) {
+      const nested = yield* observe(`observe-${id}`, [{kind: "observation", note: "Read through the harness.", participantContributionId: "review:ext", observation: "read", sourceItemId: id}]);
+      assert.equal(nested.status, "applied", `${id} ${JSON.stringify(nested)}`);
+      // the same tool's read again continues the existing entry, which now cites the nested item
+      const nestedReceipt = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!.evidence.find(entry => entry.participant && entry.sourceItemId === id);
+      assert.ok(nestedReceipt, id);
+      assert.deepEqual([nestedReceipt.id, nestedReceipt.sourceRunId, nestedReceipt.participant?.receipt.kind, nestedReceipt.participant?.receipt.toolName],
+        [receipt.id, "supervisor-run-current", "read", "mcp__github__get_pull_request"]);
+    }
+    const lifecycle = yield* observe("observe-wait", [{kind: "observation", note: "Waited for the reviewer.", participantContributionId: "review:ext", observation: "lifecycle", sourceItemId: "wait-reviewer"}]);
     assert.equal(lifecycle.status, "applied", JSON.stringify(lifecycle));
     document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
-    const lifecycleReceipt = document.evidence.filter(item => item.participant).at(-1);
-    assert.deepEqual(lifecycleReceipt?.participant?.receipt, {kind: "lifecycle", toolName: "t3-code__t3_thread_wait", inputDigest: lifecycleReceipt?.participant?.receipt.inputDigest},
-      "the gateway's target name is recorded verbatim");
-    // a running or missing item, an item cited for an unsupported statement, an unknown contribution, a foreign item owner
-    assert.deepEqual(yield* observe("observe-running", [{kind: "observation", note: "Still running.", participantContributionId: "review:ext", observation: "read", sourceItemId: "running-read"}]),
-      {status: "invalid", operationId: "observe-running", reason: "participant_item_not_completed_tool"});
+    assert.deepEqual(document.evidence.filter(item => item.participant).at(-1)?.participant?.receipt, {kind: "lifecycle", toolName: "mcp__t3-code__t3_thread_wait",
+      inputDigest: document.evidence.filter(item => item.participant).at(-1)?.participant?.receipt.inputDigest});
+    // the provenance fences: running, weak identity, unknown run, rolled-back run, undated, a read dated before the declaration, and a
+    // nested read whose ancestor chain leaves the root's own run
+    for (const [id, reason] of [["running-read", "participant_item_not_completed_tool"], ["weak-read", "participant_item_not_strong"],
+      ["old-run-read", "participant_item_run_mismatch"], ["rolled-back-read", "participant_item_run_mismatch"], ["undated-read", "participant_item_undated"], ["stale-read", "participant_item_before_window"],
+      ["nested-foreign-parent", "participant_item_chain_mismatch"], ["nested-old-run-parent", "participant_item_chain_mismatch"], ["nested-rolled-parent", "participant_item_chain_mismatch"],
+      ["nested-outside-parent", "participant_item_chain_mismatch"], ["nested-missing-parent", "participant_item_chain_mismatch"], ["nested-cyclic-parent", "participant_item_chain_mismatch"]] as const)
+      assert.deepEqual(yield* observe(`observe-${id}`, [{kind: "observation", note: "Read it.", participantContributionId: "review:ext", observation: "read", sourceItemId: id}]),
+        {status: "invalid", operationId: `observe-${id}`, reason}, id);
     assert.deepEqual(yield* observe("observe-no-item", [{kind: "observation", note: "Read it.", participantContributionId: "review:ext", observation: "read"}]),
       {status: "invalid", operationId: "observe-no-item", reason: "participant_item_required"});
     assert.deepEqual(yield* observe("observe-unsupported-item", [{kind: "observation", note: "No route.", participantContributionId: "review:ext", observation: "unsupported", sourceItemId: "read-pr"}]),
@@ -1583,7 +1664,82 @@ it.effect("a participant observation is the root's own completed item: read and 
     const malformed = yield* observe("observe-malformed", [{kind: "note", note: "x", participantContributionId: "review:ext", observation: "read"}]);
     assert.equal(malformed.status, "invalid");
     assert.equal((malformed as {diagnostic?: {code: string; path: string}}).diagnostic?.code, "evidence_entry_invalid");
-    assert.equal((malformed as {diagnostic?: {code: string; path: string}}).diagnostic?.path, "/input/evidence/0");
+  } finally {yield* fixture.close;}
+}));
+
+it.live("a receipt is credited to the attempt window it belongs to: a read before an applied return cannot be recorded after it, even from the same run, while a prior-run read inside the attempt counts", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const definitions = fixture.definitionReader.current;
+    const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The task needs ${id}.`});
+    const proposal = proposalForDefinitions(definitions, sequencePlan([local("implement"), local("review"),
+      {kind: "branch", condition: "Review found failures.", reason: "The findings decide.", then: {kind: "sequence", nodes: [
+        {kind: "back_to", target: "implement", maximum: 5, reason: "Repeat from implementation while findings remain."}]}},
+      local("deliver")]));
+    yield* replaceCurrentProposal(fixture, "proposal-loop", definitions, proposal);
+    const accepted: WorkflowAgreementImport = {taskId: "task-current", sourceThreadId: fixture.mainThreadId, sourceRunId: "source-run-current",
+      sourceMessageId: "source-message-current", sourceHash: fixture.sourceBinding.sourceHash, objective: "Complete the current project task.",
+      agreement: {status: "agreed", message: "The operative accepted the review loop.", proposalId: "proposal-loop", agreedAt: Date.now(),
+        evidence: {kind: "supervisor_message", messageId: "loop-supervisor-message"}, agentMessageId: "loop-agent-message", workflow: proposal}};
+    assert.equal((yield* fixture.workflows.importAcceptedAgreement(fixture.owner, accepted, Date.now())).status, "applied");
+    const current = () => Effect.map(fixture.workflows.get(fixture.projectId, fixture.mainThreadId), document => document!);
+    let document = yield* current();
+    const step = (id: string) => planEntities(document.plan).find(node => node.kind === "step" && node.localId === id)!;
+    const ids = {implement: step("implement").nodeId, review: step("review").nodeId};
+    const loop = planBranches(document.plan)[0]!;
+    const t = (seconds: number) => `2026-10-14T00:00:${String(seconds).padStart(2, "0")}.000Z`;
+    const recorded = yield* guidanceTransaction(fixture.db)(fixture.workflows.recordContribution(fixture.owner, {contributionId: "impl:ext", nodeId: ids.implement, revision: 1,
+      state: "awaiting_result", summary: "An external agent implements.", references: [], externalRef: null, participant: {kind: "external", ref: "agent:7"},
+      sourceThreadId: fixture.mainThreadId, sourceRunId: "source-run-current", sourceMessageId: "source-message-current"}, Date.parse(t(1))));
+    assert.equal(recorded.status, "applied", JSON.stringify(recorded));
+    const items: Array<Record<string, unknown>> = [];
+    const rootItem = (id: string, completedAt: string, overrides: Record<string, unknown> = {}) => {
+      const detail = rootItemDetail(fixture, id, "mcp__agent__status", {ref: "agent:7"}, {completedAt, ...overrides});
+      fixture.details.set(id, detail);
+      items.push(detail);
+    };
+    rootItem("early-read", t(3));
+    rootItem("late-read", t(9));
+    rootItem("prior-run-read", t(8), {runId: "earlier-run", nodeId: "node-prior-run-read"});
+    const write = (operationId: string, patch: Omit<WorkflowApplyPatch, "operationId" | "workflowId" | "expectedRevision">) => Effect.gen(function* () {
+      document = yield* current();
+      const args = yield* applyArgs(fixture, {operationId, workflowId: document.workflowId, expectedRevision: document.revision, ...patch});
+      installEvidence(fixture, args);
+      fixture.projection.runs.push({id: "earlier-run", ordinal: 0, status: "completed", requestedAt: t(7), startedAt: t(7), completedAt: t(8), rootNodeId: "earlier-root",
+        threadId: fixture.supervisorThreadId, providerThreadId: "provider-thread-current"});
+      (fixture.projection.nodes as Array<Record<string, unknown>>).push({id: "earlier-root", kind: "root_turn", threadId: fixture.supervisorThreadId, runId: "earlier-run", rootNodeId: "earlier-root", providerThreadId: "provider-thread-current", parentNodeId: null, status: "completed"},
+        ...items.filter(item => item.runId === "supervisor-run-current").map(item => rootItemNode(fixture, item.id as string)), rootItemNode(fixture, "prior-run-read", "earlier-run", "earlier-root"));
+      return yield* fixture.controller.write(args);
+    });
+    const observe = (operationId: string, sourceItemId: string) => write(operationId, {evidence: [{kind: "observation", note: "Observed the agent.", participantContributionId: "impl:ext", observation: "read", sourceItemId}], note: "Observe."});
+    const first = yield* observe("observe-early", "early-read");
+    assert.equal(first.status, "applied", JSON.stringify(first));
+    document = yield* current();
+    assert.equal(document.evidence.find(item => item.participant)?.participant?.attempt, 1);
+    // attempt 1 completes with findings; the return to implement is applied at t(5)
+    const started = yield* write("loop-start", {status: "underway", statuses: [{nodeId: ids.implement, status: "completed"}, {nodeId: ids.review, status: "completed"}],
+      evidence: [{kind: "status_changed", note: "The task is underway."}, {kind: "status_changed", targetNodeId: ids.implement, note: "Implementation completed."},
+        {kind: "status_changed", targetNodeId: ids.review, note: "Review completed with findings."}], note: "Attempt 1 ended with findings."});
+    assert.equal(started.status, "applied", JSON.stringify(started));
+    assert.equal((yield* fixture.workflows.recordBranchSelection(fixture.owner, {nodeId: loop.nodeId, revision: 1, path: "then", reason: "The review found failures.",
+      sourceThreadId: fixture.mainThreadId, sourceRunId: "source-run-current", sourceMessageId: "loop-decision-message", sourceCreatedAt: Date.parse(t(4))}, Date.parse(t(4)))).status, "applied");
+    document = yield* current();
+    const pending = document.returns.find(item => item.state === "pending");
+    assert.ok(pending, "the return is pending");
+    const returned = yield* fixture.workflows.applyReturn(fixture.owner, {operationId: "apply-return", workflowId: document.workflowId, expectedRevision: document.revision,
+      returnId: pending.returnId, note: "Returned to implementation."}, Date.parse(t(5)));
+    assert.equal(returned.status, "applied", JSON.stringify(returned));
+    // the same run's earlier read cannot be credited to attempt 2; a later read can; a read from an earlier run inside the attempt counts too
+    assert.deepEqual(yield* observe("observe-early-again", "early-read"), {status: "invalid", operationId: "observe-early-again", reason: "participant_item_before_window"});
+    const late = yield* observe("observe-late", "late-read");
+    assert.equal(late.status, "applied", JSON.stringify(late));
+    const prior = yield* observe("observe-prior-run", "prior-run-read");
+    assert.equal(prior.status, "applied", JSON.stringify(prior));
+    document = yield* current();
+    // the two attempt-2 reads of the same tool are one continuing fact: the entry records the latest item and run and counts the repeat
+    const receipts = document.evidence.filter(item => item.participant).map(item => [item.sourceItemId, item.participant!.attempt, item.sourceRunId, item.participant!.repeats]);
+    assert.deepEqual(receipts, [["early-read", 1, "supervisor-run-current", 1], ["prior-run-read", 2, "earlier-run", 2]],
+      "attempt 1's receipt stays history; attempt 2 holds only reads inside its window");
   } finally {yield* fixture.close;}
 }));
 

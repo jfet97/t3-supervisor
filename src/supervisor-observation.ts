@@ -41,6 +41,8 @@ export const ProjectSupervisorScopeThreadSchema = Schema.Struct({
   deletedAt: Schema.NullOr(Schema.String),
   activityRefs: Schema.Array(SupervisorActivityReferenceSchema),
   contactLimit: Schema.String,
+  /** True only when the service itself read this thread's projection in this snapshot with its lineage verified; metadata alone is not a read. */
+  projectionRead: Schema.optionalKey(Schema.Boolean),
 });
 export type ProjectSupervisorScopeThread = typeof ProjectSupervisorScopeThreadSchema.Type;
 
@@ -209,5 +211,6 @@ export const observeScopeThread = (input: {
     deletedAt,
     activityRefs: input.lineageVerified === false ? [] : input.activityRefs.slice(0, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS),
     contactLimit: contactLimit(origin, current.lifecycle, archivedAt, deletedAt),
+    projectionRead: projection !== null && input.lineageVerified !== false,
   };
 };

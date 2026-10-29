@@ -178,12 +178,12 @@ it("the participants section shows role, attempt, lifecycle, completion, coverag
     {...base, id: "linked", handle: "linked", threadId: "linked", lifecycle: "running"},
     {...base, id: "contribution:review:ext", source: "declared", kind: "external", handle: "github:pr-42", threadId: null, contributionId: "review:ext", revision: 2,
       roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 1, retired: false}], lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed",
-      currentReceipt: {kind: "read", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "read-pr", toolName: "mcp__github__get_pull_request", evidenceId: "e1"}, priorReceipts: 1},
+      currentReceipt: {kind: "read", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "read-pr", toolName: "mcp__github__get_pull_request", evidenceId: "e1", repeats: 3, firstRecordedAt: 1_799_999_000_000}, priorReceipts: 1},
     {...base, id: "contribution:review:t3", source: "declared", kind: "t3_conversation", handle: "reviewer-x", threadId: "reviewer-x", environmentId: "lab", contributionId: "review:t3", revision: 1,
       roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 1, retired: false}], lifecycle: "reported", reportedState: "awaiting_result", coverage: "lifecycle_only",
-      currentReceipt: {kind: "lifecycle", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "wait-1", toolName: "t3-code__t3_thread_wait", evidenceId: "e2"}},
+      currentReceipt: {kind: "lifecycle", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "wait-1", toolName: "mcp__t3-code__t3_thread_wait", evidenceId: "e2", repeats: 1, firstRecordedAt: 1_800_000_000_000}},
     {...base, id: "contribution:review:none", source: "declared", kind: "unknown", handle: null, threadId: null, contributionId: "review:none", revision: 1, lifecycle: "reported", reportedState: "awaiting_result", coverage: "unsupported",
-      currentReceipt: {kind: "unsupported", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: null, toolName: null, evidenceId: "e3"}},
+      currentReceipt: {kind: "unsupported", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: null, toolName: null, evidenceId: "e3", repeats: 1, firstRecordedAt: 1_800_000_000_000}},
     {...base, id: "contribution:review:reported", source: "declared", kind: "external", handle: "agent:9", threadId: null, contributionId: "review:reported", revision: 1, lifecycle: "reported", reportedState: "awaiting_result", coverage: "reported"},
   ];
   const withParticipants = (rows: WorkflowProgressParticipant[]) => ({...progressSnapshot, workflows: progressSnapshot.workflows.map(workflow =>
@@ -201,11 +201,21 @@ it("the participants section shows role, attempt, lifecycle, completion, coverag
   assert.match(html, /mcp__github__get_pull_request/);
   assert.match(html, /1 earlier receipt belong/);
   assert.match(html, /No receipt for the current declaration, revision and attempt/);
-  assert.match(html, /environment lab/);
+  assert.match(html, /environment <code>lab<\/code>/);
   assert.match(html, /No handle reported/);
   assert.match(html, /href="[^"]*participants[^"]*"/, "the help links to the participants guide topic");
   assert.doesNotMatch(html, /settled|parked/i);
   assert.match(renderConnected([withParticipants([])]), /No participants are recorded for this workflow/);
+  // a conversation declared in another environment keeps its identity and gets no local link; a local one is linked; repeats and the route note show
+  assert.doesNotMatch(html, /href="t3-thread:\/\/v1\/reviewer-x"/, "no local link for a foreign conversation");
+  assert.match(html, /<span class="participant-identity">reviewer-x<\/span>/);
+  assert.match(html, /environment <code>lab<\/code> \(another environment; open it there, no local link\)/);
+  assert.match(html, /href="t3-thread:\/\/v1\/child-one"/, "a local native child stays linked");
+  assert.match(html, /repeated 3 times since/);
+  assert.match(html, /Whether the same route is available now is not verified/);
+  const local = renderToStaticMarkup(createElement(ConnectedWork, {threads: [], mainThreadId: "task-thread", workflows: new Map([["task-thread", {...progressSnapshot.workflows[0]!, participants: participants.filter(item => item.id === "contribution:review:t3")}]]),
+    coverage: new Map(), task: undefined, complete: true, localEnvironmentId: "lab"}));
+  assert.match(local, /href="t3-thread:\/\/v1\/reviewer-x"/, "a declaration naming this dashboard's own environment is local and linked");
 });
 
 it("native reviewer turns remain in history while the same reviewer can start a fresh attempt", () => {
