@@ -6,7 +6,7 @@ import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {ProjectSupervisorSnapshot, type WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js";
 import {WorkflowProgressSnapshotSchema} from "../src/workflow-progress.js";
-import {currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, TaskAlignment, TaskOutcome} from "../ui/src/workflow-journey.js";
+import {currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, reachedDecisionIds, TaskAlignment, TaskOutcome} from "../ui/src/workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, stepNotes} from "../ui/src/task-record.js";
 import {fixtureJourney, journeyCases, journeyObjective, journeyTitle} from "./ui-fixture/journey.js";
 import {FixtureModel, fixtureIds, isScenarioName} from "./ui-fixture/scenarios.js";
@@ -248,6 +248,33 @@ it("a live branch shows its condition and labelled paths; a pending decision is 
   const progressText = liveProgress(record.plan, currentBranchPaths(record.workflow));
   assert.deepEqual(progressText.pending.map(branch => branch.nodeId), ["packing-review-depth"]);
   assert.ok(!progressText.steps.some(step => ["packing-review-single", "packing-correctness", "packing-fit"].includes(step.nodeId)), "alternatives are not counted as applicable steps");
+});
+
+it("a pending decision is amber only once its earlier work is settled: before that it is deferred in neutral tone, and the earlier attempt's decision stays disclosed either way", () => {
+  const {task, progress} = example("returned");
+  const record = journeyRecord(task, progress.workflows[0]);
+  if (record.kind !== "live") throw new Error("live workflow expected");
+  const render = (workflow: typeof record.workflow) => renderToStaticMarkup(createElement(PlanJourney, {node: workflow.plan!, mode: "live", notes: stepNotes(task, record),
+    selections: workflow.branchSelections, returns: workflow.returns, attempts: new Map(workflow.attempts?.map(item => [item.nodeId, item.attempt])), reached: reachedDecisionIds(workflow)}));
+  // implementation is underway again: the review-result decision lies ahead and is not current work
+  const before = render(record.workflow);
+  assert.equal(reachedDecisionIds(record.workflow).size, 0);
+  assert.match(before, /class="step-state">Decision not yet reached</);
+  assert.doesNotMatch(before, /Decision pending|pill amber|class="step-mark state-decision-pending"/);
+  assert.match(before, /aria-label="Then path, when the condition holds: awaits the decision"/);
+  assert.match(before, /Previous attempt 1/);
+  assert.match(before, /then path selected \(revision 1\)/);
+  assert.match(before, /Decision reason: Reconstructed example: the fit review reported an overfill defect/);
+  // once everything before it is settled, the same decision is reached and pending again
+  const settle = (plan: typeof record.plan): typeof record.plan => ({...plan, nodes: plan.nodes.map(node => node.kind === "sequence" || node.kind === "parallel" ? settle(node)
+    : node.kind === "workflow" ? {...node, status: "completed" as const, plan: node.plan ? settle(node.plan) : null} : node.kind === "step" && node.nodeId !== "packing-deliver" ? {...node, status: "completed" as const} : node)});
+  const settled = {...record.workflow, plan: settle(record.plan)};
+  assert.deepEqual([...reachedDecisionIds(settled)], ["packing-redo-decision"]);
+  const after = render(settled);
+  assert.match(after, /class="step-state">Decision pending again</);
+  assert.match(after, /class="step-mark state-decision-pending"/);
+  assert.match(after, /class="pill amber">Awaiting decision</);
+  assert.match(after, /Previous attempt 1/);
 });
 
 it("a selected path shows the agent's reason and the other path stays visible as not selected, never completed", () => {

@@ -153,8 +153,9 @@ export const WorkflowProgressReturnSchema = Schema.Struct({
   requestedAt: Schema.Number,
   resolvedAt: Schema.NullOr(Schema.Number),
   closed: Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, status: WorkflowExecutionStatus, contributorThreadIds: Schema.Array(Schema.String)}))),
-  /** The branch selections that were current in the closed attempt; their reason and source stay on the branch events of that revision. */
-  closedSelections: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, revision: Schema.Number, path: Schema.Literals(branchSelectionPaths)})))),
+  /** The branch selections that were current in the closed attempt, each with the reason and source of that revision, read from the whole record. */
+  closedSelections: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, revision: Schema.Number, path: Schema.Literals(branchSelectionPaths),
+    reason: Schema.String, sourceThreadId: NullableText, sourceMessageId: NullableText, recordedAt: Schema.NullOr(Schema.Number)})))),
   retiredRuns: Schema.Array(WorkflowReturnRunSchema),
   note: NullableText,
 });
@@ -344,13 +345,24 @@ const progressCompletions = (document: WorkflowStateDocument): WorkflowProgressC
     completedAt: document.evidence.reduce<number | null>((latest, item) => item.kind === "status_changed" && item.targetNodeId === node.nodeId &&
       item.statusTo === "completed" && (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null)}]);
 
+// the reason and source of one closed selection revision: the durable selection row first, else its recorded event in the whole evidence,
+// so a closed attempt keeps its decision after the bounded recent branch events have moved on
+const closedSelectionDetail = (document: WorkflowStateDocument, selection: {nodeId: string; revision: number}) => {
+  const row = document.branchSelections.find(item => item.nodeId === selection.nodeId && item.revision === selection.revision);
+  if (row) return {reason: row.reason, sourceThreadId: row.sourceThreadId, sourceMessageId: row.sourceMessageId, recordedAt: row.recordedAt};
+  const event = document.evidence.find(item => item.kind === "branch_selected" && item.targetNodeId === selection.nodeId && item.branch?.revision === selection.revision);
+  return event ? {reason: event.note, sourceThreadId: event.sourceThreadId, sourceMessageId: event.sourceMessageId, recordedAt: event.recordedAt}
+    : {reason: "", sourceThreadId: null, sourceMessageId: null, recordedAt: null};
+};
+
 const progressReturns = (document: WorkflowStateDocument): WorkflowProgressReturn[] => {
   const planNames = planNodeNames(document.plan);
   return document.returns.map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId, targetNodeId: item.targetNodeId,
     targetName: contributionNodeName(document, item.targetNodeId, planNames), regionNodeIds: [...item.regionNodeIds], attempt: item.attempt, state: item.state,
     reason: item.reason, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId, requestedAt: item.requestedAt, resolvedAt: item.resolvedAt,
     closed: item.closed ? item.closed.map(closed => ({nodeId: closed.nodeId, status: closed.status, contributorThreadIds: [...closed.contributorThreadIds]})) : null,
-    closedSelections: item.closedSelections ? item.closedSelections.map(selection => ({nodeId: selection.nodeId, revision: selection.revision, path: selection.path})) : null,
+    closedSelections: item.closedSelections ? item.closedSelections.map(selection => ({nodeId: selection.nodeId, revision: selection.revision, path: selection.path,
+      ...closedSelectionDetail(document, selection)})) : null,
     retiredRuns: item.retiredRuns.map(run => run.kind === "provider_turns" ? {...run, providerTurnIds: [...run.providerTurnIds]} : {...run}),
     note: item.resolution?.note ?? null}));
 };

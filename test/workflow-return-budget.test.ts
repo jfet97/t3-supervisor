@@ -13,7 +13,7 @@ import {guidanceTransaction} from "../src/guidance-sql.js";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
 import {progressWorkflow} from "../src/workflow-progress.js";
-import {PlanJourney, previousAttempts, readyAfterReturn} from "../ui/src/workflow-journey.js";
+import {currentWork, PlanJourney, previousAttempts, readyAfterReturn} from "../ui/src/workflow-journey.js";
 import {historyOperations, operationHeadline, WorkflowHistory} from "../ui/src/workflow-history.js";
 
 // parser and workflow-store proof for a bounded return: the budget is the applied-jump ledger, and resets follow replay scope
@@ -878,7 +878,7 @@ it.live("a real return renders a ready target, neutral earlier outcomes, previou
   const ready = readyAfterReturn(workflow.plan, workflow.returns);
   assert.deepEqual([...ready], [ids.reviewa], "only the return's target is ready");
   const render = () => renderToStaticMarkup(createElement(PlanJourney, {node: workflow.plan!, mode: "live", selections: workflow.branchSelections, attempts,
-    returns: workflow.returns, branchEvents: workflow.branchEvents, ready, notApplicable: new Set(workflow.notApplicable ?? [])}));
+    returns: workflow.returns, ready, notApplicable: new Set(workflow.notApplicable ?? [])}));
   let html = render();
   assert.match(html, /class="journey-stop state-ready"/);
   assert.match(html, /reviewa<span class="step-flags"><span class="pill">Attempt 2<\/span><\/span><\/span><span class="step-state">Ready to start · attempt 2</);
@@ -892,7 +892,8 @@ it.live("a real return renders a ready target, neutral earlier outcomes, previou
   const previous = previousAttempts(ids.reviewa!, workflow.returns);
   assert.deepEqual(previous.map(item => [item.attempt, item.closed?.status]), [[1, "completed"]]);
   const laneA = planBranches(workflow.plan).find(item => item.condition === "Lane A findings.")!;
-  assert.deepEqual(previousAttempts(laneA.nodeId, workflow.returns).map(item => item.selection), [{nodeId: laneA.nodeId, revision: 1, path: "then"}]);
+  assert.deepEqual(previousAttempts(laneA.nodeId, workflow.returns).map(item => item.selection && [item.selection.nodeId, item.selection.revision, item.selection.path, item.selection.reason]),
+    [[laneA.nodeId, 1, "then", "Context decided then."]]);
   assert.match(html, /Previous attempt 1/);
   assert.match(html, /then path selected \(revision 1\)/);
   assert.match(html, /Decision reason: Context decided then\./);
@@ -901,7 +902,7 @@ it.live("a real return renders a ready target, neutral earlier outcomes, previou
   yield* run.choose("Lane A findings.", "then");
   const reselected = progressWorkflow(yield* run.main(), []);
   const again = renderToStaticMarkup(createElement(PlanJourney, {node: reselected.plan!, mode: "live", selections: reselected.branchSelections, attempts,
-    returns: reselected.returns, branchEvents: reselected.branchEvents, ready: readyAfterReturn(reselected.plan, reselected.returns)}));
+    returns: reselected.returns, ready: readyAfterReturn(reselected.plan, reselected.returns)}));
   assert.match(again, /Previous attempt 1/);
   assert.match(again, /then path selected \(revision 1\)/);
   assert.match(again, /Then path selected/);
@@ -921,6 +922,100 @@ it.live("a real return renders a ready target, neutral earlier outcomes, previou
   html = history;
   assert.ok((html.match(/<li/g) ?? []).length >= workflow.history!.length, "no record is merged away");
 }), {timeout: 30_000});
+
+it.live("overlapping returns leave only the later frontier ready, previous attempts count per occurrence, and independent lanes stay ready beside active work", () => Effect.gen(function* () {
+  const run = yield* open([local("implement"), {kind: "parallel", nodes: [
+    {kind: "sequence", nodes: [local("reviewa"), branch("Lane A findings.", [local("fixa"), backTo("reviewa", 2)])]},
+    {kind: "sequence", nodes: [local("reviewb"), branch("Lane B findings.", [local("fixb"), backTo("reviewb", 2)])]},
+  ]}, branch("Overall findings.", [backTo("implement", 2)]), local("deliver")]);
+  const id = Object.fromEntries(planEntities((yield* run.main()).plan).filter(node => node.kind === "step").map(node => [node.localId, node.nodeId])) as Record<string, string>;
+  yield* run.complete(["implement", "reviewa", "reviewb"], "first-pass");
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix");
+  yield* run.jump("reviewa", "inner-return");
+  // lane A's second attempt finds nothing, lane B found nothing, and the overall decision reopens implementation with both lanes
+  yield* run.complete(["reviewa"], "lane-a-second");
+  yield* run.choose("Lane A findings.", "else");
+  yield* run.choose("Lane B findings.", "else");
+  yield* run.choose("Overall findings.", "then");
+  yield* run.jump("implement", "outer-return");
+  let workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual([...readyAfterReturn(workflow.plan, workflow.returns)], [id.implement], "the inner return's target is superseded by the later return that reopened it");
+  assert.deepEqual(previousAttempts(id.reviewa!, workflow.returns).map(item => [item.attempt, item.closed?.status]), [[1, "completed"], [2, "completed"]], "closed attempts are numbered per occurrence");
+  assert.deepEqual(previousAttempts(id.fixa!, workflow.returns).map(item => item.attempt), [1, 2]);
+  assert.deepEqual(previousAttempts(id.implement!, workflow.returns).map(item => item.attempt), [1]);
+  assert.deepEqual(previousAttempts(id.reviewb!, workflow.returns).map(item => item.attempt), [1]);
+  assert.equal(new Map(workflow.attempts!.map(item => [item.nodeId, item.attempt])).get(id.reviewa!), 3, "the current attempt follows the closed ones");
+  assert.deepEqual(currentWork(workflow), {active: [], ready: ["implement"], decisions: []});
+  // the second pass: lane A returns again while lane B's correction is underway, then lane B returns too
+  yield* run.complete(["implement", "reviewa", "reviewb"], "second-pass");
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix-2");
+  yield* run.jump("reviewa", "lane-a-return-2");
+  yield* run.choose("Lane B findings.", "then");
+  const busy = yield* run.main();
+  assert.equal((yield* run.advance(busy, "lane-b-busy", run.tick(), {fixb: "underway"})).status, "applied");
+  workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual(currentWork(workflow), {active: ["fixb"], ready: ["reviewa"], decisions: []}, "a ready lane stays named beside an unrelated active lane");
+  yield* run.complete(["fixb"], "lane-b-fix-2");
+  yield* run.jump("reviewb", "lane-b-return");
+  workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual([...readyAfterReturn(workflow.plan, workflow.returns)].sort(), [id.reviewa, id.reviewb].sort(), "independent lanes keep their own ready targets");
+  assert.deepEqual(currentWork(workflow).ready.sort(), ["reviewa", "reviewb"]);
+}), {timeout: 60_000});
+
+it.live("a return to a workflow occurrence names that workflow as ready work", () => Effect.gen(function* () {
+  const parsed = parseDefinitionWorkflow("loop", loopYaml);
+  const loopContext = {...context, workflows: [{...parsed, summary: "Repeat work.", origin: "project" as const, path: ".t3-supervisor/workflows/loop.yaml", sourceId: "loop"}]};
+  const run = yield* open([{kind: "workflow", definitionId: "loop", reason: "Use the loop."}, branch("Redo the loop.", [backTo("loop", 2)]), local("deliver")], loopContext);
+  const edit = (statuses: Array<{nodeId: string; status: WorkflowExecutionStatus}>, operationId: string) => Effect.gen(function* () {
+    const document = yield* run.main();
+    const current = new Map(planEntities(document.plan).map(node => [node.nodeId, node.status]));
+    const changed = statuses.filter(item => current.get(item.nodeId) !== item.status);
+    const edited = withOccurrenceStatuses(document.plan!, changed);
+    assert.ok("plan" in edited, JSON.stringify(edited));
+    const evidence: NonNullable<WorkflowApplyInput["evidence"]> = changed.map(item => ({kind: "status_changed" as const, targetNodeId: item.nodeId, note: `${item.nodeId} is ${item.status}.`}));
+    if (document.status !== "underway") evidence.push({kind: "status_changed", targetNodeId: null, note: "The task is underway."});
+    const result = yield* run.box.stores.workflows.apply(run.owner, {operationId, workflowId: document.workflowId, expectedRevision: document.revision, status: "underway",
+      objective: document.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: edited.plan,
+      note: "Record progress.", evidence}, run.validation, run.tick());
+    assert.equal(result.status, "applied", `${operationId} ${JSON.stringify(result)}`);
+  });
+  const entities = planEntities((yield* run.main()).plan);
+  const loop = entities.find(node => node.kind === "workflow")!;
+  const work = entities.find(node => node.kind === "step" && node.localId === "work")!;
+  yield* edit([{nodeId: loop.nodeId, status: "underway"}, {nodeId: work.nodeId, status: "completed"}], "work-done");
+  yield* run.choose("Again?", "else");
+  yield* edit([{nodeId: loop.nodeId, status: "completed"}], "loop-done");
+  yield* run.choose("Redo the loop.", "then");
+  yield* run.jump("loop", "redo");
+  const workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual([...readyAfterReturn(workflow.plan, workflow.returns)], [loop.nodeId]);
+  assert.deepEqual(currentWork(workflow), {active: [], ready: [loop.name], decisions: []}, "the reopened workflow occurrence is current work");
+  assert.deepEqual(previousAttempts(loop.nodeId, workflow.returns).map(item => [item.attempt, item.closed?.status]), [[1, "completed"]]);
+}), {timeout: 60_000});
+
+it.live("a closed attempt keeps its decision reason and source after more than 50 later branch events", () => Effect.gen(function* () {
+  const run = yield* open([local("implement"), {kind: "parallel", nodes: [
+    {kind: "sequence", nodes: [local("reviewa"), branch("Lane A findings.", [local("fixa"), backTo("reviewa", 2)])]},
+    {kind: "sequence", nodes: [local("reviewb"), branch("Lane B findings.", [local("fixb")])]},
+  ]}, local("deliver")]);
+  yield* run.complete(["implement", "reviewa", "reviewb"], "first-pass");
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix");
+  yield* run.jump("reviewa", "lane-a-return");
+  for (let index = 0; index < 52; index++) yield* run.choose("Lane B findings.", index % 2 === 0 ? "then" : "else");
+  const workflow = progressWorkflow(yield* run.main(), []);
+  const laneA = planBranches(workflow.plan).find(item => item.condition === "Lane A findings.")!;
+  assert.equal(workflow.branchEvents!.length, 50, "the recent branch events stay bounded");
+  assert.ok(!workflow.branchEvents!.some(event => event.nodeId === laneA.nodeId), "the bounded recent events no longer hold the closed attempt's selection");
+  assert.deepEqual(previousAttempts(laneA.nodeId, workflow.returns).map(item => [item.attempt, item.selection?.revision, item.selection?.reason, item.selection?.sourceMessageId]),
+    [[1, 1, "Context decided then.", `main-message-${laneA.nodeId}-1`]], "the return record carries the closed selection's reason and source");
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: workflow.plan!, mode: "live", selections: workflow.branchSelections, returns: workflow.returns}));
+  assert.match(html, /Previous attempt 1/);
+  assert.match(html, /Decision reason: Context decided then\./);
+  assert.match(html, new RegExp(`message <code>main-message-${laneA.nodeId}-1`));
+}), {timeout: 60_000});
 
 it.live("an omitted ledger does not hide an applied jump after the return leaves the plan", () => Effect.gen(function* () {
   const opened = yield* open([local("work"), branch("Findings remain.", [backTo("work", 1)])]);

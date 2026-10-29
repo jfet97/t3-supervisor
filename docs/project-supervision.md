@@ -207,12 +207,17 @@ Supervisor, which applies the return at a safe point once the closed attempt's w
 stopped. Once `n` jumps have been applied, the unresolved failure stays visible and
 another jump does not start. An applied return resets only budgets whose replay region
 is strictly inside the region it reopens. Right after a return every repeated member
-is planned again, so the task page names the return's target as ready to start until
-work in the region begins; an outcome recorded on a path that is no longer selected or
-awaits a decision again is shown as earlier history without a live tone. Each repeated
-occurrence and the branches inside the region keep a collapsed "Previous attempt n"
-with the status, contributors and decision (revision, reason, source) the closed
-attempt ended with, retained after a fresh decision. History lists the records of one
+is planned again, so the task page names the return's target (a step or a workflow)
+as ready to start until work in its own region begins, beside any unrelated lane that is
+already active; when a later return reopens an earlier return's target again, only the
+later frontier is ready. An outcome recorded on a path that is no longer selected or
+awaits a decision again is shown as earlier history without a live tone, and a pending
+decision whose earlier work is not yet settled is shown as not yet reached, in neutral
+tone, until it is. Each repeated occurrence and the branches inside the region keep a
+collapsed "Previous attempt n", numbered per occurrence like History, with the status,
+contributors and decision (revision, reason, source) the closed attempt ended with; the
+decision's reason and source travel with the return record itself, so they outlive the
+bounded recent branch events. History lists the records of one
 write under one headline, in stored order and never merged, and a record that changed
 no status is never the headline. The closed attempt keeps its statuses, contributors, decisions and retired
 child runs as history; the reopened occurrences keep their contributor conversations

@@ -13,8 +13,11 @@ it("the returned-work scene passes the public API decoders and keeps first-attem
   const progress = Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(scene.progress);
   const workflow = progress.workflows[0]!;
   assert.equal(workflow.historyComplete, true);
-  assert.deepEqual(workflow.history?.map(event => event.attempt), [1, 1, 2, 2]);
+  assert.deepEqual(workflow.history?.map(event => event.attempt), [1, 1, 1, 2, null, 2]);
+  assert.deepEqual(workflow.history?.filter(event => event.operationId === "fixture-op-return").map(event => event.kind), ["return_applied", "status_changed"], "the return and its task status share one write");
   assert.equal(workflow.returns?.[0]?.retiredRuns.length, 2);
+  assert.deepEqual(workflow.returns?.[0]?.closedSelections?.map(selection => [selection.nodeId, selection.revision, selection.path, selection.sourceMessageId]), [["packing-redo-decision", 1, "then", "fixture-redo-selection-1"]]);
+  assert.equal(workflow.branchSelections?.[0]?.current, false, "the closed attempt's selection is invalidated by the return");
   assert.equal(progress.scope?.threads.length, 3);
   const implement = workflow.plan?.nodes.find(node => node.kind === "step" && node.nodeId === "packing-implement");
   assert.ok(implement?.kind === "step");
