@@ -1616,10 +1616,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       return yield* processed;
     }));
   }).pipe(Effect.timeout("30 seconds"));
-  // one discovery step for a candidate main: a new genuine human request becomes a queued interpretation task of its binding
+  // one discovery step for a candidate main: a new genuine human request becomes a queued interpretation task of its binding; a main
+  // whose workspace is still preparing is reported as deferred, so the cycle spends no productive slot on it
   const discover = (thread: ThreadInfo, registered: {id: string}, previous: TaskRecord | null, catalog: CatalogValue) => Effect.gen(function* () {
     const main = yield* projection(thread.id);
-    if (workspacePreparationPending(main)) return;
+    if (workspacePreparationPending(main)) return "preparation_pending" as const;
     if (!(yield* scope.eligible(main.thread, catalog.threads)) || main.thread.projectId !== registered.id) return;
     const baseline = yield* sourceFloor(thread.id, main);if (baseline === null) return;
     // an explicit Enable or a new activation boundary supervises the chat's next request afresh, even after an agreed task
@@ -1747,12 +1748,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         // or in-flight work is never replaced
         if (!previous?.conversation && typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
           thread.latestRunId === anchors.get(thread.id) || thread.latestRunId === examinedRuns.get(thread.id))) return;
-        // discovery failures are retried without producing model work
-        discovered += 1;
-        yield* attempt(discover(thread, registered, previous, catalog));
+        // discovery failures are retried without producing model work; a pending workspace is memorized but takes no productive slot
+        const result = yield* attempt(discover(thread, registered, previous, catalog));
+        if (!(result.ok && result.value === "preparation_pending")) discovered += 1;
       });
-      // a fresh chat takes a discovery slot only when it is actually discovered: a skipped one costs its memory and nothing else; the
-      // scan is bounded, and whatever it does not reach stays fresh for the next cycle
+      // a fresh chat takes a discovery slot only when it is actually discovered: a skipped or still-preparing one costs its memory (and
+      // one read) and nothing else; the scan is bounded, and whatever it does not reach stays fresh for the next cycle
       for (const thread of fresh.slice(0, discoveryLimit * freshScanFactor)) {
         if (discovered >= discoveryLimit) break;
         yield* consider(thread);

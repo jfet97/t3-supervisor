@@ -1719,7 +1719,7 @@ it.effect("twenty skipped fresh chats, off project or still preparing, hold no d
   assert.deepEqual(fixture.projectionReads.filter((id) => id.startsWith("off-main-")), [], "a switched-off project's chats are skipped without a read");
   assert.equal(fixture.projectionReads.filter((id) => id.startsWith("prep-main-")).length, 10, "each preparing chat is read once");
   const events = (yield* TestConsole.logLines).map((line) => JSON.parse(String(line)) as Record<string, unknown>).filter((line) => line.event === "supervisor_discovery");
-  assert.deepEqual([events[0]!.fresh, events[0]!.discovered], [21, 11], "skipped chats are fresh but take no discovery slot");
+  assert.deepEqual([events[0]!.fresh, events[0]!.discovered], [21, 1], "skipped and preparing chats are fresh but take no productive discovery slot");
   yield* supervisor.runOnce;
   assert.equal(fixture.projectionReads.filter((id) => id.startsWith("prep-main-")).length, 10, "no preparing chat is offered a second early slot while T3 reports it preparing");
   yield* supervisor.runOnce;
@@ -1728,4 +1728,24 @@ it.effect("twenty skipped fresh chats, off project or still preparing, hold no d
   assert.ok(later.every((event) => event.fresh === 0), "the skipped and preparing chats never return as fresh while their run lifecycle is unchanged; the ordinary rotation visits them at its own pace, as before");
   assert.deepEqual(fixture.projectionReads.filter((id) => id.startsWith("old-main-")), []);
   assert.equal(yield* fixture.store.task("off-main-0"), null);
+}), {timeout: 60_000});
+
+it.effect("twenty preparing fresh chats ahead of a ready request consume no productive slot: the ready request is discovered in the first cycle", () => Effect.gen(function* () {
+  const sources = anchoredMains(30);
+  for (let index = 0; index < 20; index++) sources.push({threadId: `prep-main-${index}`, projectId: "project-a", turns: [{id: `prep-task-${index}`, sequence: 11, text: `Preparing request ${index}`}]});
+  sources.push({threadId: "ready-main", projectId: "project-a", turns: [{id: "ready-task", sequence: 11, text: "Build the invoice export"}]});
+  const fixture = yield* makeFixture(sources);
+  const earlier = new Date(Date.parse(baseTime) - 60 * 60 * 1000).toISOString();
+  for (const source of sources) stampLatestRun(fixture, source.threadId, source.threadId === "ready-main" ? baseTime : earlier);
+  for (let index = 0; index < 20; index++) fixture.projections.get(`prep-main-${index}`)!.thread.activityRunStatus = "preparing";
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  assert.equal((yield* fixture.store.task("ready-main"))?.sourceRunId, "run-ready-task", "a pending workspace consumes no productive discovery slot");
+  assert.equal(fixture.projectionReads.filter((id) => id.startsWith("prep-main-")).length, 20, "each preparing chat is read once, found preparing and memorized");
+  const events = (yield* TestConsole.logLines).map((line) => JSON.parse(String(line)) as Record<string, unknown>).filter((line) => line.event === "supervisor_discovery");
+  assert.deepEqual([events[0]!.fresh, events[0]!.discovered], [21, 1], "only the productive attempt counts as a discovery");
+  yield* supervisor.runOnce;
+  const later = (yield* TestConsole.logLines).map((line) => JSON.parse(String(line)) as Record<string, unknown>).filter((line) => line.event === "supervisor_discovery").slice(1);
+  assert.ok(later.every((event) => event.fresh === 0), "no preparing chat returns as fresh while T3 still reports it preparing");
+  assert.deepEqual(fixture.projectionReads.filter((id) => id.startsWith("old-main-")), []);
 }), {timeout: 60_000});
