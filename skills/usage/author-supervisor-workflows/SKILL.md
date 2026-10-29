@@ -13,7 +13,7 @@ pattern. Dashboard work belongs to [use-t3-supervisor](../use-t3-supervisor/SKIL
 ## Target project boundary
 
 Write only the needed `project.yaml`, `steps/*.md` and `workflows/*.yaml` inside the
-target project's `.t3-supervisor/` folder by default. Keep execution rules in their
+target project's `.t3-supervisor/` folder by default. Keep project duties in their
 descriptions and explain rationale in the response. Additional documentation needs
 an explicit request or approval.
 
@@ -142,6 +142,15 @@ visible; put shared rules in the owning step or workflow description and refer t
 important conditions behind vague links, or move the same wall of text unchanged
 elsewhere.
 
+Definitions own project outcomes, applicability, roles, authority, evidence and
+acceptance policy, including reviewer choice, continuity and model diversity.
+Supervisor and the host own tool discovery, transports, gateways, participant
+registration, session/delegation lifecycle, settlement and return/identity internals.
+Reference their supported guidance instead of copying tool recipes into definitions;
+outside work uses the supported external-contribution protocol. Repository engineering
+procedures stay in their canonical project docs or skills: being reusable does not
+make them Supervisor policy.
+
 When shortening, map every original obligation to retained wording or its actual
 canonical source. Check actors, triggers, authority, named cases, evidence limits and
 exceptions. Compare readability and word counts, without imposing a quota that would
@@ -180,7 +189,8 @@ repetition across declared steps there. A findings step owns the main's accounti
 not a wrapper whose only purpose is invoking Review. Distinguish a completed review
 report from acceptance of the work, and reviewer assessment from author fixes. Reuse
 the same ordinary reviewer conversations through supported APIs when repeating work.
-The reference explains reporting, acceptance and reviewer identity.
+The reference explains reporting, acceptance and reviewer continuity policy; host and
+Supervisor guidance supply the supported execution routes.
 
 Check the ledger and concrete cases: factual answers, consequential changes, report-only
 review, contested rebuttals, fixes, changed bases, interrupted chats and both paths of
