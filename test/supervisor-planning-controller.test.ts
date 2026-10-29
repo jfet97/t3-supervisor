@@ -5,7 +5,7 @@ import { vi } from "vitest";
 import { within as bounded } from "./support/g1b-conversation.js";
 import { TestClock } from "effect/testing";
 import { fingerprint } from "../src/guidance-store.js";
-import { createPlanningAttempt, planningDraftInstruction, planningHoldText, planningReleaseText, resolvePlanningAttempt, startPlanningAttempt } from "../src/supervisor-planning.js";
+import { createPlanningAttempt, planningCanAdopt, planningDraftInstruction, planningHoldText, planningReleaseText, resolvePlanningAttempt, startPlanningAttempt } from "../src/supervisor-planning.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
 import {helperInstructions, helperInstructionsVersion} from "../src/supervisor-helper-instructions.js";
 import {goldenSnapshot} from "./support/c1-workflow-fixture.js";
@@ -76,7 +76,7 @@ it.effect("a planning pause needs its exact native owner call and preserves one 
   assert.ok(stored);
   // the owner sees the attempt's states and its drafter's task; delivery identities, texts and hashes stay stored
   assert.deepEqual(first.attempt, {attemptId: stored.id, state: "open", deadline: new Date(stored.deadline).toISOString(), resolution: null,
-    targets: [{threadId: "main", state: "requested", ack: null}], draft: null, draftInstruction: planningDraftInstruction(stored)});
+    targets: [{threadId: "main", state: "requested", ack: null}], uncovered: [], draft: null, draftInstruction: planningDraftInstruction(stored)});
   for (const hidden of [stored.targets[0]!.hold.messageId, stored.targets[0]!.hold.commandId, stored.requestHash!])
     assert.ok(!JSON.stringify(first).includes(hidden), hidden);
   const replay = (yield* f.controller.call(f.args)) as Answer;
@@ -99,7 +99,7 @@ it.effect("a planning pause needs its exact native owner call and preserves one 
   const released = (yield* f.controller.call(release)) as Answer;
   assert.equal(released.status, "recorded");
   assert.equal(released.attempt.draftInstruction, undefined);
-  assert.deepEqual(Object.keys(released.attempt), ["attemptId", "state", "deadline", "resolution", "targets", "draft"]);
+  assert.deepEqual(Object.keys(released.attempt), ["attemptId", "state", "deadline", "resolution", "targets", "uncovered", "draft"]);
   f.proof(read);
   assert.equal(((yield* f.controller.call(read)) as {attempts: Answer["attempt"][]}).attempts[0]!.draftInstruction, undefined, "a released attempt offers no drafter");
 }));
@@ -183,6 +183,113 @@ it.effect("a source-bound native pause observes the actor's own ACK and confirms
   assert.equal((yield* f.stores.requests.planningAttempts("project"))[0]?.state, "resolved");
   assert.equal(sent.length, 2, "one stable hold and one stable release");
 }));
+
+type PausedAnswer = Answer & {attempt: {targets: Array<{threadId: string; state: string}>; uncovered: Array<{threadId: string; reason: string}>}};
+const acknowledgingRpc = (sent: Record<string, unknown>[]): NativeRpcShape => ({call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+  sent.push({...payload});
+  return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+}});
+// a native child of the fixture main whose execution is a provider turn the main reports as a subagent record with its parent run
+const nativeChild = (f: Effect.Success<ReturnType<typeof fixture>>, id: string, running: boolean, now: number): ThreadInfo => {
+  const child: ThreadInfo = {id, title: id, projectId: "project", creationSource: "provider", lineage: {parentThreadId: "main", relationshipToParent: "subagent"},
+    runtimeMode: "full-access", interactionMode: "default"};
+  f.threads.push(child);
+  const turn = {id: `${id}-turn`, providerThreadId: `provider-${id}`, nodeId: `${id}-root`, status: running ? "running" : "completed", startedAt: new Date(now).toISOString(),
+    completedAt: running ? null : new Date(now).toISOString(), nativeTurnRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}};
+  f.projections.set(id, {thread: child, runs: [], nodes: [{id: turn.nodeId, threadId: id, providerThreadId: turn.providerThreadId, providerTurnId: turn.id}], providerTurns: [turn],
+    messages: [], turnItems: [], runtimeRequests: []});
+  const main = f.projections.get("main")!;
+  main.subagents = [...(main.subagents ?? []), {id: `${id}-task`, childThreadId: id, origin: "provider_native", providerThreadId: `provider-${id}`, runId: "source-run", status: running ? "running" : "completed"}];
+  return child;
+};
+const finishChild = (f: Effect.Success<ReturnType<typeof fixture>>, id: string, now: number) => {
+  const projection = f.projections.get(id)!;
+  for (const turn of projection.providerTurns as Record<string, unknown>[]) {turn.status = "completed"; turn.completedAt = new Date(now).toISOString();}
+  for (const record of f.projections.get("main")!.subagents as Record<string, unknown>[]) if (record.childThreadId === id) record.status = "completed";
+};
+const acknowledgeMain = (f: Effect.Success<ReturnType<typeof fixture>>, attemptId: string) => {
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+};
+
+it.effect("a paused main holds its live native descendants through their parent, including a late one; a parent ACK never counts for a child, whose own terminal lifecycle makes it quiescent", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const f = yield* fixture(acknowledgingRpc(sent));
+  const now = yield* Clock.currentTimeMillis;
+  nativeChild(f, "busy-child", true, now);
+  nativeChild(f, "idle-child", false, now);
+  f.proof(f.args);
+  const result = (yield* f.controller.call(f.args)) as PausedAnswer;
+  assert.equal(result.status, "recorded", JSON.stringify(result));
+  assert.deepEqual(result.attempt.targets.map(target => target.threadId).sort(), ["busy-child", "main"], "the child with ongoing work is held, the idle one is not");
+  assert.deepEqual(result.attempt.uncovered, []);
+  yield* f.controller.reconcile(f.binding);
+  const [attempt] = yield* f.stores.requests.planningAttempts("project");
+  const childTarget = attempt!.targets.find(target => target.threadId === "busy-child");
+  assert.ok(childTarget);
+  assert.equal(childTarget.recipientThreadId, "main", "a native child is held through its parent's dispatch");
+  assert.equal(childTarget.hold.text, planningHoldText(attempt!, childTarget));
+  assert.match(childTarget.hold.text ?? "", /Hold dispatch for child busy-child/);
+  // a child that appears after the pause is held on the next pass; the parent's ACK leaves both children requested
+  nativeChild(f, "late-child", true, now);
+  acknowledgeMain(f, result.attempt.attemptId);
+  yield* f.controller.reconcile(f.binding);
+  const [withLate] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(withLate!.targets.map(target => [target.threadId, target.state]).sort(), [["busy-child", "requested"], ["late-child", "requested"], ["main", "acknowledged"]]);
+  assert.equal(planningCanAdopt(withLate!, yield* Clock.currentTimeMillis), false);
+  const release = {...f.args, action: "release", attemptId: result.attempt.attemptId, operationId: "release-early", resolution: "continue"};
+  delete (release as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(release);
+  assert.deepEqual(yield* f.controller.call(release), {status: "denied", reason: "planning_acks_incomplete"});
+  // the children's own terminal lifecycle, with the parent's dispatch held, makes them quiescent
+  finishChild(f, "busy-child", now + 1);
+  finishChild(f, "late-child", now + 1);
+  yield* f.controller.reconcile(f.binding);
+  const [quiet] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(quiet!.targets.filter(target => target.threadId !== "main").map(target => target.state), ["quiescent", "quiescent"]);
+  assert.equal(planningCanAdopt(quiet!, yield* Clock.currentTimeMillis), true);
+}));
+
+it.effect("the combined target limit is the existing 100: overflow at pause time is denied with its count, a late child beyond it and a helper-covered child are listed and block adoption", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const f = yield* fixture(acknowledgingRpc(sent));
+  const now = yield* Clock.currentTimeMillis;
+  for (let index = 0; index < 100; index++) nativeChild(f, `child-${index}`, true, now);
+  f.proof(f.args);
+  assert.deepEqual(yield* f.controller.call(f.args), {status: "denied", reason: "planning_targets_limit", targetCount: 101});
+  // 99 running children and the main fill the limit exactly; a late child and a helper-covered child are uncovered, not quiet
+  f.threads.splice(f.threads.findIndex(thread => thread.id === "child-99"), 1);
+  f.projections.delete("child-99");
+  f.projections.get("main")!.subagents = (f.projections.get("main")!.subagents as Record<string, unknown>[]).filter(record => record.childThreadId !== "child-99");
+  const retry = {...f.args, operationId: "pause-b"};
+  f.proof(retry);
+  const result = (yield* f.controller.call(retry)) as PausedAnswer;
+  assert.equal(result.status, "recorded", JSON.stringify(result));
+  assert.equal(result.attempt?.targets.length, 100, JSON.stringify(result).slice(0, 300));
+  nativeChild(f, "late-child", true, now);
+  const helperChild = nativeChild(f, "helper-child", true, now);
+  const registered = yield* f.stores.team.registerMember(f.binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "bootstrap-run", now: 1});
+  yield* f.stores.team.markReady(f.binding, registered.threadId, registered.epoch);
+  yield* f.stores.team.assign(f.binding, helperChild.id, registered.threadId, new Map(f.threads.map(thread => [thread.id, thread.lineage.parentThreadId ?? null])));
+  yield* f.controller.reconcile(f.binding);
+  const [attempt] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(attempt!.targets.length, 100, "nothing beyond the limit becomes a target");
+  assert.deepEqual(attempt!.uncovered?.map(item => [item.threadId, item.reason]).sort(), [["helper-child", "assigned_to_helper"], ["late-child", "limit"]]);
+  for (const id of attempt!.targets.map(target => target.threadId).filter(id => id !== "main")) finishChild(f, id, now + 1);
+  acknowledgeMain(f, result.attempt.attemptId);
+  yield* f.controller.reconcile(f.binding);
+  const [settled] = yield* f.stores.requests.planningAttempts("project");
+  assert.ok(settled!.targets.every(target => target.state === "acknowledged" || target.state === "quiescent"), "every held target is quiet");
+  assert.equal(planningCanAdopt(settled!, yield* Clock.currentTimeMillis), false, "uncovered children never read as quiet");
+  const read = {...f.args, action: "read", attemptId: result.attempt.attemptId, operationId: "read-b"};
+  delete (read as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(read);
+  const answer = (yield* f.controller.call(read)) as {status: string; attempts: PausedAnswer["attempt"][]};
+  assert.equal(answer.status, "ready");
+  assert.deepEqual(answer.attempts[0]?.uncovered.map(item => [item.threadId, item.reason]).sort(), [["helper-child", "assigned_to_helper"], ["late-child", "limit"]], "the read lists what the pause could not hold");
+}), {timeout: 30_000});
 
 // the main's prepared proposal as the task carries it before acceptance, and the same proposal recorded as its agreement
 const proposal: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",

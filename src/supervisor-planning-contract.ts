@@ -60,6 +60,10 @@ export const PlanningDraft = Schema.Struct({
 });
 export type PlanningDraft = typeof PlanningDraft.Type;
 
+/** Explicit and automatically added pause targets together; a paused main's descendants beyond it are listed as uncovered, never omitted. */
+export const planningTargetLimit = 100;
+export const PlanningUncovered = Schema.Struct({threadId: Id, reason: Schema.Literals(["limit", "assigned_to_helper"]), observedAt: Time});
+export type PlanningUncovered = typeof PlanningUncovered.Type;
 export const PlanningAttempt = Schema.Struct({
   id: Id,
   operationId: Id,
@@ -80,7 +84,9 @@ export const PlanningAttempt = Schema.Struct({
   state: Schema.Literals(["open", "releasing", "resolved", "expired", "superseded"]),
   resolution: Schema.NullOr(Schema.Literals(["continue", "no_plan", "timeout", "superseded"])),
   closedAt: Schema.NullOr(Time),
-  targets: Schema.mutable(Schema.Array(PlanningTarget).check(Schema.isMinLength(1), Schema.isMaxLength(100))),
+  targets: Schema.mutable(Schema.Array(PlanningTarget).check(Schema.isMinLength(1), Schema.isMaxLength(planningTargetLimit))),
+  /** Live descendants of a paused main the attempt could not hold: beyond the limit, or covered by a helper; adoption waits on them. */
+  uncovered: Schema.optional(Schema.mutable(Schema.Array(PlanningUncovered))),
   draft: Schema.optional(PlanningDraft),
 });
 export type PlanningAttempt = typeof PlanningAttempt.Type;

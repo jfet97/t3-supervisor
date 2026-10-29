@@ -12,6 +12,7 @@ import type {WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js"
 import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import {interpretationFromFields, proposalContextFromDefinitions, workflowInterpretationOutcome} from "../src/supervisor-workflow.js";
 import {occurrenceAttempts, planBranches} from "../src/workflow-plan-tree.js";
+import {guidanceTransaction} from "../src/guidance-sql.js";
 import {WebSocketServer} from "ws";
 import {NodeHttpServer} from "@effect/platform-node";
 import {Effect, Layer} from "effect";
@@ -1502,6 +1503,87 @@ it.effect("activity references are scoped and stored as navigation evidence with
       status: "denied", operationId: "source-evidence-outside-scope", reason: "activity_reference_outside_current_scope",
     });
     assert.equal((yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))?.revision, 2);
+  } finally {yield* fixture.close;}
+}));
+
+it.effect("a participant observation is the root's own completed item: read and lifecycle receipts, an unsupported statement, and the fences that stay", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const create = ensureArgs(fixture, "participant-create", "Create a workflow.");
+    installEvidence(fixture, create);
+    const created = yield* fixture.controller.write(create);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const drafted = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const planned = yield* applyArgs(fixture, {operationId: "participant-plan", workflowId: created.workflowId, expectedRevision: drafted.revision, status: "planned",
+      objective: "Review the change with an external reviewer.", plan: sequencePlan([localStep("Review", "Review the change.")]), note: "Plan the review.", evidence: []});
+    installEvidence(fixture, planned);
+    assert.equal((yield* fixture.controller.write(planned)).status, "applied");
+    const initial = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const step = planEntities(initial.plan).find(node => node.kind === "step");
+    assert.ok(step);
+    const recorded = yield* guidanceTransaction(fixture.db)(fixture.workflows.recordContribution(fixture.owner, {contributionId: "review:ext", nodeId: step.nodeId, revision: 1,
+      state: "awaiting_result", summary: "An external reviewer works the step.", references: [], externalRef: null, participant: {kind: "external", ref: "github:pr-42"},
+      sourceThreadId: fixture.mainThreadId, sourceRunId: "source-run-current", sourceMessageId: "source-message-current"}, 1000));
+    assert.equal(recorded.status, "applied", JSON.stringify(recorded));
+    // the root's own items: a generic external read, a T3 wait directly and through a gateway, and a call still running
+    const rootItem = (id: string, toolName: string, input: Record<string, unknown>, status = "completed") => fixture.details.set(id, {id, type: "dynamic_tool",
+      threadId: fixture.supervisorThreadId, runId: "supervisor-run-current", nodeId: `node-${id}`, status, toolNonExecutionKind: null, toolName, input});
+    rootItem("read-pr", "mcp__github__get_pull_request", {owner: "example", repo: "app", number: 42});
+    rootItem("wait-reviewer", "mcp__t3-code__t3_thread_wait", {threadId: "reviewer-thread", timeoutSeconds: 10});
+    rootItem("gateway-wait", "mcpx_call", {name: "t3-code__t3_thread_wait", arguments: {threadId: "reviewer-thread"}});
+    rootItem("running-read", "mcp__github__get_pull_request", {number: 42}, "running");
+    const observe = (operationId: string, evidence: Array<Record<string, unknown>>) => Effect.gen(function* () {
+      const document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+      const apply = yield* applyArgs(fixture, {operationId, workflowId: created.workflowId, expectedRevision: document.revision, status: document.status,
+        objective: document.objective, plan: document.plan, note: "Observe the participant.", evidence: evidence as never});
+      installEvidence(fixture, apply);
+      return yield* fixture.controller.write(apply);
+    });
+    const read = yield* observe("observe-read", [{kind: "observation", note: "The pull request was read.", participantContributionId: "review:ext", observation: "read", sourceItemId: "read-pr"}]);
+    assert.equal(read.status, "applied", JSON.stringify(read));
+    let document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const receipt = document.evidence.find(item => item.kind === "observation" && item.participant);
+    assert.ok(receipt?.participant);
+    assert.equal(typeof receipt.participant.receipt.inputDigest, "string");
+    assert.deepEqual(receipt.participant, {contributionId: "review:ext", revision: 1, attempt: 1, participant: {kind: "external", ref: "github:pr-42"},
+      receipt: {kind: "read", toolName: "mcp__github__get_pull_request", inputDigest: receipt.participant.receipt.inputDigest}});
+    assert.equal(receipt.sourceThreadId, fixture.supervisorThreadId, "the receipt cites the root's own thread");
+    assert.equal(receipt.sourceItemId, "read-pr");
+    assert.equal(receipt.sourceRunId, "supervisor-run-current", "the item's run is recorded as navigation");
+    // a wait proves lifecycle only, directly or through a recognised gateway call; declared as a read it is refused
+    assert.deepEqual(yield* observe("observe-wait-as-read", [{kind: "observation", note: "Waited.", participantContributionId: "review:ext", observation: "read", sourceItemId: "wait-reviewer"}]),
+      {status: "invalid", operationId: "observe-wait-as-read", reason: "participant_item_lifecycle_only"});
+    assert.deepEqual(yield* observe("observe-gateway-wait-as-read", [{kind: "observation", note: "Waited.", participantContributionId: "review:ext", observation: "read", sourceItemId: "gateway-wait"}]),
+      {status: "invalid", operationId: "observe-gateway-wait-as-read", reason: "participant_item_lifecycle_only"});
+    const lifecycle = yield* observe("observe-wait", [{kind: "observation", note: "Waited for the reviewer.", participantContributionId: "review:ext", observation: "lifecycle", sourceItemId: "gateway-wait"}]);
+    assert.equal(lifecycle.status, "applied", JSON.stringify(lifecycle));
+    document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const lifecycleReceipt = document.evidence.filter(item => item.participant).at(-1);
+    assert.deepEqual(lifecycleReceipt?.participant?.receipt, {kind: "lifecycle", toolName: "t3-code__t3_thread_wait", inputDigest: lifecycleReceipt?.participant?.receipt.inputDigest},
+      "the gateway's target name is recorded verbatim");
+    // a running or missing item, an item cited for an unsupported statement, an unknown contribution, a foreign item owner
+    assert.deepEqual(yield* observe("observe-running", [{kind: "observation", note: "Still running.", participantContributionId: "review:ext", observation: "read", sourceItemId: "running-read"}]),
+      {status: "invalid", operationId: "observe-running", reason: "participant_item_not_completed_tool"});
+    assert.deepEqual(yield* observe("observe-no-item", [{kind: "observation", note: "Read it.", participantContributionId: "review:ext", observation: "read"}]),
+      {status: "invalid", operationId: "observe-no-item", reason: "participant_item_required"});
+    assert.deepEqual(yield* observe("observe-unsupported-item", [{kind: "observation", note: "No route.", participantContributionId: "review:ext", observation: "unsupported", sourceItemId: "read-pr"}]),
+      {status: "invalid", operationId: "observe-unsupported-item", reason: "participant_item_unexpected"});
+    assert.deepEqual(yield* observe("observe-unknown", [{kind: "observation", note: "No route.", participantContributionId: "review:none", observation: "unsupported"}]),
+      {status: "invalid", operationId: "observe-unknown", reason: "participant_contribution_unknown"});
+    assert.deepEqual(yield* observe("observe-foreign-item", [{kind: "observation", note: "Read it.", participantContributionId: "review:ext", observation: "read", sourceThreadId: fixture.mainThreadId, sourceItemId: "read-pr"}]),
+      {status: "denied", operationId: "observe-foreign-item", reason: "participant_item_not_own"});
+    const unsupported = yield* observe("observe-unsupported", [{kind: "observation", note: "No route to the reviewer exists.", participantContributionId: "review:ext", observation: "unsupported"}]);
+    assert.equal(unsupported.status, "applied", JSON.stringify(unsupported));
+    document = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    assert.deepEqual(document.evidence.filter(item => item.participant).at(-1)?.participant?.receipt, {kind: "unsupported", toolName: null, inputDigest: null});
+    // the operative scope fence is unchanged for a status change, and the receipt fields need an observation entry
+    assert.deepEqual(yield* observe("status-foreign", [{kind: "status_changed", note: "Reviewed.", targetNodeId: step.nodeId, sourceThreadId: "reviewer-thread", sourceMessageId: "reviewer-message"}]),
+      {status: "denied", operationId: "status-foreign", reason: "activity_reference_outside_current_scope"});
+    const malformed = yield* observe("observe-malformed", [{kind: "note", note: "x", participantContributionId: "review:ext", observation: "read"}]);
+    assert.equal(malformed.status, "invalid");
+    assert.equal((malformed as {diagnostic?: {code: string; path: string}}).diagnostic?.code, "evidence_entry_invalid");
+    assert.equal((malformed as {diagnostic?: {code: string; path: string}}).diagnostic?.path, "/input/evidence/0");
   } finally {yield* fixture.close;}
 }));
 

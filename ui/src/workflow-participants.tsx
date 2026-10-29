@@ -1,0 +1,69 @@
+import React from "react";
+import type { WorkflowProgressParticipant, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
+import { EntityDetails, HelpDisclosure } from "./disclosure.js";
+import { GuideLink } from "./guide-link.js";
+
+// each coverage value is one distinct fact; the label is what a first-time operator reads, the detail what the receipt disclosure explains
+const coverageText: Record<WorkflowProgressParticipant["coverage"], {label: string; detail: string; tone: "green" | "blue" | "amber"}> = {
+  native: {label: "Observed by the service", detail: "A verified native descendant the service reads itself.", tone: "green"},
+  supervisor_observed: {label: "Read by the Supervisor", tone: "green",
+    detail: "The Supervisor's own attributed read, backed by its completed native tool call. The service verified that call, not what the Supervisor concluded from it."},
+  lifecycle_only: {label: "Lifecycle only", detail: "Only a wait, list or search call was cited; no transcript read is established.", tone: "blue"},
+  reported: {label: "Reported by the main only", detail: "The main declared this participant; nothing was observed.", tone: "blue"},
+  unsupported: {label: "No route stated", detail: "The Supervisor stated that no route to observe this participant exists.", tone: "amber"},
+  unknown: {label: "Unknown", detail: "No declaration and no receipt.", tone: "amber"},
+};
+const kindText = {native_child: "Native child conversation", t3_conversation: "T3 conversation", external: "External participant", unknown: "Unknown participant"} as const;
+const lifecycleText = {running: "Running", completed: "Completed", interrupted: "Interrupted", unknown: "Unknown", reported: "As reported by the main"} as const;
+const completionText = {none: "Not completed", native_completed: "Conversation completed (not step completion)", result_reported: "Result reported, not assessed",
+  accepted: "Result accepted by the Supervisor", needs_more: "Further work needed", withdrawn: "Withdrawn"} as const;
+const ownerText = {root: "Supervisor root", helper: "A helper", unknown: "Unknown"} as const;
+const threadHref = (threadId: string) => `t3-thread://v1/${threadId}`;
+const time = (value: number) => {
+  const date = new Date(value);
+  return Number.isNaN(date.valueOf()) ? "Unknown time" : date.toLocaleString();
+};
+
+/** Every participant of a workflow with its role, lifecycle, completion, coverage and receipt as distinct facts; settlement is not evaluated here. */
+export function WorkflowParticipants({workflow}: {workflow: WorkflowProgressWorkflow | undefined}) {
+  const participants = workflow?.participants ?? [];
+  return <section className="stack workflow-participants" aria-labelledby="workflow-participants-title">
+    <h3 id="workflow-participants-title">Participants</h3>
+    <HelpDisclosure title="About participants and coverage"><p><GuideLink topic="participants">Participants</GuideLink> are the conversations or agents that work an
+      occurrence of this plan: native children attached to a step, children linked without a step, and participants the main reported for external work. Coverage
+      names what is established for each one: a service read of a native child, the Supervisor's own attributed read, a lifecycle-only wait, a bare report, a stated
+      missing route, or nothing. A completed conversation or an accepted result never completes a step by itself, and settlement is not evaluated on this page.</p></HelpDisclosure>
+    {!workflow ? <p className="muted">No workflow data is available for participants.</p>
+      : participants.length === 0 ? <p className="muted">No participants are recorded for this workflow.</p>
+      : <ul className="workflow-participant-list">{participants.map(participant => {
+        const coverage = coverageText[participant.coverage];
+        return <li key={participant.id} className="workflow-participant">
+          <div className="row between">
+            <div className="text-group">
+              <strong>{participant.threadId ? <a href={threadHref(participant.threadId)}>{participant.handle}</a> : participant.handle ?? "No handle reported"}</strong>
+              <p className="muted small">{kindText[participant.kind]}{participant.environmentId ? ` · environment ${participant.environmentId}` : ""}
+                {participant.contributionId ? ` · contribution ${participant.contributionId} revision ${participant.revision}` : ""}</p>
+            </div>
+            <span className={`pill ${coverage.tone}`}>Coverage: {coverage.label}</span>
+          </div>
+          <p className="small">{participant.roles.length
+            ? <>Works: {participant.roles.map(role => `${role.nodeName ?? role.nodeId} · Attempt ${role.attempt}${role.retired ? " · replaced for this attempt" : ""}`).join("; ")}</>
+            : "No attached occurrence: this linked child has no recorded role in the plan."}</p>
+          <p className="small"><strong>Conversation:</strong> {lifecycleText[participant.lifecycle]}{participant.reportedState ? ` (${participant.reportedState})` : ""} ·{" "}
+            <strong>Completion:</strong> {completionText[participant.completion]} · <strong>Followed by:</strong> {ownerText[participant.owner]} ·{" "}
+            <strong>Settlement:</strong> Not evaluated</p>
+          <EntityDetails title="Coverage receipt"><div className="text-group small">
+            <p>{coverage.detail}</p>
+            {participant.currentReceipt
+              ? <p>Latest receipt: {participant.currentReceipt.kind} · {time(participant.currentReceipt.recordedAt)} · by{" "}
+                <a href={threadHref(participant.currentReceipt.actorSupervisorThreadId)}>this Supervisor</a>
+                {participant.currentReceipt.toolName ? <> · tool <code>{participant.currentReceipt.toolName}</code></> : null}
+                {participant.currentReceipt.sourceItemId ? <> · item <code>{participant.currentReceipt.sourceItemId}</code></> : null}</p>
+              : <p>No receipt for the current declaration, revision and attempt.</p>}
+            {participant.priorReceipts > 0 && <p className="muted">{participant.priorReceipts} earlier receipt{participant.priorReceipts === 1 ? "" : "s"} belong to a
+              previous revision, declaration or attempt and stay in history.</p>}
+          </div></EntityDetails>
+        </li>;
+      })}</ul>}
+  </section>;
+}

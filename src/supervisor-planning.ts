@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { messageReadRule } from "./message-read-handle.js";
 import type { TaskRecord } from "./project-supervisor-store.js";
-import { planningTimeoutBounds } from "./supervisor-planning-contract.js";
-import type { NewPlanningAttempt, PlanningAttempt, PlanningAcknowledgement, PlanningDelivery, PlanningDraftView, PlanningTarget } from "./supervisor-planning-contract.js";
+import { planningTargetLimit, planningTimeoutBounds } from "./supervisor-planning-contract.js";
+import type { NewPlanningAttempt, PlanningAttempt, PlanningAcknowledgement, PlanningDelivery, PlanningDraftView, PlanningTarget, PlanningUncovered } from "./supervisor-planning-contract.js";
 export * from "./supervisor-planning-contract.js";
 
 /** Delivery identities are allocated before any send and never depend on retry time. */
@@ -42,7 +42,23 @@ export const planningTargetAwaited = (target: PlanningTarget): boolean => target
   target.state === "release_pending" || target.hold.state === "sending" || target.hold.state === "uncertain";
 
 export const planningCanAdopt = (attempt: PlanningAttempt, now: number): boolean => attempt.state === "open" && now < attempt.deadline &&
+  (attempt.uncovered?.length ?? 0) === 0 &&
   attempt.targets.every(target => target.state === "acknowledged" || target.state === "quiescent" || target.state === "closed");
+
+/**
+ * Late descendants of a paused main: each becomes a requested target with its own prepared hold while the combined limit allows, and
+ * every one that does not fit, or that a helper covers, is listed as uncovered so the attempt never reads as quiet without it.
+ */
+export const addPlanningTargets = (attempt: PlanningAttempt, targets: NewPlanningAttempt["targets"], uncovered: readonly PlanningUncovered[], now: number): PlanningAttempt => {
+  if (attempt.state !== "open" || now >= attempt.deadline) return attempt;
+  const known = new Set([...attempt.targets.map(target => target.threadId), ...(attempt.uncovered ?? []).map(item => item.threadId)]);
+  const fresh = targets.filter(target => !known.has(target.threadId));
+  const room = Math.max(0, planningTargetLimit - attempt.targets.length);
+  const added = fresh.slice(0, room).map(target => ({...target, state: "requested" as const, hold: planningDelivery(attempt.id, target.threadId, "hold")}));
+  const overflow = fresh.slice(room).map(target => ({threadId: target.threadId, reason: "limit" as const, observedAt: now}));
+  const listed = [...(attempt.uncovered ?? []), ...overflow, ...uncovered.filter(item => !known.has(item.threadId))];
+  return {...attempt, targets: [...attempt.targets, ...added], ...(listed.length ? {uncovered: listed} : {})};
+};
 
 /** A parent can acknowledge its own dispatch hold, never an active child's pause. */
 export const acknowledgePlanningTarget = (attempt: PlanningAttempt, acknowledgement: PlanningAcknowledgement,
@@ -163,6 +179,7 @@ export const planningDraftInstruction = (attempt: PlanningAttempt): string =>
 export const planningAttemptAnswer = (attempt: PlanningAttempt, withDraftInstruction = false) => ({
   attemptId: attempt.id, state: attempt.state, deadline: deadlineText(attempt), resolution: attempt.resolution,
   targets: attempt.targets.map(target => ({threadId: target.threadId, state: target.state, ack: target.acknowledgement?.messageId ?? null})),
+  uncovered: (attempt.uncovered ?? []).map(item => ({threadId: item.threadId, reason: item.reason})),
   draft: attempt.draft ? {state: attempt.draft.state, taskId: attempt.draft.taskId} : null,
   ...(withDraftInstruction && attempt.state === "open" && !attempt.draft ? {draftInstruction: planningDraftInstruction(attempt)} : {}),
 });

@@ -1,0 +1,81 @@
+import assert from "node:assert/strict";
+import {it} from "@effect/vitest";
+import {workflowParticipants, type ParticipantCoverageOwner, type ParticipantScopeThread} from "../src/workflow-progress.js";
+import type {ExternalContribution, ExternalContributionParticipant, WorkflowStateDocument, WorkflowStateEvidence} from "../src/workflow-state-contract.js";
+
+// the participants projection is pure: it reads the plan's contributors, the applied returns, the contributions and the observation
+// receipts of one document, and the verified scope rows and coverage owners the reader supplies
+const step = (nodeId: string, name: string, contributorThreadIds: string[]) => ({kind: "step" as const, nodeId, definitionId: null, localId: name.toLowerCase(), templatePath: null,
+  name, description: `${name} the change.`, source: null, resolution: "resolved" as const, reason: "Needed.", status: "underway" as const, contributorThreadIds});
+const contribution = (contributionId: string, nodeId: string, participant: ExternalContributionParticipant | null, overrides: Partial<ExternalContribution> = {}): ExternalContribution =>
+  ({contributionId, nodeId, state: "awaiting_result", revision: 1, summary: "Reported work.", references: [], externalRef: null, participant,
+    sourceThreadId: "main", sourceRunId: "run", sourceMessageId: "message", recordedAt: 10, assessment: null, ...overrides});
+const receipt = (id: string, contributionId: string, revision: number, attempt: number, participant: ExternalContributionParticipant | null, kind: "read" | "lifecycle" | "unsupported",
+  recordedAt: number): WorkflowStateEvidence => ({id, operationId: `op-${id}`, kind: "observation", recordedAt, actorSupervisorThreadId: "supervisor", targetNodeId: null, targetNodeName: null,
+  statusFrom: null, statusTo: null, sourceThreadId: "supervisor", sourceRunId: "root-run", sourceMessageId: null, sourceItemId: kind === "unsupported" ? null : `item-${id}`, agreementKey: null,
+  note: "Observed.", participant: {contributionId, revision, attempt, participant: participant ?? null, receipt: {kind, toolName: kind === "unsupported" ? null : `tool-${kind}`, inputDigest: null}}});
+
+it("participants merge attached and linked native children with declared participants, each coverage, completion and attempt a distinct fact", () => {
+  const document = {
+    plan: {kind: "sequence", templatePath: null, nodes: [step("step-review", "Review", ["reviewer-a", "reviewer-b"]), step("step-deliver", "Deliver", [])]},
+    returns: [{returnId: "r1", backToNodeId: "back", targetNodeId: "step-review", regionNodeIds: ["step-review"], attempt: 1, state: "applied", reason: "Findings.",
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, requestedAt: 5, resolvedAt: 6, closed: null, closedSelections: null,
+      retiredRuns: [{kind: "thread", threadId: "reviewer-b", reason: "Rounds cannot be told apart."}], resolution: null}],
+    contributions: [
+      contribution("c-t3", "step-review", {kind: "t3_conversation", threadId: "ext-thread", environmentId: "lab"}, {revision: 2, state: "result",
+        assessment: {decision: "accepted", resultRevision: 2, note: "Good.", actorSupervisorThreadId: "supervisor", evidenceId: "a1", recordedAt: 30}}),
+      contribution("c-ext", "step-deliver", {kind: "external", ref: "github:pr-42"}),
+      contribution("c-none", "step-deliver", null),
+      contribution("c-native", "step-review", {kind: "t3_conversation", threadId: "reviewer-a", environmentId: null}),
+      contribution("c-unsupported", "step-deliver", {kind: "unknown"}),
+      contribution("c-lifecycle", "step-deliver", {kind: "external", ref: "queue:7"}, {state: "withdrawn"}),
+    ],
+    evidence: [
+      receipt("old", "c-t3", 1, 1, {kind: "t3_conversation", threadId: "ext-thread", environmentId: "lab"}, "read", 11),
+      receipt("current", "c-t3", 2, 2, {kind: "t3_conversation", threadId: "ext-thread", environmentId: "lab"}, "read", 21),
+      receipt("other-declaration", "c-t3", 2, 2, {kind: "t3_conversation", threadId: "ext-thread", environmentId: null}, "read", 22),
+      receipt("stated", "c-unsupported", 1, 1, {kind: "unknown"}, "unsupported", 12),
+      receipt("waited", "c-lifecycle", 1, 1, {kind: "external", ref: "queue:7"}, "lifecycle", 13),
+    ],
+  } as unknown as WorkflowStateDocument;
+  const scope = new Map<string, ParticipantScopeThread>([["reviewer-a", {threadId: "reviewer-a", lifecycle: "completed"}], ["linked-only", {threadId: "linked-only", lifecycle: "running"}]]);
+  const owners = new Map<string, ParticipantCoverageOwner>([["reviewer-a", "assigned"], ["reviewer-b", "root"]]);
+  const rows = workflowParticipants(document, ["linked-only", "reviewer-a"], scope, owners);
+  const byId = new Map(rows.map(row => [row.id, row]));
+  assert.deepEqual([...byId.keys()], ["reviewer-a", "reviewer-b", "linked-only", "contribution:c-t3", "contribution:c-ext", "contribution:c-none", "contribution:c-native", "contribution:c-unsupported", "contribution:c-lifecycle"]);
+
+  const attached = byId.get("reviewer-a")!;
+  assert.deepEqual(attached.roles, [{nodeId: "step-review", nodeName: "Review", attempt: 2, retired: false}]);
+  assert.deepEqual([attached.coverage, attached.lifecycle, attached.completion, attached.owner, attached.kind, attached.settlement], ["native", "completed", "native_completed", "helper", "native_child", "not_evaluated"]);
+  const replaced = byId.get("reviewer-b")!;
+  assert.deepEqual(replaced.roles, [{nodeId: "step-review", nodeName: "Review", attempt: 2, retired: true}], "an applied return that retired the conversation marks the role replaced");
+  assert.deepEqual([replaced.coverage, replaced.lifecycle, replaced.owner], ["unknown", "unknown", "root"], "a contributor outside the verified scope rows stays unknown");
+  const linked = byId.get("linked-only")!;
+  assert.deepEqual([linked.roles, linked.coverage, linked.lifecycle, linked.owner], [[], "native", "running", "unknown"], "a linked child with no attached occurrence has no role");
+
+  const observed = byId.get("contribution:c-t3")!;
+  assert.deepEqual([observed.kind, observed.handle, observed.environmentId, observed.threadId, observed.revision, observed.completion, observed.coverage, observed.lifecycle, observed.reportedState],
+    ["t3_conversation", "ext-thread", "lab", "ext-thread", 2, "accepted", "supervisor_observed", "reported", "result"]);
+  assert.deepEqual(observed.roles, [{nodeId: "step-review", nodeName: "Review", attempt: 2, retired: false}]);
+  assert.equal(observed.currentReceipt?.evidenceId, "current", "only the receipt for the current revision, declaration and attempt is current");
+  assert.deepEqual([observed.currentReceipt?.kind, observed.currentReceipt?.toolName, observed.currentReceipt?.sourceItemId], ["read", "tool-read", "item-current"]);
+  assert.equal(observed.priorReceipts, 2, "the earlier revision and the other declaration stay as history");
+  assert.deepEqual([byId.get("contribution:c-ext")!.coverage, byId.get("contribution:c-ext")!.completion, byId.get("contribution:c-ext")!.handle], ["reported", "none", "github:pr-42"]);
+  assert.deepEqual([byId.get("contribution:c-none")!.coverage, byId.get("contribution:c-none")!.kind, byId.get("contribution:c-none")!.handle], ["unknown", "unknown", null]);
+  assert.deepEqual([byId.get("contribution:c-native")!.coverage, byId.get("contribution:c-native")!.lifecycle], ["native", "completed"], "a declared conversation inside the verified scope is observed by the service");
+  assert.deepEqual([byId.get("contribution:c-unsupported")!.coverage, byId.get("contribution:c-unsupported")!.currentReceipt?.kind], ["unsupported", "unsupported"]);
+  assert.deepEqual([byId.get("contribution:c-lifecycle")!.coverage, byId.get("contribution:c-lifecycle")!.completion], ["lifecycle_only", "withdrawn"]);
+  for (const row of rows) assert.equal(row.settlement, "not_evaluated");
+});
+
+it("a receipt for a stale attempt is history once a return reopened the occurrence", () => {
+  const document = {
+    plan: {kind: "sequence", templatePath: null, nodes: [step("step-review", "Review", [])]},
+    returns: [{returnId: "r1", backToNodeId: "back", targetNodeId: "step-review", regionNodeIds: ["step-review"], attempt: 1, state: "applied", reason: "Findings.",
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, requestedAt: 5, resolvedAt: 6, closed: null, closedSelections: null, retiredRuns: [], resolution: null}],
+    contributions: [contribution("c", "step-review", {kind: "external", ref: "agent:1"})],
+    evidence: [receipt("first-attempt", "c", 1, 1, {kind: "external", ref: "agent:1"}, "read", 4)],
+  } as unknown as WorkflowStateDocument;
+  const [row] = workflowParticipants(document, [], new Map(), new Map());
+  assert.deepEqual([row!.roles[0]?.attempt, row!.coverage, row!.currentReceipt, row!.priorReceipts], [2, "reported", null, 1]);
+});

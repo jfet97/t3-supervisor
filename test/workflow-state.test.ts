@@ -689,9 +689,46 @@ it("external-contribution records parse only with every exact field, type and ca
     ["long contribution ID", contributionRecord({contributionId: "a".repeat(65)})],
     ["numeric node ID", contributionRecord({nodeId: 7})],
     ["missing task ID", contributionRecord({taskId: ""})],
+    ["participant kind", contributionRecord({participant: {kind: "agent", ref: "x"}})],
+    ["participant extra key", contributionRecord({participant: {kind: "external", ref: "x", url: "https://example.test"}})],
+    ["participant empty ref", contributionRecord({participant: {kind: "external", ref: ""}})],
+    ["participant long thread", contributionRecord({participant: {kind: "t3_conversation", threadId: "t".repeat(201)}})],
+    ["participant unknown extra", contributionRecord({participant: {kind: "unknown", ref: "x"}})],
+    ["participant string", contributionRecord({participant: "reviewer"})],
   ];
   for (const [label, value] of rejected) assert.equal(parseExternalContributionRecord(value), null, label);
+  // the optional generic participant: a T3 conversation (environment optional), an opaque external handle, unknown, or null
+  assert.deepEqual(parseExternalContributionRecord(contributionRecord({participant: {kind: "t3_conversation", threadId: "reviewer-thread"}}))?.participant,
+    {kind: "t3_conversation", threadId: "reviewer-thread", environmentId: null});
+  assert.deepEqual(parseExternalContributionRecord(contributionRecord({participant: {kind: "t3_conversation", threadId: "reviewer-thread", environmentId: "lab-vm"}}))?.participant,
+    {kind: "t3_conversation", threadId: "reviewer-thread", environmentId: "lab-vm"});
+  assert.deepEqual(parseExternalContributionRecord(contributionRecord({participant: {kind: "external", ref: "github:pr-42"}}))?.participant, {kind: "external", ref: "github:pr-42"});
+  assert.deepEqual(parseExternalContributionRecord(contributionRecord({participant: {kind: "unknown"}}))?.participant, {kind: "unknown"});
+  assert.equal(parseExternalContributionRecord(contributionRecord({participant: null}))?.participant, null);
+  assert.equal(Object.hasOwn(parseExternalContributionRecord(contributionRecord())!, "participant"), false, "an absent participant stays absent on the parsed record");
 });
+
+it.live("a contribution stores its declared participant, a later revision may replace it, and the same revision cannot change it", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([], false);
+  const {first} = yield* seedLocalMain(fixture);
+  const declared = contribution(first.nodeId, {participant: {kind: "external", ref: "github:pr-42"}});
+  assert.equal((yield* record(fixture, declared, 500)).status, "applied");
+  let document = (yield* fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId))!;
+  assert.deepEqual(document.contributions[0]?.participant, {kind: "external", ref: "github:pr-42"});
+  // the same revision with a different participant is a changed record, not a replay
+  assert.deepEqual(yield* record(fixture, contribution(first.nodeId, {participant: {kind: "unknown"}}), 510), {status: "rejected", code: "contribution_revision_conflict"});
+  assert.equal((yield* record(fixture, declared, 520)).status, "unchanged", "an identical record replays as a no-op");
+  const moved = contribution(first.nodeId, {revision: 2, state: "result", summary: "The review returned.", participant: {kind: "t3_conversation", threadId: "reviewer-thread", environmentId: null}});
+  assert.equal((yield* record(fixture, moved, 530)).status, "applied");
+  document = (yield* fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId))!;
+  assert.deepEqual(document.contributions[0]?.participant, {kind: "t3_conversation", threadId: "reviewer-thread", environmentId: null});
+  assert.equal(document.contributions[0]?.revision, 2);
+  const undeclared = contribution(first.nodeId, {contributionId: "review:external-2"});
+  assert.equal((yield* record(fixture, undeclared, 540)).status, "applied");
+  document = (yield* fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId))!;
+  assert.equal(document.contributions.find(item => item.contributionId === "review:external-2")?.participant, null, "no declaration is stored as null");
+  assert.equal(document.contributions.length, 2);
+}));
 
 it.live("contribution revisions start at one, grow by one, replay as no-ops and end at withdrawn", () => Effect.gen(function* () {
   const fixture = yield* makeFixture([], false);
@@ -701,7 +738,7 @@ it.live("contribution revisions start at one, grow by one, replay as no-ops and 
   assert.equal(created.status, "applied");
   let document = (yield* fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId))!;
   assert.equal(document.revision, 2);
-  assert.deepEqual(document.contributions, [{...contribution(first.nodeId), recordedAt: 500, assessment: null}]);
+  assert.deepEqual(document.contributions, [{...contribution(first.nodeId), participant: null, recordedAt: 500, assessment: null}]);
   const recorded = document.evidence.at(-1)!;
   assert.equal(recorded.kind, "contribution_recorded");
   assert.deepEqual(recorded.contribution, {contributionId: "review:external-1", revision: 1, state: "awaiting_result", decision: null});

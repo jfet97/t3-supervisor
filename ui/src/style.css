@@ -442,6 +442,10 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .evidence-history h3 { font-size: .95rem; }
 .supervisor-records { padding-inline-start: 18px; }
 .connected-work h2 { font-size: 1.05rem; }
+.workflow-participants h3 { font-size: 1rem; }
+.workflow-participant-list { margin: 0; padding: 0; list-style: none; }
+.workflow-participant { padding: 14px 0; border-top: 1px solid var(--line); display: grid; gap: 8px; overflow-wrap: anywhere; }
+.workflow-participant > .disclosure { margin-top: 4px; }
 .alignment-exchange { display: grid; gap: 22px; padding: 0; margin: 0; list-style: none; }
 .alignment-exchange li { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 12px; }
 .alignment-exchange strong { display: block; font-size: .85rem; }

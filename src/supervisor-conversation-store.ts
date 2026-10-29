@@ -336,8 +336,13 @@ const makeConversationStore = Effect.gen(function* () {
     projectId: attempt.projectId, mainThreadId: attempt.mainThreadId, ownerThreadId: attempt.ownerThreadId,
     bindingGeneration: attempt.bindingGeneration, memberEpoch: attempt.memberEpoch, taskId: attempt.taskId,
     taskRevision: attempt.taskRevision, requestSource: attempt.requestSource, baselineAgreementId: attempt.baselineAgreementId,
-    createdAt: attempt.createdAt,
-    targets: attempt.targets.map(target => [target.threadId, target.recipientThreadId, target.scope, target.assignmentRootThreadId, target.assignmentEpoch, target.hold.messageId, target.hold.commandId])});
+    createdAt: attempt.createdAt});
+  const targetIdentity = (target: PlanningAttempt["targets"][number]) => JSON.stringify([target.threadId, target.recipientThreadId, target.scope, target.assignmentRootThreadId,
+    target.assignmentEpoch, target.hold.messageId, target.hold.commandId]);
+  // the recorded targets never change or disappear; an open attempt may append late descendants of its paused main after them
+  const targetsExtended = (current: PlanningAttempt, attempt: PlanningAttempt) =>
+    attempt.targets.length >= current.targets.length && current.targets.every((target, index) => targetIdentity(target) === targetIdentity(attempt.targets[index]!)) &&
+    (attempt.targets.length === current.targets.length || current.state === "open");
   const savePlanningAttempt = (attempt: PlanningAttempt) => guidanceSql(db.withTransaction(Effect.gen(function* () {
     if (!Schema.is(PlanningAttempt)(attempt)) return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt", sqlReason: null});
     const [row] = yield* db`SELECT document FROM supervisor_planning_attempts WHERE id=${attempt.id}`;
@@ -359,7 +364,8 @@ const makeConversationStore = Effect.gen(function* () {
         const next = attempt.draft?.cleanup?.[index];
         return !next || entry.type !== next.type || entry.runId !== next.runId || deliveryChanged(entry.receipt, next.receipt);
       }));
-    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !mayAdvance && current.state !== attempt.state || draftChanged))
+    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !targetsExtended(current, attempt) ||
+      !mayAdvance && current.state !== attempt.state || draftChanged))
       return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt_identity", sqlReason: null});
     yield* db`INSERT INTO supervisor_planning_attempts VALUES(${attempt.id},${attempt.projectId},${JSON.stringify(attempt)},${attempt.createdAt})
       ON CONFLICT(id) DO UPDATE SET document=excluded.document`;

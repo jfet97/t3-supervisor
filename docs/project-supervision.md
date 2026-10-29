@@ -358,6 +358,15 @@ remain separate decisions: "external task finished" alone never completes a step
 an accepted result does not complete it automatically, and step completion is a
 separate status edit that may cite the main's result message.
 
+A record may name its participant generically: a T3 conversation (local or in a
+linked environment), an opaque external handle, or unknown. The declaration is
+untrusted and grants nothing. The root may attribute its own observation of a
+participant by citing its own completed native tool call; a wait, list or search
+call establishes lifecycle only, never a transcript read. The task page's
+Participants section shows every participant's role and attempt, conversation
+lifecycle, completion and coverage as distinct facts, and states when nothing was
+observed or no route exists; settlement is evaluated separately.
+
 Scope is the main workflow only. A local child that used external help reports
 the outcome to the main, which relays it with its own record; no child or external
 contributor appears as a native descendant. Result text and references are

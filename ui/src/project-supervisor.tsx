@@ -1,4 +1,5 @@
 import { WorkflowHistory } from "./workflow-history.js";
+import { WorkflowParticipants } from "./workflow-participants.js";
 import { defaultPlanningTimeoutMs, planningTimeoutBounds } from "../../src/supervisor-planning-contract.js";
 import { ActivityAwareness, PlanningStatus } from "./supervision-awareness.js";
 import {RefreshAction} from "./refresh-action.js";
@@ -528,6 +529,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
     <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><HelpDisclosure title="About child conversations and contributions"><p><GuideLink topic="connected-child">Native and delegated children</GuideLink> are different ways of connecting conversations. A contribution links work to a parent step; a <GuideLink topic="helper">Supervisor assignment</GuideLink> identifies who follows it. Neither a finished conversation nor an assignment proves that a parent step is complete. <GuideLink topic="children">How child tasks contribute</GuideLink>.</p></HelpDisclosure><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
+    <WorkflowParticipants workflow={workflows.get(mainThreadId)}/>
     <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
       const workflow = workflows.get(thread.threadId);

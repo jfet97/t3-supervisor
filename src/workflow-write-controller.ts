@@ -23,9 +23,11 @@ import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, documentBra
 import {
   externalContributionDecisions,
   externalContributionLimits,
+  participantReceiptKinds,
   workflowExecutionStatuses,
   workflowMutationLimits,
   type ExternalContributionDecision,
+  type ParticipantReceiptKind,
   type WorkflowApplyInput,
   type WorkflowControllerLineage,
   type WorkflowExecutionStatus,
@@ -580,8 +582,8 @@ const evidenceDiagnostic = (evidence: unknown): WorkflowApplyDiagnostic | null =
     return {code: "evidence_entry_invalid", path: "/input/evidence", expected: `an array of at most ${workflowMutationLimits.maxEvidencePerApply} evidence entries`};
   for (const [index, item] of evidence.entries()) {
     const path = `/input/evidence/${index}`;
-    if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", ...nativeReferenceFields]))
-      return {code: "evidence_entry_invalid", path, expected: "exactly kind and note, with optional targetNodeId, sourceThreadId, sourceRunId, sourceMessageId and sourceItemId"};
+    if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", ...nativeReferenceFields, "participantContributionId", "observation"]))
+      return {code: "evidence_entry_invalid", path, expected: "exactly kind and note, with optional targetNodeId, sourceThreadId, sourceRunId, sourceMessageId, sourceItemId, participantContributionId and observation"};
     if (!["status_changed", "note", "observation", "not_applicable"].includes(String(item.kind)))
       return {code: "evidence_entry_invalid", path: `${path}/kind`, expected: "status_changed, note, observation or not_applicable"};
     if (!isText(item.note, workflowMutationLimits.maxTextLength))
@@ -590,8 +592,25 @@ const evidenceDiagnostic = (evidence: unknown): WorkflowApplyDiagnostic | null =
       return {code: "evidence_entry_invalid", path: `${path}/targetNodeId`, expected: "an existing occurrence nodeId, or null for the workflow itself"};
     const field = nativeReferenceFields.find(key => !isNullableNativeReference(item[key]));
     if (field) return {code: "evidence_reference_invalid", path: `${path}/${field}`, expected: evidenceReferenceExpected};
+    // a participant observation names the contribution and what the root's own cited item establishes, together, on an observation entry
+    if (item.participantContributionId !== undefined && (typeof item.participantContributionId !== "string" || !contributionIdPattern.test(item.participantContributionId)))
+      return {code: "evidence_entry_invalid", path: `${path}/participantContributionId`, expected: "the contributionId of an existing main-workflow contribution"};
+    if (item.observation !== undefined && !(participantReceiptKinds as readonly unknown[]).includes(item.observation))
+      return {code: "evidence_entry_invalid", path: `${path}/observation`, expected: "read, lifecycle or unsupported"};
+    if ((item.participantContributionId !== undefined) !== (item.observation !== undefined) || item.observation !== undefined && item.kind !== "observation")
+      return {code: "evidence_entry_invalid", path, expected: "participantContributionId and observation together, on an observation entry only"};
   }
   return null;
+};
+const contributionIdPattern = /^[A-Za-z0-9._:-]{1,64}$/u;
+// T3's own wait, list, search and queue tools prove lifecycle only, under any registered prefix or gateway name; nothing else is classified
+const lifecycleOnlyTool = /(?:^|__|\.)t3_(?:thread_wait|thread_list|thread_search|queue)$/u;
+const maxReceiptToolNameLength = 128;
+// the name a native item reports for its call, or the target name a recognised gateway call wraps; recorded verbatim, never interpreted
+const observedToolName = (item: Record<string, unknown>): string | null => {
+  const inner = isRecord(item.input) && typeof item.input.name === "string" && isRecord(item.input.arguments) ? item.input.name : null;
+  const name = inner ?? (typeof item.toolName === "string" ? item.toolName : null);
+  return name === null ? null : name.length <= maxReceiptToolNameLength ? name : `${name.slice(0, maxReceiptToolNameLength - 3)}...`;
 };
 
 const statusEditsExpected = `at most ${maxStatusEditsPerApply} entries of exactly {nodeId, status}, each naming a distinct existing step or workflow occurrence`;
@@ -920,6 +939,8 @@ const applyInputSchema = {
         sourceRunId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
         sourceMessageId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
         sourceItemId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
+        participantContributionId: idSchema(64),
+        observation: {type: "string", enum: [...participantReceiptKinds]},
       },
     }},
   },
@@ -1658,15 +1679,73 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     return {...result, operationId: payload.input.operationId};
   }));
 
+  const resolveParticipantObservations = Effect.fnUntraced(function* (
+    payload: Extract<WorkflowWritePayload, {action: "apply"}>,
+    owner: WorkflowOwner,
+    evidence: readonly WorkflowStateEvidenceInput[],
+    cancel: WorkflowCallCancel,
+  ): Effect.fn.Return<ActivityReferenceResult, SupervisionStoreError> {
+    if (payload.supervisorThreadId !== owner.supervisorThreadId) return {status: "denied", reason: "participant_observation_root_only"};
+    const target = yield* workflows.getByIdForOwner(owner, payload.input.workflowId);
+    if (target.status === "not_found") return {status: "invalid", reason: "activity_reference_workflow_not_found"};
+    if (target.status === "owner_mismatch") return {status: "denied", reason: "activity_reference_owner_mismatch"};
+    if (target.status === "incompatible") return {status: "unavailable", reason: "activity_reference_workflow_incompatible"};
+    if (target.document.threadId !== owner.mainThreadId) return {status: "invalid", reason: "participant_workflow_not_main"};
+    const attempts = occurrenceAttempts(target.document.returns ?? []);
+    const resolved = [...evidence];
+    for (const [index, item] of evidence.entries()) {
+      if (item.participantContributionId === undefined && item.observation === undefined) continue;
+      if (item.kind !== "observation" || item.participantContributionId === undefined || item.observation === undefined)
+        return {status: "invalid", reason: "participant_observation_invalid"};
+      const contribution = target.document.contributions.find(entry => entry.contributionId === item.participantContributionId);
+      if (!contribution) return {status: "invalid", reason: "participant_contribution_unknown"};
+      if (item.sourceThreadId != null && item.sourceThreadId !== owner.supervisorThreadId) return {status: "denied", reason: "participant_item_not_own"};
+      const receiptBase = {contributionId: contribution.contributionId, revision: contribution.revision, attempt: attempts.get(contribution.nodeId) ?? 1,
+        participant: contribution.participant ?? null};
+      if (item.observation === "unsupported") {
+        if (item.sourceItemId != null || item.sourceRunId != null || item.sourceMessageId != null) return {status: "invalid", reason: "participant_item_unexpected"};
+        resolved[index] = {...item, sourceThreadId: owner.supervisorThreadId, participantReceipt: {...receiptBase, receipt: {kind: "unsupported", toolName: null, inputDigest: null}}};
+        continue;
+      }
+      if (item.sourceItemId == null) return {status: "invalid", reason: "participant_item_required"};
+      if (yield* Deferred.isDone(cancel)) return {status: "pending", reason: "activity_reference_read_interrupted"};
+      const response = yield* settled(native.getTurnItem({threadId: owner.supervisorThreadId, itemId: item.sourceItemId}, cancel));
+      if (Option.isNone(response)) return {status: "pending", reason: "activity_reference_read_unavailable"};
+      const detail = response.value.item;
+      if (!isRecord(detail)) return {status: "invalid", reason: "activity_reference_item_not_found"};
+      if (detail.id !== item.sourceItemId || detail.threadId !== owner.supervisorThreadId) return {status: "invalid", reason: "activity_reference_item_mismatch"};
+      // a successful completed tool call of the root's own; its tool name is recorded as T3 reports it
+      if (detail.type !== "dynamic_tool" || typeof detail.toolName !== "string" || detail.status !== "completed" ||
+        (detail.toolNonExecutionKind !== undefined && detail.toolNonExecutionKind !== null))
+        return {status: "invalid", reason: "participant_item_not_completed_tool"};
+      if (item.sourceRunId != null && detail.runId !== item.sourceRunId) return {status: "invalid", reason: "activity_reference_item_run_mismatch"};
+      const toolName = observedToolName(detail) ?? detail.toolName;
+      if (item.observation === "read" && lifecycleOnlyTool.test(toolName)) return {status: "invalid", reason: "participant_item_lifecycle_only"};
+      let inputDigest: string | null = null;
+      try {inputDigest = detail.input === undefined ? null : workflowRequestHash({input: detail.input});} catch {inputDigest = null;}
+      const kind: ParticipantReceiptKind = item.observation;
+      resolved[index] = {...item, sourceThreadId: owner.supervisorThreadId,
+        ...(item.sourceRunId == null && typeof detail.runId === "string" ? {sourceRunId: detail.runId} : {}),
+        participantReceipt: {...receiptBase, receipt: {kind, toolName, inputDigest}}};
+    }
+    return {status: "ready", evidence: resolved};
+  });
+
   const validateActivityReferences = Effect.fnUntraced(function* (
     payload: Extract<WorkflowWritePayload, {action: "apply"}>,
     owner: WorkflowOwner,
     nativeScope: NativeScope,
     cancel: WorkflowCallCancel,
   ): Effect.fn.Return<ActivityReferenceResult, SupervisionStoreError> {
-    const evidence = payload.input.evidence;
-    if (!evidence) return {status: "ready"};
-    const references = evidence.filter(item => [item.sourceThreadId, item.sourceRunId, item.sourceMessageId, item.sourceItemId]
+    const submitted = payload.input.evidence;
+    if (!submitted) return {status: "ready"};
+    // a participant observation is the root's attributed receipt of its own completed native item; it is resolved on the root thread and
+    // never enters the operative scope fence below
+    const participants = submitted.some(item => item.participantContributionId !== undefined || item.observation !== undefined)
+      ? yield* resolveParticipantObservations(payload, owner, submitted, cancel) : {status: "ready" as const, evidence: submitted};
+    if (participants.status !== "ready") return participants;
+    const evidence = participants.evidence ?? submitted;
+    const references = evidence.filter(item => item.participantReceipt === undefined && [item.sourceThreadId, item.sourceRunId, item.sourceMessageId, item.sourceItemId]
       .some(value => typeof value === "string" && value.length > 0));
     if (!references.length) return {status: "ready", evidence};
     if (references.length > maxActivityReferencesPerWrite)

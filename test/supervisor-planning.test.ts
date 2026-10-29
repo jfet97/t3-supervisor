@@ -180,7 +180,7 @@ it("an answer carries the attempt's states and ACK messages, and its drafter's t
   const original = sent();
   const acknowledged = acknowledgePlanningTarget(original, {attemptId: original.id, targetThreadId: "main-a"}, evidence("main-a"), now + 1);
   assert.deepEqual(planningAttemptAnswer(acknowledged), {attemptId: "pause-a", state: "open", deadline: "2026-10-27T12:05:00.000Z", resolution: null,
-    targets: [{threadId: "main-a", state: "acknowledged", ack: "ack-main-a"}, {threadId: "child-a", state: "requested", ack: null}], draft: null});
+    targets: [{threadId: "main-a", state: "acknowledged", ack: "ack-main-a"}, {threadId: "child-a", state: "requested", ack: null}], uncovered: [], draft: null});
   assert.equal(planningAttemptAnswer(acknowledged, true).draftInstruction, planningDraftInstruction(acknowledged));
   const drafting: PlanningAttempt = {...acknowledged, draft: {threadId: "writer-a", taskId: "draft-a", state: "working", resultMessageId: null, resultRunId: null}};
   assert.deepEqual(planningAttemptAnswer(drafting, true).draft, {state: "working", taskId: "draft-a"});

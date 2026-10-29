@@ -4,7 +4,7 @@ import { Deferred, Effect, Exit, Fiber, Layer, Queue, Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
-import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
+import type { WorkflowProgressParticipant, WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { SessionAccess } from "../ui/src/access.js";
 import { confirmChatSupervisionChange, mergeLoadedDraft, ConnectedWork, progressView, ProjectSupervisorView, TaskWorkspace, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
@@ -167,6 +167,45 @@ const renderConnected = (pages: WorkflowProgressSnapshot[]) => {
   const view = progressView(pages);
   return renderToStaticMarkup(createElement(ConnectedWork, {threads: [...view.threadById.values()], mainThreadId: "task-thread", workflows: view.workflowByThreadId, coverage: view.coverageByThreadId, task: undefined, complete: view.complete}));
 };
+
+it("the participants section shows role, attempt, lifecycle, completion, coverage and receipt as distinct facts, with explicit empty and unknown states", () => {
+  const base: WorkflowProgressParticipant = {id: "x", source: "native", kind: "native_child", handle: "x", environmentId: null, threadId: "x", contributionId: null, revision: null,
+    roles: [], owner: "root", lifecycle: "unknown", reportedState: null, completion: "none", coverage: "unknown", currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated"};
+  const participants: WorkflowProgressParticipant[] = [
+    {...base, id: "child-one", handle: "child-one", threadId: "child-one", roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 2, retired: true}], owner: "helper",
+      lifecycle: "completed", completion: "native_completed", coverage: "native"},
+    {...base, id: "linked", handle: "linked", threadId: "linked", lifecycle: "running"},
+    {...base, id: "contribution:review:ext", source: "declared", kind: "external", handle: "github:pr-42", threadId: null, contributionId: "review:ext", revision: 2,
+      roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 1, retired: false}], lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed",
+      currentReceipt: {kind: "read", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "read-pr", toolName: "mcp__github__get_pull_request", evidenceId: "e1"}, priorReceipts: 1},
+    {...base, id: "contribution:review:t3", source: "declared", kind: "t3_conversation", handle: "reviewer-x", threadId: "reviewer-x", environmentId: "lab", contributionId: "review:t3", revision: 1,
+      roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 1, retired: false}], lifecycle: "reported", reportedState: "awaiting_result", coverage: "lifecycle_only",
+      currentReceipt: {kind: "lifecycle", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "wait-1", toolName: "t3-code__t3_thread_wait", evidenceId: "e2"}},
+    {...base, id: "contribution:review:none", source: "declared", kind: "unknown", handle: null, threadId: null, contributionId: "review:none", revision: 1, lifecycle: "reported", reportedState: "awaiting_result", coverage: "unsupported",
+      currentReceipt: {kind: "unsupported", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: null, toolName: null, evidenceId: "e3"}},
+    {...base, id: "contribution:review:reported", source: "declared", kind: "external", handle: "agent:9", threadId: null, contributionId: "review:reported", revision: 1, lifecycle: "reported", reportedState: "awaiting_result", coverage: "reported"},
+  ];
+  const withParticipants = (rows: WorkflowProgressParticipant[]) => ({...progressSnapshot, workflows: progressSnapshot.workflows.map(workflow =>
+    workflow.threadId === "task-thread" ? {...workflow, participants: rows} : workflow)});
+  const html = renderConnected([withParticipants(participants)]);
+  assert.match(html, /Participants<\/h3>/);
+  for (const label of ["Coverage: Observed by the service", "Coverage: Read by the Supervisor", "Coverage: Lifecycle only", "Coverage: No route stated", "Coverage: Reported by the main only", "Coverage: Unknown"])
+    assert.match(html, new RegExp(label), label);
+  assert.match(html, /Review · Attempt 2 · replaced for this attempt/);
+  assert.match(html, /No attached occurrence: this linked child has no recorded role in the plan/);
+  assert.match(html, /Conversation:<\/strong> Completed · <strong>Completion:<\/strong> Conversation completed \(not step completion\)/);
+  assert.match(html, /Result accepted by the Supervisor/);
+  assert.match(html, /Followed by:<\/strong> A helper/);
+  assert.match(html, /Settlement:<\/strong> Not evaluated/);
+  assert.match(html, /mcp__github__get_pull_request/);
+  assert.match(html, /1 earlier receipt belong/);
+  assert.match(html, /No receipt for the current declaration, revision and attempt/);
+  assert.match(html, /environment lab/);
+  assert.match(html, /No handle reported/);
+  assert.match(html, /href="[^"]*participants[^"]*"/, "the help links to the participants guide topic");
+  assert.doesNotMatch(html, /settled|parked/i);
+  assert.match(renderConnected([withParticipants([])]), /No participants are recorded for this workflow/);
+});
 
 it("native reviewer turns remain in history while the same reviewer can start a fresh attempt", () => {
   const returned = {returnId: "return-1", backToNodeId: "back-review", targetNodeId: "step-inspect", targetName: "Review", regionNodeIds: ["step-inspect"],

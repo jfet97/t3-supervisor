@@ -1054,6 +1054,19 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "participantContributionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "observation": {
+                    "type": "string",
+                    "enum": [
+                      "read",
+                      "lifecycle",
+                      "unsupported"
+                    ]
                   }
                 }
               }

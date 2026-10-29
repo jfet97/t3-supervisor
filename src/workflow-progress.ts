@@ -1,9 +1,9 @@
 import { Schema } from "effect";
-import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
+import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot, type ProjectSupervisorScopeThread } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBranches, planEntities } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, currentAcceptedProposalId, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
-  WorkflowReturnRunSchema, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
+  participantReceiptKinds, WorkflowReturnRunSchema, type ExternalContributionParticipant, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
 import { WorkflowAssessment, workflowAssessment } from "./workflow-assessment.js";
 
@@ -71,6 +71,36 @@ export const WorkflowProgressContributionSchema = Schema.Struct({
   })),
 });
 export type WorkflowProgressContribution = typeof WorkflowProgressContributionSchema.Type;
+
+/**
+ * Coverage of one task participant, each value a distinct fact: native is the service's own verified scope read of a descendant;
+ * supervisor_observed is the root's attributed read receipt backed by its own completed native item; lifecycle_only is such a receipt
+ * from a wait, list or search call; reported is the main's declaration alone; unsupported is the root's explicit statement that no route
+ * exists; unknown is no declaration and no receipt.
+ */
+export const participantCoverageStates = ["native", "supervisor_observed", "lifecycle_only", "reported", "unsupported", "unknown"] as const;
+export type ParticipantCoverageState = typeof participantCoverageStates[number];
+export const WorkflowProgressParticipantSchema = Schema.Struct({
+  id: Schema.String,
+  source: Schema.Literals(["native", "declared"]),
+  kind: Schema.Literals(["native_child", "t3_conversation", "external", "unknown"]),
+  handle: NullableText,
+  environmentId: NullableText,
+  threadId: NullableText,
+  contributionId: NullableText,
+  revision: Schema.NullOr(Schema.Number),
+  roles: Schema.Array(Schema.Struct({nodeId: Schema.String, nodeName: NullableText, attempt: Schema.Number, retired: Schema.Boolean})),
+  owner: Schema.Literals(["root", "helper", "unknown"]),
+  lifecycle: Schema.Literals(["running", "completed", "interrupted", "unknown", "reported"]),
+  reportedState: Schema.NullOr(Schema.Literals(externalContributionStates)),
+  completion: Schema.Literals(["none", "native_completed", "result_reported", "accepted", "needs_more", "withdrawn"]),
+  coverage: Schema.Literals(participantCoverageStates),
+  currentReceipt: Schema.NullOr(Schema.Struct({kind: Schema.Literals(participantReceiptKinds), recordedAt: Schema.Number, actorSupervisorThreadId: Schema.String,
+    sourceItemId: NullableText, toolName: NullableText, evidenceId: Schema.String})),
+  priorReceipts: Schema.Number,
+  settlement: Schema.Literal("not_evaluated"),
+});
+export type WorkflowProgressParticipant = typeof WorkflowProgressParticipantSchema.Type;
 
 // the workflow operative's latest decision for one branch; current is false once the branch changed or left the plan
 export const WorkflowProgressBranchSelectionSchema = Schema.Struct({
@@ -166,6 +196,8 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   returns: Schema.optionalKey(Schema.Array(WorkflowProgressReturnSchema)),
   /** The current attempt of each occurrence an applied return reopened; any other occurrence is in its first attempt. */
   attempts: Schema.optionalKey(Schema.Array(Schema.Struct({nodeId: Schema.String, attempt: Schema.Number}))),
+  /** Every participant of this workflow's occurrences: attached native descendants, linked children without a role, declared participants. */
+  participants: Schema.optionalKey(Schema.Array(WorkflowProgressParticipantSchema)),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -323,6 +355,65 @@ const currentAttemptObservations = (document: WorkflowStateDocument): WorkflowSt
   const current = occurrenceAttempts(document.returns);
   const ids = new Set(progressHistory(document).filter(item => !item.targetNodeId || item.attempt === (current.get(item.targetNodeId) ?? 1)).map(item => item.id));
   return document.evidence.filter(item => observationKinds.has(item.kind) && ids.has(item.id));
+};
+
+export type ParticipantScopeThread = Pick<ProjectSupervisorScopeThread, "threadId" | "lifecycle">;
+export type ParticipantCoverageOwner = "root" | "assigned" | "transfer" | "observe_only" | "unknown";
+const participantDigest = (participant: ExternalContributionParticipant | null | undefined): string => JSON.stringify(participant ?? null);
+const ownerOf = (state: ParticipantCoverageOwner | undefined): WorkflowProgressParticipant["owner"] =>
+  state === "root" || state === "observe_only" ? "root" : state === "assigned" || state === "transfer" ? "helper" : "unknown";
+
+/**
+ * The participants of one workflow's occurrences, computed from existing records: native descendants attached by contributorThreadIds
+ * (with their attempt and whether an applied return replaced the conversation), linked children with no attached occurrence, and the
+ * main-reported participants of this document's contributions with the root's receipts that are current for the declaration, revision
+ * and attempt; earlier receipts stay counted as history. Nothing here settles anything.
+ */
+export const workflowParticipants = (document: WorkflowStateDocument, linkedChildren: readonly string[], scopeThreads: ReadonlyMap<string, ParticipantScopeThread>,
+  coverage: ReadonlyMap<string, ParticipantCoverageOwner>): WorkflowProgressParticipant[] => {
+  const attempts = occurrenceAttempts(document.returns ?? []);
+  const names = planNodeNames(document.plan);
+  const replacedBy = new Map<string, Set<string>>();
+  for (const item of document.returns ?? []) if (item.state === "applied") for (const run of item.retiredRuns)
+    if (run.kind === "thread") for (const nodeId of item.regionNodeIds) replacedBy.set(run.threadId, new Set([...replacedBy.get(run.threadId) ?? [], nodeId]));
+  const roles = new Map<string, WorkflowProgressParticipant["roles"][number][]>();
+  for (const node of planEntities(document.plan)) for (const threadId of node.contributorThreadIds)
+    roles.set(threadId, [...roles.get(threadId) ?? [], {nodeId: node.nodeId, nodeName: node.name, attempt: attempts.get(node.nodeId) ?? 1,
+      retired: replacedBy.get(threadId)?.has(node.nodeId) ?? false}]);
+  const nativeRow = (threadId: string): WorkflowProgressParticipant => {
+    const thread = scopeThreads.get(threadId);
+    return {id: threadId, source: "native", kind: "native_child", handle: threadId, environmentId: null, threadId, contributionId: null, revision: null,
+      roles: roles.get(threadId) ?? [], owner: ownerOf(coverage.get(threadId)), lifecycle: thread?.lifecycle ?? "unknown", reportedState: null,
+      completion: thread?.lifecycle === "completed" ? "native_completed" : "none", coverage: thread ? "native" : "unknown",
+      currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated"};
+  };
+  const native = [...new Set([...roles.keys(), ...linkedChildren])].map(nativeRow);
+  const declared = document.contributions.map((contribution): WorkflowProgressParticipant => {
+    const participant = contribution.participant ?? null;
+    const attempt = attempts.get(contribution.nodeId) ?? 1;
+    const receipts = document.evidence.filter(item => item.kind === "observation" && item.participant?.contributionId === contribution.contributionId)
+      .sort((left, right) => right.recordedAt - left.recordedAt);
+    const current = receipts.filter(item => item.participant!.revision === contribution.revision && item.participant!.attempt === attempt &&
+      participantDigest(item.participant!.participant) === participantDigest(participant));
+    const latest = current[0];
+    const threadId = participant?.kind === "t3_conversation" ? participant.threadId : null;
+    const thread = threadId ? scopeThreads.get(threadId) : undefined;
+    const coverageState: ParticipantCoverageState = thread ? "native" : latest?.participant!.receipt.kind === "read" ? "supervisor_observed"
+      : latest?.participant!.receipt.kind === "lifecycle" ? "lifecycle_only" : latest?.participant!.receipt.kind === "unsupported" ? "unsupported"
+      : participant ? "reported" : "unknown";
+    return {id: `contribution:${contribution.contributionId}`, source: "declared",
+      kind: participant?.kind ?? "unknown", handle: participant?.kind === "t3_conversation" ? participant.threadId : participant?.kind === "external" ? participant.ref : null,
+      environmentId: participant?.kind === "t3_conversation" ? participant.environmentId : null, threadId, contributionId: contribution.contributionId,
+      revision: contribution.revision, roles: [{nodeId: contribution.nodeId, nodeName: contributionNodeName(document, contribution.nodeId, names), attempt, retired: false}],
+      owner: "root", lifecycle: thread?.lifecycle ?? "reported", reportedState: contribution.state,
+      completion: contribution.state === "withdrawn" ? "withdrawn" : contribution.state === "result"
+        ? contribution.assessment?.decision === "accepted" ? "accepted" : contribution.assessment?.decision === "needs_more" ? "needs_more" : "result_reported" : "none",
+      coverage: coverageState,
+      currentReceipt: latest ? {kind: latest.participant!.receipt.kind, recordedAt: latest.recordedAt, actorSupervisorThreadId: latest.actorSupervisorThreadId,
+        sourceItemId: latest.sourceItemId ?? null, toolName: latest.participant!.receipt.toolName, evidenceId: latest.id} : null,
+      priorReceipts: receipts.length - current.length, settlement: "not_evaluated"};
+  });
+  return [...native, ...declared];
 };
 
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({

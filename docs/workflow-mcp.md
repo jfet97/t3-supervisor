@@ -69,6 +69,10 @@ The fence holds one single-line JSON object with exactly these fields, all prese
 - `references`: at most 8 `{kind, value}` objects, where `kind` is `file`, `url`,
   `source` or `text` and `value` has at most 500 characters; may be empty.
 - `externalRef`: an opaque display reference of at most 200 characters, or `null`.
+- `participant` (optional): who performs the work, declared generically as
+  `{kind: "t3_conversation", threadId, environmentId?}`, `{kind: "external", ref}` or
+  `{kind: "unknown"}`, each handle at most 200 characters, or `null`. It is untrusted
+  and derives no lineage, scope membership, authority or settlement.
 
 A message may hold up to 8 records, at most one revision per contribution: a
 further record for the same contribution in that message is not imported
@@ -121,6 +125,34 @@ and step completion stay separate: no record or assessment changes a status, and
 an accepted result never completes a step automatically. The Supervisor records
 completion with an ordinary `apply` and `status_changed` evidence, which may cite
 the main's result message through `sourceThreadId` and `sourceMessageId`.
+
+### Participants and observation receipts
+
+A participant is any conversation or agent that works an occurrence: a native
+descendant attached to it through `contributorThreadIds` (the association source;
+a linked child with no attached occurrence has no role), or the participant a
+contribution declares. The root records its own observation of a declared
+participant as `apply` evidence of kind `observation` with
+`participantContributionId` and `observation` set to `read`, `lifecycle` or
+`unsupported`. For `read` and `lifecycle` the entry cites the root's own completed
+native tool item (`sourceItemId` on the root thread): the service verifies the
+caller and that item, records its tool name and an input digest verbatim, and
+interprets no foreign semantics; a T3 wait, list, search or queue call is accepted
+as `lifecycle` only and refused as `read` (`participant_item_lifecycle_only`).
+`unsupported` cites no item and states that no route exists. Each receipt is
+stored on the evidence with the exact participant, contribution revision and
+occurrence attempt it concerns; a later revision, a changed declaration or an
+applied return retires earlier receipts into history. Helpers cannot record
+receipts (`participant_observation_root_only`), a receipt for an unknown
+contribution is invalid (`participant_contribution_unknown`), and a cited item that
+is not the root's own completed tool call is refused. Receipts grant no write or
+settlement authority and never replace an assessment.
+
+The progress snapshot lists each workflow's `participants[]` with source, kind,
+handle, roles (occurrence, attempt, replaced by an applied return), owner,
+lifecycle, reported state, completion, coverage (`native`, `supervisor_observed`,
+`lifecycle_only`, `reported`, `unsupported`, `unknown`), the current receipt and the
+count of earlier receipts; settlement is `not_evaluated` until the settlement slice.
 
 `workflow_read` returns the bounded contributions and current assessments; what
 they mean is stated once, in the root's instruction section `contributions`, not in

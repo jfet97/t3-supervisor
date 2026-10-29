@@ -19,6 +19,7 @@ import {
   externalContributionLimits,
   externalContributionReferenceKinds,
   externalContributionStates,
+  participantReceiptKinds,
   workflowEvidenceKinds,
   workflowExecutionStatuses,
   storedPlanJsonDepth,
@@ -35,6 +36,7 @@ import {
   type ExternalContributionDiagnosticCode,
   type ExternalContributionImport,
   type ExternalContributionImportResult,
+  type ExternalContributionParticipant,
   type ExternalContributionRecord,
   type WorkflowContributionAssessmentInput,
   type ReturnBudget,
@@ -190,6 +192,23 @@ const contributionReferenceKinds = new Set<string>(externalContributionReference
 const contributionRecordKeys = ["taskId", "contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef"] as const;
 const exactRecordKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+// the exact key set, with one named key that may be absent
+const exactRecordKeysWithOptional = (value: Record<string, unknown>, keys: readonly string[], optional: string): boolean =>
+  exactRecordKeys(value, keys) || exactRecordKeys(value, [...keys, optional]);
+const participantHandle = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
+  value.length <= externalContributionLimits.maxParticipantHandleLength;
+// the main's generic participant declaration: a T3 conversation (environment optional), an opaque external handle, or unknown
+const validParticipant = (value: unknown): boolean => value === null || isRecord(value) && (
+  value.kind === "t3_conversation" && exactRecordKeysWithOptional(value, ["kind", "threadId"], "environmentId") && participantHandle(value.threadId) &&
+    (value.environmentId === undefined || value.environmentId === null || participantHandle(value.environmentId)) ||
+  value.kind === "external" && exactRecordKeys(value, ["kind", "ref"]) && participantHandle(value.ref) ||
+  value.kind === "unknown" && exactRecordKeys(value, ["kind"]));
+const normalizeParticipant = (value: unknown): ExternalContributionParticipant | null => {
+  if (!isRecord(value)) return null;
+  if (value.kind === "t3_conversation") return {kind: "t3_conversation", threadId: value.threadId as string, environmentId: (value.environmentId as string | undefined) ?? null};
+  if (value.kind === "external") return {kind: "external", ref: value.ref as string};
+  return {kind: "unknown"};
+};
 const validContributionId = (value: unknown): value is string => typeof value === "string" && contributionIdPattern.test(value);
 const validContributionRevision = (value: unknown): value is number =>
   Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= externalContributionLimits.maxRevision;
@@ -203,20 +222,21 @@ const validContributionContent = (value: Record<string, unknown>): boolean =>
   typeof value.state === "string" && contributionStates.has(value.state) &&
   typeof value.summary === "string" && value.summary.length <= externalContributionLimits.maxSummaryLength &&
   validContributionReferences(value.references) && (value.externalRef === null || typeof value.externalRef === "string" &&
-    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength);
+    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength) &&
+  (value.participant === undefined || validParticipant(value.participant));
 
-/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text. */
+/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text; participant optional. */
 export const parseExternalContributionRecord = (value: unknown): ExternalContributionRecord | null =>
-  isRecord(value) && exactRecordKeys(value, contributionRecordKeys) && typeof value.taskId === "string" && value.taskId.length > 0 &&
+  isRecord(value) && exactRecordKeysWithOptional(value, contributionRecordKeys, "participant") && typeof value.taskId === "string" && value.taskId.length > 0 &&
   value.taskId.length <= externalContributionLimits.maxTaskIdLength && validContributionContent(value)
     ? {taskId: value.taskId as string, contributionId: value.contributionId as string, nodeId: value.nodeId as string,
       revision: value.revision as number, state: value.state as ExternalContributionRecord["state"], summary: value.summary as string,
       references: (value.references as ExternalContributionRecord["references"]).map(item => ({kind: item.kind, value: item.value})),
-      externalRef: value.externalRef as string | null}
+      externalRef: value.externalRef as string | null, ...(Object.hasOwn(value, "participant") ? {participant: normalizeParticipant(value.participant)} : {})}
     : null;
 
-const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef">): string =>
-  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef]);
+const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef" | "participant">): string =>
+  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef, normalizeParticipant(value.participant)]);
 
 const validContributionAssessment = (value: unknown): boolean => value === null || isRecord(value) &&
   typeof value.decision === "string" && contributionDecisions.has(value.decision) && validContributionRevision(value.resultRevision) &&
@@ -232,9 +252,13 @@ const validEvidenceContribution = (value: unknown): boolean => value === undefin
   validContributionId(value.contributionId) && validContributionRevision(value.revision) &&
   (value.state === null || typeof value.state === "string" && contributionStates.has(value.state)) &&
   (value.decision === null || typeof value.decision === "string" && contributionDecisions.has(value.decision));
+const validEvidenceParticipant = (value: unknown): boolean => value === undefined || isRecord(value) &&
+  validContributionId(value.contributionId) && validContributionRevision(value.revision) && Number.isSafeInteger(value.attempt) && Number(value.attempt) >= 1 &&
+  validParticipant(value.participant) && isRecord(value.receipt) && typeof value.receipt.kind === "string" && (participantReceiptKinds as readonly string[]).includes(value.receipt.kind) &&
+  (value.receipt.toolName === null || validText(value.receipt.toolName)) && (value.receipt.inputDigest === null || validText(value.receipt.inputDigest));
 
 const validContributionImport = (value: unknown): value is ExternalContributionImport => isRecord(value) &&
-  exactRecordKeys(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"]) &&
+  exactRecordKeysWithOptional(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"], "participant") &&
   validContributionContent(value) && validNativeReference(value.sourceThreadId) && validNativeReference(value.sourceRunId) && validNativeReference(value.sourceMessageId);
 
 const validContributionAssessmentInput = (value: unknown): value is WorkflowContributionAssessmentInput => isRecord(value) &&
@@ -1033,7 +1057,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   returnBudgetCoverage(value) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
     validId(item.id) && validId(item.operationId) && (workflowEvidenceKinds as readonly string[]).includes(String(item.kind)) &&
-    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) && (item.repair === undefined || item.repair === true) &&
+    validEvidenceContribution(item.contribution) && validEvidenceParticipant(item.participant) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) && (item.repair === undefined || item.repair === true) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
@@ -1432,6 +1456,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         ...(typeof item.sourceProviderTurnId === "string"
           ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
         ...(item.kind === "status_changed" && nodeId !== null && boundary.repaired.has(nodeId) ? {repair: true as const} : {}),
+        ...(item.kind === "observation" && item.participantReceipt ? {participant: item.participantReceipt} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1633,6 +1658,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
 
     const entry: ExternalContribution = {contributionId: input.contributionId, nodeId: input.nodeId, state: input.state, revision: input.revision,
       summary: input.summary, references: input.references.map(item => ({kind: item.kind, value: item.value})), externalRef: input.externalRef,
+      participant: normalizeParticipant(input.participant),
       sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, recordedAt: at, assessment: null};
     const evidence = yield* makeEvidence({operationId: `contribution:${fingerprint([input.contributionId, input.revision])}`, owner, kind: "contribution_recorded", now: at,
       targetNodeId: validNodeId(input.nodeId) ? input.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,

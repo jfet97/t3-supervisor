@@ -1,6 +1,7 @@
 import { Clock, Deferred, Effect } from "effect";
 import { ProjectSupervisor } from "./project-supervisor.js";
-import { emptyPage, maxWorkflowProgressResponseBytes, progressWorkflow, scopePage, type WorkflowProgressPageQuery, type WorkflowProgressSnapshot } from "./workflow-progress.js";
+import { emptyPage, maxWorkflowProgressResponseBytes, progressWorkflow, scopePage, workflowParticipants, type ParticipantCoverageOwner, type WorkflowProgressPageQuery,
+  type WorkflowProgressSnapshot } from "./workflow-progress.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 
 // the server side of the dashboard's live progress page; the browser bundle imports only the schemas of workflow-progress.ts
@@ -58,6 +59,21 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
     scope.supervisorThreadId !== locator.supervisorThreadId || scope.bindingGeneration !== locator.bindingGeneration) return yield* changed;
   const threadScope = scopePage(scope, workflowThreadIds);
   const observedAt = yield* Clock.currentTimeMillis;
+  const coverage = (read.coverage ?? []).map(item => {
+    const observeOnlyRoot = item.state === "unavailable" && item.actorThreadId === locator.supervisorThreadId;
+    return {
+      threadId: item.threadId,
+      state: item.state === "root" ? "root" as const : item.state === "assigned" ? "assigned" as const :
+        item.state === "transferring" ? "transfer" as const : observeOnlyRoot ? "observe_only" as const : "unknown" as const,
+      assigneeThreadId: item.state === "assigned" || observeOnlyRoot ? item.actorThreadId : null,
+      assigneeTitle: item.state === "assigned" || observeOnlyRoot ? item.actorTitle : null,
+      assignmentRootThreadId: item.assignmentRootThreadId,
+    };
+  });
+  // participants are computed from the verified scope rows, the coverage owners and the documents of this page; nothing is stored
+  const scopeRows = new Map(scope.threads.map(thread => [thread.threadId, thread]));
+  const owners = new Map<string, ParticipantCoverageOwner>(coverage.map(item => [item.threadId, item.state]));
+  const linkedChildren = (threadId: string) => read.workflows.filter(item => item.document.parentThreadId === threadId).map(item => item.document.threadId);
   return bounded({
     status: "ok",
     message: scope.complete ? null : "Native scope observation is incomplete. Review the issues below before relying on this snapshot.",
@@ -65,19 +81,10 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
     mainThreadId: query.mainThreadId,
     observedAt,
     scope: threadScope,
-    coverage: (read.coverage ?? []).map(item => {
-      const observeOnlyRoot = item.state === "unavailable" && item.actorThreadId === locator.supervisorThreadId;
-      return {
-        threadId: item.threadId,
-        state: item.state === "root" ? "root" as const : item.state === "assigned" ? "assigned" as const :
-          item.state === "transferring" ? "transfer" as const : observeOnlyRoot ? "observe_only" as const : "unknown" as const,
-        assigneeThreadId: item.state === "assigned" || observeOnlyRoot ? item.actorThreadId : null,
-        assigneeTitle: item.state === "assigned" || observeOnlyRoot ? item.actorTitle : null,
-        assignmentRootThreadId: item.assignmentRootThreadId,
-      };
-    }),
+    coverage,
     incompatibleWorkflows: read.incompatibleWorkflows,
-    workflows: read.workflows.map(({document, parentNodeReferences}) => progressWorkflow(document, parentNodeReferences)),
+    workflows: read.workflows.map(({document, parentNodeReferences}) => ({...progressWorkflow(document, parentNodeReferences),
+      participants: workflowParticipants(document, linkedChildren(document.threadId), scopeRows, owners)})),
     workflowOffset: read.workflowOffset,
     workflowHasMore: read.workflowHasMore,
     lineageOffset: read.lineageOffset,
