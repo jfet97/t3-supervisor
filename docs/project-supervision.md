@@ -409,7 +409,7 @@ The turn ends only when the agreed work is complete or in explicit standby (a re
 wait naming who acts next), when a wait result names the next action or tells the model to
 end the turn, on context rotation, on a genuine human Stop, or for genuine external waiting
 that a native watcher reports (never the operative's own running turn). A timed-out wait
-while the target still runs is not an ending, however many waits timed out: the service
+while the target still runs is not an ending, however many waits timed out: the Supervisor
 reads forward and waits again. An operative run that ended with agreed duties still
 planned is not an ending either. Check-in and liveness wakes point at the same endings:
 the watch outcome is recorded when the watch ends, not at a fixed per-wake point. Child
