@@ -1,3 +1,4 @@
+import { agreedWorkUnfinished, explicitWaitRecorded, latestExecutedRun, returnWaiting } from "./workflow-liveness.js";
 import { conversationMayContact, conversationMayObserve, taskScopeRevision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
@@ -180,8 +181,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
     if (owned.some(request => ["prepared", "sending", "waiting", "uncertain"].includes(request.state) ||
       request.state === "failed" && request.kind === "review" && !request.failureAcknowledged)) return "request_open";
     // a queued request cancelled before it started executed nothing; the latest executed run decides completion
-    const latest = main ? [...main.runs].filter(run => !(run.status === "cancelled" && !run.startedAt))
-      .sort((left, right) => right.ordinal - left.ordinal)[0] : undefined;
+    const latest = main ? latestExecutedRun(main) : undefined;
     if (!main || !latest || latest.status !== "completed") return "main_run_not_completed";
     if (projectionNeedsAttention(main, source ?? main.thread)) return "main_busy";
     return (yield* unfinishedAgreedWork(binding, current, owned, Date.parse(latest.completedAt ?? ""))) ? "unfinished_agreed_work" : null;
@@ -197,15 +197,12 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
         !conversationMayContact(task)) return false;
       const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
       if (!document) return false;
-      const unsettled = unsettledOccurrences(document.plan, documentBranchSelections(document),
-        notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null));
-      if (document.returns.some(item => item.state === "pending")) return true;
-      if (document.status === "completed" && unsettled.length === 0) return false;
+      if (returnWaiting(document)) return true;
+      if (!agreedWorkUnfinished(document)) return false;
       // an open external result can coexist with the operative's own unfinished work, so only an explicit wait acknowledges the blocker
       const latest = owned.filter(request => request.kind === "review" && request.reviewPins).at(-1);
-      const outcome = latest?.reviewOutcome;
       const pinned = latest?.reviewPins?.tasks.some(pin => pin.taskId === task.id && pin.taskRevision === taskScopeRevision(task)) ?? false;
-      return !(outcome?.state === "confirmed" && outcome.wait && pinned && Number.isFinite(mainFinishedAt) && outcome.recordedAt >= mainFinishedAt);
+      return !explicitWaitRecorded(latest?.reviewOutcome, pinned, mainFinishedAt);
     });
 
   const scopeFor = (binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[]): SupervisorScopeResolution | null => {

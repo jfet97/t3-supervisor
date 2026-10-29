@@ -69,7 +69,10 @@ export type ConversationRequest = {
   /** A root monitoring review: what it was prepared against; its completion needs a confirmed outcome. */
   reviewPins?: ReviewPins;
   reviewOutcome?: ReviewOutcomeRecord;
+  /** A liveness wake: the main's completed run, document revision and reported child lifecycle it answers, and how often it repeated. */
+  liveness?: LivenessWake;
 };
+export type LivenessWake = {mainThreadId: string; runId: string; revision: number; children: string[]; repeat: number};
 export type WorkflowIntroduction = {
   proposalId?: string;
   earlier?: Array<{messageId: string; textHash: string}>;
@@ -199,6 +202,8 @@ const ConversationRequestDocument = Schema.Struct({
   roleVersion: Schema.optionalKey(Schema.String),
   reviewPins: Schema.optionalKey(ReviewPinsDocument),
   reviewOutcome: Schema.optionalKey(ReviewOutcomeDocument),
+  liveness: Schema.optionalKey(Schema.Struct({mainThreadId: Schema.String, runId: Schema.String, revision: Schema.Number,
+    children: Schema.mutable(Schema.Array(Schema.String)), repeat: Schema.Number})),
 });
 const DispatchMode = Schema.Union([
   Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: Schema.String }),
@@ -259,7 +264,7 @@ const decodeNoticeClockRow = decodeGuidanceRow(Schema.Struct({ last_notice_at: S
 const decodeReviewMissesRow = decodeGuidanceRow(Schema.Struct({ review_misses: Schema.Number }), "notice_clock");
 
 type PrepareInput = Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
-  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins">>;
+  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins" | "liveness">>;
 
 /** The conversation store: the durable Supervisor requests, workflow introductions, agreement candidates and notice clocks. */
 export interface SupervisorConversationStoreShape {

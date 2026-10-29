@@ -400,12 +400,36 @@ IDs for the decision record to cite.
 ## Monitoring, recovery and lifecycle
 
 Active work is followed through native T3 reads across the main and its verified
-children. The owner reads forward from each target's cursor, completes cut-off
-text and fetches plans or details only as needed. Child lists are metadata, not
-transcript reads. A bounded `t3_thread_wait` waits for run completion, not new
-activity; when T3 requires a yield, the service promptly continues verified active
-work. Active following bypasses the idle age/count thresholds and cooldown, and
-never steers into a Supervisor's ongoing thinking. One model turn runs per owner.
+children. The check-in is the watch of the whole task, not a finite report: the owner
+catches up on the frozen scope, then keeps one loop that reads forward from each
+target's cursor, completes cut-off text, consumes its own inbox at each boundary, paces
+with one bounded `t3_thread_wait` of five to ten seconds on the active target (it waits
+for run completion, not new activity), assesses and acts with one delta when needed.
+The turn ends only when the agreed work is complete or in explicit standby (a recorded
+wait naming who acts next), when a wait returns `next` or an end-turn, on context
+rotation, on a genuine human Stop, or for genuine external waiting a native watch owns;
+an operative run that ended with agreed duties still planned is not an ending. Child
+lists are metadata, not transcript reads. When T3 requires a yield, the service promptly
+continues verified active work. Active following bypasses the idle age/count thresholds
+and cooldown, and never steers into a Supervisor's ongoing thinking. One model turn runs
+per owner.
+
+The service's fallback covers only a turn that ended anyway: when the main's latest run
+completed while the agreed workflow is unfinished and no current wait is recorded, the
+root receives one liveness check-in per main run, document revision and parent-reported
+native child lifecycle, queued behind any active root turn and never steered into it, and
+repeated only after the project's idle age while nothing changed; a recorded wait, a new
+run, completion, a Stop or a settled pair keeps it quiet. Model adherence to the watch
+itself is proved live, not by tests: the fallback bounds a yield to one wake.
+
+Own inbox: the root reads its own queued messages at the boundaries it chooses (after
+each wait, before each record or send) with `t3_queue` on its own thread, handles a genuine
+human's message first and never cancels it unanswered, answers an operative's message
+with one delta or records it, then cancels that handled queued run so it is not replayed;
+the service promotes nothing to steer, so a message that arrives during one long tool
+call or thought is seen at the next boundary, bounded by the wait pacing, and only a
+human can steer. When `t3_queue` is not exposed the root discovers it and otherwise states
+that its own queue is not drainable.
 
 Idle work retains the project age/count thresholds and 30-second fallback cooldown.
 Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;
@@ -421,7 +445,7 @@ explicit absence of one). The Supervisor assesses the evidence against the agree
 workflow, records verified status changes, and sends the operative concise corrective
 guidance when evidence demonstrates a concrete, actionable mistake or deviation; it
 stays silent on routine progress and never invents a correction from uncertainty.
-Before its marker it records exactly one outcome with `workflow_write` `record_review`
+At the end of its turn it records exactly one outcome with `workflow_write` `record_review`
 (progress updated, no change, needs attention or insufficient evidence), decided from a
 fresh read of the relevant finished messages, results and current workflow: the change
 index is navigation, not proof, and no change is never a default. No change never

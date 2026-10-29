@@ -6856,3 +6856,129 @@ it.effect("a blocked proposal introduction does not stop following active work o
   assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "blocked");
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 }));
+
+// the watch is the primary contract (D) and the root's own inbox is read at its boundaries (E): a check-in sets no finite frame and
+// names the record that ends the turn, the queue tool is permitted, and the service's fallback wakes the root once per completed main
+// run, document revision and reported child lifecycle only after its turn ended, never into a busy root, quiet behind a recorded wait
+it.effect("check-ins carry the watch contract and the outcome record without a finite frame, and name the root's own queue", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, request} = yield* pinnedReview(clock, "watch-contract");
+  assert.ok(request.text.includes(`Outcome: one workflow_write record_review, requestId ${JSON.stringify(request.id)}, at the end of the turn; turn end marker: ${request.completionMarker}.`));
+  assert.doesNotMatch(request.text, /Before the marker|End your final response with this exact marker/u);
+  const monitoring = yield* sectionText(fixture, "monitoring");
+  assert.match(monitoring, /This check-in is the watch of the whole task, not a finite report/u);
+  assert.match(monitoring, /five to ten seconds on the active target, never thirty/u);
+  assert.match(monitoring, /consume your own inbox at each boundary \(section contact\)/u);
+  assert.match(monitoring, /an operative run that ended with agreed duties still planned is not an ending/u);
+  assert.match(monitoring, /one liveness check-in per completed operative run and document revision/u);
+  const contact = yield* sectionText(fixture, "contact");
+  assert.match(contact, /Own inbox: after each t3_thread_wait returns and before each record_review or send, list your own queue with t3_queue/u);
+  assert.match(contact, /handle a genuine human's first and never cancel it unanswered/u);
+  assert.match(contact, /you promote nothing to steer/u);
+  assert.match(contact, /say once that your own queue is not drainable/u);
+  const core = String((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})).core);
+  assert.match(core, /t3_queue \(own thread\)/u);
+  assert.doesNotMatch(`${monitoring}\n${contact}\n${core}`, /mcpx|omegent/iu, "the rules name operations, never a gateway product");
+  assert.ok(workflowIntroductionText(fixture.task).endsWith("mode queue; your Supervisor reads its own queue at each watch boundary."));
+}));
+
+// an agreed main whose operative run just ended with the agreed step still planned, and a helper that reviews whatever batch the
+// monitor still owes as no change until the pending request is a liveness wake (or nothing)
+const idleAgreedMain = Effect.fnUntraced(function* (clock: Effect.Success<ReturnType<typeof pinnedClock>>) {
+  const fixture = yield* makeFixture(clock);
+  yield* agreeMainWorkflow(fixture, clock.now);
+  const active = fixture.operative.runs.find(run => run.id === fixture.operative.thread.activeRunId)!;
+  completeRun(fixture.operative, active, "Paused before the review.", clock.now + 1);
+  fixture.operative.thread.activeRunId = null;
+  const pendingRequest = () => fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+  const confirmNoChange = (request: ConversationRequest, outcome: ReviewOutcomeKind = "no_change", options: ReviewRecordOptions = {}) => Effect.gen(function* () {
+    assert.equal((yield* recordOutcome(fixture, request, outcome, options)).status, "recorded");
+    completeRun(fixture.supervisor, fixture.supervisor.runs.find(run => run.userMessageId === request.messageId)!, `Recorded. ${request.completionMarker}`, clock.now + 1);
+    yield* clock.advance(31_000);
+    yield* fixture.run();
+    assert.equal((yield* storedReview(fixture, request.id))?.reviewOutcome?.state, "confirmed", JSON.stringify(yield* storedReview(fixture, request.id)));
+  });
+  const settle = Effect.gen(function* () {
+    for (let round = 0; round < 4; round++) {
+      yield* fixture.run();
+      const pending = yield* pendingRequest();
+      if (!pending || pending.liveness) return pending;
+      yield* confirmNoChange(pending);
+    }
+    return yield* pendingRequest();
+  });
+  return {fixture, active, pendingRequest, confirmNoChange, settle, rootCalls: () => fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId)};
+});
+
+it.effect("an operative run ending with agreed work unfinished gets one liveness check-in after the root's turn, never into a busy root, once per run and revision, repeated only after the idle age, and none behind a recorded wait or a Stop", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, active, pendingRequest, confirmNoChange, settle, rootCalls} = yield* idleAgreedMain(clock);
+  // the root's own turn is still running: the fallback waits for it to end instead of steering into it
+  const busyRun = appendRun({projection: fixture.supervisor, id: "root-busy-run", ordinal: 50, status: "running", messageId: "root-busy-input",
+    text: "A service turn in progress", createdBy: "system", creationSource: "server", now: clock.now});
+  for (let round = 0; round < 3; round++) {
+    yield* clock.advance(31_000);
+    yield* fixture.run();
+    assert.equal(yield* pendingRequest(), null, "no wake of any kind while the root's turn runs");
+  }
+  completeRun(fixture.supervisor, busyRun, "Done.", clock.now + 1);
+  yield* clock.advance(31_000);
+  const first = yield* settle;
+  assert.ok(first?.liveness, `one liveness check-in once the root's turn ended: ${JSON.stringify(first)}`);
+  const revision = (yield* fixture.workflows.get(projectId, operativeThreadId))!.revision;
+  assert.deepEqual(first.liveness, {mainThreadId: operativeThreadId, runId: active.id, revision, children: [], repeat: 0});
+  assert.deepEqual([first.kind, first.batch, first.taskId, Boolean(first.reviewPins)], ["review", null, fixture.task.id, true]);
+  assert.match(first.text, /Liveness check-in for main "operative-a": its latest run "operative-active-run" completed while agreed work is unfinished/u);
+  assert.ok(first.text.includes(`record_review, requestId ${JSON.stringify(first.id)}, at the end of the turn; turn end marker: ${first.completionMarker}.`));
+  assert.ok(rootCalls().length > 0 && rootCalls().every(call => (call.payload.dispatchMode as {type: string}).type === "queue_after_active"),
+    "every root wake is queued behind an active turn, never steered into it");
+  // the root records no change again: the same run and revision get no second wake before the project's idle age
+  yield* confirmNoChange(first);
+  yield* fixture.run();
+  assert.equal(yield* pendingRequest(), null, "no repeat before the idle age");
+  yield* clock.advance(2 * 60_000);
+  yield* fixture.run();
+  const repeated = (yield* pendingRequest())!;
+  assert.deepEqual(repeated.liveness, {...first.liveness, repeat: 1}, "the unchanged situation is raised once more after the idle age");
+  assert.match(repeated.text, /\(repeat 1\)/u);
+  // a recorded wait naming who acts next is standby: the fallback stays quiet however long it lasts
+  yield* confirmNoChange(repeated, "needs_attention", {reason: "The upstream release is awaited.", wait: {waitingOn: "external", resumesWhen: "The upstream release is published."}});
+  yield* clock.advance(3 * 60_000);
+  yield* fixture.run();
+  assert.equal(yield* pendingRequest(), null, "a current explicit wait is standby");
+  // a new operative run (resumed by a delta, as the service starts it) is a new key: exactly one wake, then quiet; a genuine new human
+  // request instead goes through interpretation first
+  appendRun({projection: fixture.operative, id: "operative-run-3", ordinal: 3, status: "completed", messageId: "resume-delta", text: "Continue with the review.",
+    createdBy: "system", creationSource: "server", now: clock.now});
+  yield* fixture.run();
+  const rearmed = (yield* pendingRequest())!;
+  assert.deepEqual([rearmed.liveness?.runId, rearmed.liveness?.repeat], ["operative-run-3", 0]);
+  yield* confirmNoChange(rearmed);
+  yield* fixture.run();
+  assert.equal(yield* pendingRequest(), null);
+  // a human Stop keeps the fallback quiet even after the idle age
+  const policy = yield* fixture.threadPolicy.get();
+  yield* fixture.threadPolicy.save({...policy, excludedThreadIds: [...policy.excludedThreadIds, operativeThreadId]});
+  yield* clock.advance(3 * 60_000);
+  yield* fixture.run();
+  assert.equal(yield* pendingRequest(), null, "a stopped chat gets no wake");
+}), {timeout: 60_000});
+
+it.effect("a native child's terminal lifecycle reported by its idle parent re-arms one liveness check-in, while a running child changes nothing", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, pendingRequest, confirmNoChange, settle} = yield* idleAgreedMain(clock);
+  yield* clock.advance(31_000);
+  const first = yield* settle;
+  assert.ok(first?.liveness);
+  yield* confirmNoChange(first);
+  fixture.operative.subagents = [{childThreadId: "native-reviewer", status: "running"}];
+  yield* fixture.run();
+  assert.equal(yield* pendingRequest(), null, "a running child is not a lifecycle change");
+  fixture.operative.subagents = [{childThreadId: "native-reviewer", status: "completed"}];
+  yield* fixture.run();
+  const rearmed = (yield* pendingRequest())!;
+  assert.deepEqual([rearmed.liveness?.children, rearmed.liveness?.repeat], [["native-reviewer:completed"], 0]);
+  yield* confirmNoChange(rearmed);
+  yield* fixture.run();
+  assert.equal(yield* pendingRequest(), null, "the same reported lifecycle is not raised twice before the idle age");
+}), {timeout: 60_000});

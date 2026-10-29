@@ -305,7 +305,7 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
     assert.ok(notice.includes(`supervision_plan ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
     // the event, exact read arguments and contact route; identities are not repeated in headings or contact prose
     assert.match(notice, /^Project Supervisor — workflow proposal\n/u);
-    assert.ok(notice.endsWith(`Questions: t3_thread_send to ${task.supervisorThreadId}, mode queue.`));
+    assert.ok(notice.endsWith(`Questions: t3_thread_send to ${task.supervisorThreadId}, mode queue; your Supervisor reads its own queue at each watch boundary.`));
     assert.equal(notice.split('"taskId":').length - 1, 1);
     assert.equal(notice.split('"proposalId":').length - 1, 1);
     assert.doesNotMatch(notice, /Plan outline|workflow-acceptance|branch-selection|Required references|project\.yaml|approval step/u,
