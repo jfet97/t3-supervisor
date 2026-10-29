@@ -776,7 +776,17 @@ it.effect("an uncertain command keeps its identity and attempt count through unr
   yield* parks(g, 10);
   for (const round of [2, 3, 4, 5]) yield* g.check(10 + round * SUPERVISOR_SETTLE_QUIET_MS + 1);
   assert.equal(participantCommands(g, "lost-child").length, 3, "three sends of the one command");
-  assert.deepEqual((yield* participantSettlements(g))[":lost-child"], ["uncertain", null, 3]);
+  const [lost] = participantCommands(g, "lost-child");
+  assert.deepEqual((yield* participantSettlements(g, {withCommand: true}))[":lost-child"], ["uncertain", null, 3, lost!.commandId]);
+  // elapsed sends are no native evidence: the task completed again on an unchanged quiet child reserves nothing new, and the old
+  // command keeps its count and its unknown outcome
+  g.setUncertain(false);
+  yield* reopened(g, "r-1", 20);
+  yield* completedAgain(g, "c-2", 30);
+  yield* parks(g, 10 + 7 * SUPERVISOR_SETTLE_QUIET_MS);yield* g.check(10 + 9 * SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(participantCommands(g, "lost-child").length, 3, "no fourth send and no new command on the new execution");
+  assert.deepEqual((yield* participantSettlements(g, {completionId: null, withCommand: true}))[":lost-child"], ["uncertain", null, 3, lost!.commandId], "the old command is still open");
+  assert.equal((yield* participantSettlements(g, {completionId: "c-2"}))[":lost-child"], undefined, "the new execution records nothing while the old command is open");
 }));
 
 it.effect("the next task on the same main evaluates a reused participant anew: the earlier task's settlement row stays as history and settles nothing", () => Effect.gen(function* () {

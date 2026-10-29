@@ -679,9 +679,10 @@ pinned or reactivated conversation. A conversation in a linked environment has n
 supported route from here and is listed unsupported without a command. A reserved
 command never changes: a retry after a lost reply resends the same payload, at most three
 times, and while its outcome is unknown no second command is reserved for that
-conversation; a settled read confirms it, native activity after its snapshot or its
-user's choice supersedes it, a definite rejection resolves it, and each is recorded with
-the command kept. What cannot settle is recorded with its reason (unreadable, still
+conversation, on that or any later execution; only native evidence reconciles it: a
+settled read confirms it, native activity after its snapshot or its user's choice
+supersedes it, a definite rejection resolves it, and each is recorded with the command
+kept. What cannot settle is recorded with its reason (unreadable, still
 working, no update time, the command rejected or superseded, or no route) and read
 afresh on each pass. Each command is admitted only while the same execution is still
 complete and the participant still a member, so a correction or return that reopens the

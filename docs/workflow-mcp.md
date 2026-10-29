@@ -183,7 +183,7 @@ main's current execution (its task, scope revision and latest completion record,
 the scope names on every page) (`pending`, `uncertain`, `settled`, `superseded`,
 `unresolved`, `skipped`) with `settlementReason` for superseded, unresolved and skipped
 ones (`unavailable`, `not_quiet`, `snapshot_unavailable`, `settle_rejected`,
-`environment_settle_unsupported`, `keep_active`, `activity_changed`, `attempts_exhausted`).
+`environment_settle_unsupported`, `keep_active`, `activity_changed`).
 `native` requires the service's own projection read of a live local thread in that
 snapshot (`projectionRead` on the scope row; lifecycle metadata of an unread,
 archived or deleted thread is `unknown`), and a conversation declared with an

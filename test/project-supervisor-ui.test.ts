@@ -197,7 +197,7 @@ it("the participants section shows role, attempt, lifecycle, completion, coverag
   assert.match(html, /Conversation:<\/strong> Completed · <strong>Completion:<\/strong> Conversation completed \(not step completion\)/);
   assert.match(html, /Result accepted by the Supervisor/);
   assert.match(html, /Followed by:<\/strong> A helper/);
-  assert.match(html, /Settlement:<\/strong> Not evaluated \(the task has not completed\)/);
+  assert.match(html, /Settlement:<\/strong> Not evaluated</);
   // settlement states are shown as recorded: a T3 conversation's state with its reason, and not applicable for anything else
   const settled = renderConnected([withParticipants([
     {...base, id: "done", handle: "done", threadId: "done", settlement: "settled"},

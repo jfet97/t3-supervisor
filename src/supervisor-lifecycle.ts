@@ -688,7 +688,8 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
    * Settles the participants of the current completed execution once each, by their own automatic-settle commands, after the main's
    * lineage read found every child quiet. A participant's earlier command whose outcome is unknown is resolved first and identically: its
    * reserved payload never changes, so a settled read confirms it, native activity after its snapshot or its user's choice supersedes it, a
-   * quiet unchanged read retries it (at most three sends), and no second command is reserved while it is open. The execution then gets at
+   * quiet unchanged read retries it (at most three sends; the bound ends the sends, never the command), and no second command is reserved
+   * while it is open, on any execution. The execution then gets at
    * most one command of its own: a local conversation settles on the snapshot its fresh read showed when it is quiet and not kept active by
    * its user, a conversation in a linked environment is listed unsupported, and what cannot settle is recorded with its reason and read
    * afresh on each pass. A new completed execution (a later task, or the same task completed again after a return) evaluates every
@@ -724,7 +725,9 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
         else if (thread.updatedAt !== open.snapshotAt) yield* resolve("superseded", "activity_changed");
         else if (userKeepsSupervisorActive(thread)) yield* resolve("superseded", "keep_active");
         else if (projectionNeedsAttention(read.value, info ?? thread)) {yield* resolve("unresolved", "not_quiet"); continue;}
-        else if ((open.attempts ?? 0) >= PARTICIPANT_SETTLE_ATTEMPTS) {if (sameExecution(open, execution)) continue; yield* resolve("superseded", "attempts_exhausted");}
+        // the bound ends the sends, not the command: elapsed attempts are no native evidence, so an unchanged quiet thread keeps the
+        // command open, on this and every later execution, until a settled read, new activity or the user's choice reconciles it
+        else if ((open.attempts ?? 0) >= PARTICIPANT_SETTLE_ATTEMPTS) continue;
         else {yield* sendParticipantSettlement(binding, execution, scope, target, {retry: open}, version, now); continue;}
         latest = (yield* store.binding(binding.projectId, binding.mainThreadId)) ?? binding;
       }
