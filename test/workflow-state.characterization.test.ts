@@ -649,7 +649,8 @@ it.live("CT-WSS-04: golden stateHash and receipt for a fixture document", () => 
   assert.equal(sha256(text), goldenDraftStateHash);
   const exists = yield* fixture.workflows.ensureMain(fixture.owner, "golden-exists", "Start a golden draft.", 2000);
   assert.equal(JSON.stringify(exists),
-    `{"status":"exists","operationId":"golden-exists","workflowId":"golden-workflow","revision":1,"stateHash":"${goldenDraftStateHash}","formatVersion":2}`);
+    `{"status":"exists","operationId":"golden-exists","workflowId":"golden-workflow","revision":1,"documentStatus":"planned","stateHash":"${goldenDraftStateHash}","formatVersion":2}`);
+  assert.equal(exists.status === "exists" ? exists.documentStatus : null, "planned", "the receipt states the draft's own status, planned");
 
   // the hash covers the decoded document: a stored draft without contributions hashes with an empty list appended last
   const withoutContributions: Record<string, unknown> = {...goldenDraft};
@@ -668,7 +669,8 @@ it.live("CT-WSS-04: golden stateHash and receipt for a fixture document", () => 
   const storedDocument = yield* rawDocument(fixture.sql, goldenDraft.workflowId);
   const storedReceipt = String((yield* query(fixture.sql, "SELECT result FROM supervisor_workflow_operations WHERE operation_id=?", "golden-apply"))[0]?.result);
   assert.equal(storedReceipt,
-    `{"status":"applied","operationId":"golden-apply","workflowId":"golden-workflow","revision":2,"stateHash":"${sha256(storedDocument)}","formatVersion":2}`);
+    `{"status":"applied","operationId":"golden-apply","workflowId":"golden-workflow","revision":2,"stateHash":"${sha256(storedDocument)}","formatVersion":2,"documentStatus":"planned"}`);
   assert.equal(JSON.stringify(applied), storedReceipt);
+  assert.equal((JSON.parse(storedDocument) as {status: string}).status, "planned", "the applied receipt's documentStatus is the stored document's status");
   assert.equal(fingerprint(yield* fixture.workflows.get("project-a", "main-a")), sha256(storedDocument));
 }), {timeout: 10_000});
