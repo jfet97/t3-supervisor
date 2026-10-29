@@ -34,7 +34,7 @@ it.effect("CC-CLOCK-WALL and CC-IDS: workflow times default to Clock and workflo
   assert.equal(owner.supervisorThreadId, `supervisor-root:${id(1)}`);
   const created = yield* stores.workflows.ensureMain(owner, "clock-ensure", "Start a draft.");
   assert.deepEqual(created, {status: "created", operationId: "clock-ensure", workflowId: id(2), revision: 1,
-    stateHash: sha256(yield* rawDocument(stores.sql, id(2))), formatVersion: 2});
+    stateHash: sha256(yield* rawDocument(stores.sql, id(2))), formatVersion: 2, documentStatus: "planned"});
   const document = (yield* stores.workflows.get("project-a", "main-a"))!;
   assert.deepEqual([document.createdAt, document.updatedAt, document.evidence[0]?.id, document.evidence[0]?.recordedAt],
     [1_800_000_000_000, 1_800_000_000_000, id(3), 1_800_000_000_000]);
