@@ -144,13 +144,31 @@ export const nativeUserMessageVisible = (projection: Projection, run: RunInfo, m
     root.runId === run.id && (root.parentNodeId === null || root.parentNodeId === undefined) && root.status !== "rolled_back";
 };
 
-/** Native human provenance, independent of whether this chat is eligible for task supervision. */
+// the message a resolved runtime input request of this thread names as its answer: the request's own message link, read from the keys
+// T3 may use for it, or the message's reference to the request; a pending or unknown request answers nothing
+const answersRuntimeRequest = (projection: Projection, message: MessageInfo): boolean => Array.isArray(projection.runtimeRequests) &&
+  projection.runtimeRequests.some(value => {
+    if (!isRecord(value)) return false;
+    const identity = runtimeRequestIdentity(value);
+    if (freshRuntimeRequestStatus(projection, identity) !== "resolved") return false;
+    const links = [value.responseMessageId, value.answerMessageId, value.resolvedMessageId, value.messageId,
+      isRecord(value.response) ? value.response.messageId : undefined, isRecord(value.resolution) ? value.resolution.messageId : undefined];
+    return links.includes(message.id) || typeof message.runtimeRequestId === "string" && message.runtimeRequestId === identity.requestId;
+  });
+
+/**
+ * Native human provenance, independent of whether this chat is eligible for task supervision: the human's own web or mobile message, or
+ * the human's answer to a runtime input request of this thread, which T3 records as a server-created message. Never a message an agent
+ * sent (senderThreadId), a scheduled or imported one, a system or Supervisor command (`supervisor-*` ids), a service notice, or a Stop
+ * the Supervisor itself authored: the absence of senderThreadId alone never makes a message human.
+ */
 export const genuineHumanMessage = (projection: Projection, messageId: string): MessageInfo | null => {
   const message = projection.messages.find(item => item.id === messageId && item.threadId === projection.thread.id);
   const run = message?.runId ? projection.runs.find(item => item.id === message.runId && item.threadId === projection.thread.id) : undefined;
-  return message && run && message.role === "user" && message.createdBy === "user" && !message.streaming &&
-    (message.creationSource === "web" || message.creationSource === "mobile") && !message.senderThreadId && !message.scheduledTaskId && !message.source &&
-    !message.id.startsWith("supervisor-notice:") && nativeUserMessageVisible(projection, run, message) ? message : null;
+  if (!message || !run || message.role !== "user" || message.createdBy !== "user" || message.streaming || message.senderThreadId ||
+    message.scheduledTaskId || message.source || message.id.startsWith("supervisor-")) return null;
+  if (message.creationSource === "web" || message.creationSource === "mobile") return nativeUserMessageVisible(projection, run, message) ? message : null;
+  return message.creationSource === "server" && run.status !== "rolled_back" && answersRuntimeRequest(projection, message) ? message : null;
 };
 
 export const hasUnansweredHuman = (projection: Projection): boolean => {

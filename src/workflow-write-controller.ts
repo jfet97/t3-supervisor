@@ -40,7 +40,7 @@ import {
 import type { Projection, ThreadInfo } from "./types.js";
 import {resolveSupervisorScope, type SupervisorScopeResolution} from "./supervisor-scope.js";
 import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.js";
-import {mainRunNodeReader, timestampMs} from "./domain.js";
+import {genuineHumanMessage, mainRunNodeReader, timestampMs} from "./domain.js";
 import {
   canonicalJson,
   isRecord,
@@ -722,8 +722,9 @@ const parseWritePayload = (value: unknown): ParsedInput => {
       applyIds.every(id => isId(id)) && new Set(applyIds).size === applyIds.length;
     // a reason is required where the outcome needs one; applies are cited by progress_updated and only by it
     const wait = value.wait;
-    const validWait = wait === undefined || isRecord(wait) && hasExactKeys(wait, ["waitingOn", "resumesWhen"]) &&
-      reviewWaitOwners.includes(wait.waitingOn as typeof reviewWaitOwners[number]) && isText(wait.resumesWhen, reviewLimits.maxWaitTriggerLength);
+    const validWait = wait === undefined || isRecord(wait) && hasExactKeys(wait, ["waitingOn", "resumesWhen"], ["messageId"]) &&
+      reviewWaitOwners.includes(wait.waitingOn as typeof reviewWaitOwners[number]) && isText(wait.resumesWhen, reviewLimits.maxWaitTriggerLength) &&
+      (wait.messageId === undefined || isId(wait.messageId));
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "requestId", "outcome"], [...authorityKeys, "reason", "applyOperationIds", "wait"]) || !validWait ||
       !isId(value.operationId) || !isId(value.requestId) || outcome === undefined || !validApplies ||
       value.reason !== undefined && !isText(value.reason, reviewLimits.maxReasonLength) ||
@@ -732,7 +733,8 @@ const parseWritePayload = (value: unknown): ParsedInput => {
       return {ok: false, reason: "invalid_record_review", ...(isId(value.operationId) ? {operationId: value.operationId} : {})};
     return {ok: true, value: {...locator, action: "record_review", operationId: value.operationId, requestId: value.requestId, outcome,
       ...(typeof value.reason === "string" ? {reason: value.reason} : {}), ...(applyIds !== undefined ? {applyOperationIds: applyIds as string[]} : {}),
-      ...(isRecord(wait) ? {wait: {waitingOn: wait.waitingOn as typeof reviewWaitOwners[number], resumesWhen: wait.resumesWhen as string}} : {})}};
+      ...(isRecord(wait) ? {wait: {waitingOn: wait.waitingOn as typeof reviewWaitOwners[number], resumesWhen: wait.resumesWhen as string,
+        ...(typeof wait.messageId === "string" ? {messageId: wait.messageId} : {})}} : {})}};
   }
   if (value.action === "apply") {
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"], authorityKeys))
@@ -1093,7 +1095,8 @@ export const workflowWriteToolDefinition = {
       applyOperationIds: {type: "array", minItems: 1, maxItems: reviewLimits.maxApplies, uniqueItems: true, items: idSchema()},
       wait: {type: "object", additionalProperties: false, required: ["waitingOn", "resumesWhen"],
         description: "With record_review: an explicit current wait when the main has stopped with agreed work unfinished: who must act (requester or external, never the operative's own unfinished action) and what resumes the work.",
-        properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength)}},
+        properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength),
+          messageId: {...idSchema(), description: "With waitingOn requester: the id of the human's own message (web, mobile or a runtime answer) in your own or the main conversation that the wait answers; an agent's, the service's or your own message is refused (wait_source_not_human)."}}},
     },
     oneOf: [
       {properties: {action: {const: "ensure_main"}}, required: ["operationId", "note"]},
@@ -2293,6 +2296,19 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const listed = yield* settled(native.listThreads(cancel));
     if (Option.isNone(listed)) return {status: "pending", operationId, reason: "native_lineage_unavailable", retryable: true};
     if (yield* Deferred.isDone(cancel)) return {status: "pending", operationId, reason: "native_lineage_interrupted", retryable: true};
+    // a wait on the requester cites the human's own message, a genuine human message of the root or the main: an agent's send, the
+    // service's notice or the root's own message authorizes no wait on a human
+    if (payload.action === "record_review" && payload.wait?.waitingOn === "requester") {
+      const cited = payload.wait.messageId;
+      if (cited === undefined) return {status: "denied", operationId, reason: "wait_source_not_human"};
+      const root = yield* settled(native.projection(owner.supervisorThreadId, cancel));
+      const main = yield* settled(native.projection(owner.mainThreadId, cancel));
+      if (![root, main].some(read => Option.isSome(read) && read.value.thread.id === (read === root ? owner.supervisorThreadId : owner.mainThreadId) &&
+        genuineHumanMessage(read.value, cited) !== null)) {
+        if (Option.isNone(root) || Option.isNone(main)) return {status: "pending", operationId, reason: "wait_source_read_unavailable", retryable: true};
+        return {status: "denied", operationId, reason: "wait_source_not_human"};
+      }
+    }
 
     // the block after the lineage read: an incomplete lineage or a dead child is a durable denial, any other action but apply commits
     const lineage = yield* admitted((guard, now) => Effect.gen(function* (): Effect.fn.Return<{done: WorkflowWriteResult} | {scope: NativeScope; apply: Extract<WorkflowWritePayload, {action: "apply"}>}> {

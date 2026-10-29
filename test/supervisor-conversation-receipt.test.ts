@@ -22,6 +22,11 @@ const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type ===
 // a fixture whose services read the wall clock while the fixture records its own times
 const fixtureAt = (options?: Parameters<typeof makeFixture>[1]) => Effect.andThen(TestClock.setTime(wallClock), makeFixture({now: baseTime}, options));
 
+it.effect("the operative's introduction says Supervisor guidance is never a human limit", () => Effect.gen(function* () {
+  const fixture = yield* fixtureAt();
+  assert.match(workflowIntroductionText(fixture.task), /Supervisor guidance is never a human limit; human limits are cited by their message\./u);
+}));
+
 // the prepared unsent introduction of the fixture task, as an earlier cycle reserved it
 const readyIntroduction = (fixture: Fixture) => Effect.gen(function* () {
   const introduction: WorkflowIntroduction = {taskId: fixture.task.id, projectId, threadId: operativeThreadId, supervisorThreadId: fixture.binding.threadId,

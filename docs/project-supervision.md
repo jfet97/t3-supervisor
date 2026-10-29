@@ -590,6 +590,16 @@ The initial Supervisor and helper notices include portable tool-discovery guidan
 their first instruction read. No gateway implementation is assumed. The initial root
 notice also requires a stopped service result before confirming Stop and gives the
 dashboard fallback when that call is unavailable or denied.
+A genuine human message, wherever the service requires one, is the human's own web or
+mobile message or the human's answer to a runtime input request of that chat, which T3
+records as a server-created message. A message an agent sent from another chat, a
+scheduled or imported one, a system or Supervisor command, a service notice or a Stop the
+Supervisor itself authored is never human, and the absence of a sender thread alone
+proves nothing. Supervisor guidance is never a human limit: the Supervisor cites human
+limits by their message, and a Stop it imposes is its own, said so. A failing check or
+finding keeps its review duty unfinished: it requires the agreed check or review and the
+operative's own correction, prescribes no implementation, locator, type or sanitization
+strategy, and adds no hold that is not a genuine human limit or the agreed plan.
 The assistant that calls `supervision_stop` judges that a genuine human asked to stop, in
 any language; the service does not interpret the words. It verifies deterministically that
 the cited message is that human's original native message, that the caller's own native

@@ -1148,6 +1148,12 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 300
+            },
+            "messageId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "With waitingOn requester: the id of the human's own message (web, mobile or a runtime answer) in your own or the main conversation that the wait answers; an agent's, the service's or your own message is refused (wait_source_not_human)."
             }
           }
         }

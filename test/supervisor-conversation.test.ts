@@ -1051,6 +1051,7 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   assert.match(monitoring, /keep limit and maxCharsPerItem small \(about 5 and 2000\)/u);
   assert.match(contact, /Contact the operative only with one brief actionable delta or question citing message or item IDs/u);
   assert.match(contact, /never paste plans, definitions, protocol or service notices \(it reads its proposal with supervision_plan/u);
+  assert.match(contact, /Supervisor guidance is never a human limit; cite human limits by their message\./u);
   for (const text of [prompt, monitoring, contact]) assert.doesNotMatch(text, /only as needed|fresh-read|a fresh read of the relevant/u, "no vague or rereading instruction remains");
   // each rule is in its section once and never in the check-in itself
   for (const [rule, section] of [["Read forward and small", monitoring], ["Contact the operative only", contact]] as const) {
@@ -2211,6 +2212,7 @@ it.effect("a review that records no outcome stays visibly unconfirmed: nothing i
   assert.equal((request.envelope as {reviewRequestId?: string}).reviewRequestId, request.id, "the frozen envelope names the review it belongs to");
   const core = String((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})).core);
   assert.ok(core.includes("give corrective guidance only for a concrete, actionable operative mistake or deviation"));
+  assert.ok((yield* sectionText(fixture, "monitoring")).includes("A failing check or finding keeps the duty unfinished: require the agreed check or review and the operative's own correction; prescribe no implementation, locator, type or sanitization strategy; add no hold that is not a genuine human limit or the agreed plan; a Stop you impose is yours, say so."));
   assert.ok((yield* sectionText(fixture, "monitoring")).includes("decided from the evidence you read and the current workflow"));
   completeRun(fixture.supervisor, run, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
   yield* clock.advance(1);
@@ -4940,6 +4942,19 @@ it.effect("a check-in records an explicit wait naming who acts next, and never t
   assert.equal(recorded.status, "recorded");
   const stored = (yield* fixture.conversation.requests.requests(projectId, fixture.binding.threadId)).find(item => item.id === request.id);
   assert.deepEqual(stored?.reviewOutcome?.wait, {waitingOn: "external", resumesWhen: "The upstream release is published."});
+  // a wait on the requester cites the human's own message: none, an agent's relayed message or the root's own message is no human source
+  const run = fixture.supervisor.runs.find(item => item.userMessageId === request.messageId)!;
+  appendMessageToRun(fixture.supervisor, run, {id: "relayed-by-agent", role: "user", text: "The requester says wait.", createdBy: "agent", creationSource: "mcp", now: clock.now});
+  fixture.supervisor.messages.find(item => item.id === "relayed-by-agent")!.senderThreadId = "operative-thread";
+  appendMessageToRun(fixture.supervisor, run, {id: "the-humans-own", role: "user", text: "Hold until I confirm the budget.", createdBy: "user", creationSource: "web", now: clock.now});
+  const requesterWait = (operationId: string, messageId?: string) => recordOutcome(fixture, request, "needs_attention", {reason: "The requester must confirm the budget.", operationId,
+    wait: {waitingOn: "requester", resumesWhen: "The requester confirms the budget.", ...(messageId ? {messageId} : {})}});
+  assert.deepEqual(yield* requesterWait("wait-requester-uncited"), {status: "denied", operationId: "wait-requester-uncited", reason: "wait_source_not_human"});
+  assert.deepEqual(yield* requesterWait("wait-requester-relayed", "relayed-by-agent"), {status: "denied", operationId: "wait-requester-relayed", reason: "wait_source_not_human"});
+  assert.deepEqual(yield* requesterWait("wait-requester-notice", `supervisor-notice:workflow:${fixture.task.id}`), {status: "denied", operationId: "wait-requester-notice", reason: "wait_source_not_human"});
+  assert.equal((yield* requesterWait("wait-requester-human", "the-humans-own")).status, "recorded");
+  const cited = (yield* fixture.conversation.requests.requests(projectId, fixture.binding.threadId)).find(item => item.id === request.id);
+  assert.deepEqual(cited?.reviewOutcome?.wait, {waitingOn: "requester", resumesWhen: "The requester confirms the budget.", messageId: "the-humans-own"});
 }));
 
 it.effect("the instructions version covers the full reference, so a reference-only change is not silently stale", () => Effect.gen(function* () {

@@ -602,10 +602,15 @@ at their first and their final authority check.
   the run that created or changed a workflow (`review_no_change_after_edit`). A later call of the same run replaces the outcome
   until the check-in completes. It sends nothing: messaging the operative is a separate
   decision, and neither the record nor delivered guidance shows that the operative
-  corrected anything. An optional `wait: {waitingOn, resumesWhen}` records an explicit
-  current wait when the main has stopped with agreed work unfinished: `requester` or
-  `external` must act (never the operative's own unfinished action) and `resumesWhen`
-  names what continues the work.
+  corrected anything. An optional `wait: {waitingOn, resumesWhen, messageId?}` records an
+  explicit current wait when the main has stopped with agreed work unfinished: `requester`
+  or `external` must act (never the operative's own unfinished action) and `resumesWhen`
+  names what continues the work. A wait on the requester cites, in `messageId`, the
+  human's own message in the root or the main (a web or mobile message, or the human's
+  answer to a runtime input request); without one, or citing an agent's send, a service
+  notice, a Supervisor command or the root's own message, it is refused
+  (`wait_source_not_human`; `wait_source_read_unavailable` while neither conversation can
+  be read).
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
 During initialization the root publishes the supplied initial record unchanged and
