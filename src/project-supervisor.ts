@@ -531,7 +531,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (!resolved) complete = false;
     return {projectId, mainThreadId, supervisorThreadId: binding?.threadId ?? null, bindingGeneration: binding?.generation ?? null,
       observedAt, lineageTotal, lineageOffset, lineageHasMore,
-      complete: complete && Boolean(resolved?.complete), issues, threads: observedRows} satisfies ProjectSupervisorScopeSnapshot;
+      complete: complete && Boolean(resolved?.complete), issues, threads: observedRows,
+      // the completed task's participant settlements as the lifecycle recorded them; nothing here is evaluated anew
+      ...(binding?.participantSettlements?.length ? {participantSettlements: binding.participantSettlements.map(item => ({threadId: item.threadId, environmentId: item.environmentId,
+        state: item.state, reason: item.reason ?? null, observedAt: item.observedAt}))} : {})} satisfies ProjectSupervisorScopeSnapshot;
   });
   // the shared activation boundary read of concurrent folder checks: its first caller runs it under the 30 s deadline, and when
   // that caller ends without a result its joined callers see a failed read

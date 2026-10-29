@@ -1,7 +1,7 @@
 import { Clock, Deferred, Effect } from "effect";
 import { ProjectSupervisor } from "./project-supervisor.js";
-import { emptyPage, maxWorkflowProgressResponseBytes, progressWorkflow, scopePage, workflowParticipants, type ParticipantCoverageOwner, type WorkflowProgressPageQuery,
-  type WorkflowProgressSnapshot } from "./workflow-progress.js";
+import { emptyPage, maxWorkflowProgressResponseBytes, progressWorkflow, scopePage, settlementKey, workflowParticipants, type ParticipantCoverageOwner, type ParticipantSettlementView,
+  type WorkflowProgressPageQuery, type WorkflowProgressSnapshot } from "./workflow-progress.js";
 import { WorkflowWriteController } from "./workflow-write-controller.js";
 
 // the server side of the dashboard's live progress page; the browser bundle imports only the schemas of workflow-progress.ts
@@ -74,6 +74,8 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
   const scopeRows = new Map(scope.threads.map(thread => [thread.threadId, thread]));
   const owners = new Map<string, ParticipantCoverageOwner>(coverage.map(item => [item.threadId, item.state]));
   const linkedChildren = (threadId: string) => read.workflows.filter(item => item.document.parentThreadId === threadId).map(item => item.document.threadId);
+  // the binding's recorded settlements of the completed task's participants, by thread and environment
+  const settlements = new Map<string, ParticipantSettlementView>((scope.participantSettlements ?? []).map(item => [settlementKey(item.threadId, item.environmentId), {state: item.state, reason: item.reason}]));
   return bounded({
     status: "ok",
     message: scope.complete ? null : "Native scope observation is incomplete. Review the issues below before relying on this snapshot.",
@@ -84,7 +86,7 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
     coverage,
     incompatibleWorkflows: read.incompatibleWorkflows,
     workflows: read.workflows.map(({document, parentNodeReferences}) => ({...progressWorkflow(document, parentNodeReferences),
-      participants: workflowParticipants(document, linkedChildren(document.threadId), scopeRows, owners)})),
+      participants: workflowParticipants(document, linkedChildren(document.threadId), scopeRows, owners, settlements)})),
     workflowOffset: read.workflowOffset,
     workflowHasMore: read.workflowHasMore,
     lineageOffset: read.lineageOffset,

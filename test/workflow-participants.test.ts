@@ -66,7 +66,7 @@ it("participants merge attached and linked native children with declared partici
   assert.deepEqual([byId.get("contribution:c-native")!.coverage, byId.get("contribution:c-native")!.lifecycle], ["native", "completed"], "a declared conversation inside the verified scope is observed by the service");
   assert.deepEqual([byId.get("contribution:c-unsupported")!.coverage, byId.get("contribution:c-unsupported")!.currentReceipt?.kind], ["unsupported", "unsupported"]);
   assert.deepEqual([byId.get("contribution:c-lifecycle")!.coverage, byId.get("contribution:c-lifecycle")!.completion], ["lifecycle_only", "withdrawn"]);
-  for (const row of rows) assert.equal(row.settlement, "not_evaluated");
+  for (const row of rows) assert.equal(row.settlement, row.kind === "native_child" || row.kind === "t3_conversation" ? "not_evaluated" : "not_applicable", row.id);
 });
 
 it("native coverage needs the service's own read of a live local thread, and a conversation declared in another environment never joins a local row", () => {
@@ -95,6 +95,27 @@ it("native coverage needs the service's own read of a live local thread, and a c
   assert.deepEqual([byId.get("contribution:c-local")!.coverage, byId.get("contribution:c-local")!.lifecycle], ["native", "completed"], "a local declaration joins the read local row");
   assert.deepEqual([byId.get("contribution:c-foreign")!.coverage, byId.get("contribution:c-foreign")!.lifecycle, byId.get("contribution:c-foreign")!.environmentId],
     ["reported", "reported", "lab-vm"], "the same thread id in another environment is another conversation and never aliases the local one");
+});
+
+it("settlement states join the rows by thread and environment: T3 conversations carry what was recorded, everything else is not applicable", () => {
+  const document = {
+    plan: {kind: "sequence", templatePath: null, nodes: [step("step-review", "Review", ["reviewer-a"])]},
+    returns: [],
+    contributions: [
+      contribution("c-local", "step-review", {kind: "t3_conversation", threadId: "reviewer-a", environmentId: null}),
+      contribution("c-vm", "step-review", {kind: "t3_conversation", threadId: "reviewer-a", environmentId: "lab-vm"}),
+      contribution("c-ext", "step-review", {kind: "external", ref: "github:pr-42"}),
+      contribution("c-none", "step-review", null),
+    ],
+    evidence: [],
+  } as unknown as WorkflowStateDocument;
+  const settlements = new Map([[":reviewer-a", {state: "settled" as const, reason: null}], ["lab-vm:reviewer-a", {state: "unresolved" as const, reason: "settle_rejected_for_environment"}]]);
+  const byId = new Map(workflowParticipants(document, [], new Map(), new Map(), settlements).map(item => [item.id, item]));
+  assert.deepEqual([byId.get("reviewer-a")!.settlement, byId.get("contribution:c-local")!.settlement], ["settled", "settled"], "a local declaration shares the local thread's settlement");
+  assert.deepEqual([byId.get("contribution:c-vm")!.settlement, byId.get("contribution:c-vm")!.settlementReason], ["unresolved", "settle_rejected_for_environment"],
+    "the same thread id in another environment has its own settlement");
+  assert.deepEqual([byId.get("contribution:c-ext")!.settlement, byId.get("contribution:c-none")!.settlement], ["not_applicable", "not_applicable"]);
+  assert.equal(workflowParticipants(document, [], new Map(), new Map()).find(item => item.id === "reviewer-a")!.settlement, "not_evaluated", "nothing recorded reads as not evaluated");
 });
 
 it("a receipt for a stale attempt is history once a return reopened the occurrence", () => {

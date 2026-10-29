@@ -11,6 +11,7 @@ import { decodeRow, documentRow, documentRows, type GuidanceStoreError, mapSqlEr
 import { fingerprint } from "./guidance-store.js";
 import { SupervisorIds } from "./ids.js";
 import { SupervisorStateReset } from "./supervisor-state-reset.js";
+import { type ParticipantSettlementState } from "./supervisor-observation.js";
 import { defaultMonitoringSettings, monitoringIntervalMinutes, type DefinitionReviewInfo, type SupervisorBinding, type SupervisorModelSelection, type SupervisorMonitoringSettings, type TaskInterpretationInfo, type WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
 import type { Projection } from "./types.js";
 import { sameModel } from "./supervisor-native.js";
@@ -33,7 +34,12 @@ export type SupervisorStopNotice = {messageId: string; commandId: string; stoppe
   dispatchMode?: {type: "steer_active"; targetRunId: string} | {type: "queue_after_active"}; rejectedAttempts?: Array<{messageId: string; commandId: string}>; error?: string | null};
 export type BindingRecord = SupervisorBinding & {mainQuietSince?: number | null; mainQuietFingerprint?: string; mainSettlementBlockedBy?: string | null; mainSettlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number};
   /** The direct human resume that lifted the latest Stop from this Supervisor's own conversation; any later Stop or Enable replaces it. */
-  supervisionResume?: SupervisionResume};
+  supervisionResume?: SupervisionResume;
+  /** The settlement of each T3-managed participant of the completed task, by thread id and environment; external participants have none. */
+  participantSettlements?: ParticipantSettlement[]};
+/** One participant's settlement after task completion: local by thread id, or in a linked environment when one is named. */
+export type ParticipantSettlement = {threadId: string; environmentId: string | null; commandId: string | null; state: ParticipantSettlementState;
+  observedAt: number; activityVersion?: string; attempts?: number; reason?: string | null};
 /** A genuine human's direct request in the bound Supervisor conversation to resume its stopped main, as its verified supervision_start cited it. */
 export type SupervisionResume = {callerThreadId: string; userMessageId: string; operationId: string; resumedAt: number};
 /** One immutable notice body and native identity for an explicit Stop period; the identities come from SupervisorIds. */

@@ -130,7 +130,11 @@ const fixture = Effect.gen(function* () {
   const project: ProjectionRead = (id) => Effect.suspend(() => {projectionReads++;const failure = failures.get(id);if (failure) return Effect.fail(failure);const p = projections.get(id);
     return p ? Effect.succeed(p) : Effect.fail(new T3TransportError("T3 thread projection is unavailable"));});
   // T3 accepts the settle and shows the Supervisor settled; with an uncertain receipt the accepted call's reply is lost
-  const rpc: OperateCall = (_tag, payload) => {calls.push(payload);if (uncertain) return Effect.fail(new SupervisorRpcError("uncertain"));const target = projections.get(String(payload.threadId)) ?? settledTarget!;target.thread.settledAt = "2026-10-14T10:02:00Z";target.thread.settledOverride = "settled";return Effect.succeed({sequence: 11});};
+  let environmentAccepts = true;
+  const rpc: OperateCall = (_tag, payload) => {calls.push(payload);if (uncertain) return Effect.fail(new SupervisorRpcError("uncertain"));
+    // a settle naming a linked environment is answered by that environment's T3: accepted, or definitely rejected as unsupported
+    if (payload.environmentId !== undefined) return environmentAccepts ? Effect.succeed({sequence: 12}) : Effect.fail(new SupervisorRpcError("rejected", true, false, true));
+    const target = projections.get(String(payload.threadId)) ?? settledTarget!;target.thread.settledAt = "2026-10-14T10:02:00Z";target.thread.settledOverride = "settled";return Effect.succeed({sequence: 11});};
   const process = yield* openLifecycleProcess(directory, {read: project, rpc});
   const {store, requests, monitor, workflows, conversation, lifecycle, sql} = process;
   yield* store.baseline({snapshotSequence: 10, threads: []});
@@ -144,7 +148,8 @@ const fixture = Effect.gen(function* () {
   yield* store.saveTask(engagedTask({id: "task", projectId: "p", threadId: "main", sourceRunId: "run", sourceMessageId: "source", sourceHash: "hash", sourceOrdinal: 1, supervisorThreadId: binding.threadId,
     messageId: "interpretation", status: "inferred", objective: "Implement", reason: "Requested", updatedAt: 1, requestText: "", dispatchedAt: null, supervisorRunId: null, replayCount: 0}, main));
   return {process, sql, store, requests, monitor, binding, conversation, lifecycle, workflows, main, supervisor, projections, threads, calls, projectionReads: () => projectionReads,
-    setUncertain: () => {uncertain = true;}, setFailure: (id: string, error: T3TransportError | null) => {if (error) failures.set(id, error);else failures.delete(id);},
+    setUncertain: (value = true) => {uncertain = value;}, setEnvironmentSettle: (accepts: boolean) => {environmentAccepts = accepts;},
+    setFailure: (id: string, error: T3TransportError | null) => {if (error) failures.set(id, error);else failures.delete(id);},
     stopChat: (threadId: string) => stopChat(process, threadId),
     check: (now: number) => at(now, Effect.flatMap(store.binding("p", "main"), (current) => lifecycle.check(current!, threads)))};
 });
@@ -610,6 +615,101 @@ it.effect("a genuine current wait, real completion and Stop keep ordinary parkin
   yield* unfinishedAgreedTask(stopped);
   yield* stopped.stopChat("main");
   assert.equal(yield* parks(stopped, 10), 1, "Stop still parks the owned Supervisor");
+}));
+
+// J: the complete participant set of a completed task settles with the main, each by its own command and once; what cannot settle is
+// recorded with its reason; participants that are not T3 conversations are not applicable
+const settledIds = (f: Effect.Success<typeof fixture>) => f.calls.filter(call => call.type === "thread.settle").map(call => `${call.environmentId ?? ""}:${call.threadId}`);
+const participantSettlements = (f: Effect.Success<typeof fixture>) => Effect.map(f.store.binding("p", "main"), binding =>
+  Object.fromEntries((binding?.participantSettlements ?? []).map(item => [`${item.environmentId ?? ""}:${item.threadId}`, [item.state, item.reason ?? null, item.attempts ?? 0]])));
+const quietChild = (f: Effect.Success<typeof fixture>, id: string, extra: Record<string, unknown> = {}) => {
+  const child = {...thread(id, "main", "subagent", "main"), projectId: null, creationSource: "provider", latestRunId: null, activeRunId: null, ...extra};
+  f.threads.push(child);
+  f.main.subagents = [...(f.main.subagents ?? []), {childThreadId: child.id, status: "completed"}];
+  f.projections.set(child.id, {thread: child, runs: [], messages: [], subagents: []});
+  return child;
+};
+const localConversation = (f: Effect.Success<typeof fixture>, id: string, extra: Record<string, unknown> = {}) => {
+  const conversation = {...thread(id), ...extra};
+  f.projections.set(id, {thread: conversation, runs: [], messages: [], subagents: []});
+  return conversation;
+};
+// the stored document bound to the fixture task, so a completed status is the task's own completion (the helper's default leaves it unbound)
+const boundTo = (f: Effect.Success<typeof fixture>, extra: Record<string, unknown> = {}) => Effect.map(f.store.task("main"), task => ({...extra,
+  sourceBinding: {workspaceRoot: "/workspace", revision: "definitions-1", globalRevision: null, definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true,
+    taskId: task!.id, proposalId: "proposal", sourceHash: taskScopeRevision(task!)}}));
+const catalogued = (f: Effect.Success<typeof fixture>) => Context.get(f.process.context, SupervisionScopeService).rememberCatalog([{id: "p", workspaceRoot: "/workspace"}], f.threads);
+const declared = (contributionId: string, participant: Record<string, unknown> | null, accepted = false) => ({contributionId, nodeId: unfinishedStepId, revision: 1,
+  state: accepted ? "result" : "awaiting_result", summary: "A reviewer.", references: [], externalRef: null, participant, sourceThreadId: "main", sourceRunId: "run",
+  sourceMessageId: "source", recordedAt: 2, assessment: accepted ? {decision: "accepted", resultRevision: 1, note: "Good.", actorSupervisorThreadId: "supervisor", evidenceId: "a1", recordedAt: 3} : null});
+const observedReceipt = (id: string, contributionId: string, participant: Record<string, unknown>) => ({id, operationId: `op-${id}`, kind: "observation", recordedAt: 4,
+  actorSupervisorThreadId: "supervisor", targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: null, sourceThreadId: "supervisor", sourceRunId: "root-run",
+  sourceMessageId: null, sourceItemId: `item-${id}`, agreementKey: null, note: "Observed.",
+  participant: {contributionId, revision: 1, attempt: 1, participant, receipt: {kind: "read", toolName: "tool-read", inputDigest: null}, repeats: 1, firstRecordedAt: 4}});
+
+it.effect("completion settles the quiet native child and the declared local reviewer with the main, once each, and skips a child its user keeps active", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  quietChild(f, "native-child");
+  quietChild(f, "pinned-child", {pinnedAt: "2026-10-14T09:00:00Z"});
+  localConversation(f, "reviewer-local");
+  yield* catalogued(f);
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, {contributions: [declared("review", {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null})]}));
+  yield* parks(f, 10);
+  assert.deepEqual(settledIds(f).filter(id => id !== `:${f.binding.threadId}`).sort(), [":main", ":native-child", ":reviewer-local"], "the main, its quiet child and the local reviewer settle; the pinned child does not");
+  assert.deepEqual(yield* participantSettlements(f), {":native-child": ["settled", null, 1], ":pinned-child": ["skipped", "keep_active", 0], ":reviewer-local": ["settled", null, 1]});
+  const before = f.calls.length;
+  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(settledIds(f).filter(id => id === ":native-child" || id === ":reviewer-local").length, 2, "a settled participant is never commanded again");
+  assert.ok(f.calls.length <= before + 1, "later checks add at most the root's own settlement");
+}));
+
+it.effect("no participant settles before the task completes, so an intermediate review round keeps its reviewer", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  quietChild(f, "reviewer-child");
+  yield* catalogued(f);
+  yield* unfinishedAgreedTask(f, "underway", "underway", yield* boundTo(f));
+  yield* parks(f, 10);
+  assert.deepEqual(settledIds(f), [], "nothing settles while the agreed work is unfinished");
+  assert.deepEqual(yield* participantSettlements(f), {});
+}));
+
+it.effect("an uncertain participant settlement is retained and retried after the quiet window, then settles", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  quietChild(f, "native-child");
+  yield* catalogued(f);
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f));
+  f.setUncertain(true);
+  yield* parks(f, 10);
+  assert.deepEqual((yield* participantSettlements(f))[":native-child"], ["uncertain", null, 1], "a lost reply is retained as uncertain");
+  f.setUncertain(false);
+  yield* f.check(10 + SUPERVISOR_SETTLE_QUIET_MS + 1);
+  assert.deepEqual((yield* participantSettlements(f))[":native-child"], ["uncertain", null, 1], "no retry inside the quiet window");
+  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS + 1);
+  assert.deepEqual((yield* participantSettlements(f))[":native-child"], ["settled", null, 2], "the retry settles it");
+  assert.equal(settledIds(f).filter(id => id === ":native-child").length, 2);
+}));
+
+it.effect("an external participant is not applicable and gets no command; a declared conversation in a linked environment settles when T3 accepts the environment and is listed unresolved when it rejects or was never observed", () => Effect.gen(function* () {
+  const vm = {kind: "t3_conversation", threadId: "reviewer-vm", environmentId: "lab-vm"};
+  const accepted = yield* fixture;
+  yield* catalogued(accepted);
+  yield* unfinishedAgreedTask(accepted, "completed", "completed", yield* boundTo(accepted, {contributions: [declared("ext", {kind: "external", ref: "github:pr-7"}, true), declared("vm", vm, true),
+    declared("unseen", {kind: "t3_conversation", threadId: "reviewer-unseen", environmentId: "lab-vm"}, true), declared("open", {kind: "t3_conversation", threadId: "reviewer-open", environmentId: "lab-vm"})],
+    evidence: [observedReceipt("r-vm", "vm", vm), observedReceipt("r-open", "open", {kind: "t3_conversation", threadId: "reviewer-open", environmentId: "lab-vm"})]}));
+  yield* parks(accepted, 10);
+  assert.deepEqual(settledIds(accepted).filter(id => id.startsWith("lab-vm:")), ["lab-vm:reviewer-vm"], "only the observed, accepted linked-environment conversation is commanded");
+  assert.ok(!accepted.calls.some(call => String(call.threadId).includes("pr-7")), "an external participant gets no command");
+  assert.deepEqual(yield* participantSettlements(accepted), {"lab-vm:reviewer-vm": ["settled", null, 1], "lab-vm:reviewer-unseen": ["unresolved", "not_observed", 0], "lab-vm:reviewer-open": ["unresolved", "result_not_accepted", 0]});
+
+  const rejected = yield* fixture;
+  rejected.setEnvironmentSettle(false);
+  yield* catalogued(rejected);
+  yield* unfinishedAgreedTask(rejected, "completed", "completed", yield* boundTo(rejected, {contributions: [declared("vm", vm, true)], evidence: [observedReceipt("r-vm", "vm", vm)]}));
+  yield* parks(rejected, 10);
+  assert.deepEqual(settledIds(rejected).filter(id => id.startsWith("lab-vm:")), ["lab-vm:reviewer-vm"]);
+  assert.deepEqual((yield* participantSettlements(rejected))["lab-vm:reviewer-vm"], ["unresolved", "settle_rejected_for_environment", 1], "a rejected environment settle is listed, not retried blindly");
+  yield* rejected.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);yield* rejected.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
+  assert.equal(settledIds(rejected).filter(id => id === "lab-vm:reviewer-vm").length, 1, "an unresolved rejection is not commanded again on the same completed task");
 }));
 
 it.effect("unknown intermediate child ancestry blocks closed-main settlement", () => Effect.gen(function* () {

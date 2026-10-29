@@ -177,7 +177,10 @@ The progress snapshot lists each workflow's `participants[]` with source, kind,
 handle, roles (occurrence, attempt, replaced by an applied return), owner,
 lifecycle, reported state, completion, coverage (`native`, `supervisor_observed`,
 `lifecycle_only`, `reported`, `unsupported`, `unknown`), the current receipt and the
-count of earlier receipts; settlement is `not_evaluated` until the settlement slice.
+count of earlier receipts, and `settlement`: `not_evaluated` until the task completed,
+`not_applicable` for external or unknown participants, else the recorded state
+(`pending`, `uncertain`, `settled`, `superseded`, `unresolved`, `skipped`) with
+`settlementReason` for unresolved and skipped ones.
 `native` requires the service's own projection read of a live local thread in that
 snapshot (`projectionRead` on the scope row; lifecycle metadata of an unread,
 archived or deleted thread is `unknown`), and a conversation declared with an

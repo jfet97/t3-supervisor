@@ -18,6 +18,15 @@ const lifecycleText = {running: "Running", completed: "Completed", interrupted: 
 const completionText = {none: "Not completed", native_completed: "Conversation completed (not step completion)", result_reported: "Result reported, not assessed",
   accepted: "Result accepted by the Supervisor", needs_more: "Further work needed", withdrawn: "Withdrawn"} as const;
 const ownerText = {root: "Supervisor root", helper: "A helper", unknown: "Unknown"} as const;
+// settlement after task completion: a T3-managed conversation settles by its own command; anything else has no settlement to show
+const settlementText: Record<WorkflowProgressParticipant["settlement"], string> = {not_evaluated: "Not evaluated (the task has not completed)",
+  not_applicable: "Not applicable (not a T3 conversation; its completion is the reported result)", pending: "Settling", uncertain: "Settlement uncertain, retried",
+  settled: "Settled", superseded: "Settlement superseded by new activity", unresolved: "Unresolved", skipped: "Not settled"};
+const settlementReasonText: Record<string, string> = {unavailable: "the conversation could not be read", not_quiet: "the conversation still has work",
+  not_observed: "the Supervisor never observed it", result_not_accepted: "its result is not accepted", settle_rejected: "T3 rejected the settle command",
+  settle_rejected_for_environment: "T3 rejected the settle command for its environment", keep_active: "its user keeps it active"};
+const settlementLine = (participant: WorkflowProgressParticipant) => `${settlementText[participant.settlement]}${participant.settlementReason
+  ? ` (${settlementReasonText[participant.settlementReason] ?? participant.settlementReason})` : ""}`;
 const threadHref = (threadId: string) => `t3-thread://v1/${threadId}`;
 const time = (value: number) => {
   const date = new Date(value);
@@ -29,7 +38,7 @@ const time = (value: number) => {
 const foreign = (participant: WorkflowProgressParticipant, localEnvironmentId: string | null | undefined): boolean =>
   participant.environmentId !== null && participant.environmentId !== localEnvironmentId;
 
-/** Every participant of a workflow with its role, lifecycle, completion, coverage and receipt as distinct facts; settlement is not evaluated here. */
+/** Every participant of a workflow with its role, lifecycle, completion, coverage and receipt as distinct facts; settlement states what the service recorded after task completion. */
 export function WorkflowParticipants({workflow, localEnvironmentId}: {workflow: WorkflowProgressWorkflow | undefined; localEnvironmentId?: string | null | undefined}) {
   const participants = workflow?.participants ?? [];
   return <section className="stack workflow-participants" aria-labelledby="workflow-participants-title">
@@ -37,7 +46,7 @@ export function WorkflowParticipants({workflow, localEnvironmentId}: {workflow: 
     <HelpDisclosure title="About participants and coverage"><p><GuideLink topic="participants">Participants</GuideLink> are the conversations or agents that work an
       occurrence of this plan: native children attached to a step, children linked without a step, and participants the main reported for external work. Coverage
       names what is established for each one: a service read of a native child, the Supervisor's own attributed read, a lifecycle-only wait, a bare report, a stated
-      missing route, or nothing. A completed conversation or an accepted result never completes a step by itself, and settlement is not evaluated on this page.</p></HelpDisclosure>
+      missing route, or nothing. A completed conversation or an accepted result never completes a step by itself. Settlement is recorded only after the task completed: T3-managed conversations settle by their own command, a conversation kept active by its user or one the service could not settle is listed as such, and participants that are not T3 conversations have no settlement.</p></HelpDisclosure>
     {!workflow ? <p className="muted">No workflow data is available for participants.</p>
       : participants.length === 0 ? <p className="muted">No participants are recorded for this workflow.</p>
       : <ul className="workflow-participant-list">{participants.map(participant => {
@@ -58,7 +67,7 @@ export function WorkflowParticipants({workflow, localEnvironmentId}: {workflow: 
             : "No attached occurrence: this linked child has no recorded role in the plan."}</p>
           <p className="small"><strong>Conversation:</strong> {lifecycleText[participant.lifecycle]}{participant.reportedState ? ` (${participant.reportedState})` : ""} ·{" "}
             <strong>Completion:</strong> {completionText[participant.completion]} · <strong>Followed by:</strong> {ownerText[participant.owner]} ·{" "}
-            <strong>Settlement:</strong> Not evaluated</p>
+            <strong>Settlement:</strong> {settlementLine(participant)}</p>
           <EntityDetails title="Coverage receipt"><div className="text-group small">
             <p>{coverage.detail}</p>
             {participant.currentReceipt

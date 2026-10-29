@@ -380,7 +380,10 @@ only to the declaration and attempt it was made in. The task page's
 Participants section shows every participant's role and attempt, conversation
 lifecycle, completion and coverage as distinct facts, and states when nothing was
 observed or no route exists; a conversation in another environment is shown with
-its environment and no local link; settlement is evaluated separately.
+its environment and no local link; after task completion each T3 conversation's
+settlement is shown as recorded (settled, settling, uncertain, unresolved with its
+reason, or skipped for its user's choice), and a participant that is not a T3
+conversation is shown as not applicable.
 
 Scope is the main workflow only. A local child that used external help reports
 the outcome to the main, which relays it with its own record; no child or external
@@ -662,7 +665,17 @@ choice made after the stop holds it. The operative main is never settled or
 interrupted because supervision stopped, and other chats keep their supervision.
 
 Quiet completion/archive/deletion can settle the owned chat once children and
-pending work are quiet. An idle main whose agreed main workflow is unfinished parks only
+pending work are quiet. When the task completed (every applicable member settled, no
+pending return), the complete participant set settles with the main, each by its own
+command and once: the main's lineage descendants (not forks) and the T3 conversations
+the main's contributions declared, locally when a fresh read shows the conversation quiet
+and not kept active by its user, or in a linked environment when the Supervisor observed
+it and its result was accepted. What cannot settle is recorded with its reason (unreadable,
+still working, never observed, result not accepted, or the settle command rejected for
+it or its environment), an uncertain command is retried after the quiet window, and a
+conversation kept active by its user is skipped. Intermediate review rounds never settle
+a reviewer, so a reused reviewer stays available. Participants that are not T3
+conversations have no settlement: their completion is the result the main reported. An idle main whose agreed main workflow is unfinished parks only
 on an explicit current wait: the latest check-in's confirmed outcome carries a wait naming
 whether the requester or an external party must act and what resumes the work, recorded
 for the current task after the main's last completed run. Ordinary attention, a stale or

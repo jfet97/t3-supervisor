@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot, type ProjectSupervisorScopeThread } from "./supervisor-observation.js";
+import { participantSettlementStates, ProjectSupervisorScopeSnapshotSchema, type ParticipantSettlementState, type ProjectSupervisorScopeSnapshot, type ProjectSupervisorScopeThread } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
 import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBackTos, planBranches, planEntities, resolveBackTo } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, currentAcceptedProposalId, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
@@ -111,7 +111,9 @@ export const WorkflowProgressParticipantSchema = Schema.Struct({
   currentReceipt: Schema.NullOr(Schema.Struct({kind: Schema.Literals(participantReceiptKinds), recordedAt: Schema.Number, actorSupervisorThreadId: Schema.String,
     sourceItemId: NullableText, toolName: NullableText, evidenceId: Schema.String, repeats: Schema.Number, firstRecordedAt: Schema.Number})),
   priorReceipts: Schema.Number,
-  settlement: Schema.Literal("not_evaluated"),
+  /** T3 settlement after task completion: not applicable to external or unknown participants, not evaluated until the task completed. */
+  settlement: Schema.Literals(["not_evaluated", "not_applicable", ...participantSettlementStates]),
+  settlementReason: NullableText,
 });
 export type WorkflowProgressParticipant = typeof WorkflowProgressParticipantSchema.Type;
 
@@ -400,8 +402,16 @@ const ownerOf = (state: ParticipantCoverageOwner | undefined): WorkflowProgressP
  * main-reported participants of this document's contributions with the root's receipts that are current for the declaration, revision
  * and attempt; earlier receipts stay counted as history. Nothing here settles anything.
  */
+/** The key of a participant's settlement: its thread id, qualified by its environment when it is not local. */
+export const settlementKey = (threadId: string, environmentId: string | null | undefined): string => `${environmentId ?? ""}:${threadId}`;
+export type ParticipantSettlementView = {state: ParticipantSettlementState; reason: string | null};
+
 export const workflowParticipants = (document: WorkflowStateDocument, linkedChildren: readonly string[], scopeThreads: ReadonlyMap<string, ParticipantScopeThread>,
-  coverage: ReadonlyMap<string, ParticipantCoverageOwner>): WorkflowProgressParticipant[] => {
+  coverage: ReadonlyMap<string, ParticipantCoverageOwner>, settlements: ReadonlyMap<string, ParticipantSettlementView> = new Map()): WorkflowProgressParticipant[] => {
+  const settlementOf = (threadId: string, environmentId: string | null): Pick<WorkflowProgressParticipant, "settlement" | "settlementReason"> => {
+    const recorded = settlements.get(settlementKey(threadId, environmentId));
+    return recorded ? {settlement: recorded.state, settlementReason: recorded.reason} : {settlement: "not_evaluated", settlementReason: null};
+  };
   const attempts = occurrenceAttempts(document.returns ?? []);
   const names = planNodeNames(document.plan);
   const replacedBy = new Map<string, Set<string>>();
@@ -416,7 +426,7 @@ export const workflowParticipants = (document: WorkflowStateDocument, linkedChil
     return {id: threadId, source: "native", kind: "native_child", handle: threadId, environmentId: null, threadId, contributionId: null, revision: null,
       roles: roles.get(threadId) ?? [], owner: ownerOf(coverage.get(threadId)), lifecycle: thread?.lifecycle ?? "unknown", reportedState: null,
       completion: thread?.lifecycle === "completed" ? "native_completed" : "none", coverage: nativelyRead(thread) ? "native" : "unknown",
-      currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated"};
+      currentReceipt: null, priorReceipts: 0, ...settlementOf(threadId, null)};
   };
   const native = [...new Set([...roles.keys(), ...linkedChildren])].map(nativeRow);
   const declared = document.contributions.map((contribution): WorkflowProgressParticipant => {
@@ -445,7 +455,9 @@ export const workflowParticipants = (document: WorkflowStateDocument, linkedChil
       currentReceipt: latest ? {kind: latest.participant!.receipt.kind, recordedAt: latest.recordedAt, actorSupervisorThreadId: latest.actorSupervisorThreadId,
         sourceItemId: latest.sourceItemId ?? null, toolName: latest.participant!.receipt.toolName, evidenceId: latest.id,
         repeats: latest.participant!.repeats ?? 1, firstRecordedAt: latest.participant!.firstRecordedAt ?? latest.recordedAt} : null,
-      priorReceipts: receipts.length - current.length, settlement: "not_evaluated"};
+      priorReceipts: receipts.length - current.length,
+      // only a T3-managed conversation can settle; an external or unknown participant's completion is its reported result, nothing more
+      ...(participant?.kind === "t3_conversation" ? settlementOf(participant.threadId, participant.environmentId) : {settlement: "not_applicable" as const, settlementReason: null})};
   });
   return [...native, ...declared];
 };

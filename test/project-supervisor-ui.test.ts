@@ -171,7 +171,7 @@ const renderConnected = (pages: WorkflowProgressSnapshot[]) => {
 
 it("the participants section shows role, attempt, lifecycle, completion, coverage and receipt as distinct facts, with explicit empty and unknown states", () => {
   const base: WorkflowProgressParticipant = {id: "x", source: "native", kind: "native_child", handle: "x", environmentId: null, threadId: "x", contributionId: null, revision: null,
-    roles: [], owner: "root", lifecycle: "unknown", reportedState: null, completion: "none", coverage: "unknown", currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated"};
+    roles: [], owner: "root", lifecycle: "unknown", reportedState: null, completion: "none", coverage: "unknown", currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated", settlementReason: null};
   const participants: WorkflowProgressParticipant[] = [
     {...base, id: "child-one", handle: "child-one", threadId: "child-one", roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 2, retired: true}], owner: "helper",
       lifecycle: "completed", completion: "native_completed", coverage: "native"},
@@ -197,7 +197,20 @@ it("the participants section shows role, attempt, lifecycle, completion, coverag
   assert.match(html, /Conversation:<\/strong> Completed · <strong>Completion:<\/strong> Conversation completed \(not step completion\)/);
   assert.match(html, /Result accepted by the Supervisor/);
   assert.match(html, /Followed by:<\/strong> A helper/);
-  assert.match(html, /Settlement:<\/strong> Not evaluated/);
+  assert.match(html, /Settlement:<\/strong> Not evaluated \(the task has not completed\)/);
+  // settlement states are shown as recorded: a T3 conversation's state with its reason, and not applicable for anything else
+  const settled = renderConnected([withParticipants([
+    {...base, id: "done", handle: "done", threadId: "done", settlement: "settled"},
+    {...base, id: "held", handle: "held", threadId: "held", settlement: "skipped", settlementReason: "keep_active"},
+    {...base, id: "contribution:vm", source: "declared", kind: "t3_conversation", handle: "reviewer-vm", threadId: "reviewer-vm", environmentId: "lab-vm", contributionId: "vm", revision: 1,
+      lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed", settlement: "unresolved", settlementReason: "settle_rejected_for_environment"},
+    {...base, id: "contribution:ext", source: "declared", kind: "external", handle: "github:pr-7", threadId: null, contributionId: "ext", revision: 1, lifecycle: "reported", reportedState: "result",
+      completion: "accepted", coverage: "reported", settlement: "not_applicable"},
+  ])]);
+  assert.match(settled, /Settlement:<\/strong> Settled/);
+  assert.match(settled, /Settlement:<\/strong> Not settled \(its user keeps it active\)/);
+  assert.match(settled, /Settlement:<\/strong> Unresolved \(T3 rejected the settle command for its environment\)/);
+  assert.match(settled, /Settlement:<\/strong> Not applicable \(not a T3 conversation; its completion is the reported result\)/);
   assert.match(html, /mcp__github__get_pull_request/);
   assert.match(html, /1 earlier receipt belong/);
   assert.match(html, /No receipt for the current declaration, revision and attempt/);
