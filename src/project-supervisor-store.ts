@@ -38,12 +38,11 @@ export type BindingRecord = SupervisorBinding & {mainQuietSince?: number | null;
   /** The settlement of each T3-managed participant per completed execution, by thread id and environment; earlier executions' rows are history. */
   participantSettlements?: ParticipantSettlement[]};
 /**
- * One participant's settlement for one completed execution (task, revision and the document's completion record): local by thread id, or
- * in a linked environment when one is named. A row holds at most one command; its payload (command id and the thread's updatedAt it was
- * reserved on) never changes through retries, and its attempt count stays with it.
+ * One participant's recorded settlement for one completed execution (task, revision and the document's completion record): local by thread
+ * id, or in a linked environment when one is named; the command id names the one automatic attempt when one was made.
  */
 export type ParticipantSettlement = {taskId: string; taskRevision: string; completionId: string | null; threadId: string; environmentId: string | null;
-  commandId: string | null; state: ParticipantSettlementState; observedAt: number; activityVersion?: string; attempts?: number; reason?: string | null; snapshotAt?: string | null};
+  commandId: string | null; state: ParticipantSettlementState; observedAt: number; activityVersion?: string; reason?: string | null};
 /** A genuine human's direct request in the bound Supervisor conversation to resume its stopped main, as its verified supervision_start cited it. */
 export type SupervisionResume = {callerThreadId: string; userMessageId: string; operationId: string; resumedAt: number};
 /** One immutable notice body and native identity for an explicit Stop period; the identities come from SupervisorIds. */

@@ -178,12 +178,13 @@ handle, roles (occurrence, attempt, replaced by an applied return), owner,
 lifecycle, reported state, completion, coverage (`native`, `supervisor_observed`,
 `lifecycle_only`, `reported`, `unsupported`, `unknown`), the current receipt and the
 count of earlier receipts, and `settlement`: `not_evaluated` until the task completed,
-`not_applicable` for external or unknown participants, else the state recorded for the
-main's current execution (its task, scope revision and latest completion record, which
-the scope names on every page) (`pending`, `uncertain`, `settled`, `superseded`,
-`unresolved`, `skipped`) with `settlementReason` for superseded, unresolved and skipped
-ones (`unavailable`, `not_quiet`, `snapshot_unavailable`, `settle_rejected`,
-`environment_settle_unsupported`, `keep_active`, `activity_changed`).
+`not_applicable` for external or unknown participants, else the outcome of the one
+automatic attempt recorded for the main's current execution (its task, scope revision and
+latest completion record, which the scope names on every page): `pending`, `uncertain`,
+`settled`, `superseded`, `unresolved` or `skipped`, with `settlementReason` for unresolved
+and skipped ones (`unavailable`, `not_quiet`, `snapshot_unavailable`, `settle_rejected`,
+`environment_settle_unsupported`, `keep_active`). Nothing is retried; what did not settle
+is settled by hand.
 `native` requires the service's own projection read of a live local thread in that
 snapshot (`projectionRead` on the scope row; lifecycle metadata of an unread,
 archived or deleted thread is `unknown`), and a conversation declared with an

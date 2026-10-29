@@ -625,21 +625,20 @@ it.effect("a genuine current wait, real completion and Stop keep ordinary parkin
   assert.equal(yield* parks(stopped, 10), 1, "Stop still parks the owned Supervisor");
 }));
 
-// J: the complete participant set of a completed task settles with the main, each by its own automatic-settle command on its fresh
-// snapshot and once per task; what cannot settle is recorded with its reason, keeping its command through retries; participants that
-// are not local T3 conversations are not applicable or unsupported
+// J: one best-effort automatic settle attempt per T3 participant and completed execution, recorded from native evidence; what did not
+// settle is recorded once with its reason and left to manual settlement, nothing is re-read or re-sent; participants that are not local
+// T3 conversations are not applicable or unsupported
 const settleTypes = ["thread.settle", "thread.auto-settle"];
 const settledIds = (f: Effect.Success<typeof fixture>) => f.calls.filter(call => settleTypes.includes(String(call.type))).map(call => `${call.environmentId ?? ""}:${call.threadId}`);
 const participantCommands = (f: Effect.Success<typeof fixture>, threadId: string) => f.calls.filter(call => call.threadId === threadId && settleTypes.includes(String(call.type)));
-// the rows of one execution (the current task and its latest completion record unless named), as state, reason and attempts, with the
-// command when asked
+// the rows of one execution (the current task and its latest completion record unless named), as state and reason, with the command when asked
 const participantSettlements = (f: Effect.Success<typeof fixture>, options: {taskId?: string; completionId?: string | null; withCommand?: boolean} = {}) => Effect.gen(function* () {
   const current = options.taskId ?? (yield* f.store.task("main"))!.id;
   const document = yield* f.workflows.get("p", "main");
   const completionId = options.completionId === undefined ? (document ? completionRecordId(document) : null) : options.completionId;
   const binding = yield* f.store.binding("p", "main");
   return Object.fromEntries((binding?.participantSettlements ?? []).filter(item => item.taskId === current && item.completionId === completionId)
-    .map(item => [`${item.environmentId ?? ""}:${item.threadId}`, [item.state, item.reason ?? null, item.attempts ?? 0, ...(options.withCommand ? [item.commandId] : [])]]));
+    .map(item => [`${item.environmentId ?? ""}:${item.threadId}`, [item.state, item.reason ?? null, ...(options.withCommand ? [item.commandId] : [])]]));
 });
 // a status record of the main document itself, as the workflow store writes it when the document's status moves
 const statusRecord = (id: string, statusFrom: string, statusTo: string, recordedAt: number) => ({id, operationId: `op-${id}`, kind: "status_changed", recordedAt,
@@ -680,6 +679,7 @@ const observedReceipt = (id: string, contributionId: string, participant: Record
   actorSupervisorThreadId: "supervisor", targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: null, sourceThreadId: "supervisor", sourceRunId: "root-run",
   sourceMessageId: null, sourceItemId: `item-${id}`, agreementKey: null, note: "Observed.",
   participant: {contributionId, revision: 1, attempt: 1, participant, receipt: {kind: "read", toolName: "tool-read", inputDigest: null}, repeats: 1, firstRecordedAt: 4}});
+const localReviewer = {contributions: [declared("review", {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null})]};
 // a later human request on the same main replaces the completed task with its own identity and scope revision
 const nextTask = (f: Effect.Success<typeof fixture>, id: string, text: string) => Effect.gen(function* () {
   const ordinal = f.main.runs.length + 1;
@@ -693,19 +693,19 @@ const nextTask = (f: Effect.Success<typeof fixture>, id: string, text: string) =
   return (yield* f.store.task("main"))!;
 });
 
-it.effect("completion settles the quiet native child and the declared local reviewer with the main, once each, by automatic settles on their fresh snapshots, and skips a child its user keeps active", () => Effect.gen(function* () {
+it.effect("completion settles the quiet native child and the declared local reviewer with the main, once each, by one automatic settle on their fresh snapshots, and skips a child its user keeps active", () => Effect.gen(function* () {
   const f = yield* fixture;
   quietChild(f, "native-child");
   quietChild(f, "pinned-child", {pinnedAt: "2026-10-14T09:00:00Z"});
   localConversation(f, "reviewer-local", {updatedAt: "2026-10-14T10:01:30Z"});
   yield* catalogued(f);
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, {contributions: [declared("review", {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null})]}));
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, localReviewer));
   yield* parks(f, 10);
   assert.deepEqual(settledIds(f).filter(id => id !== `:${f.binding.threadId}`).sort(), [":main", ":native-child", ":reviewer-local"], "the main, its quiet child and the local reviewer settle; the pinned child does not");
   assert.deepEqual(participantCommands(f, "reviewer-local").map(call => [call.type, call.snapshotAt, call.environmentId]), [["thread.auto-settle", "2026-10-14T10:01:30Z", undefined]],
     "a participant settles by the automatic settle on the snapshot its fresh read showed, with no environment routing");
   assert.equal(participantCommands(f, "native-child")[0]?.snapshotAt, "2026-10-14T10:01:00Z");
-  assert.deepEqual(yield* participantSettlements(f), {":native-child": ["settled", null, 1], ":pinned-child": ["skipped", "keep_active", 0], ":reviewer-local": ["settled", null, 1]});
+  assert.deepEqual(yield* participantSettlements(f), {":native-child": ["settled", null], ":pinned-child": ["skipped", "keep_active"], ":reviewer-local": ["settled", null]});
   const before = f.calls.length;
   yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
   assert.equal(settledIds(f).filter(id => id === ":native-child" || id === ":reviewer-local").length, 2, "a settled participant is never commanded again");
@@ -722,149 +722,46 @@ it.effect("no participant settles before the task completes, so an intermediate 
   assert.deepEqual(yield* participantSettlements(f), {});
 }));
 
-it.effect("an uncertain participant settlement is retained and retried after the quiet window, then settles", () => Effect.gen(function* () {
+it.effect("one attempt per execution: an unknown outcome stays recorded as unknown, a busy or unreadable reviewer is recorded once with its reason, and nothing is re-read or re-sent later", () => Effect.gen(function* () {
   const f = yield* fixture;
-  quietChild(f, "native-child");
+  quietChild(f, "lost-child");
+  const busy = localConversation(f, "reviewer-busy", {activeRunId: "review-run"});
+  localConversation(f, "reviewer-dark");
+  f.setFailure("reviewer-dark", new T3TransportError("T3 thread projection is unavailable"));
   yield* catalogued(f);
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f));
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, {contributions: [declared("busy", {kind: "t3_conversation", threadId: "reviewer-busy", environmentId: null}),
+    declared("dark", {kind: "t3_conversation", threadId: "reviewer-dark", environmentId: null})]}));
   f.setUncertain(true);
   yield* parks(f, 10);
-  assert.deepEqual((yield* participantSettlements(f))[":native-child"], ["uncertain", null, 1], "a lost reply is retained as uncertain");
+  const [lost] = participantCommands(f, "lost-child");
+  assert.deepEqual(yield* participantSettlements(f, {withCommand: true}), {":lost-child": ["uncertain", null, lost!.commandId], ":reviewer-busy": ["unresolved", "not_quiet", null],
+    ":reviewer-dark": ["unresolved", "unavailable", null]}, "the lost reply is recorded as unknown with its command; the busy and unreadable reviewers once with their reasons");
+  // the reply path recovers, the reviewers become quiet and readable: the records stand, nothing more goes out; settlement is manual from here
   f.setUncertain(false);
-  yield* f.check(10 + SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.deepEqual((yield* participantSettlements(f))[":native-child"], ["uncertain", null, 1], "no retry inside the quiet window");
-  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.deepEqual((yield* participantSettlements(f))[":native-child"], ["settled", null, 2], "the retry settles it");
-  assert.equal(settledIds(f).filter(id => id === ":native-child").length, 2);
-}));
-
-it.effect("an uncertain command keeps its identity and attempt count through unreadable and busy passes: the quiet retry sends the same command, bounded at three sends", () => Effect.gen(function* () {
-  // a declared local reviewer is read by its own participant read; a lineage child's unreadable or busy state already holds the whole pass
-  const f = yield* fixture;
-  const reviewer = localConversation(f, "reviewer-local");
-  yield* catalogued(f);
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, {contributions: [declared("review", {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null})]}));
-  f.setUncertain(true);
-  yield* parks(f, 10);
-  const [first] = participantCommands(f, "reviewer-local");
-  assert.deepEqual((yield* participantSettlements(f, {withCommand: true}))[":reviewer-local"], ["uncertain", null, 1, first!.commandId]);
-  f.setUncertain(false);
-  // the retry's fresh read fails: the row says so, still naming the command and its one send
-  f.setFailure("reviewer-local", new T3TransportError("T3 thread projection is unavailable"));
-  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.deepEqual((yield* participantSettlements(f, {withCommand: true}))[":reviewer-local"], ["unresolved", "unavailable", 1, first!.commandId], "an unreadable pass keeps the command");
-  // then the reviewer is read busy
-  f.setFailure("reviewer-local", null);
-  reviewer.activeRunId = "review-run";
-  yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.deepEqual((yield* participantSettlements(f, {withCommand: true}))[":reviewer-local"], ["unresolved", "not_quiet", 1, first!.commandId], "a busy pass keeps the command");
-  assert.equal(participantCommands(f, "reviewer-local").length, 1, "no command goes out to an unreadable or busy participant");
-  // quiet again: the same command is sent, not a new one, and settles
-  reviewer.activeRunId = null;
-  yield* f.check(10 + 4 * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  const commands = participantCommands(f, "reviewer-local");
-  assert.deepEqual(commands.map(call => call.commandId), [first!.commandId, first!.commandId], "the quiet retry reuses the command");
-  assert.equal(JSON.stringify(commands[1]), JSON.stringify(commands[0]), "the retry is the reserved payload, unchanged in every field");
-  assert.deepEqual((yield* participantSettlements(f, {withCommand: true}))[":reviewer-local"], ["settled", null, 2, first!.commandId]);
-
-  // the bound: a command whose reply is lost three times is not sent a fourth time, and the row keeps saying uncertain
-  const g = yield* fixture;
-  quietChild(g, "lost-child");
-  yield* catalogued(g);
-  yield* unfinishedAgreedTask(g, "completed", "completed", yield* boundTo(g));
-  g.setUncertain(true);
-  yield* parks(g, 10);
-  for (const round of [2, 3, 4, 5]) yield* g.check(10 + round * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.equal(participantCommands(g, "lost-child").length, 3, "three sends of the one command");
-  const [lost] = participantCommands(g, "lost-child");
-  assert.deepEqual((yield* participantSettlements(g, {withCommand: true}))[":lost-child"], ["uncertain", null, 3, lost!.commandId]);
-  // elapsed sends are no native evidence: the task completed again on an unchanged quiet child reserves nothing new, and the old
-  // command keeps its count and its unknown outcome
-  g.setUncertain(false);
-  yield* reopened(g, "r-1", 20);
-  yield* completedAgain(g, "c-2", 30);
-  yield* parks(g, 10 + 7 * SUPERVISOR_SETTLE_QUIET_MS);yield* g.check(10 + 9 * SUPERVISOR_SETTLE_QUIET_MS);
-  assert.equal(participantCommands(g, "lost-child").length, 3, "no fourth send and no new command on the new execution");
-  assert.deepEqual((yield* participantSettlements(g, {completionId: null, withCommand: true}))[":lost-child"], ["uncertain", null, 3, lost!.commandId], "the old command is still open");
-  assert.equal((yield* participantSettlements(g, {completionId: "c-2"}))[":lost-child"], undefined, "the new execution records nothing while the old command is open");
+  Object.assign(busy, {activeRunId: null});
+  f.setFailure("reviewer-dark", null);
+  for (const round of [2, 3, 4]) yield* f.check(10 + round * SUPERVISOR_SETTLE_QUIET_MS + 1);
+  assert.equal(participantCommands(f, "lost-child").length, 1, "an unknown outcome is not re-sent");
+  assert.deepEqual([participantCommands(f, "reviewer-busy").length, participantCommands(f, "reviewer-dark").length], [0, 0], "a recorded reviewer is not evaluated again");
+  assert.deepEqual(yield* participantSettlements(f, {withCommand: true}), {":lost-child": ["uncertain", null, lost!.commandId], ":reviewer-busy": ["unresolved", "not_quiet", null],
+    ":reviewer-dark": ["unresolved", "unavailable", null]});
 }));
 
 it.effect("the next task on the same main evaluates a reused participant anew: the earlier task's settlement row stays as history and settles nothing", () => Effect.gen(function* () {
   const f = yield* fixture;
   const reviewer = localConversation(f, "reviewer-local");
   yield* catalogued(f);
-  const declaredReviewer = {contributions: [declared("review", {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null})]};
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, declaredReviewer));
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, localReviewer));
   yield* parks(f, 10);
-  assert.deepEqual((yield* participantSettlements(f, {taskId: "task"}))[":reviewer-local"], ["settled", null, 1]);
+  assert.deepEqual((yield* participantSettlements(f, {taskId: "task"}))[":reviewer-local"], ["settled", null]);
   // the reviewer works again on the next task, which completes while the reviewer is still busy
   const second = yield* nextTask(f, "task-2", "Implement more");
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, declaredReviewer), "exists");
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, localReviewer), "exists");
   Object.assign(reviewer, {settledAt: undefined, settledOverride: null, updatedAt: "2026-10-14T11:05:00Z", activeRunId: "review-run-2"});
-  const from = 10 + 2 * SUPERVISOR_SETTLE_QUIET_MS;
-  yield* parks(f, from);
-  assert.deepEqual((yield* participantSettlements(f, {taskId: second.id}))[":reviewer-local"], ["unresolved", "not_quiet", 0], "the busy reviewer is not settled on the earlier task's row");
-  assert.deepEqual((yield* participantSettlements(f, {taskId: "task"}))[":reviewer-local"], ["settled", null, 1], "the earlier task's row is history");
-  assert.equal(participantCommands(f, "reviewer-local").length, 1);
-  // quiet again: the second task settles it by its own new command on the fresh snapshot
-  Object.assign(reviewer, {activeRunId: null});
-  yield* f.check(from + 2 * SUPERVISOR_SETTLE_QUIET_MS);
-  const commands = participantCommands(f, "reviewer-local");
-  assert.equal(commands.length, 2);
-  assert.notEqual(commands[1]!.commandId, commands[0]!.commandId, "the next task's settlement is its own command");
-  assert.equal(commands[1]!.snapshotAt, "2026-10-14T11:05:00Z");
-  assert.deepEqual((yield* participantSettlements(f, {taskId: second.id}))[":reviewer-local"], ["settled", null, 1]);
-}));
-
-it.effect("activity arriving just before the automatic settle rejects it atomically: the row says so, the rejected command is resolved, and this execution reserves no other", () => Effect.gen(function* () {
-  const f = yield* fixture;
-  quietChild(f, "racing-child");
-  const chosen = quietChild(f, "chosen-child");
-  yield* catalogued(f);
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f));
-  f.setActivityBeforeSettle("racing-child", "2026-10-14T10:01:45Z");
-  f.setActivityBeforeSettle("chosen-child", "2026-10-14T10:01:50Z");
-  yield* parks(f, 10);
-  assert.deepEqual((yield* participantSettlements(f))[":racing-child"], ["unresolved", "settle_rejected", 1], "the snapshot the command named is no longer the thread's");
-  assert.equal(f.projections.get("racing-child")!.thread.settledAt, undefined, "nothing settled");
-  assert.deepEqual((yield* participantSettlements(f))[":chosen-child"], ["unresolved", "settle_rejected", 1]);
-  // later passes read the new state but reserve no second command for this execution, whatever the thread does
-  Object.assign(chosen, {settledOverride: "active", unsettledAt: "2026-10-14T10:01:55Z"});
-  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
-  assert.deepEqual(participantCommands(f, "racing-child").map(call => call.snapshotAt), ["2026-10-14T10:01:00Z"], "the rejected command is not re-sent with another snapshot");
-  assert.equal(participantCommands(f, "chosen-child").length, 1);
-  assert.deepEqual((yield* participantSettlements(f))[":racing-child"], ["unresolved", "settle_rejected", 1]);
-  assert.deepEqual((yield* participantSettlements(f))[":chosen-child"], ["unresolved", "settle_rejected", 1]);
-}));
-
-it.effect("an unknown command keeps its reserved payload: activity after its snapshot supersedes it with its history kept, and only a new completed execution reserves a new command on the fresh snapshot", () => Effect.gen(function* () {
-  const f = yield* fixture;
-  const reviewer = localConversation(f, "reviewer-local");
-  yield* catalogued(f);
-  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, {contributions: [declared("review", {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null})],
-    evidence: [statusRecord("c-1", "underway", "completed", 5)]}));
-  f.setUncertain(true);
-  yield* parks(f, 10);
-  const [first] = participantCommands(f, "reviewer-local");
-  assert.deepEqual((yield* participantSettlements(f, {withCommand: true}))[":reviewer-local"], ["uncertain", null, 1, first!.commandId]);
-  f.setUncertain(false);
-  // the reviewer runs again (its update time moves) and is busy on the retry pass: the reserved snapshot is stale, so the command is superseded
-  Object.assign(reviewer, {updatedAt: "2026-10-14T10:20:00Z", activeRunId: "later-run"});
-  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.deepEqual((yield* participantSettlements(f, {withCommand: true}))[":reviewer-local"], ["superseded", "activity_changed", 1, first!.commandId], "native activity after the snapshot supersedes the unknown command");
-  Object.assign(reviewer, {activeRunId: null});
-  yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS + 1);yield* f.check(10 + 4 * SUPERVISOR_SETTLE_QUIET_MS + 1);
-  assert.equal(participantCommands(f, "reviewer-local").length, 1, "the command is not re-sent with another snapshot, and this execution reserves no second one");
-  // the task returns to earlier work and completes again: the new execution reserves its own command on the fresh snapshot
-  yield* reopened(f, "r-1", 20);
-  yield* completedAgain(f, "c-2", 30);
-  yield* parks(f, 10 + 6 * SUPERVISOR_SETTLE_QUIET_MS);
-  const commands = participantCommands(f, "reviewer-local");
-  assert.equal(commands.length, 2);
-  assert.notEqual(commands[1]!.commandId, first!.commandId, "a new completed execution gets its own command");
-  assert.equal(commands[1]!.snapshotAt, "2026-10-14T10:20:00Z");
-  assert.deepEqual((yield* participantSettlements(f, {completionId: "c-2", withCommand: true}))[":reviewer-local"], ["settled", null, 1, commands[1]!.commandId]);
-  assert.deepEqual((yield* participantSettlements(f, {completionId: "c-1", withCommand: true}))[":reviewer-local"], ["superseded", "activity_changed", 1, first!.commandId], "the earlier command's history stays");
+  yield* parks(f, 10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual((yield* participantSettlements(f, {taskId: second.id}))[":reviewer-local"], ["unresolved", "not_quiet"], "the busy reviewer is not settled on the earlier task's row");
+  assert.deepEqual((yield* participantSettlements(f, {taskId: "task"}))[":reviewer-local"], ["settled", null], "the earlier task's row is history");
+  assert.equal(participantCommands(f, "reviewer-local").length, 1, "the next task's one evaluation found it busy: no command, manual settlement from here");
 }));
 
 it.effect("the same task completed again after a return evaluates its reviewer anew: a reviewer that ran again settles by a new command on its fresh snapshot, one that stayed settled gets no second command, and the first completion's rows stay as history", () => Effect.gen(function* () {
@@ -874,7 +771,7 @@ it.effect("the same task completed again after a return evaluates its reviewer a
   yield* catalogued(f);
   yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f, {evidence: [statusRecord("c-1", "underway", "completed", 5)]}));
   yield* parks(f, 10);
-  assert.deepEqual(yield* participantSettlements(f, {completionId: "c-1"}), {":reviewer-child": ["settled", null, 1], ":steady-child": ["settled", null, 1]});
+  assert.deepEqual(yield* participantSettlements(f, {completionId: "c-1"}), {":reviewer-child": ["settled", null], ":steady-child": ["settled", null]});
   const [first] = participantCommands(f, "reviewer-child");
   // a return reopens the task and the reviewer runs again; nothing settles until the task is complete again, and a busy lineage child holds the pass
   yield* reopened(f, "r-1", 20);
@@ -890,9 +787,26 @@ it.effect("the same task completed again after a return evaluates its reviewer a
   assert.equal(commands.length, 2);
   assert.notEqual(commands[1]!.commandId, first!.commandId, "the new completion's settlement is its own command");
   assert.equal(commands[1]!.snapshotAt, "2026-10-14T10:30:00Z");
-  assert.deepEqual(yield* participantSettlements(f, {completionId: "c-2"}), {":reviewer-child": ["settled", null, 1], ":steady-child": ["settled", null, 0]});
-  assert.deepEqual(yield* participantSettlements(f, {completionId: "c-1"}), {":reviewer-child": ["settled", null, 1], ":steady-child": ["settled", null, 1]}, "the first completion's rows are history");
+  assert.deepEqual(yield* participantSettlements(f, {completionId: "c-2"}), {":reviewer-child": ["settled", null], ":steady-child": ["settled", null]});
+  assert.deepEqual(yield* participantSettlements(f, {completionId: "c-1"}), {":reviewer-child": ["settled", null], ":steady-child": ["settled", null]}, "the first completion's rows are history");
   assert.equal(participantCommands(f, "steady-child").length, 1, "a participant that stayed settled gets no second command");
+}));
+
+it.effect("activity arriving just before the automatic settle rejects it atomically: the rejection is recorded once and nothing more goes out for this execution", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  quietChild(f, "racing-child");
+  const chosen = quietChild(f, "chosen-child");
+  yield* catalogued(f);
+  yield* unfinishedAgreedTask(f, "completed", "completed", yield* boundTo(f));
+  f.setActivityBeforeSettle("racing-child", "2026-10-14T10:01:45Z");
+  f.setActivityBeforeSettle("chosen-child", "2026-10-14T10:01:50Z");
+  yield* parks(f, 10);
+  assert.deepEqual(yield* participantSettlements(f), {":racing-child": ["unresolved", "settle_rejected"], ":chosen-child": ["unresolved", "settle_rejected"]}, "the snapshot the command named is no longer the thread's");
+  assert.equal(f.projections.get("racing-child")!.thread.settledAt, undefined, "nothing settled");
+  Object.assign(chosen, {settledOverride: "active", unsettledAt: "2026-10-14T10:01:55Z"});
+  yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
+  assert.deepEqual([participantCommands(f, "racing-child").length, participantCommands(f, "chosen-child").length], [1, 1], "no command is re-sent with another snapshot");
+  assert.deepEqual(yield* participantSettlements(f), {":racing-child": ["unresolved", "settle_rejected"], ":chosen-child": ["unresolved", "settle_rejected"]});
 }));
 
 it.effect("a document reopened while the first participant's command waits leaves the remaining participants unsettled until the task is complete again", () => Effect.gen(function* () {
@@ -904,17 +818,17 @@ it.effect("a document reopened while the first participant's command waits leave
   const document = (yield* f.workflows.get("p", "main"))!;
   const reopen = execute(f.sql, "UPDATE supervisor_workflow_state SET document=?,updated_at=? WHERE workflow_id=?", JSON.stringify({...document, status: "underway"}), 3, document.workflowId);
   // a workflow correction reopens the document as the first participant command goes out
-  let reopened = false;
-  f.setBeforeCommand(Effect.suspend(() => {if (reopened) return Effect.void;reopened = true;return Effect.orDie(reopen);}));
+  let reopenedOnce = false;
+  f.setBeforeCommand(Effect.suspend(() => {if (reopenedOnce) return Effect.void;reopenedOnce = true;return Effect.orDie(reopen);}));
   yield* parks(f, 10);
   const participantCalls = f.calls.filter(call => call.type === "thread.auto-settle");
   assert.equal(participantCalls.length, 1, "only the command admitted on the completed document went out");
-  assert.deepEqual(Object.values(yield* participantSettlements(f)), [["settled", null, 1]], "the other participant has no row from stale completion");
+  assert.deepEqual(Object.values(yield* participantSettlements(f)), [["settled", null]], "the other participant has no row from stale completion");
   assert.equal(f.calls.filter(call => call.threadId === "main").length, 0, "the main is not settled from stale completion either");
   // the correction completes the task again: the remaining participant settles then
   yield* execute(f.sql, "UPDATE supervisor_workflow_state SET document=?,updated_at=? WHERE workflow_id=?", JSON.stringify({...document, status: "completed"}), 4, document.workflowId);
   yield* parks(f, 10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);
-  assert.deepEqual(yield* participantSettlements(f), {":first-child": ["settled", null, 1], ":second-child": ["settled", null, 1]});
+  assert.deepEqual(yield* participantSettlements(f), {":first-child": ["settled", null], ":second-child": ["settled", null]});
 }));
 
 it.effect("an external participant is not applicable and gets no command; a declared conversation in a linked environment is listed unsupported without a command, observed and accepted or not", () => Effect.gen(function* () {
@@ -927,7 +841,7 @@ it.effect("an external participant is not applicable and gets no command; a decl
   yield* parks(f, 10);
   assert.deepEqual(settledIds(f).filter(id => id !== `:${f.binding.threadId}`), [":main"], "no command names a linked environment's conversation or an external participant");
   assert.ok(f.calls.every(call => call.environmentId === undefined), "no command carries an environment");
-  assert.deepEqual(yield* participantSettlements(f), {"lab-vm:reviewer-vm": ["unresolved", "environment_settle_unsupported", 0], "lab-vm:reviewer-unseen": ["unresolved", "environment_settle_unsupported", 0]});
+  assert.deepEqual(yield* participantSettlements(f), {"lab-vm:reviewer-vm": ["unresolved", "environment_settle_unsupported"], "lab-vm:reviewer-unseen": ["unresolved", "environment_settle_unsupported"]});
   yield* f.check(10 + 2 * SUPERVISOR_SETTLE_QUIET_MS);yield* f.check(10 + 3 * SUPERVISOR_SETTLE_QUIET_MS);
   assert.ok(f.calls.every(call => call.environmentId === undefined && call.threadId !== "reviewer-vm"), "never commanded later either");
 }));

@@ -381,9 +381,10 @@ Participants section shows every participant's role and attempt, conversation
 lifecycle, completion and coverage as distinct facts, and states when nothing was
 observed or no route exists; a conversation in another environment is shown with
 its environment and no local link; after task completion each T3 conversation's
-settlement for the current execution is shown as recorded (settled, settling, uncertain,
-superseded or unresolved with its reason, or skipped for its user's choice), and a
-participant that is not a T3 conversation is shown as not applicable.
+settlement for the current execution is shown as recorded (settled, the automatic
+attempt sent, its outcome unknown, superseded by its user, not settled automatically with
+its reason, or skipped for its user's choice; whatever did not settle is settled by hand),
+and a participant that is not a T3 conversation is shown as not applicable.
 
 Scope is the main workflow only. A local child that used external help reports
 the outcome to the main, which relays it with its own record; no child or external
@@ -669,28 +670,22 @@ interrupted because supervision stopped, and other chats keep their supervision.
 
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. When the task completed (every applicable member settled, no
-pending return), the complete participant set settles with the main, each by its own
-automatic-settle command and once per completed execution: the main's lineage
-descendants (not forks) and the local T3 conversations the main's contributions
-declared, when a fresh read shows the conversation quiet and not kept active by its
-user. The command names the update time that read showed, so T3 rejects it atomically
-when the conversation changed or its user chose in between; the service never settles a
-pinned or reactivated conversation. A conversation in a linked environment has no
-supported route from here and is listed unsupported without a command. A reserved
-command never changes: a retry after a lost reply resends the same payload, at most three
-times, and while its outcome is unknown no second command is reserved for that
-conversation, on that or any later execution; only native evidence reconciles it: a
-settled read confirms it, native activity after its snapshot or its user's choice
-supersedes it, a definite rejection resolves it, and each is recorded with the command
-kept. What cannot settle is recorded with its reason (unreadable, still
-working, no update time, the command rejected or superseded, or no route) and read
-afresh on each pass. Each command is admitted only while the same execution is still
+pending return), the service makes one best-effort automatic attempt per T3 participant:
+the main's lineage descendants (not forks) and the local T3 conversations the main's
+contributions declared are each evaluated once per completed execution. A conversation
+that is readable, quiet, not kept active by its user and carries an update time gets one
+automatic-settle command on that snapshot, which T3 rejects atomically when the
+conversation changed or its user chose in between; the outcome is recorded from native
+evidence (settled, superseded by its user, unknown after a lost reply, or rejected).
+Anything else is recorded once with its reason (unreadable, still working, no update
+time, or no supported route for a linked environment) and left to manual settlement:
+nothing is re-read, re-sent or retried for that execution, and any chat can be settled
+by hand at any time. The command is admitted only while the same execution is still
 complete and the participant still a member, so a correction or return that reopens the
 document while an earlier command waits settles nothing further. An execution is the
 task, its scope revision and the main document's latest completion record: the next
-task, or the same task completed again after a return, evaluates every participant anew
-and may reserve a new command on the fresh snapshot, while the earlier rows stay as
-history. Intermediate review rounds never settle a reviewer, so a reused reviewer stays
+task, or the same task completed again after a return, evaluates every participant anew,
+while the earlier rows stay as history. Intermediate review rounds never settle a reviewer, so a reused reviewer stays
 available. Participants that are not T3 conversations have no settlement: their
 completion is the result the main reported. An idle main whose agreed main workflow is unfinished parks only
 on an explicit current wait: the latest check-in's confirmed outcome carries a wait naming

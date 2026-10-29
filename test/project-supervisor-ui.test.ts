@@ -209,7 +209,7 @@ it("the participants section shows role, attempt, lifecycle, completion, coverag
   ])]);
   assert.match(settled, /Settlement:<\/strong> Settled/);
   assert.match(settled, /Settlement:<\/strong> Not settled \(its user keeps it active\)/);
-  assert.match(settled, /Settlement:<\/strong> Unresolved \(no supported route settles a conversation in another environment\)/);
+  assert.match(settled, /Settlement:<\/strong> Not settled automatically; settle by hand \(no supported route settles a conversation in another environment\)/);
   assert.match(settled, /Settlement:<\/strong> Not applicable \(not a T3 conversation; its completion is the reported result\)/);
   assert.match(html, /mcp__github__get_pull_request/);
   assert.match(html, /1 earlier receipt belong/);

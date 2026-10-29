@@ -18,14 +18,14 @@ const lifecycleText = {running: "Running", completed: "Completed", interrupted: 
 const completionText = {none: "Not completed", native_completed: "Conversation completed (not step completion)", result_reported: "Result reported, not assessed",
   accepted: "Result accepted by the Supervisor", needs_more: "Further work needed", withdrawn: "Withdrawn"} as const;
 const ownerText = {root: "Supervisor root", helper: "A helper", unknown: "Unknown"} as const;
-// settlement after task completion: a T3-managed conversation settles by its own command; anything else has no settlement to show
+// settlement after task completion: one recorded automatic attempt per T3-managed conversation; whatever did not settle is settled by hand
 const settlementText: Record<WorkflowProgressParticipant["settlement"], string> = {not_evaluated: "Not evaluated",
-  not_applicable: "Not applicable (not a T3 conversation; its completion is the reported result)", pending: "Settling", uncertain: "Settlement uncertain, retried",
-  settled: "Settled", superseded: "Settlement superseded by new activity", unresolved: "Unresolved", skipped: "Not settled"};
-const settlementReasonText: Record<string, string> = {unavailable: "the conversation could not be read", not_quiet: "the conversation still has work",
+  not_applicable: "Not applicable (not a T3 conversation; its completion is the reported result)", pending: "Automatic settle sent",
+  uncertain: "Automatic settle outcome unknown; settle by hand if it is still active", settled: "Settled", superseded: "Automatic settle superseded by its user",
+  unresolved: "Not settled automatically; settle by hand", skipped: "Not settled"};
+const settlementReasonText: Record<string, string> = {unavailable: "the conversation could not be read", not_quiet: "the conversation still had work",
   settle_rejected: "T3 rejected the settle command: the conversation changed or its user chose", snapshot_unavailable: "its read carries no update time to settle on",
-  environment_settle_unsupported: "no supported route settles a conversation in another environment", keep_active: "its user keeps it active",
-  activity_changed: "the conversation changed after the command"};
+  environment_settle_unsupported: "no supported route settles a conversation in another environment", keep_active: "its user keeps it active"};
 const settlementLine = (participant: WorkflowProgressParticipant) => `${settlementText[participant.settlement]}${participant.settlementReason
   ? ` (${settlementReasonText[participant.settlementReason] ?? participant.settlementReason})` : ""}`;
 const threadHref = (threadId: string) => `t3-thread://v1/${threadId}`;
