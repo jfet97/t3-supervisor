@@ -72,7 +72,7 @@ export type ConversationRequest = {
   /** A liveness wake: the main's completed run, document revision and reported child lifecycle it answers, and how often it repeated. */
   liveness?: LivenessWake;
 };
-export type LivenessWake = {mainThreadId: string; runId: string; revision: number; children: string[]; repeat: number};
+export type LivenessWake = {mainThreadId: string; runId: string; revision: number; children: string[]; /** The root's latest executed terminal run (its native projection) this wake answers; null when none executed. */ rootRunId: string | null; repeat: number};
 export type WorkflowIntroduction = {
   proposalId?: string;
   earlier?: Array<{messageId: string; textHash: string}>;
@@ -203,7 +203,7 @@ const ConversationRequestDocument = Schema.Struct({
   reviewPins: Schema.optionalKey(ReviewPinsDocument),
   reviewOutcome: Schema.optionalKey(ReviewOutcomeDocument),
   liveness: Schema.optionalKey(Schema.Struct({mainThreadId: Schema.String, runId: Schema.String, revision: Schema.Number,
-    children: Schema.mutable(Schema.Array(Schema.String)), repeat: Schema.Number})),
+    children: Schema.mutable(Schema.Array(Schema.String)), rootRunId: Schema.NullOr(Schema.String), repeat: Schema.Number})),
 });
 const DispatchMode = Schema.Union([
   Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: Schema.String }),

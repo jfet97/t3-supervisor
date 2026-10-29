@@ -21,11 +21,12 @@ export const activeWatchInstructions = "This check-in is the watch of the whole 
   "own inbox at each boundary (section contact); pace with one bounded local t3_thread_wait of five to ten seconds on the active target, never " +
   "thirty (it waits for run completion, not activity); assess; act with one delta when needed. Child lists are metadata; separately read verified " +
   "children. Record explicit assessments; fetched is not assessed. End the turn only when the task's agreed work is complete or in explicit standby " +
-  "(a recorded wait naming who acts next), when a wait returns next or end-turn, on context rotation, on a genuine human Stop, or for genuine " +
-  "external waiting a native watch owns; an operative run that ended with agreed duties still planned is not an ending: resume it with one delta " +
-  "or record needs_attention or a wait in this same turn. Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or " +
-  "do operative work. The service continues active work and, only after your turn ended with agreed work unfinished and no recorded wait, sends " +
-  "one liveness check-in per completed operative run and document revision.";
+  "(a recorded wait naming who acts next), when a wait returns next or end-turn, on context rotation, on a genuine human Stop, for genuine " +
+  "external waiting a native watch owns, or, when your own queue is not drainable, at the end of each read-forward pass so queued messages " +
+  "start as normal turns; an operative run that ended with agreed duties still planned is not an ending: resume it with one delta or record " +
+  "needs_attention or a wait in this same turn. Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do " +
+  "operative work. The service continues active work and, only after your turn ended with agreed work unfinished and no recorded wait, sends " +
+  "one liveness check-in per completed operative run, document revision and such ended turn of yours.";
 
 export type SupervisorMonitorPriority =
   | "user_instruction"

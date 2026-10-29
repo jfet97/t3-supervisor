@@ -417,19 +417,26 @@ per owner.
 The service's fallback covers only a turn that ended anyway: when the main's latest run
 completed while the agreed workflow is unfinished and no current wait is recorded, the
 root receives one liveness check-in per main run, document revision and parent-reported
-native child lifecycle, queued behind any active root turn and never steered into it, and
-repeated only after the project's idle age while nothing changed; a recorded wait, a new
-run, completion, a Stop or a settled pair keeps it quiet. Model adherence to the watch
-itself is proved live, not by tests: the fallback bounds a yield to one wake.
+native child lifecycle, queued behind any active root turn and never steered into it. A
+root turn that again ends without a recorded wait or progress is a new recovery
+generation: the check-in is re-armed once per such terminal root turn after the thirty
+second cooldown, never twice within one; a recorded wait, a new run, completion, a Stop
+or a settled pair keeps it quiet, and no timer or extra monitor is involved. Model
+adherence to the watch itself is proved live, not by tests: the fallback bounds a yield
+to one wake per generation.
 
 Own inbox: the root reads its own queued messages at the boundaries it chooses (after
-each wait, before each record or send) with `t3_queue` on its own thread, handles a genuine
-human's message first and never cancels it unanswered, answers an operative's message
-with one delta or records it, then cancels that handled queued run so it is not replayed;
-the service promotes nothing to steer, so a message that arrives during one long tool
-call or thought is seen at the next boundary, bounded by the wait pacing, and only a
-human can steer. When `t3_queue` is not exposed the root discovers it and otherwise states
-that its own queue is not drainable.
+each wait, before each record or send) with `t3_queue` on its own thread. What it cancels
+is decided from the queued run's native metadata (sender thread and origin), never from
+quoted text: only a verified operative-origin run it actually handled with one delta or a
+record; service-owned, unknown-origin and unanswered genuine human runs stay queued, a
+human's message is handled first, and the service promotes nothing to steer. When
+`t3_queue` is not exposed the root discovers it and otherwise states once that its own
+queue is not drainable and ends its turn after each read-forward pass, so queued messages
+start as normal turns while the service continues active work. A queued message is seen
+at the root's next boundary: the wait between boundaries is bounded (five to ten
+seconds); the latency of a long thought or tool call in progress is not, and only a human
+can steer.
 
 Idle work retains the project age/count thresholds and 30-second fallback cooldown.
 Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;
