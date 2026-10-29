@@ -47,6 +47,19 @@ Settings shows relevant explicit exclusions and bounded search-to-add, retaining
 hidden/unavailable exclusions. Stop provenance appears in Home and the conversation;
 Home's Review and enable opens the exact scoped control.
 
+Discovery handles the chats whose latest run changed first, oldest request first,
+up to twenty per cycle; the remaining slots of the cycle come from the ordinary
+rotation over the catalog. A chat anchored in the activation baseline whose latest
+run has not changed costs nothing, however many such chats the instance has. A
+changed chat is offered once per run lifecycle T3 reports (the run, its activity
+status, its start and completion): a chat skipped because its project is off or its
+Start is pending, or deferred because its workspace is still preparing, takes no
+discovery slot and is offered again exactly when T3 reports that lifecycle moved on,
+so a preparing chat's ready transition keeps its priority and no set of skipped chats
+can starve the rest. The service logs one `supervisor_discovery` event per cycle that
+found fresh requests or attempted a discovery, with counts and the cycle's duration
+only.
+
 Disabling stops new service-originated interpretation, introductions, check-ins
 and recovery sends. It preserves chats, bindings, requests and agreements; a
 running native turn may finish. Re-enabling captures a discovery boundary instead
