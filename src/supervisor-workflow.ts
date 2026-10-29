@@ -1521,7 +1521,9 @@ export const validateWorkflowApplyAgainstPinnedContext = (
     const context = isMainTarget ? pinnedContext : {...pinnedContext, config: {required: []}, requirementsKnown: true, knownRequirementKeys: []};
     const accepted = acceptedPlans.map(plan => canonicalPlan(plan, pinnedContext, true, false, templateNodeIds(), true));
     if (accepted.some(item => item.issues.length > 0)) return null;
-    const existing = currentPlan ? canonicalPlan(currentPlan, pinnedContext, true, false, templateNodeIds(), true) : null;
+    // the service-owned current plan is rechecked strictly against the pinned definitions with its own stored occurrences as the runtime
+    // baseline: a return budget the store deliberately retained on an occurrence is that occurrence's identity, not a candidate edit
+    const existing = currentPlan ? canonicalPlan(currentPlan, pinnedContext, true, false, templateNodeIds(), true, currentPlan) : null;
     if (currentPlan && (!existing || existing.issues.length > 0)) return null;
     const canonical = canonicalPlan(candidate.plan, context, false, true, nodeIds, true, existing?.plan ?? null, diagnostic, "/input/plan");
     const options: CanonicalOptions = {strict: false, assignMissingNodeIds: true, preserveExecutionState: true,

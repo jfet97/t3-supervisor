@@ -6,7 +6,7 @@ import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} 
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {canonicalizeProposalDraft, proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {workflowMutationLimits, type WorkflowAgreementImport, type WorkflowApplyInput, type WorkflowExecutionStatus, type WorkflowOwner, type WorkflowStateDocument, type WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
-import {backToContext, occurrenceAttempts, planBackTos, planBranches, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns} from "../src/workflow-plan-tree.js";
+import {backToContext, occurrenceAttempts, planBackTos, planBranches, planEntities, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import {effectiveIndex, indexSource, projectIndex} from "./project-definitions-fixture.js";
 import {execute, openWorkflowStores, query, temporaryDirectory} from "./support/g12-stores.js";
 
@@ -87,14 +87,14 @@ it("replay reset follows the resolved region and refuses a missing or unsafe max
 
 const invalidReason = (result: {status: string}) => result.status === "invalid" ? (result as {reason?: string}).reason ?? result.status : result.status;
 
-const open = (nodes: unknown[]) => Effect.gen(function* () {
+const open = (nodes: unknown[], pinned = context) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("return-budget-");
   const stores = yield* openWorkflowStores(directory);
   yield* execute(stores.sql, "INSERT INTO meta VALUES(?,?)", `supervisor_control:${JSON.stringify("project-a")}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
   const reserved = yield* stores.supervisors.reserve("project-a", "main-a", "Main conversation", defaultSupervisorModel, 1, 1);
   yield* stores.supervisors.setBinding({...reserved, state: "ready"});
   const owner: WorkflowOwner = {projectId: "project-a", mainThreadId: "main-a", supervisorThreadId: reserved.threadId, bindingGeneration: reserved.generation};
-  const plan = validateWorkflowPlan(draft(...nodes), context);
+  const plan = validateWorkflowPlan(draft(...nodes), pinned);
   assert.ok(plan?.plan, "the agreed plan resolves");
   const proposal = {status: "proposed", message: "A draft.", workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, ...plan} as WorkflowProposalInfo;
   const binding: WorkflowStateSourceBinding = {workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, definitionsStatus: "ready",
@@ -103,7 +103,7 @@ const open = (nodes: unknown[]) => Effect.gen(function* () {
     objective: "Ship the reviewed change.", agreement: {status: "agreed", message: "Accepted.", proposalId: "proposal-a", agreedAt: 10,
       evidence: {kind: "supervisor_message", messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow: proposal}};
   assert.equal((yield* stores.workflows.importAcceptedAgreement(owner, agreement, 100)).status, "applied");
-  const validation = {pinnedContext: context, originalProposal: proposal, expectedTaskId: "task-a", expectedProposalId: "proposal-a",
+  const validation = {pinnedContext: pinned, originalProposal: proposal, expectedTaskId: "task-a", expectedProposalId: "proposal-a",
     expectedSourceHash: taskSourceHash, acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null};
   const box = {stores};
   const main = () => Effect.map(box.stores.workflows.get("project-a", "main-a"), document => {
@@ -703,6 +703,99 @@ it.live("a later acceptance adds a new return, and a fresh id does not refill a 
   const unchanged = yield* spentRun.main();
   assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.plan)[0]?.budgetId, freshBudget);
   assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.agreement.workflow.plan)[0]?.budgetId, freshBudget);
+}), {timeout: 30_000});
+
+const loopYaml = "name: Loop\ndescription: Repeat work.\nfixed: true\nsequence:\n  - step: {id: work, name: Work, description: Do the work.}\n  - branch:\n      if: Again?\n      then:\n        - back_to(2): work\n";
+
+// the live blocker on 4cd74dd7: after task A completed with one applied jump, task B agreed the same fixed workflow; its new occurrence
+// kept the retained budget, and the next status-only apply failed pinned_definition_context_mismatch because the stored plan was rechecked
+// strictly without its own occurrences as the baseline
+it.live("a status-only apply after a new task agreed the same fixed workflow keeps its occurrence ids, its retained budget and the used count", () => Effect.gen(function* () {
+  const parsed = parseDefinitionWorkflow("loop", loopYaml);
+  const loopContext = {...context, workflows: [{...parsed, summary: "Repeat work.", origin: "project" as const, path: ".t3-supervisor/workflows/loop.yaml", sourceId: "loop"}]};
+  const run = yield* open([{kind: "workflow", definitionId: "loop", reason: "Use the loop."}], loopContext);
+  const statusEdit = (document: WorkflowStateDocument, operationId: string, statuses: Array<{nodeId: string; status: WorkflowExecutionStatus}>,
+    taskStatus: WorkflowExecutionStatus, binding: WorkflowStateSourceBinding, validation: typeof run.validation, proposal: WorkflowProposalInfo) => {
+    const current = new Map(planEntities(document.plan).map(node => [node.nodeId, node.status]));
+    const changed = statuses.filter(item => current.get(item.nodeId) !== item.status);
+    const edited = withOccurrenceStatuses(document.plan!, changed);
+    assert.ok("plan" in edited, JSON.stringify(edited));
+    const evidence: NonNullable<WorkflowApplyInput["evidence"]> = changed.map(item => ({kind: "status_changed" as const, targetNodeId: item.nodeId, note: `${item.nodeId} is ${item.status}.`}));
+    if (taskStatus !== document.status) evidence.push({kind: "status_changed", targetNodeId: null, note: `The task is ${taskStatus}.`});
+    return run.box.stores.workflows.apply(run.owner, {operationId, workflowId: document.workflowId, expectedRevision: document.revision, status: taskStatus,
+      objective: document.objective, sourceBinding: binding, requirements: [...proposal.requirements], issues: [...proposal.issues], plan: edited.plan,
+      note: "Record progress.", evidence}, validation, run.tick());
+  };
+  // task A: work, one applied jump, the second pass, then completed
+  const initial = yield* run.main();
+  const occurrenceA = planEntities(initial.plan).find(node => node.kind === "workflow");
+  const workA = planEntities(initial.plan).find(node => node.kind === "step" && node.localId === "work");
+  assert.ok(occurrenceA && workA);
+  const pass = (document: WorkflowStateDocument, operationId: string) =>
+    statusEdit(document, operationId, [{nodeId: occurrenceA.nodeId, status: "underway"}, {nodeId: workA.nodeId, status: "completed"}], "underway", run.binding, run.validation, run.proposal);
+  const firstPass = yield* pass(initial, "a-work");
+  assert.equal(firstPass.status, "applied", JSON.stringify(firstPass));
+  yield* run.choose("Again?", "then");
+  yield* run.jump("work", "a-jump");
+  const spentA = yield* run.budget("work");
+  assert.equal(spentA.used, 1);
+  const secondPass = yield* pass(yield* run.main(), "a-work-again");
+  assert.equal(secondPass.status, "applied", JSON.stringify(secondPass));
+  yield* run.choose("Again?", "else");
+  const doneA = yield* run.main();
+  const finishedA = yield* statusEdit(doneA, "a-complete", [{nodeId: occurrenceA.nodeId, status: "completed"}], "completed", run.binding, run.validation, run.proposal);
+  assert.equal(finishedA.status, "applied", JSON.stringify(finishedA));
+
+  // task B agrees the same fixed workflow: a new occurrence with the same template path
+  const draftedB = canonicalizeProposalDraft(draft({kind: "workflow", definitionId: "loop", reason: "Use the loop again."}), loopContext, "task-b");
+  assert.ok(draftedB.ok, JSON.stringify(draftedB));
+  if (!draftedB.ok || !draftedB.workflow.plan) return;
+  const proposalB = {status: "proposed", message: "The next draft.", workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, ...draftedB.workflow} as WorkflowProposalInfo;
+  const bindingB: WorkflowStateSourceBinding = {...run.binding, taskId: "task-b", proposalId: "proposal-b", sourceHash: "ship-the-next-change"};
+  const agreementB: WorkflowAgreementImport = {taskId: "task-b", sourceThreadId: "main-a", sourceRunId: "run-b", sourceMessageId: "message-b", sourceHash: "ship-the-next-change",
+    objective: "Ship the next change.", agreement: {status: "agreed", message: "Accepted.", proposalId: "proposal-b", agreedAt: 30,
+      evidence: {kind: "supervisor_message", messageId: "supervisor-message-b"}, agentMessageId: "agent-message-b", workflow: proposalB}};
+  assert.equal((yield* run.box.stores.workflows.importAcceptedAgreement(run.owner, agreementB, run.tick())).status, "applied");
+  const validationB = {pinnedContext: loopContext, originalProposal: proposalB, expectedTaskId: "task-b", expectedProposalId: "proposal-b",
+    expectedSourceHash: "ship-the-next-change", acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null};
+  const before = yield* run.main();
+  const appliedB = yield* run.box.stores.workflows.apply(run.owner, {operationId: "b-plan", workflowId: before.workflowId, expectedRevision: before.revision, status: "planned",
+    objective: "Ship the next change.", sourceBinding: bindingB, requirements: [...proposalB.requirements], issues: [...proposalB.issues], plan: draftedB.workflow.plan,
+    note: "Adopt task B.", evidence: [{kind: "status_changed", targetNodeId: null, note: "The next task is planned."}]}, validationB, run.tick());
+  assert.equal(appliedB.status, "applied", JSON.stringify(appliedB));
+  const planned = yield* run.main();
+  const occurrenceB = planEntities(planned.plan).find(node => node.kind === "workflow");
+  const workB = planEntities(planned.plan).find(node => node.kind === "step" && node.localId === "work");
+  assert.ok(occurrenceB && workB);
+  assert.notEqual(occurrenceB.nodeId, occurrenceA.nodeId, "task B is a new occurrence");
+  const returnB = planBackTos(planned.plan)[0];
+  assert.ok(returnB);
+  assert.equal(returnB.budgetId, spentA.node.budgetId, "the store retains the budget at its address, as before");
+  assert.equal(returnBudgetUsed(planned.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1);
+
+  // the blocked live write: a status-only apply with the identities the status read returned
+  const statusOnly = yield* statusEdit(planned, "b-status", [{nodeId: occurrenceB.nodeId, status: "underway"}, {nodeId: workB.nodeId, status: "underway"}], "underway", bindingB, validationB, proposalB);
+  assert.equal(statusOnly.status, "applied", JSON.stringify(statusOnly));
+  const after = yield* run.main();
+  assert.deepEqual(planEntities(after.plan).map(node => node.nodeId), planEntities(planned.plan).map(node => node.nodeId), "occurrence ids are stable");
+  assert.equal(planBackTos(after.plan)[0]?.budgetId, returnB.budgetId, "the retained budget is unchanged");
+  assert.equal(returnBudgetUsed(after.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1, "the used count is unchanged");
+  assert.equal(planEntities(after.plan).find(node => node.nodeId === workB.nodeId)?.status, "underway");
+
+  // provenance stays guarded: task A's binding cannot write task B's plan, and a tampered budget on the retained return is not adopted
+  const stale = yield* statusEdit(after, "b-stale-binding", [{nodeId: workB.nodeId, status: "completed"}], "underway", run.binding, validationB, proposalB);
+  assert.equal(invalidReason(stale), "pinned_definition_context_mismatch");
+  const tampered = JSON.parse(JSON.stringify(after.plan)) as WorkflowPlanGroupInfo;
+  const tamperedReturn = planBackTos(tampered)[0] as {budgetId: string};
+  tamperedReturn.budgetId = "ef".repeat(32);
+  const resubmitted = yield* run.box.stores.workflows.apply(run.owner, {operationId: "b-tampered-budget", workflowId: after.workflowId, expectedRevision: after.revision,
+    status: after.status, objective: after.objective, sourceBinding: bindingB, requirements: [...proposalB.requirements], issues: [...proposalB.issues], plan: tampered,
+    note: "Resend the plan.", evidence: []}, validationB, run.tick());
+  assert.equal(resubmitted.status, "applied", JSON.stringify(resubmitted));
+  const kept = yield* run.main();
+  assert.equal(planBackTos(kept.plan)[0]?.budgetId, returnB.budgetId, "the occurrence keeps its retained budget identity");
+  assert.equal(kept.returnBudgets?.some(item => item.budgetId === "ef".repeat(32)), false);
+  assert.equal(returnBudgetUsed(kept.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1);
 }), {timeout: 30_000});
 
 it.live("an omitted ledger does not hide an applied jump after the return leaves the plan", () => Effect.gen(function* () {
