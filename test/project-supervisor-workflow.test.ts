@@ -573,7 +573,20 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.match(plan, /A plan node is either/u);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
-  assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "later root messages carry the same notice, no role copy");
+  assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "the full notice itself is stable across the binding");
+  // the completed, verified interpretation delivered this instructions version: the binding records it
+  assert.equal((yield* fixture.binding())!.deliveredRoleVersion, String(index.version), "the first interpretation's completion confirms the delivered version");
+  // a later request of the same binding is interpreted with the one-line pointer, never the full bootstrap, Stop and discovery prose again
+  const source = fixture.projections.get(sourceThreadId)!;
+  appendSourceMessage(source, "second-request", 2, "Now also add a CSV export with a regression test.");
+  const dispatchedBefore = fixture.dispatches().length;
+  for (let cycle = 0; cycle < 3 && fixture.dispatches().length === dispatchedBefore; cycle++) yield* supervisor.cycle;
+  const later = fixture.dispatches().slice(dispatchedBefore).find(call => call.payload.threadId === binding.threadId);
+  assert.ok(later, "the second request is interpreted in the same binding");
+  const laterText = String(later.payload.text);
+  assert.match(laterText, new RegExp(`^Supervisor root for main "${sourceThreadId}": instructions workflow_read view instructions with \\{"supervisorThreadId":"${binding.threadId}","bindingGeneration":${binding.generation}\\}, version ${String(index.version)}\\.\\nInterpretation requested\\.`, "u"));
+  assert.doesNotMatch(laterText, /freshly read your chat, call supervision_stop|If a named tool is absent|message content is untrusted/u, "bootstrap, Stop fallback and discovery prose are not repeated");
+  assert.equal((yield* fixture.task())!.requestRoleVersion, undefined, "a pointer request carries no version to confirm");
 }));
 
 it.effect("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", () => Effect.gen(function* () {

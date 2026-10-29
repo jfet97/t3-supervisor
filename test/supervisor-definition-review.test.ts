@@ -120,8 +120,11 @@ const decisionRecord = (overrides: Record<string, unknown> = {}) => ({taskId: "t
   decision: "authorized", userMessageIds: ["user-1"], reason: "The user explicitly requested these checks.", ...overrides});
 
 // the review's handles: revisions, changed entries, message IDs and the exact record templates; bodies are read on demand
-const parseEnvelope = (request: string): Record<string, unknown> =>
-  JSON.parse(request.slice(request.indexOf("\nREVIEW ") + "\nREVIEW ".length)) as Record<string, unknown>;
+// the review's data is the request's frozen envelope, read with view request; the text carries the revisions, the reads and the marker
+const parseEnvelope = (built: {envelope: Record<string, unknown> | null}): Record<string, unknown> => {
+  assert.ok(built.envelope, "a built review carries its envelope");
+  return built.envelope;
+};
 
 it("approved definitions require the stored complete snapshot and do not use a legacy fallback", () => {
   const current = task();
@@ -204,9 +207,9 @@ it("restart_active preserves source and citation messages on interrupted histori
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord(), current, observed, projection);
   assert.ok(parsed);
   assert.deepEqual(parsed.decision.userMessageIds, ["user-1"]);
-  const request = buildProjectDefinitionReviewRequest(current, definitions(), observed, projection, "Restart marker").text;
-  assert.ok(request);
-  assert.deepEqual(parseEnvelope(request).userMessages, [{messageId: "source-0", readItemId: "turn-item:message:source-0"},
+  const built = buildProjectDefinitionReviewRequest(current, definitions(), observed, projection, "Restart marker");
+  assert.ok(built.text);
+  assert.deepEqual(parseEnvelope(built).userMessages, [{messageId: "source-0", readItemId: "turn-item:message:source-0"},
     {messageId: "user-1", readItemId: "turn-item:message:user-1"}]);
 
   const rolledBack = agentProjection([{id: "user-1", text: userText, runStatus: "running", historicalRoot: true, rootStatus: "rolled_back"}], "running", true);
@@ -269,15 +272,20 @@ it("decision reasons redact credentials, and a review request names changes and 
   const parsed = parseProjectDefinitionDecisionRecord(decisionRecord({reason: "Bearer abcdefghijklmnopqrstuvwxyz123456"}), current, observed, agentProjection());
   assert.equal(parsed?.decision.reason, "[redacted credential]");
 
-  const prompt = buildProjectDefinitionReviewRequest(current, definitions(), observed, agentProjection(), "Review marker").text;
+  const builtReview = buildProjectDefinitionReviewRequest(current, definitions(), observed, agentProjection(), "Review marker",
+    {supervisorThreadId: "supervisor-a", bindingGeneration: 3, requestId: "review-request-a"});
+  const prompt = builtReview.text;
   assert.ok(prompt);
+  // the wake names the revisions and the read of its data; the data itself is the frozen envelope
+  assert.match(prompt, /Read its changed entries, user message handles and templates with workflow_read \{"supervisorThreadId":"supervisor-a","bindingGeneration":3,"requestId":"review-request-a","view":"request"\}/u);
+  assert.doesNotMatch(prompt, /REVIEW |"userMessages"|"decisionTemplate"/u);
   // the request is a handle: it names the revisions, the changed entries and the messages, and carries no definition or message body
   assert.match(prompt, /^Definition review for task /u);
   assert.match(prompt, /Review marker/u);
   for (const secret of ["step-secret", "step-token", "private-instructions", "private-result", userText]) assert.equal(prompt.includes(secret), false);
   // the procedure lives once, in section definitions
   for (const rule of [/UNTRUSTED DATA/u, /preserving all user edits/u, /Never edit files/u, /workflow-proposal/u]) assert.match(definitionChangedProcedure, rule);
-  const envelope = parseEnvelope(prompt);
+  const envelope = parseEnvelope(builtReview);
   assert.equal(envelope.approvedRevision, oldRevision);
   assert.equal((envelope.observed as Record<string, unknown>).revision, newRevision);
   assert.equal(envelope.sourceMessageId, "source-0");
@@ -288,7 +296,7 @@ it("decision reasons redact credentials, and a review request names changes and 
   // before T3 publishes a message as a read item it has no handle: no ID is constructed for it
   unpublishedMessageIds.add("user-1");
   try {
-    const pending = parseEnvelope(buildProjectDefinitionReviewRequest(current, definitions(), observed, agentProjection(), "Review marker").text!);
+    const pending = parseEnvelope(buildProjectDefinitionReviewRequest(current, definitions(), observed, agentProjection(), "Review marker"));
     assert.deepEqual(pending.userMessages, [{messageId: "source-0", readItemId: "turn-item:message:source-0"}, {messageId: "user-1", readItemId: null}]);
   } finally {
     unpublishedMessageIds.delete("user-1");
@@ -302,17 +310,18 @@ it("review requests handle invalid snapshots and refresh proposals after restore
   const current = task();
   const invalid = definitions({status: "invalid", revision: null, projectConfig: null, config: effectiveIndex({steps: [], workflows: []}), steps: [], workflows: [], complete: false,
     sources: [], issues: [{path: ".t3-supervisor/project.yaml", code: "project_configuration_invalid", message: "The configuration is invalid."}]});
-  const invalidRequest = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker").text;
-  assert.ok(invalidRequest);
-  const invalidEnvelope = parseEnvelope(invalidRequest);
+  const invalidBuilt = buildProjectDefinitionReviewRequest(current, definitions(), invalid, agentProjection(), "Invalid marker");
+  assert.ok(invalidBuilt.text);
+  const invalidEnvelope = parseEnvelope(invalidBuilt);
   assert.equal(invalidEnvelope.decisionTemplate !== null, true);
   assert.equal((invalidEnvelope.decisionTemplate as Record<string, unknown>).observedRevision, null);
   assert.equal(invalidEnvelope.proposalTemplate, null);
 
   const authorized = definitions({revision: newRevision});
-  const refreshRequest = buildProjectDefinitionReviewRequest(current, authorized, authorized, agentProjection(), "Refresh marker").text;
+  const refreshBuilt = buildProjectDefinitionReviewRequest(current, authorized, authorized, agentProjection(), "Refresh marker");
+  const refreshRequest = refreshBuilt.text;
   assert.ok(refreshRequest);
-  const refreshEnvelope = parseEnvelope(refreshRequest);
+  const refreshEnvelope = parseEnvelope(refreshBuilt);
   assert.equal(refreshEnvelope.decisionTemplate, null);
   assert.equal(refreshEnvelope.proposalTemplate !== null, true);
   assert.match(refreshRequest, /approved definitions were restored or authorized; reassess/u);
@@ -328,9 +337,9 @@ it("a review names exactly the changed entries and sources, compared before reda
   const approved = definitions();
   const current = task();
   const changedOf = (observed: ProjectDefinitionSnapshot) => {
-    const request = buildProjectDefinitionReviewRequest(current, approved, observed, agentProjection(), "Changed entries marker").text;
-    assert.ok(request);
-    return {request, changed: parseEnvelope(request).changed as {steps: string[]; workflows: string[]; sources: string[]}};
+    const built = buildProjectDefinitionReviewRequest(current, approved, observed, agentProjection(), "Changed entries marker");
+    assert.ok(built.text);
+    return {request: `${built.text}\n${JSON.stringify(built.envelope)}`, changed: parseEnvelope(built).changed as {steps: string[]; workflows: string[]; sources: string[]}};
   };
   assert.deepEqual(changedOf(definitions({revision: newRevision})).changed, {steps: [], workflows: [], sources: []}, "a new revision alone changes no entry");
   const edited = changedOf(definitions({revision: newRevision, sources: approved.sources.map(source => ({...source, content: `${source.content}\n# token=different-secret`}))}));
@@ -357,7 +366,7 @@ it("recovery retains effective parsed global guidance and rewritten references",
   const result = buildProjectDefinitionReviewRequest(task(), approved, observed, agentProjection(), "Global marker");
   assert.ok(result.text, result.error ?? "missing recovery");
   // the effective global guidance is read with view definitions; the review names the changed global revision
-  const envelope = parseEnvelope(result.text) as {observed: {globalRevision: string | null}; changed: {steps: string[]; workflows: string[]}};
+  const envelope = parseEnvelope(result) as {observed: {globalRevision: string | null}; changed: {steps: string[]; workflows: string[]}};
   assert.equal(envelope.observed.globalRevision, "global-new");
   assert.deepEqual([envelope.changed.steps, envelope.changed.workflows], [[], []]);
 });

@@ -1,9 +1,9 @@
 import { Schema } from "effect";
-import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
+import { participantSettlementStates, ProjectSupervisorScopeSnapshotSchema, type ParticipantSettlementState, type ProjectSupervisorScopeSnapshot, type ProjectSupervisorScopeThread } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
-import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBranches, planEntities } from "./workflow-plan-tree.js";
+import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBackTos, planBranches, planEntities, resolveBackTo } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, currentAcceptedProposalId, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
-  WorkflowReturnRunSchema, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
+  participantReceiptKinds, WorkflowReturnRunSchema, type ExternalContributionParticipant, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
 import { WorkflowAssessment, workflowAssessment } from "./workflow-assessment.js";
 
@@ -27,13 +27,22 @@ export type WorkflowProgressObservation = typeof WorkflowProgressObservationSche
 
 export const WorkflowHistoryEventSchema = Schema.Struct({
   id: Schema.String, sequence: Schema.Number, kind: Schema.String, recordedAt: Schema.Number,
+  /** The write that recorded this event; consecutive events of one write are one operation, never merged into one record. */
+  operationId: Schema.optionalKey(Schema.String),
   targetNodeId: NullableText, targetNodeName: NullableText, attempt: Schema.NullOr(Schema.Number),
   statusFrom: Schema.NullOr(WorkflowExecutionStatus), statusTo: Schema.NullOr(WorkflowExecutionStatus),
   sourceThreadId: NullableText, sourceMessageId: NullableText, sourceItemId: NullableText, note: Schema.String,
+  repair: Schema.optionalKey(Schema.Literal(true)),
+  /** A compacted read receipt: one span from its first read to its latest, counted, at the position of the first read. */
+  coverage: Schema.optionalKey(Schema.Struct({firstRecordedAt: Schema.Number, latestRecordedAt: Schema.Number, repeats: Schema.Number})),
 });
 export type WorkflowHistoryEvent = typeof WorkflowHistoryEventSchema.Type;
 
-/** Stored append order is authoritative even when several events share a timestamp. */
+/**
+ * Stored append order is authoritative even when several events share a timestamp. A compacted receipt keeps its row and sequence while
+ * its stored time and write move to the latest read, so History dates it by its first read and shows the latest read and the count as a
+ * span: semantic records after it keep moving forward, and a repeated read never becomes a newly dated event before an older action.
+ */
 export const progressHistory = (document: WorkflowStateDocument): WorkflowHistoryEvent[] => {
   const attempts = new Map<string, number>();
   return document.evidence.map((item, index) => {
@@ -41,10 +50,15 @@ export const progressHistory = (document: WorkflowStateDocument): WorkflowHistor
       const returned = document.returns.find(returned => returned.returnId === item.return!.returnId && returned.state === "applied");
       for (const id of returned?.regionNodeIds ?? []) attempts.set(id, (attempts.get(id) ?? 1) + 1);
     }
-    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: item.recordedAt, targetNodeId: item.targetNodeId,
+    const receipt = item.kind === "observation" && item.participant ? item.participant : null;
+    const coverage = receipt ? {firstRecordedAt: receipt.firstRecordedAt ?? item.recordedAt, latestRecordedAt: item.recordedAt, repeats: receipt.repeats ?? 1} : null;
+    const compacted = coverage !== null && coverage.repeats > 1;
+    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: coverage ? coverage.firstRecordedAt : item.recordedAt,
+      // a span's stored write is its latest read's; it stays its own entry rather than joining that later write's records
+      ...(compacted || item.operationId === undefined ? {} : {operationId: item.operationId}), targetNodeId: item.targetNodeId,
       targetNodeName: item.targetNodeName, attempt: item.targetNodeId ? attempts.get(item.targetNodeId) ?? 1 : null,
       statusFrom: item.statusFrom, statusTo: item.statusTo, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
-      sourceItemId: item.sourceItemId ?? null, note: item.note};
+      sourceItemId: item.sourceItemId ?? null, note: item.note, ...(item.repair === true ? {repair: true as const} : {}), ...(coverage ? {coverage} : {})};
   });
 };
 
@@ -70,6 +84,38 @@ export const WorkflowProgressContributionSchema = Schema.Struct({
   })),
 });
 export type WorkflowProgressContribution = typeof WorkflowProgressContributionSchema.Type;
+
+/**
+ * Coverage of one task participant, each value a distinct fact: native is the service's own verified scope read of a descendant;
+ * supervisor_observed is the root's attributed read receipt backed by its own completed native item; lifecycle_only is such a receipt
+ * from a wait, list or search call; reported is the main's declaration alone; unsupported is the root's explicit statement that no route
+ * exists; unknown is no declaration and no receipt.
+ */
+export const participantCoverageStates = ["native", "supervisor_observed", "lifecycle_only", "reported", "unsupported", "unknown"] as const;
+export type ParticipantCoverageState = typeof participantCoverageStates[number];
+export const WorkflowProgressParticipantSchema = Schema.Struct({
+  id: Schema.String,
+  source: Schema.Literals(["native", "declared"]),
+  kind: Schema.Literals(["native_child", "t3_conversation", "external", "unknown"]),
+  handle: NullableText,
+  environmentId: NullableText,
+  threadId: NullableText,
+  contributionId: NullableText,
+  revision: Schema.NullOr(Schema.Number),
+  roles: Schema.Array(Schema.Struct({nodeId: Schema.String, nodeName: NullableText, attempt: Schema.Number, retired: Schema.Boolean})),
+  owner: Schema.Literals(["root", "helper", "unknown"]),
+  lifecycle: Schema.Literals(["running", "completed", "interrupted", "unknown", "reported"]),
+  reportedState: Schema.NullOr(Schema.Literals(externalContributionStates)),
+  completion: Schema.Literals(["none", "native_completed", "result_reported", "accepted", "needs_more", "withdrawn"]),
+  coverage: Schema.Literals(participantCoverageStates),
+  currentReceipt: Schema.NullOr(Schema.Struct({kind: Schema.Literals(participantReceiptKinds), recordedAt: Schema.Number, actorSupervisorThreadId: Schema.String,
+    sourceItemId: NullableText, toolName: NullableText, evidenceId: Schema.String, repeats: Schema.Number, firstRecordedAt: Schema.Number})),
+  priorReceipts: Schema.Number,
+  /** T3 settlement after task completion: not applicable to external or unknown participants, not evaluated until the task completed. */
+  settlement: Schema.Literals(["not_evaluated", "not_applicable", ...participantSettlementStates]),
+  settlementReason: NullableText,
+});
+export type WorkflowProgressParticipant = typeof WorkflowProgressParticipantSchema.Type;
 
 // the workflow operative's latest decision for one branch; current is false once the branch changed or left the plan
 export const WorkflowProgressBranchSelectionSchema = Schema.Struct({
@@ -120,6 +166,9 @@ export const WorkflowProgressReturnSchema = Schema.Struct({
   requestedAt: Schema.Number,
   resolvedAt: Schema.NullOr(Schema.Number),
   closed: Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, status: WorkflowExecutionStatus, contributorThreadIds: Schema.Array(Schema.String)}))),
+  /** The branch selections that were current in the closed attempt, each with the reason and source of that revision, read from the whole record. */
+  closedSelections: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, revision: Schema.Number, path: Schema.Literals(branchSelectionPaths),
+    reason: Schema.String, sourceThreadId: NullableText, sourceMessageId: NullableText, recordedAt: Schema.NullOr(Schema.Number)})))),
   retiredRuns: Schema.Array(WorkflowReturnRunSchema),
   note: NullableText,
 });
@@ -163,8 +212,10 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   /** Occurrences settled by a current not-applicable assessment, including everything inside an assessed workflow. */
   notApplicable: Schema.optionalKey(Schema.Array(Schema.String)),
   returns: Schema.optionalKey(Schema.Array(WorkflowProgressReturnSchema)),
-  /** The current attempt of each occurrence an applied return reopened; any other occurrence is in its first attempt. */
+  /** The current attempt of every occurrence inside a return's region: 1 until an applied return reopens it, one more per applied return holding it. */
   attempts: Schema.optionalKey(Schema.Array(Schema.Struct({nodeId: Schema.String, attempt: Schema.Number}))),
+  /** Every participant of this workflow's occurrences: attached native descendants, linked children without a role, declared participants. */
+  participants: Schema.optionalKey(Schema.Array(WorkflowProgressParticipantSchema)),
 });
 export type WorkflowProgressWorkflow = typeof WorkflowProgressWorkflowSchema.Type;
 
@@ -307,12 +358,24 @@ const progressCompletions = (document: WorkflowStateDocument): WorkflowProgressC
     completedAt: document.evidence.reduce<number | null>((latest, item) => item.kind === "status_changed" && item.targetNodeId === node.nodeId &&
       item.statusTo === "completed" && (latest === null || item.recordedAt > latest) ? item.recordedAt : latest, null)}]);
 
+// the reason and source of one closed selection revision: the durable selection row first, else its recorded event in the whole evidence,
+// so a closed attempt keeps its decision after the bounded recent branch events have moved on
+const closedSelectionDetail = (document: WorkflowStateDocument, selection: {nodeId: string; revision: number}) => {
+  const row = document.branchSelections.find(item => item.nodeId === selection.nodeId && item.revision === selection.revision);
+  if (row) return {reason: row.reason, sourceThreadId: row.sourceThreadId, sourceMessageId: row.sourceMessageId, recordedAt: row.recordedAt};
+  const event = document.evidence.find(item => item.kind === "branch_selected" && item.targetNodeId === selection.nodeId && item.branch?.revision === selection.revision);
+  return event ? {reason: event.note, sourceThreadId: event.sourceThreadId, sourceMessageId: event.sourceMessageId, recordedAt: event.recordedAt}
+    : {reason: "", sourceThreadId: null, sourceMessageId: null, recordedAt: null};
+};
+
 const progressReturns = (document: WorkflowStateDocument): WorkflowProgressReturn[] => {
   const planNames = planNodeNames(document.plan);
   return document.returns.map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId, targetNodeId: item.targetNodeId,
     targetName: contributionNodeName(document, item.targetNodeId, planNames), regionNodeIds: [...item.regionNodeIds], attempt: item.attempt, state: item.state,
     reason: item.reason, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId, requestedAt: item.requestedAt, resolvedAt: item.resolvedAt,
     closed: item.closed ? item.closed.map(closed => ({nodeId: closed.nodeId, status: closed.status, contributorThreadIds: [...closed.contributorThreadIds]})) : null,
+    closedSelections: item.closedSelections ? item.closedSelections.map(selection => ({nodeId: selection.nodeId, revision: selection.revision, path: selection.path,
+      ...closedSelectionDetail(document, selection)})) : null,
     retiredRuns: item.retiredRuns.map(run => run.kind === "provider_turns" ? {...run, providerTurnIds: [...run.providerTurnIds]} : {...run}),
     note: item.resolution?.note ?? null}));
 };
@@ -322,6 +385,99 @@ const currentAttemptObservations = (document: WorkflowStateDocument): WorkflowSt
   const current = occurrenceAttempts(document.returns);
   const ids = new Set(progressHistory(document).filter(item => !item.targetNodeId || item.attempt === (current.get(item.targetNodeId) ?? 1)).map(item => item.id));
   return document.evidence.filter(item => observationKinds.has(item.kind) && ids.has(item.id));
+};
+
+export type ParticipantScopeThread = Pick<ProjectSupervisorScopeThread, "threadId" | "lifecycle" | "projectionRead" | "archivedAt" | "deletedAt">;
+// a native read of a local thread: the service read its projection in this snapshot and it is neither archived nor deleted; lifecycle
+// metadata without that read is not coverage
+const nativelyRead = (thread: ParticipantScopeThread | undefined): boolean => thread?.projectionRead === true && !thread.archivedAt && !thread.deletedAt;
+export type ParticipantCoverageOwner = "root" | "assigned" | "transfer" | "observe_only" | "unknown";
+const participantDigest = (participant: ExternalContributionParticipant | null | undefined): string => JSON.stringify(participant ?? null);
+const ownerOf = (state: ParticipantCoverageOwner | undefined): WorkflowProgressParticipant["owner"] =>
+  state === "root" || state === "observe_only" ? "root" : state === "assigned" || state === "transfer" ? "helper" : "unknown";
+
+/**
+ * The participants of one workflow's occurrences, computed from existing records: native descendants attached by contributorThreadIds
+ * (with their attempt and whether an applied return replaced the conversation), linked children with no attached occurrence, and the
+ * main-reported participants of this document's contributions with the root's receipts that are current for the declaration, revision
+ * and attempt; earlier receipts stay counted as history. Nothing here settles anything.
+ */
+/** The id of a main document's latest completion record (its status moved to completed), or null while it never completed. */
+export const completionRecordId = (document: Pick<WorkflowStateDocument, "evidence">): string | null =>
+  document.evidence.filter(item => item.targetNodeId === null && item.statusTo === "completed" && item.statusFrom !== "completed").at(-1)?.id ?? null;
+/** The key of a participant's settlement: its thread id, qualified by its environment when it is not local. */
+export const settlementKey = (threadId: string, environmentId: string | null | undefined): string => `${environmentId ?? ""}:${threadId}`;
+export type ParticipantSettlementView = {state: ParticipantSettlementState; reason: string | null};
+
+export const workflowParticipants = (document: WorkflowStateDocument, linkedChildren: readonly string[], scopeThreads: ReadonlyMap<string, ParticipantScopeThread>,
+  coverage: ReadonlyMap<string, ParticipantCoverageOwner>, settlements: ReadonlyMap<string, ParticipantSettlementView> = new Map()): WorkflowProgressParticipant[] => {
+  const settlementOf = (threadId: string, environmentId: string | null): Pick<WorkflowProgressParticipant, "settlement" | "settlementReason"> => {
+    const recorded = settlements.get(settlementKey(threadId, environmentId));
+    return recorded ? {settlement: recorded.state, settlementReason: recorded.reason} : {settlement: "not_evaluated", settlementReason: null};
+  };
+  const attempts = occurrenceAttempts(document.returns ?? []);
+  const names = planNodeNames(document.plan);
+  const replacedBy = new Map<string, Set<string>>();
+  for (const item of document.returns ?? []) if (item.state === "applied") for (const run of item.retiredRuns)
+    if (run.kind === "thread") for (const nodeId of item.regionNodeIds) replacedBy.set(run.threadId, new Set([...replacedBy.get(run.threadId) ?? [], nodeId]));
+  const roles = new Map<string, WorkflowProgressParticipant["roles"][number][]>();
+  for (const node of planEntities(document.plan)) for (const threadId of node.contributorThreadIds)
+    roles.set(threadId, [...roles.get(threadId) ?? [], {nodeId: node.nodeId, nodeName: node.name, attempt: attempts.get(node.nodeId) ?? 1,
+      retired: replacedBy.get(threadId)?.has(node.nodeId) ?? false}]);
+  const nativeRow = (threadId: string): WorkflowProgressParticipant => {
+    const thread = scopeThreads.get(threadId);
+    return {id: threadId, source: "native", kind: "native_child", handle: threadId, environmentId: null, threadId, contributionId: null, revision: null,
+      roles: roles.get(threadId) ?? [], owner: ownerOf(coverage.get(threadId)), lifecycle: thread?.lifecycle ?? "unknown", reportedState: null,
+      completion: thread?.lifecycle === "completed" ? "native_completed" : "none", coverage: nativelyRead(thread) ? "native" : "unknown",
+      currentReceipt: null, priorReceipts: 0, ...settlementOf(threadId, null)};
+  };
+  const native = [...new Set([...roles.keys(), ...linkedChildren])].map(nativeRow);
+  const declared = document.contributions.map((contribution): WorkflowProgressParticipant => {
+    const participant = contribution.participant ?? null;
+    const attempt = attempts.get(contribution.nodeId) ?? 1;
+    const receipts = document.evidence.filter(item => item.kind === "observation" && item.participant?.contributionId === contribution.contributionId)
+      .sort((left, right) => right.recordedAt - left.recordedAt);
+    const current = receipts.filter(item => item.participant!.revision === contribution.revision && item.participant!.attempt === attempt &&
+      participantDigest(item.participant!.participant) === participantDigest(participant));
+    const latest = current[0];
+    const threadId = participant?.kind === "t3_conversation" ? participant.threadId : null;
+    // a declared conversation joins a local scope row only when it is declared local (no environment): the same thread id in another
+    // environment is a different conversation and never aliases a local one
+    const thread = threadId && participant?.kind === "t3_conversation" && participant.environmentId === null ? scopeThreads.get(threadId) : undefined;
+    const coverageState: ParticipantCoverageState = nativelyRead(thread) ? "native" : latest?.participant!.receipt.kind === "read" ? "supervisor_observed"
+      : latest?.participant!.receipt.kind === "lifecycle" ? "lifecycle_only" : latest?.participant!.receipt.kind === "unsupported" ? "unsupported"
+      : participant ? "reported" : "unknown";
+    return {id: `contribution:${contribution.contributionId}`, source: "declared",
+      kind: participant?.kind ?? "unknown", handle: participant?.kind === "t3_conversation" ? participant.threadId : participant?.kind === "external" ? participant.ref : null,
+      environmentId: participant?.kind === "t3_conversation" ? participant.environmentId : null, threadId, contributionId: contribution.contributionId,
+      revision: contribution.revision, roles: [{nodeId: contribution.nodeId, nodeName: contributionNodeName(document, contribution.nodeId, names), attempt, retired: false}],
+      owner: "root", lifecycle: thread?.lifecycle ?? "reported", reportedState: contribution.state,
+      completion: contribution.state === "withdrawn" ? "withdrawn" : contribution.state === "result"
+        ? contribution.assessment?.decision === "accepted" ? "accepted" : contribution.assessment?.decision === "needs_more" ? "needs_more" : "result_reported" : "none",
+      coverage: coverageState,
+      currentReceipt: latest ? {kind: latest.participant!.receipt.kind, recordedAt: latest.recordedAt, actorSupervisorThreadId: latest.actorSupervisorThreadId,
+        sourceItemId: latest.sourceItemId ?? null, toolName: latest.participant!.receipt.toolName, evidenceId: latest.id,
+        repeats: latest.participant!.repeats ?? 1, firstRecordedAt: latest.participant!.firstRecordedAt ?? latest.recordedAt} : null,
+      priorReceipts: receipts.length - current.length,
+      // only a T3-managed conversation can settle; an external or unknown participant's completion is its reported result, nothing more
+      ...(participant?.kind === "t3_conversation" ? settlementOf(participant.threadId, participant.environmentId) : {settlement: "not_applicable" as const, settlementReason: null})};
+  });
+  return [...native, ...declared];
+};
+
+/**
+ * The attempt of every occurrence a return can repeat: attempt 1 is explicit inside each return's region, and an applied return adds one
+ * for each occurrence its region holds, so attempts only ever grow; a nested budget reset changes no attempt, and occurrences outside every
+ * region are listed nowhere.
+ */
+export const returnableAttempts = (document: Pick<WorkflowStateDocument, "plan" | "returns">): Map<string, number> => {
+  const attempts = new Map<string, number>();
+  if (document.plan) for (const backTo of planBackTos(document.plan)) {
+    const resolved = resolveBackTo(document.plan, backTo.nodeId);
+    if (resolved.ok) for (const nodeId of resolved.regionNodeIds) attempts.set(nodeId, 1);
+  }
+  for (const [nodeId, attempt] of occurrenceAttempts(document.returns ?? [])) attempts.set(nodeId, Math.max(attempts.get(nodeId) ?? 1, attempt));
+  return attempts;
 };
 
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
@@ -364,5 +520,5 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   notApplicable: [...notApplicableSubtrees(document.plan, effectiveBranchSelections(document.plan, document.branchSelections ?? []),
     notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))],
   returns: progressReturns(document),
-  attempts: [...occurrenceAttempts(document.returns ?? [])].map(([nodeId, attempt]) => ({nodeId, attempt})),
+  attempts: [...returnableAttempts(document)].map(([nodeId, attempt]) => ({nodeId, attempt})),
 });

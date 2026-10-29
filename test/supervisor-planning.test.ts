@@ -4,8 +4,8 @@ import { Exit, Schema } from "effect";
 import {
   acknowledgePlanningTarget, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs,
   expirePlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningCanAdopt, planningDraftInstruction, planningDraftNotice, planningDraftRead,
-  planningHasUnresolvedEffects, planningHoldText, planningInstructions, planningReleaseText,
-  planningDelivery, resolvePlanningAttempt, startPlanningAttempt, type PlanningAttempt,
+  markPlanningTargetQuiescent, planningHasUnresolvedEffects, planningHoldText, planningInstructions, planningReleaseText,
+  planningDelivery, resolvePlanningAttempt, startPlanningAttempt, unacceptedProposal, type PlanningAttempt,
 } from "../src/supervisor-planning.js";
 import { exactFenceRecords } from "../src/supervisor-workflow-agreement.js";
 import { interpretationPlanRules } from "../src/supervisor-workflow.js";
@@ -135,6 +135,56 @@ it("a continued child's release points to its own scoped plan, through its paren
     "Planning pause pause-a released (superseded). Continue your authorised task; human Stops and limits still apply.");
 });
 
+it("a finished child's relayed hold is released as a dispatch hold only, a finished direct child closes without a notice, and a child that answers after quiescence is live again", () => {
+  const base = sent();
+  const direct = {...base.targets[1]!, threadId: "child-b", recipientThreadId: "child-b", hold: {...planningDelivery("pause-a", "child-b", "hold"), state: "sent" as const, attemptedAt: now, runId: "run-a"}};
+  const withDirect: PlanningAttempt = {...base, targets: [...base.targets, direct]};
+  const quiet = markPlanningTargetQuiescent(markPlanningTargetQuiescent(withDirect, "child-a", {runId: "run-a", observedAt: now + 1}, now + 1), "child-b", {runId: "run-b", observedAt: now + 1}, now + 1);
+  const acked = acknowledgePlanningTarget(quiet, {attemptId: "pause-a", targetThreadId: "main-a"}, evidence("main-a"), now + 2);
+  assert.equal(planningCanAdopt(acked, now + 2), true);
+  const released = resolvePlanningAttempt(acked, "continue", now + 100);
+  assert.deepEqual(released.targets.map(target => [target.threadId, target.state, target.release !== undefined]), [["main-a", "release_pending", true], ["child-a", "release_pending", true], ["child-b", "closed", false]],
+    "the relayed hold is released at the parent; the finished direct child gets no message that would start new work");
+  assert.equal(released.targets[2]!.closedAt, now + 100);
+  assert.equal(planningReleaseText(released, released.targets[0]!), "Planning pause pause-a released (planning resolved). Continue your authorised task; human Stops and limits still apply.");
+  assert.equal(planningReleaseText(released, released.targets[1]!), "Relay to child child-a: planning pause pause-a released (planning resolved). Child child-a had finished its work: this releases your dispatch hold only. " +
+    "Do not restart it or re-task it under its earlier result; new work for it needs its own assignment. Human Stops and limits still apply.");
+  // a child that answers the hold after its quiescence reading is live: its release resumes it and its quiescence no longer describes it
+  const live = acknowledgePlanningTarget(quiet, {attemptId: "pause-a", targetThreadId: "child-a"}, evidence("child-a"), now + 2);
+  assert.equal(live.targets[1]!.state, "acknowledged");
+  assert.equal(live.targets[1]!.quiescence, undefined);
+  const resumed = resolvePlanningAttempt(live, "continue", now + 100);
+  assert.equal(planningReleaseText(resumed, resumed.targets[1]!), "Relay to child child-a: planning pause pause-a released (planning resolved). Continue your authorised task; human Stops and limits still apply.");
+});
+
+// the main's current proposal, as the planning controller reads it at release time
+const proposalTask = (agreed: boolean, withProposal = true) => ({id: "task-a", workflowProposalId: "proposal-a",
+  workflow: withProposal ? {status: "proposed"} as never : null,
+  agreement: agreed ? {status: "agreed" as const, proposalId: "proposal-a"} as never : null});
+
+it("planning resolved or superseded with an unagreed main proposal grants no implementation permission and names the one acceptance route", () => {
+  const original = sent();
+  const continued = resolvePlanningAttempt({...original, targets: original.targets.map(target => ({...target, state: "acknowledged" as const}))}, "continue", now + 100);
+  const main = continued.targets[0]!;
+  // the pending read: only the main, only continue or superseded, only while the current proposal is not the recorded agreement
+  assert.deepEqual(unacceptedProposal(continued, main, proposalTask(false)), {taskId: "task-a", proposalId: "proposal-a"});
+  assert.deepEqual(unacceptedProposal(continued, main, proposalTask(false, false)), {taskId: "task-a", proposalId: null}, "no proposal to read yet");
+  assert.deepEqual(unacceptedProposal(continued, main, null), {taskId: "task-a", proposalId: null}, "a task that is gone leaves nothing agreed");
+  assert.equal(unacceptedProposal(continued, main, proposalTask(true)), null, "the agreed current proposal continues");
+  assert.equal(unacceptedProposal(continued, continued.targets[1]!, proposalTask(false)), null, "a child target has no own acceptance");
+  assert.equal(unacceptedProposal({...continued, resolution: "superseded"}, main, proposalTask(false))?.proposalId, "proposal-a");
+  assert.equal(unacceptedProposal({...continued, resolution: "timeout"}, main, proposalTask(false)), null, "a genuine timeout release continues the task");
+  assert.equal(unacceptedProposal({...continued, resolution: "no_plan"}, main, proposalTask(false)), null, "a no-plan release continues the task");
+  assert.equal(planningReleaseText(continued, main, {taskId: "task-a", proposalId: "proposal-a"}),
+    "Planning pause pause-a released (planning resolved). This release grants no implementation permission: workflow proposal proposal-a is not agreed; " +
+    "read it with supervision_plan {\"callerThreadId\":\"main-a\",\"taskId\":\"task-a\",\"proposalId\":\"proposal-a\"} and, if you agree, put its exact acceptance " +
+    "record in your own completed reply; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.");
+  assert.equal(planningReleaseText({...continued, resolution: "superseded"}, main, {taskId: "task-a", proposalId: null}),
+    "Planning pause pause-a released (superseded). This release grants no implementation permission: no workflow proposal is agreed yet; agree the one your Supervisor " +
+    "sends before implementing; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.");
+  assert.doesNotMatch(planningReleaseText(continued, main, {taskId: "task-a", proposalId: "proposal-a"}), /Continue your authorised task/u);
+});
+
 it("the drafter's task names its read route and pins, never the plan, rules or definitions", () => {
   const original = attempt();
   const instruction = planningDraftInstruction(original);
@@ -152,7 +202,7 @@ it("an answer carries the attempt's states and ACK messages, and its drafter's t
   const original = sent();
   const acknowledged = acknowledgePlanningTarget(original, {attemptId: original.id, targetThreadId: "main-a"}, evidence("main-a"), now + 1);
   assert.deepEqual(planningAttemptAnswer(acknowledged), {attemptId: "pause-a", state: "open", deadline: "2026-10-27T12:05:00.000Z", resolution: null,
-    targets: [{threadId: "main-a", state: "acknowledged", ack: "ack-main-a"}, {threadId: "child-a", state: "requested", ack: null}], draft: null});
+    targets: [{threadId: "main-a", state: "acknowledged", ack: "ack-main-a"}, {threadId: "child-a", state: "requested", ack: null}], uncovered: [], scopeUnavailable: false, draft: null});
   assert.equal(planningAttemptAnswer(acknowledged, true).draftInstruction, planningDraftInstruction(acknowledged));
   const drafting: PlanningAttempt = {...acknowledged, draft: {threadId: "writer-a", taskId: "draft-a", state: "working", resultMessageId: null, resultRunId: null}};
   assert.deepEqual(planningAttemptAnswer(drafting, true).draft, {state: "working", taskId: "draft-a"});

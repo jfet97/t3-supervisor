@@ -68,7 +68,7 @@ const createMainWorkflow = (f: IntWorkflowFixture, operationId = "int-ensure") =
   const args = ensureArgs(f, operationId, "Create the main workflow through the production route.");
   const itemId = installEvidence(f, args);
   const reply = yield* mcpCall(f.endpoint, "workflow_write", args);
-  return {args, itemId, reply, value: reply.value as {status: string; operationId: string; workflowId: string; revision: number; stateHash: string; formatVersion: number}};
+  return {args, itemId, reply, value: reply.value as {status: string; operationId: string; workflowId: string; revision: number; stateHash: string; formatVersion: number; documentStatus: string}};
 });
 
 it.live("CT-INT-01: 0 gate rejects a missing token, a foreign Host and a foreign Origin before any native read", () => Effect.gen(function* () {
@@ -101,8 +101,9 @@ it.live("CT-INT-01: i a valid exact own-main-run proof commits mutation, evidenc
   const {args, itemId, reply, value} = yield* createMainWorkflow(f);
   assert.equal(reply.httpStatus, 200);
   assert.equal(reply.isError, false);
-  assert.deepEqual(Object.keys(value).sort(), ["formatVersion", "operationId", "revision", "stateHash", "status", "workflowId"]);
+  assert.deepEqual(Object.keys(value).sort(), ["documentStatus", "formatVersion", "operationId", "revision", "stateHash", "status", "workflowId"]);
   assert.equal(value.status, "created");
+  assert.equal(value.documentStatus, "planned", "a created draft's own status");
   assert.equal(value.operationId, "int-ensure");
   assert.equal(value.revision, 1);
   assert.equal(value.formatVersion, 2);

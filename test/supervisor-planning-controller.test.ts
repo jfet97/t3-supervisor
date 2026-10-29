@@ -5,7 +5,7 @@ import { vi } from "vitest";
 import { within as bounded } from "./support/g1b-conversation.js";
 import { TestClock } from "effect/testing";
 import { fingerprint } from "../src/guidance-store.js";
-import { createPlanningAttempt, planningDraftInstruction, planningHoldText, planningReleaseText, resolvePlanningAttempt, startPlanningAttempt } from "../src/supervisor-planning.js";
+import { createPlanningAttempt, planningCanAdopt, planningDraftInstruction, planningHoldText, planningReleaseText, resolvePlanningAttempt, startPlanningAttempt } from "../src/supervisor-planning.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
 import {helperInstructions, helperInstructionsVersion} from "../src/supervisor-helper-instructions.js";
 import {goldenSnapshot} from "./support/c1-workflow-fixture.js";
@@ -13,7 +13,7 @@ import {proposalContextFromDefinitions, validateWorkflowPlan} from "../src/super
 import {planBackTos, planBranches, planEntities, returnBudgetUsed, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import type {WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 import type { ThreadInfo } from "../src/types.js";
-import { planningFixture as fixture } from "./support/planning-fixture.js";
+import { planningFixture as fixture, type PlanningReadFailures } from "./support/planning-fixture.js";
 
 // a mutable namespace copy permits a scoped observer of the real watchdog fibers; every Effect implementation stays unchanged.
 vi.mock("effect", async importOriginal => {
@@ -36,6 +36,32 @@ it.effect("a registering helper reads its own reference on demand without receiv
   assert.match(helperInstructions, /request view documents only for complete plans, lineage, history or evidence/u);
   assert.equal((yield* f.workflows.readTool({...input, memberEpoch: member.epoch + 1}, cancel)).status, "denied");
   assert.notEqual((yield* f.workflows.readTool({...input, view: "context"}, cancel)).status, "ok", "registration grants reference reading only");
+  // the root's frozen check-in envelope is the root's own: a registering helper's authority does not read it
+  const request = yield* f.stores.requests.prepare({projectId: "project", supervisorThreadId: f.binding.threadId, kind: "review", taskId: null, text: "Check-in", batch: null,
+    completionMarker: "Supervisor check-in monitor:1 completed", envelope: {threads: []}}, 1);
+  assert.equal((yield* f.workflows.readTool({...input, view: "request", requestId: request.id}, cancel)).status, "denied");
+}));
+
+it.effect("a ready helper reads only its own check-in's frozen rows with view request; the root's request is not owned and an unknown id is unavailable", () => Effect.gen(function* () {
+  const f = yield* fixture();
+  const registered = yield* f.stores.team.registerMember(f.binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "bootstrap-run", now: 1});
+  const member = yield* f.stores.team.markReady(f.binding, registered.threadId, registered.epoch);
+  const cancel = yield* Deferred.make<void>();
+  const authority = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch};
+  const rows = {targets: [{threadId: "main", assignmentRootThreadId: "main", assignmentEpoch: 1, pending: 2, refs: [{sourceItemId: "turn-item:1"}]}], notifications: []};
+  const own = yield* f.stores.requests.prepare({id: "team-review:own", projectId: "project", supervisorThreadId: member.threadId, kind: "review", taskId: null,
+    text: "Helper check-in", batch: null, completionMarker: "Supervisor team check-in team-review:own completed", teamMemberEpoch: member.epoch, envelope: rows}, 1);
+  const root = yield* f.stores.requests.prepare({projectId: "project", supervisorThreadId: f.binding.threadId, kind: "review", taskId: null, text: "Check-in", batch: null,
+    completionMarker: "Supervisor check-in monitor:1 completed", envelope: {threads: []}}, 2);
+  const read = (yield* f.reader.readTool({...authority, view: "request", requestId: own.id}, cancel)) as unknown as {status: string; view: string; request: Record<string, unknown>; envelope: unknown};
+  assert.deepEqual([read.status, read.view, read.request.requestId, read.request.kind, read.envelope], ["ok", "request", own.id, "review", rows]);
+  assert.deepEqual(yield* f.reader.readTool({...authority, view: "request", requestId: root.id}, cancel), {status: "denied", view: "request", reason: "request_not_owned"});
+  assert.deepEqual(yield* f.reader.readTool({...authority, view: "request", requestId: "00000000-0000-4000-8000-000000000000"}, cancel), {status: "unavailable", view: "request", reason: "request_unknown"});
+  // a stale epoch reads nothing, and the root reads its own request but not the helper's
+  assert.equal((yield* f.reader.readTool({...authority, memberEpoch: member.epoch + 1, view: "request", requestId: own.id}, cancel)).status, "denied");
+  const rootAuthority = {supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  assert.equal(((yield* f.reader.readTool({...rootAuthority, view: "request", requestId: root.id}, cancel)) as {status: string}).status, "ok");
+  assert.deepEqual(yield* f.reader.readTool({...rootAuthority, view: "request", requestId: own.id}, cancel), {status: "denied", view: "request", reason: "request_not_owned"});
 }));
 
 it.effect("a planning pause needs its exact native owner call and preserves one identity on replay", () => Effect.gen(function* () {
@@ -50,7 +76,7 @@ it.effect("a planning pause needs its exact native owner call and preserves one 
   assert.ok(stored);
   // the owner sees the attempt's states and its drafter's task; delivery identities, texts and hashes stay stored
   assert.deepEqual(first.attempt, {attemptId: stored.id, state: "open", deadline: new Date(stored.deadline).toISOString(), resolution: null,
-    targets: [{threadId: "main", state: "requested", ack: null}], draft: null, draftInstruction: planningDraftInstruction(stored)});
+    targets: [{threadId: "main", state: "requested", ack: null}], uncovered: [], scopeUnavailable: false, draft: null, draftInstruction: planningDraftInstruction(stored)});
   for (const hidden of [stored.targets[0]!.hold.messageId, stored.targets[0]!.hold.commandId, stored.requestHash!])
     assert.ok(!JSON.stringify(first).includes(hidden), hidden);
   const replay = (yield* f.controller.call(f.args)) as Answer;
@@ -73,7 +99,7 @@ it.effect("a planning pause needs its exact native owner call and preserves one 
   const released = (yield* f.controller.call(release)) as Answer;
   assert.equal(released.status, "recorded");
   assert.equal(released.attempt.draftInstruction, undefined);
-  assert.deepEqual(Object.keys(released.attempt), ["attemptId", "state", "deadline", "resolution", "targets", "draft"]);
+  assert.deepEqual(Object.keys(released.attempt), ["attemptId", "state", "deadline", "resolution", "targets", "uncovered", "scopeUnavailable", "draft"]);
   f.proof(read);
   assert.equal(((yield* f.controller.call(read)) as {attempts: Answer["attempt"][]}).attempts[0]!.draftInstruction, undefined, "a released attempt offers no drafter");
 }));
@@ -149,12 +175,344 @@ it.effect("a source-bound native pause observes the actor's own ACK and confirms
   assert.equal(((yield* f.controller.call(release)) as {status: string}).status, "recorded");
   yield* f.controller.reconcile(f.binding);
   const notice = sent.find(item => String(item.messageId).includes(":release:"))!;
-  assert.equal(notice.text, `Planning pause ${result.attempt.attemptId} released (planning resolved). Continue your authorised task; human Stops and limits still apply.`);
+  // the fixture task has no proposal yet: planning resolved releases the pause but grants no implementation permission
+  assert.equal(notice.text, `Planning pause ${result.attempt.attemptId} released (planning resolved). This release grants no implementation permission: no workflow proposal is agreed yet; agree the one your Supervisor sends before implementing; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`);
   main.messages.push({id: String(notice.messageId), threadId: "main", runId: "source-run", nodeId: "source-node", role: "user", streaming: false,
     text: String(notice.text), creationSource: "server", createdBy: "system", createdAt: "2026-10-27T12:01:02Z", updatedAt: "2026-10-27T12:01:02Z"});
   yield* f.controller.reconcile(f.binding);
   assert.equal((yield* f.stores.requests.planningAttempts("project"))[0]?.state, "resolved");
   assert.equal(sent.length, 2, "one stable hold and one stable release");
+}));
+
+type PausedAnswer = Answer & {attempt: {targets: Array<{threadId: string; state: string}>; uncovered: Array<{threadId: string; reason: string}>; scopeUnavailable: boolean}};
+const acknowledgingRpc = (sent: Record<string, unknown>[]): NativeRpcShape => ({call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+  sent.push({...payload});
+  return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+}});
+// a native child of the fixture main whose execution is a provider turn the main reports as a subagent record with its parent run
+const nativeChild = (f: Effect.Success<ReturnType<typeof fixture>>, id: string, running: boolean, now: number): ThreadInfo => {
+  const child: ThreadInfo = {id, title: id, projectId: "project", creationSource: "provider", lineage: {parentThreadId: "main", relationshipToParent: "subagent"},
+    runtimeMode: "full-access", interactionMode: "default"};
+  f.threads.push(child);
+  const turn = {id: `${id}-turn`, providerThreadId: `provider-${id}`, nodeId: `${id}-root`, status: running ? "running" : "completed", startedAt: new Date(now).toISOString(),
+    completedAt: running ? null : new Date(now).toISOString(), nativeTurnRef: {driver: "codex", nativeId: `native-${id}`, strength: "strong"}};
+  f.projections.set(id, {thread: child, runs: [], nodes: [{id: turn.nodeId, threadId: id, providerThreadId: turn.providerThreadId, providerTurnId: turn.id}], providerTurns: [turn],
+    messages: [], turnItems: [], runtimeRequests: []});
+  const main = f.projections.get("main")!;
+  main.subagents = [...(main.subagents ?? []), {id: `${id}-task`, childThreadId: id, origin: "provider_native", providerThreadId: `provider-${id}`, runId: "source-run", status: running ? "running" : "completed"}];
+  return child;
+};
+const finishChild = (f: Effect.Success<ReturnType<typeof fixture>>, id: string, now: number) => {
+  const projection = f.projections.get(id)!;
+  for (const turn of projection.providerTurns as Record<string, unknown>[]) {turn.status = "completed"; turn.completedAt = new Date(now).toISOString();}
+  for (const record of f.projections.get("main")!.subagents as Record<string, unknown>[]) if (record.childThreadId === id) record.status = "completed";
+};
+const restartChild = (f: Effect.Success<ReturnType<typeof fixture>>, id: string, now: number) => {
+  const projection = f.projections.get(id)!;
+  const turns = projection.providerTurns as Record<string, unknown>[];
+  turns.push({id: `${id}-turn-${turns.length + 1}`, providerThreadId: `provider-${id}`, nodeId: `${id}-root`, status: "running",
+    startedAt: new Date(now).toISOString(), completedAt: null, nativeTurnRef: {driver: "codex", nativeId: `native-${id}-${turns.length + 1}`, strength: "strong"}});
+  for (const record of f.projections.get("main")!.subagents as Record<string, unknown>[]) if (record.childThreadId === id) record.status = "running";
+};
+// a child's own completed reply carrying the attempt's ACK record for itself
+const acknowledgeChild = (f: Effect.Success<ReturnType<typeof fixture>>, attemptId: string, id: string) => {
+  const projection = f.projections.get(id)!;
+  projection.runs = [{id: `${id}-run`, ordinal: 1, status: "completed", requestedAt: "2026-10-27T12:00:00Z", startedAt: "2026-10-27T12:00:00Z", completedAt: "2026-10-27T12:01:00Z",
+    rootNodeId: `${id}-root-node`, threadId: id, providerThreadId: `provider-${id}`}];
+  (projection.nodes as Record<string, unknown>[]).push(
+    {id: `${id}-root-node`, kind: "root_turn", threadId: id, runId: `${id}-run`, rootNodeId: `${id}-root-node`, parentNodeId: null, providerThreadId: `provider-${id}`, status: "completed"},
+    {id: `${id}-ack-node`, kind: "assistant_message", threadId: id, runId: `${id}-run`, rootNodeId: `${id}-root-node`, parentNodeId: `${id}-root-node`, providerThreadId: `provider-${id}`, status: "completed"});
+  projection.messages.push({id: `${id}-ack`, threadId: id, runId: `${id}-run`, nodeId: `${id}-ack-node`, role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId, targetThreadId: id})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+};
+const acknowledgeMain = (f: Effect.Success<ReturnType<typeof fixture>>, attemptId: string) => {
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+};
+
+it.effect("a paused main holds its live native descendants through their parent, including a late one; a parent ACK never counts for a child, whose own terminal lifecycle makes it quiescent", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const f = yield* fixture(acknowledgingRpc(sent));
+  const now = yield* Clock.currentTimeMillis;
+  nativeChild(f, "busy-child", true, now);
+  nativeChild(f, "idle-child", false, now);
+  f.proof(f.args);
+  const result = (yield* f.controller.call(f.args)) as PausedAnswer;
+  assert.equal(result.status, "recorded", JSON.stringify(result));
+  assert.deepEqual(result.attempt.targets.map(target => target.threadId).sort(), ["busy-child", "main"], "the child with ongoing work is held, the idle one is not");
+  assert.deepEqual(result.attempt.uncovered, []);
+  yield* f.controller.reconcile(f.binding);
+  const [attempt] = yield* f.stores.requests.planningAttempts("project");
+  const childTarget = attempt!.targets.find(target => target.threadId === "busy-child");
+  assert.ok(childTarget);
+  assert.equal(childTarget.recipientThreadId, "main", "a native child is held through its parent's dispatch");
+  assert.equal(childTarget.hold.text, planningHoldText(attempt!, childTarget));
+  assert.match(childTarget.hold.text ?? "", /Hold dispatch for child busy-child/);
+  // a child that appears after the pause is held on the next pass; the parent's ACK leaves both children requested
+  nativeChild(f, "late-child", true, now);
+  acknowledgeMain(f, result.attempt.attemptId);
+  yield* f.controller.reconcile(f.binding);
+  const [withLate] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(withLate!.targets.map(target => [target.threadId, target.state]).sort(), [["busy-child", "requested"], ["late-child", "requested"], ["main", "acknowledged"]]);
+  assert.equal(planningCanAdopt(withLate!, yield* Clock.currentTimeMillis), false);
+  const release = {...f.args, action: "release", attemptId: result.attempt.attemptId, operationId: "release-early", resolution: "continue"};
+  delete (release as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(release);
+  assert.deepEqual(yield* f.controller.call(release), {status: "denied", reason: "planning_acks_incomplete"});
+  // the children's own terminal lifecycle, with the parent's dispatch held, makes them quiescent
+  finishChild(f, "busy-child", now + 1);
+  finishChild(f, "late-child", now + 1);
+  yield* f.controller.reconcile(f.binding);
+  const [quiet] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(quiet!.targets.filter(target => target.threadId !== "main").map(target => target.state), ["quiescent", "quiescent"]);
+  assert.equal(planningCanAdopt(quiet!, yield* Clock.currentTimeMillis), true);
+  // adoption establishes quiet freshly: a child with work again is awaited again, not adopted on its earlier reading
+  restartChild(f, "busy-child", now + 2);
+  f.proof({...release, operationId: "release-restarted"});
+  assert.deepEqual(yield* f.controller.call({...release, operationId: "release-restarted"}), {status: "denied", reason: "planning_acks_incomplete"});
+  const [awaited] = yield* f.stores.requests.planningAttempts("project");
+  const restarted = awaited!.targets.find(target => target.threadId === "busy-child")!;
+  assert.deepEqual([restarted.state, restarted.quiescence], ["requested", undefined], "the release's own read withdrew the quiescence");
+  finishChild(f, "busy-child", now + 3);
+  yield* f.controller.reconcile(f.binding);
+  // neither finished child has a workflow of its own: the release needs none fabricated, and each relayed hold is released as a hold only
+  f.proof({...release, operationId: "release-finished"});
+  assert.equal(((yield* f.controller.call({...release, operationId: "release-finished"})) as {status: string}).status, "recorded");
+  yield* f.controller.reconcile(f.binding);
+  const notices = sent.filter(item => String(item.messageId).includes(":release:")).map(item => String(item.text));
+  assert.equal(notices.length, 3, JSON.stringify(notices));
+  for (const id of ["busy-child", "late-child"]) {
+    const notice = notices.find(text => text.startsWith(`Relay to child ${id}: planning pause`));
+    assert.ok(notice, id);
+    assert.match(notice, /releases your dispatch hold only\. Do not restart it or re-task it under its earlier result/);
+    assert.doesNotMatch(notice, /Continue your authorised task|scoped plan/);
+  }
+  assert.ok(notices.some(text => text.startsWith(`Planning pause ${result.attempt.attemptId} released (planning resolved).`)), "the main's own release names the task's acceptance route");
+}));
+
+it.effect("a held child whose work resumes needs its linked, planned workflow to continue; without one the continue release is refused and a no-plan release still frees it", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const f = yield* fixture(acknowledgingRpc(sent));
+  const now = yield* Clock.currentTimeMillis;
+  nativeChild(f, "live-child", true, now);
+  f.proof(f.args);
+  const result = (yield* f.controller.call(f.args)) as PausedAnswer;
+  assert.equal(result.status, "recorded", JSON.stringify(result));
+  yield* f.controller.reconcile(f.binding);
+  acknowledgeMain(f, result.attempt.attemptId);
+  acknowledgeChild(f, result.attempt.attemptId, "live-child");
+  yield* f.controller.reconcile(f.binding);
+  const [acked] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(acked!.targets.map(target => [target.threadId, target.state]).sort(), [["live-child", "acknowledged"], ["main", "acknowledged"]]);
+  const release = {...f.args, action: "release", attemptId: result.attempt.attemptId, operationId: "release-unscoped", resolution: "continue"};
+  delete (release as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(release);
+  assert.deepEqual(yield* f.controller.call(release), {status: "denied", reason: "planning_target_unscoped"}, "live work that resumes is not pointed at a plan it does not have");
+  const noPlan = {...release, operationId: "release-no-plan", resolution: "no_plan"};
+  f.proof(noPlan);
+  assert.equal(((yield* f.controller.call(noPlan)) as {status: string}).status, "recorded");
+  yield* f.controller.reconcile(f.binding);
+  const relayed = sent.map(item => String(item.text)).find(text => text.startsWith("Relay to child live-child: planning pause"));
+  assert.equal(relayed, `Relay to child live-child: planning pause ${result.attempt.attemptId} released (no plan needed). Continue your authorised task; human Stops and limits still apply.`);
+}));
+
+it.effect("a live child that cannot be read is listed as unavailable and blocks adoption past the main's ACK until a fresh read settles it; a release reads membership itself and a lineage outage marks the attempt until it recovers", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const failures: PlanningReadFailures = {projections: new Set(["dark-child", "flaky-child"]), listThreads: false};
+  const f = yield* fixture(acknowledgingRpc(sent), {readFailures: failures});
+  const now = yield* Clock.currentTimeMillis;
+  nativeChild(f, "dark-child", true, now);
+  nativeChild(f, "flaky-child", true, now);
+  f.proof(f.args);
+  const result = (yield* f.controller.call(f.args)) as PausedAnswer;
+  assert.equal(result.status, "recorded", JSON.stringify(result));
+  assert.deepEqual(result.attempt.targets.map(target => target.threadId), ["main"], "an unreadable child is never a target");
+  assert.deepEqual(result.attempt.uncovered, [{threadId: "dark-child", reason: "unavailable"}, {threadId: "flaky-child", reason: "unavailable"}], "nothing about the unreadable children's work is established");
+  yield* f.controller.reconcile(f.binding);
+  acknowledgeMain(f, result.attempt.attemptId);
+  yield* f.controller.reconcile(f.binding);
+  const [acked] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(acked!.targets[0]!.state, "acknowledged");
+  assert.equal(planningCanAdopt(acked!, yield* Clock.currentTimeMillis), false, "the main's ACK cannot make the attempt look complete while a child is unread");
+  const release = {...f.args, action: "release", attemptId: result.attempt.attemptId, operationId: "release-dark", resolution: "continue"};
+  delete (release as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(release);
+  assert.deepEqual(yield* f.controller.call(release), {status: "denied", reason: "planning_acks_incomplete"});
+  // both reads recover: the idle child's listing is settled by that fresh read, not by time; the busy one is held, never silently dropped
+  failures.projections.clear();
+  finishChild(f, "dark-child", now + 1);
+  yield* f.controller.reconcile(f.binding);
+  const [recoveredBusy] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(recoveredBusy!.uncovered ?? [], [], "a fresh read settles the quiet child's listing and replaces the busy child's with a hold");
+  assert.deepEqual(recoveredBusy!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["flaky-child", "requested"]], "a readable busy child becomes a held target");
+  assert.equal(planningCanAdopt(recoveredBusy!, yield* Clock.currentTimeMillis), false, "the held busy child blocks adoption");
+  f.proof({...release, operationId: "release-busy"});
+  assert.deepEqual(yield* f.controller.call({...release, operationId: "release-busy"}), {status: "denied", reason: "planning_acks_incomplete"});
+  finishChild(f, "flaky-child", now + 1);
+  yield* f.controller.reconcile(f.binding);
+  const [settled] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(settled!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["flaky-child", "quiescent"]], "the held child's own terminal lifecycle makes it quiescent");
+  assert.equal(planningCanAdopt(settled!, yield* Clock.currentTimeMillis), true);
+  // a child that starts after the last reconcile is held by the release's own membership read, with no reconcile in between
+  nativeChild(f, "late-starter", true, now + 2);
+  f.proof({...release, operationId: "release-late"});
+  assert.deepEqual(yield* f.controller.call({...release, operationId: "release-late"}), {status: "denied", reason: "planning_acks_incomplete"});
+  const [withLate] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(withLate!.targets.map(target => [target.threadId, target.state]), [["main", "acknowledged"], ["flaky-child", "quiescent"], ["late-starter", "requested"]], "the release itself held the late child");
+  // a lineage outage establishes nothing: the release's own membership read marks the attempt and refuses, a reconcile pass under the
+  // same outage keeps the mark, and only a later successful read of the lineage clears it
+  finishChild(f, "late-starter", now + 3);
+  yield* f.controller.reconcile(f.binding);
+  failures.listThreads = true;
+  f.proof({...release, operationId: "release-outage"});
+  assert.deepEqual(yield* f.controller.call({...release, operationId: "release-outage"}), {status: "denied", reason: "planning_scope_unavailable"}, "an unreadable lineage is not an established membership");
+  const [markedByRelease] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(typeof markedByRelease!.scopeUnavailableAt, "number", "the release itself records the outage, even at a zero clock");
+  yield* f.controller.reconcile(f.binding);
+  const [marked] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(marked!.scopeUnavailableAt, markedByRelease!.scopeUnavailableAt, "a reconcile under the same outage keeps the first mark");
+  assert.equal(planningCanAdopt(marked!, yield* Clock.currentTimeMillis), false);
+  failures.listThreads = false;
+  const read = {...f.args, action: "read", attemptId: result.attempt.attemptId, operationId: "read-outage"};
+  delete (read as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(read);
+  assert.equal(((yield* f.controller.call(read)) as {attempts: PausedAnswer["attempt"][]}).attempts[0]?.scopeUnavailable, true, "the mark stays until a read establishes membership again");
+  f.proof({...release, operationId: "release-recovered"});
+  assert.equal(((yield* f.controller.call({...release, operationId: "release-recovered"})) as {status: string}).status, "recorded", "the release's own fresh read re-establishes membership: every held child is quiet");
+  const [recovered] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(recovered!.scopeUnavailableAt, undefined, "a successful lineage read clears the mark");
+  assert.equal(recovered!.state, "releasing", "the release notices are still being delivered");
+  // the native descendant has no workflow of its own: its relayed release carries no scoped-plan hint and the main's is unchanged
+  yield* f.controller.reconcile(f.binding);
+  const relayed = sent.filter(item => String(item.messageId).includes(":release:")).map(item => String(item.text));
+  assert.equal(relayed.length, 3, JSON.stringify(relayed));
+  assert.ok(relayed.some(text => text.startsWith("Relay to child late-starter: planning pause") && text.includes("releases your dispatch hold only") && !text.includes("Continue your authorised task")), JSON.stringify(relayed));
+  assert.ok(relayed.some(text => text.startsWith(`Planning pause ${result.attempt.attemptId} released (planning resolved). This release grants no implementation permission`)), JSON.stringify(relayed));
+}));
+
+it.effect("the combined target limit is the existing 100: overflow at pause time is denied with its count, a late child beyond it and a helper-covered child are listed and block adoption", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const f = yield* fixture(acknowledgingRpc(sent));
+  const now = yield* Clock.currentTimeMillis;
+  for (let index = 0; index < 100; index++) nativeChild(f, `child-${index}`, true, now);
+  f.proof(f.args);
+  assert.deepEqual(yield* f.controller.call(f.args), {status: "denied", reason: "planning_targets_limit", targetCount: 101});
+  // 99 running children and the main fill the limit exactly; a late child and a helper-covered child are uncovered, not quiet
+  f.threads.splice(f.threads.findIndex(thread => thread.id === "child-99"), 1);
+  f.projections.delete("child-99");
+  f.projections.get("main")!.subagents = (f.projections.get("main")!.subagents as Record<string, unknown>[]).filter(record => record.childThreadId !== "child-99");
+  const retry = {...f.args, operationId: "pause-b"};
+  f.proof(retry);
+  const result = (yield* f.controller.call(retry)) as PausedAnswer;
+  assert.equal(result.status, "recorded", JSON.stringify(result));
+  assert.equal(result.attempt?.targets.length, 100, JSON.stringify(result).slice(0, 300));
+  nativeChild(f, "late-child", true, now);
+  const helperChild = nativeChild(f, "helper-child", true, now);
+  const registered = yield* f.stores.team.registerMember(f.binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "bootstrap-run", now: 1});
+  yield* f.stores.team.markReady(f.binding, registered.threadId, registered.epoch);
+  yield* f.stores.team.assign(f.binding, helperChild.id, registered.threadId, new Map(f.threads.map(thread => [thread.id, thread.lineage.parentThreadId ?? null])));
+  yield* f.controller.reconcile(f.binding);
+  const [attempt] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(attempt!.targets.length, 100, "nothing beyond the limit becomes a target");
+  assert.deepEqual(attempt!.uncovered?.map(item => [item.threadId, item.reason]).sort(), [["helper-child", "assigned_to_helper"], ["late-child", "limit"]]);
+  for (const id of attempt!.targets.map(target => target.threadId).filter(id => id !== "main")) finishChild(f, id, now + 1);
+  acknowledgeMain(f, result.attempt.attemptId);
+  yield* f.controller.reconcile(f.binding);
+  const [settled] = yield* f.stores.requests.planningAttempts("project");
+  assert.ok(settled!.targets.every(target => target.state === "acknowledged" || target.state === "quiescent"), "every held target is quiet");
+  assert.equal(planningCanAdopt(settled!, yield* Clock.currentTimeMillis), false, "uncovered children never read as quiet");
+  const read = {...f.args, action: "read", attemptId: result.attempt.attemptId, operationId: "read-b"};
+  delete (read as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(read);
+  const answer = (yield* f.controller.call(read)) as {status: string; attempts: PausedAnswer["attempt"][]};
+  assert.equal(answer.status, "ready");
+  assert.deepEqual(answer.attempts[0]?.uncovered.map(item => [item.threadId, item.reason]).sort(), [["helper-child", "assigned_to_helper"], ["late-child", "limit"]], "the read lists what the pause could not hold");
+  // a listing is settled only by fresh evidence of quiet: the helper-covered child finishes, the one beyond the limit stays listed while busy
+  finishChild(f, "helper-child", now + 2);
+  yield* f.controller.reconcile(f.binding);
+  const [helperQuiet] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(helperQuiet!.uncovered?.map(item => [item.threadId, item.reason]), [["late-child", "limit"]], "the quiet helper-covered child is settled; the busy over-limit child is not");
+  assert.equal(planningCanAdopt(helperQuiet!, yield* Clock.currentTimeMillis), false);
+  finishChild(f, "late-child", now + 3);
+  yield* f.controller.reconcile(f.binding);
+  const [allQuiet] = yield* f.stores.requests.planningAttempts("project");
+  assert.deepEqual(allQuiet!.uncovered ?? [], [], "the over-limit child's listing is settled by its own quiet read");
+  assert.equal(planningCanAdopt(allQuiet!, yield* Clock.currentTimeMillis), true);
+}), {timeout: 30_000});
+
+// the main's prepared proposal as the task carries it before acceptance, and the same proposal recorded as its agreement
+const proposal: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
+  workspaceRoot: "/workspace/project", revision: "definitions-1", globalRevision: null, definitionsStatus: "ready", definitionsComplete: true,
+  requirementsKnown: true, requirements: [], issues: [], plan: null};
+const agreement = {status: "agreed" as const, message: "The operative assistant accepted the Supervisor's exact proposal by its digest.", proposalId: "proposal-a",
+  agreedAt: 1, evidence: {kind: "supervisor_message" as const, messageId: "proposal-message"}, agentMessageId: "acceptance-message", workflow: proposal};
+// the acknowledged pause of the fixture main, through the controller's own hold send and the main's exact ACK
+const acknowledgedPause = (f: Effect.Success<ReturnType<typeof fixture>>, sent: Record<string, unknown>[]) => Effect.gen(function* () {
+  f.proof(f.args);
+  const result = (yield* f.controller.call(f.args)) as Answer;
+  assert.equal(result.status, "recorded");
+  yield* f.controller.reconcile(f.binding);
+  assert.ok(sent.find(item => String(item.messageId).includes(":hold:")), "the hold went out natively");
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: result.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  return result.attempt.attemptId;
+});
+const releaseOf = (sent: Record<string, unknown>[]) => String(sent.find(item => String(item.messageId).includes(":release:"))?.text);
+
+for (const agreed of [false, true])
+it.effect(`a planning-resolved release of a main whose proposal is ${agreed ? "agreed continues the task" : "unagreed grants no implementation permission and names the acceptance route"}, only after the ACK`, () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+    sent.push({...payload});return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+  }};
+  const f = yield* fixture(rpc);
+  yield* f.stores.supervisors.saveTask({...f.task, workflow: proposal, workflowProposalId: "proposal-a", ...(agreed ? {agreement} : {})});
+  f.proof(f.args);
+  const paused = (yield* f.controller.call(f.args)) as Answer;
+  // a release before the main's ACK is refused: the two never race into a release of an unacknowledged pause
+  const early = {...f.args, action: "release", attemptId: paused.attempt.attemptId, operationId: "release-early", resolution: "continue"};
+  delete (early as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(early);
+  assert.equal(((yield* f.controller.call(early)) as {reason?: string}).reason, "planning_acks_incomplete");
+  yield* f.controller.reconcile(f.binding);
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  yield* f.controller.reconcile(f.binding);
+  const release = {...early, operationId: "release-a"};
+  f.proof(release);
+  assert.equal(((yield* f.controller.call(release)) as {status: string}).status, "recorded");
+  yield* f.controller.reconcile(f.binding);
+  const attemptId = paused.attempt.attemptId;
+  // the native send carries the release the main's agreement state decides
+  assert.equal(releaseOf(sent), agreed
+    ? `Planning pause ${attemptId} released (planning resolved). Continue your authorised task; human Stops and limits still apply.`
+    : `Planning pause ${attemptId} released (planning resolved). This release grants no implementation permission: workflow proposal proposal-a is not agreed; read it with supervision_plan {"callerThreadId":"main","taskId":"task-a","proposalId":"proposal-a"} and, if you agree, put its exact acceptance record in your own completed reply; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`);
+  const [stored] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(stored!.targets[0]!.release!.text, releaseOf(sent), "the stored bytes are the sent bytes");
+  assert.equal(sent.length, 2, "one hold and one release");
+}));
+
+it.effect("a pause superseded by a changed task releases the main without implementation permission while nothing is agreed", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+    sent.push({...payload});return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+  }};
+  const f = yield* fixture(rpc);
+  const attemptId = yield* acknowledgedPause(f, sent);
+  // the main's request was replaced by a new task: the attempt is superseded and its delivered hold must be released
+  yield* f.stores.supervisors.saveTask({...f.task, id: "task-b", messageId: "interpretation-b"});
+  yield* f.controller.reconcile(f.binding);
+  const [stored] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(stored?.state, "superseded");
+  assert.equal(stored?.resolution, "superseded");
+  assert.equal(releaseOf(sent), `Planning pause ${attemptId} released (superseded). This release grants no implementation permission: no workflow proposal is agreed yet; agree the one your Supervisor sends before implementing; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`);
+  assert.doesNotMatch(releaseOf(sent), /Continue your authorised task/u);
 }));
 
 it.effect("an edited requester source cannot receive the earlier planning hold", () => Effect.gen(function* () {

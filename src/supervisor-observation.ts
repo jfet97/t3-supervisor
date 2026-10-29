@@ -41,8 +41,19 @@ export const ProjectSupervisorScopeThreadSchema = Schema.Struct({
   deletedAt: Schema.NullOr(Schema.String),
   activityRefs: Schema.Array(SupervisorActivityReferenceSchema),
   contactLimit: Schema.String,
+  /** True only when the service itself read this thread's projection in this snapshot with its lineage verified; metadata alone is not a read. */
+  projectionRead: Schema.optionalKey(Schema.Boolean),
 });
 export type ProjectSupervisorScopeThread = typeof ProjectSupervisorScopeThreadSchema.Type;
+
+/** How the settlement of one T3-managed participant stands after task completion; unresolved and skipped carry a reason. */
+export const participantSettlementStates = ["pending", "uncertain", "settled", "superseded", "unresolved", "skipped"] as const;
+export type ParticipantSettlementState = typeof participantSettlementStates[number];
+export const ParticipantSettlementSchema = Schema.Struct({taskId: Schema.String, taskRevision: Schema.String, completionId: Schema.NullOr(Schema.String), threadId: Schema.String,
+  environmentId: Schema.NullOr(Schema.String), state: Schema.Literals(participantSettlementStates), reason: Schema.NullOr(Schema.String), observedAt: Schema.Number});
+export type ParticipantSettlementInfo = typeof ParticipantSettlementSchema.Type;
+/** The main's current task, its scope revision and the main document's latest completion record: the execution whose settlement rows are current. */
+export const CurrentExecutionSchema = Schema.Struct({taskId: Schema.String, taskRevision: Schema.String, completionId: Schema.NullOr(Schema.String)});
 
 export const ProjectSupervisorScopeSnapshotSchema = Schema.Struct({
   projectId: Schema.String,
@@ -56,6 +67,10 @@ export const ProjectSupervisorScopeSnapshotSchema = Schema.Struct({
   complete: Schema.Boolean,
   issues: Schema.Array(SupervisorObservationIssueSchema),
   threads: Schema.Array(ProjectSupervisorScopeThreadSchema),
+  /** The binding's recorded participant settlements, each for the execution it was evaluated on; absent while nothing was evaluated. */
+  participantSettlements: Schema.optionalKey(Schema.Array(ParticipantSettlementSchema)),
+  /** The main's current execution, read independently of any workflow page; null while the main has no task. */
+  currentExecution: Schema.optionalKey(Schema.NullOr(CurrentExecutionSchema)),
 });
 export type ProjectSupervisorScopeSnapshot = typeof ProjectSupervisorScopeSnapshotSchema.Type;
 export type SupervisorScopeObservedThread = ProjectSupervisorScopeThread;
@@ -209,5 +224,6 @@ export const observeScopeThread = (input: {
     deletedAt,
     activityRefs: input.lineageVerified === false ? [] : input.activityRefs.slice(0, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS),
     contactLimit: contactLimit(origin, current.lifecycle, archivedAt, deletedAt),
+    projectionRead: projection !== null && input.lineageVerified !== false,
   };
 };

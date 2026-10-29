@@ -235,16 +235,19 @@ const waitingReview = (clock: FixtureClock) => Effect.gen(function* () {
   const fixture = yield* dueCheckIn(clock);
   yield* fixture.run;
   const request = yield* fixture.requests.pending(projectId, fixture.binding.threadId);
-  // a root with workflow state carries the instructions handle, so no role version waits for delivery
-  assert.ok(request?.kind === "review" && request.state === "waiting" && request.batch && request.roleVersion === undefined);
+  // the first wake of an instructions version carries the full root notice and names that version to confirm; the binding records it
+  // as delivered only through a confirmed completion, so it stays undelivered until then
+  const version = String((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})).version);
+  assert.ok(request?.kind === "review" && request.state === "waiting" && request.batch);
+  assert.equal(request.roleVersion, version, "the first wake carries the current instructions version to confirm");
   const run = fixture.supervisor.runs.find(item => item.userMessageId === request.messageId);
   assert.ok(run);
-  return {fixture, request, run};
+  return {fixture, request, run, version};
 });
 
 it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back completion and the miss reset, also after reopen", () => Effect.gen(function* () {
   const clock = {now: baseTime};
-  const {fixture, request, run} = yield* waitingReview(clock);
+  const {fixture, request, run, version} = yield* waitingReview(clock);
   yield* fixture.requests.missedReview(fixture.binding.threadId);
   assert.equal((yield* recordOutcome(fixture, fixture.supervisor, request)).status, "recorded");
   completeRun(fixture.supervisor, run, `No intervention is needed. ${request.completionMarker}`, clock.now + 1);
@@ -259,11 +262,12 @@ it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back compl
   assert.deepEqual(yield* reviewState(reopened.sql, fixture.binding.threadId, request.id), before);
   assert.deepEqual((yield* reopened.monitor.pending(projectId, operativeThreadId)).map(item => item.id), pendingBefore);
 
-  // the same reconcile succeeds once the failure is gone
+  // the same reconcile succeeds once the failure is gone: the confirmed completion also records the carried version as delivered, in
+  // the same section as the completion, the miss reset and the acknowledgement (the rolled-back attempt above left it undelivered)
   yield* execute(fixture.sql, "DROP TRIGGER c1_fail_acknowledgement");
   yield* fixture.run;
   const completed = yield* reviewState(fixture.sql, fixture.binding.threadId, request.id);
-  assert.deepEqual(completed, {state: "completed", error: null, runId: run.id, deliveredRoleVersion: null, reviewMisses: 0,
+  assert.deepEqual(completed, {state: "completed", error: null, runId: run.id, deliveredRoleVersion: version, reviewMisses: 0,
     acknowledged: [...pendingBefore].sort()});
   assert.deepEqual(yield* fixture.monitor.pending(projectId, operativeThreadId), []);
 }), {timeout: 10_000});
@@ -281,6 +285,7 @@ it.effect("CT-CONV-04: a failure after the miss increment rolls back the counter
   const reopened = yield* fixture.reopen;
   assert.deepEqual(yield* reviewState(reopened.sql, fixture.binding.threadId, request.id), before);
 
+  // a completion without its marker is a miss: it closes the request but confirms nothing, so the carried version stays undelivered
   yield* execute(fixture.sql, "DROP TRIGGER c1_fail_close");
   yield* fixture.run;
   assert.deepEqual(yield* reviewState(fixture.sql, fixture.binding.threadId, request.id), {state: "completed",

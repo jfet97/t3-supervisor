@@ -19,6 +19,7 @@ import {
   externalContributionLimits,
   externalContributionReferenceKinds,
   externalContributionStates,
+  participantReceiptKinds,
   workflowEvidenceKinds,
   workflowExecutionStatuses,
   storedPlanJsonDepth,
@@ -35,8 +36,10 @@ import {
   type ExternalContributionDiagnosticCode,
   type ExternalContributionImport,
   type ExternalContributionImportResult,
+  type ExternalContributionParticipant,
   type ExternalContributionRecord,
   type WorkflowContributionAssessmentInput,
+  type WorkflowEvidenceParticipant,
   type ReturnBudget,
   type ReturnBudgetEvent,
   type WorkflowAgreementImport,
@@ -190,6 +193,23 @@ const contributionReferenceKinds = new Set<string>(externalContributionReference
 const contributionRecordKeys = ["taskId", "contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef"] as const;
 const exactRecordKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+// the exact key set, with one named key that may be absent
+const exactRecordKeysWithOptional = (value: Record<string, unknown>, keys: readonly string[], optional: string): boolean =>
+  exactRecordKeys(value, keys) || exactRecordKeys(value, [...keys, optional]);
+const participantHandle = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
+  value.length <= externalContributionLimits.maxParticipantHandleLength;
+// the main's generic participant declaration: a T3 conversation (environment optional), an opaque external handle, or unknown
+const validParticipant = (value: unknown): boolean => value === null || isRecord(value) && (
+  value.kind === "t3_conversation" && exactRecordKeysWithOptional(value, ["kind", "threadId"], "environmentId") && participantHandle(value.threadId) &&
+    (value.environmentId === undefined || value.environmentId === null || participantHandle(value.environmentId)) ||
+  value.kind === "external" && exactRecordKeys(value, ["kind", "ref"]) && participantHandle(value.ref) ||
+  value.kind === "unknown" && exactRecordKeys(value, ["kind"]));
+const normalizeParticipant = (value: unknown): ExternalContributionParticipant | null => {
+  if (!isRecord(value)) return null;
+  if (value.kind === "t3_conversation") return {kind: "t3_conversation", threadId: value.threadId as string, environmentId: (value.environmentId as string | undefined) ?? null};
+  if (value.kind === "external") return {kind: "external", ref: value.ref as string};
+  return {kind: "unknown"};
+};
 const validContributionId = (value: unknown): value is string => typeof value === "string" && contributionIdPattern.test(value);
 const validContributionRevision = (value: unknown): value is number =>
   Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= externalContributionLimits.maxRevision;
@@ -203,20 +223,21 @@ const validContributionContent = (value: Record<string, unknown>): boolean =>
   typeof value.state === "string" && contributionStates.has(value.state) &&
   typeof value.summary === "string" && value.summary.length <= externalContributionLimits.maxSummaryLength &&
   validContributionReferences(value.references) && (value.externalRef === null || typeof value.externalRef === "string" &&
-    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength);
+    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength) &&
+  (value.participant === undefined || validParticipant(value.participant));
 
-/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text. */
+/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text; participant optional. */
 export const parseExternalContributionRecord = (value: unknown): ExternalContributionRecord | null =>
-  isRecord(value) && exactRecordKeys(value, contributionRecordKeys) && typeof value.taskId === "string" && value.taskId.length > 0 &&
+  isRecord(value) && exactRecordKeysWithOptional(value, contributionRecordKeys, "participant") && typeof value.taskId === "string" && value.taskId.length > 0 &&
   value.taskId.length <= externalContributionLimits.maxTaskIdLength && validContributionContent(value)
     ? {taskId: value.taskId as string, contributionId: value.contributionId as string, nodeId: value.nodeId as string,
       revision: value.revision as number, state: value.state as ExternalContributionRecord["state"], summary: value.summary as string,
       references: (value.references as ExternalContributionRecord["references"]).map(item => ({kind: item.kind, value: item.value})),
-      externalRef: value.externalRef as string | null}
+      externalRef: value.externalRef as string | null, ...(Object.hasOwn(value, "participant") ? {participant: normalizeParticipant(value.participant)} : {})}
     : null;
 
-const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef">): string =>
-  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef]);
+const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef" | "participant">): string =>
+  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef, normalizeParticipant(value.participant)]);
 
 const validContributionAssessment = (value: unknown): boolean => value === null || isRecord(value) &&
   typeof value.decision === "string" && contributionDecisions.has(value.decision) && validContributionRevision(value.resultRevision) &&
@@ -232,9 +253,17 @@ const validEvidenceContribution = (value: unknown): boolean => value === undefin
   validContributionId(value.contributionId) && validContributionRevision(value.revision) &&
   (value.state === null || typeof value.state === "string" && contributionStates.has(value.state)) &&
   (value.decision === null || typeof value.decision === "string" && contributionDecisions.has(value.decision));
+const validEvidenceParticipant = (value: unknown): boolean => value === undefined || isRecord(value) &&
+  validContributionId(value.contributionId) && validContributionRevision(value.revision) && Number.isSafeInteger(value.attempt) && Number(value.attempt) >= 1 &&
+  validParticipant(value.participant) && isRecord(value.receipt) && typeof value.receipt.kind === "string" && (participantReceiptKinds as readonly string[]).includes(value.receipt.kind) &&
+  (value.receipt.toolName === null || validText(value.receipt.toolName)) && (value.receipt.inputDigest === null || validText(value.receipt.inputDigest)) &&
+  (value.repeats === undefined || Number.isSafeInteger(value.repeats) && Number(value.repeats) >= 1) && (value.firstRecordedAt === undefined || Number.isFinite(value.firstRecordedAt));
+// the identity of one receipt fact: the same actor observing the same declaration, revision and attempt the same way
+const receiptKey = (actor: string, value: WorkflowEvidenceParticipant): string =>
+  JSON.stringify([actor, value.contributionId, value.revision, value.attempt, normalizeParticipant(value.participant), value.receipt.kind, value.receipt.toolName]);
 
 const validContributionImport = (value: unknown): value is ExternalContributionImport => isRecord(value) &&
-  exactRecordKeys(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"]) &&
+  exactRecordKeysWithOptional(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"], "participant") &&
   validContributionContent(value) && validNativeReference(value.sourceThreadId) && validNativeReference(value.sourceRunId) && validNativeReference(value.sourceMessageId);
 
 const validContributionAssessmentInput = (value: unknown): value is WorkflowContributionAssessmentInput => isRecord(value) &&
@@ -787,6 +816,55 @@ const pendingReturnProblem = (current: WorkflowStateDocument, input: Pick<Workfl
   return null;
 };
 
+const returnRequiredExpected = "the selected path returns through this back_to: settle the assessing member only, let the service request the return, then start the " +
+  "next attempt with supervision_planning action apply_return; no status inside the return's region moves backward by hand.";
+const statusRepairRequiredExpected = "a status inside a return region moves backward, off the selected path, only as the correction of a misrecorded status: resend this " +
+  "apply with repair: true and status_changed evidence whose note says what was misrecorded; a repair starts no attempt and spends no jump.";
+const repairNotApplicableExpected = "send repair: true only with an apply that moves a status backward inside a return region whose failure path is not selected; " +
+  "this apply moves none.";
+/**
+ * The one return boundary. Inside the region of a back_to the current selections reach, its failure path selected or the return lying on
+ * every path, no status moves backward by hand: the assessing member settles, the service requests the return and the Supervisor applies
+ * it, which alone starts an attempt and spends a jump; with that return's budget spent the failure stays unresolved. Off the selected
+ * path a backward move inside a region is a misrecorded status, corrected only as an explicit repair, which starts no attempt. A region
+ * whose return already waits keeps the pending-return rule. Backward moves outside every region, and the reassessment a changed scope
+ * requires, are unaffected.
+ */
+const returnBoundaryProblem = (current: WorkflowStateDocument, input: Pick<WorkflowApplyInput, "repair">, nextPlan: WorkflowStatePlan,
+  selections: readonly BranchSelection[], returnBudgets: readonly ReturnBudget[], scopeReassessment: boolean):
+  {problem: WorkflowApplyDiagnostic} | {repaired: ReadonlySet<string>} => {
+  const repaired = new Set<string>();
+  const notApplicable = (): {problem: WorkflowApplyDiagnostic} => ({problem: {code: "repair_not_applicable", path: "/repair", expected: repairNotApplicableExpected}});
+  if (!nextPlan || scopeReassessment) return input.repair === true ? notApplicable() : {repaired};
+  const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
+  const backward = collectPlanEntities(nextPlan).filter(node => {
+    const before = previous.get(node.nodeId);
+    return before !== undefined && (node.status === "planned" && (before === "completed" || before === "underway") || node.status === "underway" && before === "completed");
+  });
+  const selected = effectiveBranchSelections(nextPlan, selections);
+  const reach = new Map(planReach(nextPlan, selected).map(({node, reach}) => [node, reach] as const));
+  // a region whose return already waits is the pending-return rule's to refuse, flag or not
+  const waiting = new Set(current.returns.flatMap(entry => entry.state === "pending" ? [entry.backToNodeId] : []));
+  const waitingRegions = new Set(current.returns.flatMap(entry => entry.state === "pending" ? entry.regionNodeIds : []));
+  const held = backward.some(node => waitingRegions.has(node.nodeId));
+  for (const backTo of planBackTos(nextPlan)) {
+    if (waiting.has(backTo.nodeId)) continue;
+    const resolved = resolveBackTo(nextPlan, backTo.nodeId);
+    if (!resolved.ok) continue;
+    const region = new Set(resolved.regionNodeIds);
+    const moved = backward.find(node => region.has(node.nodeId));
+    if (!moved) continue;
+    const path = planStatusPointer(nextPlan, moved) ?? "/plan";
+    if (applicableReach(reach.get(backTo) ?? "unconditional")) {
+      const exhausted = returnBudgetUsed(ledgerEvents(returnBudgets, backTo.budgetId)) >= backTo.maximum;
+      return {problem: exhausted ? {code: "return_budget_exhausted", path, expected: returnBudgetExhaustedExpected} : {code: "return_required", path, expected: returnRequiredExpected}};
+    }
+    if (input.repair !== true) return {problem: {code: "status_repair_required", path, expected: statusRepairRequiredExpected}};
+    for (const node of backward) if (region.has(node.nodeId)) repaired.add(node.nodeId);
+  }
+  return input.repair === true && repaired.size === 0 && !held ? notApplicable() : {repaired};
+};
+
 // a status or applicability assertion never rests on an execution a return retired; a reference without a thread cites the workflow's own
 const retiredRunProblem = (current: WorkflowStateDocument, evidence: readonly WorkflowStateEvidenceInput[]): WorkflowApplyDiagnostic | null => {
   const index = evidence.findIndex(item => (item.kind === "status_changed" || item.kind === "not_applicable") &&
@@ -962,7 +1040,8 @@ const recordedProgressProblem = (current: WorkflowStateDocument, input: Workflow
 const validApplyInput = (value: unknown): boolean => isRecord(value) &&
   validId(value.operationId) && validId(value.workflowId) && Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 &&
   validText(value.note) && isStatus(value.status) && (value.objective === null || validText(value.objective)) &&
-  validSourceBinding(value.sourceBinding) && validRequirements(value.requirements) && validIssues(value.issues) && validApplyPlan(value.plan) && validEvidenceInput(value.evidence);
+  validSourceBinding(value.sourceBinding) && validRequirements(value.requirements) && validIssues(value.issues) && validApplyPlan(value.plan) && validEvidenceInput(value.evidence) &&
+  (value.repair === undefined || typeof value.repair === "boolean");
 
 const validDocument = (value: Record<string, unknown>): boolean => value.formatVersion === 2 && validId(value.workflowId) &&
   validId(value.projectId) && validId(value.mainThreadId) && validId(value.threadId) &&
@@ -983,7 +1062,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   returnBudgetCoverage(value) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
     validId(item.id) && validId(item.operationId) && (workflowEvidenceKinds as readonly string[]).includes(String(item.kind)) &&
-    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) &&
+    validEvidenceContribution(item.contribution) && validEvidenceParticipant(item.participant) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) && (item.repair === undefined || item.repair === true) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
@@ -1067,7 +1146,7 @@ const classifyReceipt = (operationId: string, text: string): WorkflowMutationRes
 };
 
 const workflowReceipt = (status: "applied" | "created", operationId: string, document: WorkflowStateDocument): WorkflowMutationReceipt =>
-  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2});
+  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2, documentStatus: document.status});
 
 // the plan and evidence checks, as pure functions
 const normalizeWorkflowPlan = (input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
@@ -1363,6 +1442,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
           (item.sourceMessageId || item.sourceItemId)))
         return {status: "invalid", operationId: input.operationId, reason: "scope_assessment_required"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     }
+    const boundary = returnBoundaryProblem(current, validatedInput, nextPlan, branchState.selections, returnBudgets, scopeReassessment);
+    if ("problem" in boundary) return {status: "invalid", operationId: input.operationId, reason: boundary.problem.code, diagnostic: boundary.problem} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
     const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
     const evidence = [...current.evidence];
@@ -1370,6 +1451,21 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       const nodeId = item.targetNodeId ?? null;
       const previous = nodeId ? previousNodes.get(nodeId) : null;
       const next = nodeId ? nextNodes.get(nodeId) : null;
+      // a repeated identical receipt is one continuing fact: its entry keeps its place and first time, and records the latest read and
+      // the count, so continuous observation never consumes the evidence history
+      if (item.kind === "observation" && item.participantReceipt) {
+        const key = receiptKey(owner.supervisorThreadId, item.participantReceipt);
+        const index = evidence.findIndex(entry => entry.kind === "observation" && entry.participant && entry.actorSupervisorThreadId === owner.supervisorThreadId &&
+          receiptKey(entry.actorSupervisorThreadId, entry.participant) === key);
+        if (index >= 0) {
+          const existing = evidence[index]!;
+          evidence[index] = {...existing, operationId: input.operationId, recordedAt: at, note: item.note,
+            sourceThreadId: item.sourceThreadId ?? existing.sourceThreadId, sourceRunId: item.sourceRunId ?? null, sourceMessageId: item.sourceMessageId ?? null,
+            sourceItemId: item.sourceItemId ?? null,
+            participant: {...item.participantReceipt, repeats: (existing.participant!.repeats ?? 1) + 1, firstRecordedAt: existing.participant!.firstRecordedAt ?? existing.recordedAt}};
+          continue;
+        }
+      }
       evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: item.kind, now: at,
         targetNodeId: nodeId, targetNodeName: next?.name ?? previous?.name ?? null,
         statusFrom: previous?.status ?? (nodeId === null ? current.status : null),
@@ -1379,6 +1475,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note,
         ...(typeof item.sourceProviderTurnId === "string"
           ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
+        ...(item.kind === "status_changed" && nodeId !== null && boundary.repaired.has(nodeId) ? {repair: true as const} : {}),
+        ...(item.kind === "observation" && item.participantReceipt ? {participant: {...item.participantReceipt, repeats: 1, firstRecordedAt: at}} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1401,7 +1499,11 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
 
     const oldPlanHash = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan);
     const newPlanHash = workflowPlanSignature(validatedInput.objective, validatedInput.sourceBinding, validatedInput.requirements, validatedInput.issues, nextPlan);
-    evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
+    // an observation-only apply that changes no plan, status, node, branch or selection records its observations alone
+    const observationOnly = evidenceInputs.length > 0 && evidenceInputs.every(item => item.kind === "observation") && oldPlanHash === newPlanHash &&
+      current.status === validatedInput.status && branchState.invalidated.length === 0 && changedBranches(current.plan, nextPlan).length === 0 &&
+      [...previousNodes.values()].every(node => nextNodes.has(node.nodeId)) && [...nextNodes.values()].every(node => previousNodes.get(node.nodeId)?.status === node.status);
+    if (!observationOnly) evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
       targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: validatedInput.status,
       sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
     const synced = syncedReturns({workflowId: current.workflowId, plan: nextPlan, branchSelections: branchState.selections, returns: current.returns, evidence,
@@ -1441,7 +1543,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     if (existing) {
       const decoded = classifyWorkflowRow(existing);
       if (decoded.status === "incompatible") return {...decoded, operationId};
-      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision,
+      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision, documentStatus: decoded.document.status,
         stateHash: fingerprint(decoded.document), formatVersion: 2} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
     }
     const document = yield* emptyDocument(owner, owner.mainThreadId, null, null, 1, at);
@@ -1580,6 +1682,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
 
     const entry: ExternalContribution = {contributionId: input.contributionId, nodeId: input.nodeId, state: input.state, revision: input.revision,
       summary: input.summary, references: input.references.map(item => ({kind: item.kind, value: item.value})), externalRef: input.externalRef,
+      participant: normalizeParticipant(input.participant),
       sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, recordedAt: at, assessment: null};
     const evidence = yield* makeEvidence({operationId: `contribution:${fingerprint([input.contributionId, input.revision])}`, owner, kind: "contribution_recorded", now: at,
       targetNodeId: validNodeId(input.nodeId) ? input.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,

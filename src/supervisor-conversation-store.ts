@@ -69,7 +69,12 @@ export type ConversationRequest = {
   /** A root monitoring review: what it was prepared against; its completion needs a confirmed outcome. */
   reviewPins?: ReviewPins;
   reviewOutcome?: ReviewOutcomeRecord;
+  /** A liveness wake: the main's completed run, document revision and reported child lifecycle it answers, and how often it repeated. */
+  liveness?: LivenessWake;
+  /** The frozen envelope of a check-in or wake: its rows, counts, handles, routes and indexes, read on demand with workflow_read view request. */
+  envelope?: Record<string, unknown>;
 };
+export type LivenessWake = {mainThreadId: string; runId: string; revision: number; children: string[]; /** The root's latest executed terminal run (its native projection) this wake answers; null when none executed. */ rootRunId: string | null; repeat: number};
 export type WorkflowIntroduction = {
   proposalId?: string;
   earlier?: Array<{messageId: string; textHash: string}>;
@@ -199,6 +204,9 @@ const ConversationRequestDocument = Schema.Struct({
   roleVersion: Schema.optionalKey(Schema.String),
   reviewPins: Schema.optionalKey(ReviewPinsDocument),
   reviewOutcome: Schema.optionalKey(ReviewOutcomeDocument),
+  liveness: Schema.optionalKey(Schema.Struct({mainThreadId: Schema.String, runId: Schema.String, revision: Schema.Number,
+    children: Schema.mutable(Schema.Array(Schema.String)), rootRunId: Schema.NullOr(Schema.String), repeat: Schema.Number})),
+  envelope: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
 const DispatchMode = Schema.Union([
   Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: Schema.String }),
@@ -259,7 +267,7 @@ const decodeNoticeClockRow = decodeGuidanceRow(Schema.Struct({ last_notice_at: S
 const decodeReviewMissesRow = decodeGuidanceRow(Schema.Struct({ review_misses: Schema.Number }), "notice_clock");
 
 type PrepareInput = Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
-  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins">>;
+  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins" | "liveness" | "envelope">>;
 
 /** The conversation store: the durable Supervisor requests, workflow introductions, agreement candidates and notice clocks. */
 export interface SupervisorConversationStoreShape {
@@ -328,8 +336,13 @@ const makeConversationStore = Effect.gen(function* () {
     projectId: attempt.projectId, mainThreadId: attempt.mainThreadId, ownerThreadId: attempt.ownerThreadId,
     bindingGeneration: attempt.bindingGeneration, memberEpoch: attempt.memberEpoch, taskId: attempt.taskId,
     taskRevision: attempt.taskRevision, requestSource: attempt.requestSource, baselineAgreementId: attempt.baselineAgreementId,
-    createdAt: attempt.createdAt,
-    targets: attempt.targets.map(target => [target.threadId, target.recipientThreadId, target.scope, target.assignmentRootThreadId, target.assignmentEpoch, target.hold.messageId, target.hold.commandId])});
+    createdAt: attempt.createdAt});
+  const targetIdentity = (target: PlanningAttempt["targets"][number]) => JSON.stringify([target.threadId, target.recipientThreadId, target.scope, target.assignmentRootThreadId,
+    target.assignmentEpoch, target.hold.messageId, target.hold.commandId]);
+  // the recorded targets never change or disappear; an open attempt may append late descendants of its paused main after them
+  const targetsExtended = (current: PlanningAttempt, attempt: PlanningAttempt) =>
+    attempt.targets.length >= current.targets.length && current.targets.every((target, index) => targetIdentity(target) === targetIdentity(attempt.targets[index]!)) &&
+    (attempt.targets.length === current.targets.length || current.state === "open");
   const savePlanningAttempt = (attempt: PlanningAttempt) => guidanceSql(db.withTransaction(Effect.gen(function* () {
     if (!Schema.is(PlanningAttempt)(attempt)) return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt", sqlReason: null});
     const [row] = yield* db`SELECT document FROM supervisor_planning_attempts WHERE id=${attempt.id}`;
@@ -351,7 +364,8 @@ const makeConversationStore = Effect.gen(function* () {
         const next = attempt.draft?.cleanup?.[index];
         return !next || entry.type !== next.type || entry.runId !== next.runId || deliveryChanged(entry.receipt, next.receipt);
       }));
-    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !mayAdvance && current.state !== attempt.state || draftChanged))
+    if (current && ((!deadlineUnchanged && !firstDelivery) || attemptedBytesChanged || planningIdentity(current) !== planningIdentity(attempt) || !targetsExtended(current, attempt) ||
+      !mayAdvance && current.state !== attempt.state || draftChanged))
       return yield* new GuidanceStoreError({reason: "row_invalid", row: "planning_attempt_identity", sqlReason: null});
     yield* db`INSERT INTO supervisor_planning_attempts VALUES(${attempt.id},${attempt.projectId},${JSON.stringify(attempt)},${attempt.createdAt})
       ON CONFLICT(id) DO UPDATE SET document=excluded.document`;

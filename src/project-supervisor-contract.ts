@@ -358,7 +358,8 @@ export type DefinitionReviewInfo = typeof DefinitionReview.Type;
 export const reviewOutcomes = ["progress_updated", "no_change", "needs_attention", "insufficient_evidence"] as const;
 /** Who must act before an unfinished agreed workflow continues; the operative's own unfinished action is never a wait. */
 export const reviewWaitOwners = ["requester", "external"] as const;
-export const ReviewWait = Schema.Struct({waitingOn: Schema.Literals(reviewWaitOwners), resumesWhen: Schema.String});
+// a wait on the requester cites the human's own message (web, mobile or a runtime answer) in the root or the main
+export const ReviewWait = Schema.Struct({waitingOn: Schema.Literals(reviewWaitOwners), resumesWhen: Schema.String, messageId: Schema.optionalKey(Schema.String)});
 export type ReviewWaitInfo = typeof ReviewWait.Type;
 const ReviewOutcomeKind = Schema.Literals(reviewOutcomes);
 /** The last confirmed review outcome and the current one not (yet) confirmed: recorded, unconfirmed, or missing. */

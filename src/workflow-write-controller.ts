@@ -23,9 +23,11 @@ import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, documentBra
 import {
   externalContributionDecisions,
   externalContributionLimits,
+  participantReceiptKinds,
   workflowExecutionStatuses,
   workflowMutationLimits,
   type ExternalContributionDecision,
+  type ParticipantReceiptKind,
   type WorkflowApplyInput,
   type WorkflowControllerLineage,
   type WorkflowExecutionStatus,
@@ -38,12 +40,15 @@ import {
 import type { Projection, ThreadInfo } from "./types.js";
 import {resolveSupervisorScope, type SupervisorScopeResolution} from "./supervisor-scope.js";
 import {nativeNodeTurn, readNativeProviderTurns} from "./workflow-native-turns.js";
+import {genuineHumanMessage, mainRunNodeReader, timestampMs} from "./domain.js";
 import {
   canonicalJson,
   isRecord,
   configuredWorkflowToolRoutes,
   providerTurnEvidenceCandidates,
   verifyProviderTurnToolEvidence,
+  nativeCallRoute,
+  nativeItemExecution,
   verifyWorkflowToolEvidence,
   workflowEvidenceCandidates,
   workflowRequestHash,
@@ -77,7 +82,7 @@ import { InterpretationWake } from "./interpretation-wake.js";
 import { logEvent, type LogFields } from "./logging.js";
 import {branchConditionMaxLength, definitionSnapshotIndexed, returnBudgetMaximum, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import {currentPendingDecisions, occurrenceAttempts, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanReach, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
+import {currentPendingDecisions, occurrenceAttempts, pendingDecisionsOutside, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, unsettledOccurrences, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanReach, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
 
 // the native item read returned no item record
 export class WorkflowNativeItemUnavailable extends Data.TaggedError("WorkflowNativeItemUnavailable") {}
@@ -140,7 +145,7 @@ export type WorkflowStatusEdit = {nodeId: string; status: WorkflowExecutionStatu
 export type WorkflowOmissionEdit = {nodeId: string; reason: string};
 export type WorkflowApplyPatch = Pick<WorkflowApplyInput, "operationId" | "workflowId" | "expectedRevision" | "note"> &
   Partial<Pick<WorkflowApplyInput, "status" | "objective" | "sourceBinding" | "requirements" | "issues" | "plan">> &
-  {statuses?: WorkflowStatusEdit[]; omit?: WorkflowOmissionEdit[]; evidence?: WorkflowStateEvidenceInput[]};
+  {statuses?: WorkflowStatusEdit[]; omit?: WorkflowOmissionEdit[]; evidence?: WorkflowStateEvidenceInput[]; repair?: boolean};
 
 export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "ensure_main"; operationId: string; note: string}
@@ -151,9 +156,9 @@ export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "record_review"; operationId: string; requestId: string; outcome: ReviewOutcomeKind; reason?: string; applyOperationIds?: string[]; wait?: ReviewWaitInfo}
 );
 
-export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check";
+export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check" | "request";
 export type SupervisorContextViewInput = {view: SupervisorContextViewName; section?: string; revision?: "approved" | "observed"; definitionIds?: string[];
-  includeSources?: boolean; record?: unknown};
+  includeSources?: boolean; record?: unknown; requestId?: string; callerThreadId?: string};
 export type SupervisorContextViewResult = {status: string; view: SupervisorContextViewName; [key: string]: unknown};
 // the views an interpretation request needs: its current pins, its rules, the root's instructions and the definitions it plans from
 const interpretationViews: ReadonlySet<string> = new Set<SupervisorContextViewName>(["context", "interpretation", "instructions", "definitions"]);
@@ -162,7 +167,7 @@ const interpretationViews: ReadonlySet<string> = new Set<SupervisorContextViewNa
 export type StatusViewRow = Omit<PlanStatusOutlineRow, "reach"> & {reach?: Exclude<PlanReach, "unconditional">};
 export type WorkflowStatusViewResult = {status: "ok"; view: "status"; mainTaskAgreementStatus: "agreed" | "stale" | null;
   workflowOffset: number; workflowHasMore: boolean; workflows: Array<{workflowId: string; threadId: string; parentWorkflowId: string | null;
-    revision: number; status: WorkflowExecutionStatus; occurrences: StatusViewRow[]; pendingBranchDecisions: string[];
+    revision: number; status: WorkflowExecutionStatus; membersSettled: boolean; occurrences: StatusViewRow[]; pendingBranchDecisions: string[];
     pendingReturns: Array<{returnId: string; backToNodeId: string; targetNodeId: string; attempt: number; regionNodeIds: string[]; reason: string; requestedAt: number}>}>};
 export type SupervisionStartInput = {callerThreadId: string; userMessageId: string; operationId: string};
 export type SupervisionStartResult = {status: "pending" | "active" | "rejected" | "denied" | "invalid" | "unavailable"; reason: string; retryable?: boolean};
@@ -176,6 +181,8 @@ export type SupervisionStopResult =
 export type WorkflowReadPayload = WorkflowLocator & {
   view?: SupervisorContextViewName | "status" | "documents";
   section?: string;
+  /** With view request: the id of the caller's own check-in or wake whose frozen envelope is read. */
+  requestId?: string;
   revision?: "approved" | "observed";
   definitionIds?: string[];
   includeSources?: boolean;
@@ -534,6 +541,7 @@ const omissionProblemExpected: Record<OmissionEditProblem, string> = {
 // a store pointer into the edited plan of an apply without a plan, mapped to the status edit that set that occurrence's status
 const statusEditPointer = (plan: WorkflowApplyInput["plan"], currentPlan: WorkflowApplyInput["plan"], path: string, edits: readonly WorkflowStatusEdit[]): string => {
   if (path === "/status") return "/input/status";
+  if (path === "/repair") return "/input/repair";
   if (path.startsWith("/evidence/")) return `/input${path}`;
   const node = planNodeAtPointer(plan, path);
   if (!node || !("nodeId" in node)) return "/input/statuses";
@@ -550,6 +558,7 @@ const statusEditPointer = (plan: WorkflowApplyInput["plan"], currentPlan: Workfl
 // paths use the same /input base as the other apply diagnostics.
 export const submittedApplyPointer = (submittedPlan: unknown, path: string): string => {
   if (path === "/status") return "/input/status";
+  if (path === "/repair") return "/input/repair";
   if (path.startsWith("/evidence/")) return `/input${path}`;
   const segments = path.split("/").slice(1);
   const status = segments.at(-1) === "status";
@@ -576,8 +585,8 @@ const evidenceDiagnostic = (evidence: unknown): WorkflowApplyDiagnostic | null =
     return {code: "evidence_entry_invalid", path: "/input/evidence", expected: `an array of at most ${workflowMutationLimits.maxEvidencePerApply} evidence entries`};
   for (const [index, item] of evidence.entries()) {
     const path = `/input/evidence/${index}`;
-    if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", ...nativeReferenceFields]))
-      return {code: "evidence_entry_invalid", path, expected: "exactly kind and note, with optional targetNodeId, sourceThreadId, sourceRunId, sourceMessageId and sourceItemId"};
+    if (!isRecord(item) || !hasExactKeys(item, ["kind", "note"], ["targetNodeId", ...nativeReferenceFields, "participantContributionId", "observation"]))
+      return {code: "evidence_entry_invalid", path, expected: "exactly kind and note, with optional targetNodeId, sourceThreadId, sourceRunId, sourceMessageId, sourceItemId, participantContributionId and observation"};
     if (!["status_changed", "note", "observation", "not_applicable"].includes(String(item.kind)))
       return {code: "evidence_entry_invalid", path: `${path}/kind`, expected: "status_changed, note, observation or not_applicable"};
     if (!isText(item.note, workflowMutationLimits.maxTextLength))
@@ -586,9 +595,32 @@ const evidenceDiagnostic = (evidence: unknown): WorkflowApplyDiagnostic | null =
       return {code: "evidence_entry_invalid", path: `${path}/targetNodeId`, expected: "an existing occurrence nodeId, or null for the workflow itself"};
     const field = nativeReferenceFields.find(key => !isNullableNativeReference(item[key]));
     if (field) return {code: "evidence_reference_invalid", path: `${path}/${field}`, expected: evidenceReferenceExpected};
+    // a participant observation names the contribution and what the root's own cited item establishes, together, on an observation entry
+    if (item.participantContributionId !== undefined && (typeof item.participantContributionId !== "string" || !contributionIdPattern.test(item.participantContributionId)))
+      return {code: "evidence_entry_invalid", path: `${path}/participantContributionId`, expected: "the contributionId of an existing main-workflow contribution"};
+    if (item.observation !== undefined && !(participantReceiptKinds as readonly unknown[]).includes(item.observation))
+      return {code: "evidence_entry_invalid", path: `${path}/observation`, expected: "read, lifecycle or unsupported"};
+    if ((item.participantContributionId !== undefined) !== (item.observation !== undefined) || item.observation !== undefined && item.kind !== "observation")
+      return {code: "evidence_entry_invalid", path, expected: "participantContributionId and observation together, on an observation entry only"};
   }
   return null;
 };
+const contributionIdPattern = /^[A-Za-z0-9._:-]{1,64}$/u;
+// T3's own wait, list, search and queue tools prove lifecycle only, under any registered prefix; nothing else is classified
+const lifecycleOnlyTool = /(?:^|__|\.)t3_(?:thread_wait|thread_list|thread_search|queue)$/u;
+const maxReceiptToolNameLength = 128;
+// the name the configured routes read for a native call, recorded verbatim and bounded; an unconfigured wrapper's inner target is never inferred
+const boundedToolName = (name: string): string => name.length <= maxReceiptToolNameLength ? name : `${name.slice(0, maxReceiptToolNameLength - 3)}...`;
+// a receipt item nested by a harness or gateway is credited through its ancestors, each an item of the same root run inside its main run
+const maxReceiptItemDepth = 8;
+// the shared execution checks, named for the receipt they refuse
+const participantExecutionReasons = {
+  native_item_identity_incomplete: "participant_item_identity_incomplete", native_item_not_executed: "participant_item_not_completed_tool",
+  native_tool_item_rolled_back: "participant_item_not_completed_tool", native_item_not_running_or_completed: "participant_item_not_completed_tool",
+  native_run_identity_mismatch: "participant_item_run_mismatch", native_run_rolled_back: "participant_item_run_mismatch",
+  native_root_node_rolled_back: "participant_item_rolled_back", native_item_outside_main_run: "participant_item_outside_main_run",
+  native_tool_node_rolled_back: "participant_item_rolled_back",
+} as const;
 
 const statusEditsExpected = `at most ${maxStatusEditsPerApply} entries of exactly {nodeId, status}, each naming a distinct existing step or workflow occurrence`;
 // explicit occurrence status edits: bounded, distinct and shape-checked here; existence is checked against the current document
@@ -636,7 +668,7 @@ const applyInputDiagnostic = (value: unknown): WorkflowApplyDiagnostic | null =>
 
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (!isRecord(value) || !hasExactKeys(value,
-    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "statuses", "omit", "evidence"])) return null;
+    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "statuses", "omit", "evidence", "repair"])) return null;
   if (!isId(value.operationId) || !isId(value.workflowId) || !Number.isSafeInteger(value.expectedRevision) ||
     (value.expectedRevision as number) < 1 || value.status !== undefined && !isStatus(value.status) ||
     value.objective !== undefined && !(value.objective === null || isText(value.objective, workflowMutationLimits.maxTextLength)) ||
@@ -644,6 +676,7 @@ const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
     value.sourceBinding !== undefined && !validSourceBindingInput(value.sourceBinding) ||
     value.requirements !== undefined && !validRequirementInput(value.requirements) ||
     value.issues !== undefined && !validIssueInput(value.issues) ||
+    value.repair !== undefined && typeof value.repair !== "boolean" ||
     value.plan !== undefined && value.plan !== null && !validPlanRequest(value.plan) ||
     conflictingEditsDiagnostic(value) || evidenceDiagnostic(value.evidence) ||
     value.statuses !== undefined && statusEditsDiagnostic(value.statuses) ||
@@ -689,8 +722,9 @@ const parseWritePayload = (value: unknown): ParsedInput => {
       applyIds.every(id => isId(id)) && new Set(applyIds).size === applyIds.length;
     // a reason is required where the outcome needs one; applies are cited by progress_updated and only by it
     const wait = value.wait;
-    const validWait = wait === undefined || isRecord(wait) && hasExactKeys(wait, ["waitingOn", "resumesWhen"]) &&
-      reviewWaitOwners.includes(wait.waitingOn as typeof reviewWaitOwners[number]) && isText(wait.resumesWhen, reviewLimits.maxWaitTriggerLength);
+    const validWait = wait === undefined || isRecord(wait) && hasExactKeys(wait, ["waitingOn", "resumesWhen"], ["messageId"]) &&
+      reviewWaitOwners.includes(wait.waitingOn as typeof reviewWaitOwners[number]) && isText(wait.resumesWhen, reviewLimits.maxWaitTriggerLength) &&
+      (wait.messageId === undefined || isId(wait.messageId));
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "operationId", "requestId", "outcome"], [...authorityKeys, "reason", "applyOperationIds", "wait"]) || !validWait ||
       !isId(value.operationId) || !isId(value.requestId) || outcome === undefined || !validApplies ||
       value.reason !== undefined && !isText(value.reason, reviewLimits.maxReasonLength) ||
@@ -699,7 +733,8 @@ const parseWritePayload = (value: unknown): ParsedInput => {
       return {ok: false, reason: "invalid_record_review", ...(isId(value.operationId) ? {operationId: value.operationId} : {})};
     return {ok: true, value: {...locator, action: "record_review", operationId: value.operationId, requestId: value.requestId, outcome,
       ...(typeof value.reason === "string" ? {reason: value.reason} : {}), ...(applyIds !== undefined ? {applyOperationIds: applyIds as string[]} : {}),
-      ...(isRecord(wait) ? {wait: {waitingOn: wait.waitingOn as typeof reviewWaitOwners[number], resumesWhen: wait.resumesWhen as string}} : {})}};
+      ...(isRecord(wait) ? {wait: {waitingOn: wait.waitingOn as typeof reviewWaitOwners[number], resumesWhen: wait.resumesWhen as string,
+        ...(typeof wait.messageId === "string" ? {messageId: wait.messageId} : {})}} : {})}};
   }
   if (value.action === "apply") {
     if (!hasExactKeys(value, ["action", "supervisorThreadId", "bindingGeneration", "input"], authorityKeys))
@@ -715,20 +750,22 @@ const parseWritePayload = (value: unknown): ParsedInput => {
 
 const parseReadPayload = (value: unknown): ParsedReadInput => {
   if (!isRecord(value) || !hasExactKeys(value, ["supervisorThreadId", "bindingGeneration"],
-    ["view", "section", "revision", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
+    ["view", "section", "revision", "definitionIds", "includeSources", "record", "requestId", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
   // compact status and explicit complete records page the same workflows
   if (value.view === "status" || value.view === "documents") {
     const documents = parseReadPayload(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "view")));
-    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined) &&
+    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record", "requestId"].every(key => value[key] === undefined) &&
       (value.view === "documents" || value.lineageOffset === undefined)
       ? {ok: true, value: {...documents.value, view: value.view}} : {ok: false, reason: "invalid_read_arguments"};
   }
   if (value.view !== undefined) {
-    if (!locator || !["context", "definitions", "instructions", "interpretation", "check"].includes(String(value.view)) ||
+    if (!locator || !["context", "definitions", "instructions", "interpretation", "check", "request"].includes(String(value.view)) ||
       value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(id => isId(id))) ||
       value.includeSources !== undefined && typeof value.includeSources !== "boolean" || value.view !== "check" && value.record !== undefined ||
       value.view === "check" && value.record === undefined || value.workflowId !== undefined || value.workflowOffset !== undefined ||
+      // a request view names exactly one request id and nothing else of the other views
+      value.view !== "request" && value.requestId !== undefined || value.view === "request" && !isId(value.requestId) ||
       value.section !== undefined && (!["instructions", "interpretation", "context"].includes(String(value.view)) || !isId(value.section)) ||
       value.revision !== undefined && (value.view !== "definitions" || value.revision !== "approved" && value.revision !== "observed") ||
       value.lineageOffset !== undefined || value.limit !== undefined) return {ok: false, reason: "invalid_read_arguments"};
@@ -737,9 +774,10 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
       ...(value.revision === "approved" || value.revision === "observed" ? {revision: value.revision} : {}),
       ...(Array.isArray(value.definitionIds) ? {definitionIds: value.definitionIds as string[]} : {}),
       ...(typeof value.includeSources === "boolean" ? {includeSources: value.includeSources} : {}),
-      ...(value.record !== undefined ? {record: value.record} : {})}};
+      ...(value.record !== undefined ? {record: value.record} : {}),
+      ...(typeof value.requestId === "string" ? {requestId: value.requestId} : {})}};
   }
-  if (!locator || value.section !== undefined || value.revision !== undefined || value.workflowId !== undefined && !isId(value.workflowId) ||
+  if (!locator || value.section !== undefined || value.revision !== undefined || value.requestId !== undefined || value.workflowId !== undefined && !isId(value.workflowId) ||
     value.workflowOffset !== undefined && (!Number.isSafeInteger(value.workflowOffset) || (value.workflowOffset as number) < 0 || (value.workflowOffset as number) > 10_000) ||
     value.lineageOffset !== undefined && (!Number.isSafeInteger(value.lineageOffset) || (value.lineageOffset as number) < 0 || (value.lineageOffset as number) > 10_000) ||
     value.limit !== undefined && (!Number.isSafeInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > maxWorkflowReadDocs))
@@ -900,6 +938,8 @@ const applyInputSchema = {
       items: {type: "object", additionalProperties: false, required: ["nodeId", "reason"], properties: {
         nodeId: idSchema(64), reason: textSchema(maxPlanReasonLength),
       }}},
+    repair: {type: "boolean",
+      description: "Declares the backward status moves of this apply inside a return region whose failure path is not selected as the correction of a misrecorded status; it starts no attempt and spends no jump. On the selected path a region never moves backward by hand: settle the assessing member and apply the requested return instead."},
     note: textSchema(workflowMutationLimits.maxTextLength),
     evidence: {type: "array", maxItems: workflowMutationLimits.maxEvidencePerApply, items: {
       type: "object", additionalProperties: false, required: ["kind", "note"], properties: {
@@ -910,6 +950,8 @@ const applyInputSchema = {
         sourceRunId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
         sourceMessageId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
         sourceItemId: {anyOf: [nativeReferenceSchema, {type: "null"}]},
+        participantContributionId: idSchema(64),
+        observation: {type: "string", enum: [...participantReceiptKinds]},
       },
     }},
   },
@@ -1003,7 +1045,7 @@ export const supervisionInterpretationSubmitToolDefinition = {
 
 export const workflowReadToolDefinition = {
   name: "workflow_read",
-  description: "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
+  description: "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check, the frozen envelope of one of your own check-ins (view request) or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
   // the read input names no plan, so it advertises none of the plan schema
   inputSchema: {
     type: "object",
@@ -1015,13 +1057,14 @@ export const workflowReadToolDefinition = {
       workflowOffset: {type: "integer", minimum: 0, maximum: 10_000},
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
-      view: {type: "string", enum: ["status", "documents", "context", "definitions", "instructions", "interpretation", "check"],
+      view: {type: "string", enum: ["status", "documents", "context", "definitions", "instructions", "interpretation", "check", "request"],
         description: "Omit for status: current occurrences, nesting, progress, branch reach, omissions and attempts. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."},
       section: {type: "string", description: "With view instructions: one section id from its index. With view interpretation: \"plan\", read only when a plan is needed. With view context: \"conversation\", \"plan\" or \"diagnostics\"."},
       revision: {type: "string", enum: ["approved", "observed"], description: "With view definitions: the approved definitions of the task (default) or the checkout's current ones."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
       includeSources: {type: "boolean", description: "With view definitions: also return raw definition source files, for diagnosing invalid or incomplete definitions."},
       record: {type: "object", description: "With view check: the exact compact workflow-proposal record to validate."},
+      requestId: {...idSchema(), description: "With view request: the requestId a check-in or liveness wake of your own names; returns its frozen envelope (rows, counts, handles, routes, pins and indexes), during the turn and after its acknowledgement."},
     },
   },
 } as const;
@@ -1052,7 +1095,8 @@ export const workflowWriteToolDefinition = {
       applyOperationIds: {type: "array", minItems: 1, maxItems: reviewLimits.maxApplies, uniqueItems: true, items: idSchema()},
       wait: {type: "object", additionalProperties: false, required: ["waitingOn", "resumesWhen"],
         description: "With record_review: an explicit current wait when the main has stopped with agreed work unfinished: who must act (requester or external, never the operative's own unfinished action) and what resumes the work.",
-        properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength)}},
+        properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength),
+          messageId: {...idSchema(), description: "With waitingOn requester: the id of the human's own message (web, mobile or a runtime answer) in your own or the main conversation that the wait answers; an agent's, the service's or your own message is refused (wait_source_not_human)."}}},
     },
     oneOf: [
       {properties: {action: {const: "ensure_main"}}, required: ["operationId", "note"]},
@@ -1593,6 +1637,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       plan: payload.input.plan === undefined ? editedPlan : payload.input.plan,
       note: payload.input.note,
       ...(payload.input.evidence !== undefined ? {evidence: validatedEvidence ?? payload.input.evidence} : {}),
+      ...(payload.input.repair !== undefined ? {repair: payload.input.repair} : {}),
     };
     const candidate = {...applyInput, sourceBinding: effectiveSourceBinding};
     const target = {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId};
@@ -1646,15 +1691,116 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     return {...result, operationId: payload.input.operationId};
   }));
 
+  const resolveParticipantObservations = Effect.fnUntraced(function* (
+    payload: Extract<WorkflowWritePayload, {action: "apply"}>,
+    owner: WorkflowOwner,
+    evidence: readonly WorkflowStateEvidenceInput[],
+    cancel: WorkflowCallCancel,
+  ): Effect.fn.Return<ActivityReferenceResult, SupervisionStoreError> {
+    if (payload.supervisorThreadId !== owner.supervisorThreadId) return {status: "denied", reason: "participant_observation_root_only"};
+    const target = yield* workflows.getByIdForOwner(owner, payload.input.workflowId);
+    if (target.status === "not_found") return {status: "invalid", reason: "activity_reference_workflow_not_found"};
+    if (target.status === "owner_mismatch") return {status: "denied", reason: "activity_reference_owner_mismatch"};
+    if (target.status === "incompatible") return {status: "unavailable", reason: "activity_reference_workflow_incompatible"};
+    if (target.document.threadId !== owner.mainThreadId) return {status: "invalid", reason: "participant_workflow_not_main"};
+    const attempts = occurrenceAttempts(target.document.returns ?? []);
+    const resolved = [...evidence];
+    // the root's own projection, read once: a receipt item must be a completed main-run tool call of the root with strong native identity
+    let rootProjection: Projection | null | undefined;
+    const readRootProjection = Effect.fnUntraced(function* (): Effect.fn.Return<Projection | null> {
+      if (rootProjection !== undefined) return rootProjection;
+      const read = yield* settled(native.projection(owner.supervisorThreadId, cancel));
+      rootProjection = Option.isNone(read) || read.value.thread.id !== owner.supervisorThreadId ? null : read.value;
+      return rootProjection;
+    });
+    for (const [index, item] of evidence.entries()) {
+      if (item.participantContributionId === undefined && item.observation === undefined) continue;
+      if (item.kind !== "observation" || item.participantContributionId === undefined || item.observation === undefined)
+        return {status: "invalid", reason: "participant_observation_invalid"};
+      const contribution = target.document.contributions.find(entry => entry.contributionId === item.participantContributionId);
+      if (!contribution) return {status: "invalid", reason: "participant_contribution_unknown"};
+      if (item.sourceThreadId != null && item.sourceThreadId !== owner.supervisorThreadId) return {status: "denied", reason: "participant_item_not_own"};
+      const receiptBase = {contributionId: contribution.contributionId, revision: contribution.revision, attempt: attempts.get(contribution.nodeId) ?? 1,
+        participant: contribution.participant ?? null};
+      if (item.observation === "unsupported") {
+        if (item.sourceItemId != null || item.sourceRunId != null || item.sourceMessageId != null) return {status: "invalid", reason: "participant_item_unexpected"};
+        resolved[index] = {...item, sourceThreadId: owner.supervisorThreadId, participantReceipt: {...receiptBase, receipt: {kind: "unsupported", toolName: null, inputDigest: null}}};
+        continue;
+      }
+      if (item.sourceItemId == null) return {status: "invalid", reason: "participant_item_required"};
+      if (yield* Deferred.isDone(cancel)) return {status: "pending", reason: "activity_reference_read_interrupted"};
+      const response = yield* settled(native.getTurnItem({threadId: owner.supervisorThreadId, itemId: item.sourceItemId}, cancel));
+      if (Option.isNone(response)) return {status: "pending", reason: "activity_reference_read_unavailable"};
+      const detail = response.value.item;
+      if (!isRecord(detail)) return {status: "invalid", reason: "activity_reference_item_not_found"};
+      if (detail.id !== item.sourceItemId || detail.threadId !== owner.supervisorThreadId) return {status: "invalid", reason: "activity_reference_item_mismatch"};
+      // the same provenance fences as the root's own write proof: a completed tool call with strong native identity in a main run of the
+      // root that is not rolled back, whose node completed
+      if (detail.type !== "dynamic_tool" || typeof detail.toolName !== "string" || detail.status !== "completed" ||
+        (detail.toolNonExecutionKind !== undefined && detail.toolNonExecutionKind !== null))
+        return {status: "invalid", reason: "participant_item_not_completed_tool"};
+      if (!isRecord(detail.nativeItemRef) || detail.nativeItemRef.strength !== "strong" || typeof detail.nodeId !== "string") return {status: "invalid", reason: "participant_item_not_strong"};
+      const projection = yield* readRootProjection();
+      if (!projection) return {status: "pending", reason: "activity_reference_read_unavailable"};
+      // the execution and identity checks shared with the write proof: complete native identity, the run's provider thread, nothing rolled back
+      const execution = nativeItemExecution(projection, owner.supervisorThreadId, detail);
+      if (!execution.ok) return {status: "invalid", reason: participantExecutionReasons[execution.reason]};
+      const {run, node} = execution;
+      if (item.sourceRunId != null && run.id !== item.sourceRunId) return {status: "invalid", reason: "activity_reference_item_run_mismatch"};
+      const nodeOf = mainRunNodeReader(projection, run);
+      if ((node.kind !== "dynamic_tool" && node.kind !== "tool_call") || node.status !== "completed") return {status: "invalid", reason: "participant_item_outside_main_run"};
+      // a nested item is the root's own only through its ancestors: each an item of this thread and run whose node lies in the same main
+      // run and is not rolled back; an unreadable ancestor establishes nothing yet, a mismatching or missing one never does
+      const chain = new Set<string>([item.sourceItemId]);
+      let parentItemId: unknown = detail.parentItemId;
+      while (parentItemId !== null && parentItemId !== undefined) {
+        if (typeof parentItemId !== "string" || chain.has(parentItemId) || chain.size > maxReceiptItemDepth) return {status: "invalid", reason: "participant_item_chain_mismatch"};
+        if (yield* Deferred.isDone(cancel)) return {status: "pending", reason: "activity_reference_read_interrupted"};
+        const ancestorRead = yield* settled(native.getTurnItem({threadId: owner.supervisorThreadId, itemId: parentItemId}, cancel));
+        if (Option.isNone(ancestorRead)) return {status: "pending", reason: "activity_reference_read_unavailable"};
+        const ancestor = ancestorRead.value.item;
+        const ancestorNode = isRecord(ancestor) && typeof ancestor.nodeId === "string" ? nodeOf(ancestor.nodeId) : undefined;
+        if (!isRecord(ancestor) || ancestor.id !== parentItemId || ancestor.threadId !== owner.supervisorThreadId || ancestor.runId !== run.id ||
+          ancestor.status === "rolled_back" || !ancestorNode || ancestorNode.status === "rolled_back")
+          return {status: "invalid", reason: "participant_item_chain_mismatch"};
+        chain.add(parentItemId);
+        parentItemId = ancestor.parentItemId;
+      }
+      // the read is credited to the declaration and attempt window it belongs to: T3's own time for the item itself, never the write's
+      // time and never its run's end, which a run spanning a return would lend to an older read
+      const at = timestampMs(detail.completedAt) ?? timestampMs(detail.updatedAt);
+      if (at === null) return {status: "invalid", reason: "participant_item_undated"};
+      const window = Math.max(contribution.recordedAt, ...(target.document.returns ?? [])
+        .filter(entry => entry.state === "applied" && entry.resolvedAt !== null && entry.regionNodeIds.includes(contribution.nodeId)).map(entry => entry.resolvedAt!));
+      if (at < window) return {status: "invalid", reason: "participant_item_before_window"};
+      // the call as the configured routes read it: a configured gateway call stands for its named target, any other wrapper for itself
+      const route = nativeCallRoute(detail, routes);
+      if (!route) return {status: "invalid", reason: "participant_item_not_completed_tool"};
+      const toolName = boundedToolName(route.toolName);
+      if (item.observation === "read" && lifecycleOnlyTool.test(route.toolName)) return {status: "invalid", reason: "participant_item_lifecycle_only"};
+      let inputDigest: string | null = null;
+      try {inputDigest = route.input === undefined ? null : workflowRequestHash({input: route.input});} catch {inputDigest = null;}
+      const kind: ParticipantReceiptKind = item.observation;
+      resolved[index] = {...item, sourceThreadId: owner.supervisorThreadId, sourceRunId: run.id, participantReceipt: {...receiptBase, receipt: {kind, toolName, inputDigest}}};
+    }
+    return {status: "ready", evidence: resolved};
+  });
+
   const validateActivityReferences = Effect.fnUntraced(function* (
     payload: Extract<WorkflowWritePayload, {action: "apply"}>,
     owner: WorkflowOwner,
     nativeScope: NativeScope,
     cancel: WorkflowCallCancel,
   ): Effect.fn.Return<ActivityReferenceResult, SupervisionStoreError> {
-    const evidence = payload.input.evidence;
-    if (!evidence) return {status: "ready"};
-    const references = evidence.filter(item => [item.sourceThreadId, item.sourceRunId, item.sourceMessageId, item.sourceItemId]
+    const submitted = payload.input.evidence;
+    if (!submitted) return {status: "ready"};
+    // a participant observation is the root's attributed receipt of its own completed native item; it is resolved on the root thread and
+    // never enters the operative scope fence below
+    const participants = submitted.some(item => item.participantContributionId !== undefined || item.observation !== undefined)
+      ? yield* resolveParticipantObservations(payload, owner, submitted, cancel) : {status: "ready" as const, evidence: submitted};
+    if (participants.status !== "ready") return participants;
+    const evidence = participants.evidence ?? submitted;
+    const references = evidence.filter(item => item.participantReceipt === undefined && [item.sourceThreadId, item.sourceRunId, item.sourceMessageId, item.sourceItemId]
       .some(value => typeof value === "string" && value.length > 0));
     if (!references.length) return {status: "ready", evidence};
     if (references.length > maxActivityReferencesPerWrite)
@@ -2086,27 +2232,35 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       if (documents.status !== "ok") return documents;
       return {status: "ok", view: "status", mainTaskAgreementStatus: documents.mainTaskAgreementStatus,
         workflowOffset: documents.workflowOffset, workflowHasMore: documents.workflowHasMore,
-        workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => ({workflowId: document.workflowId, threadId: document.threadId,
-          parentWorkflowId: document.parentWorkflowId, revision: document.revision, status: document.status,
-          // a row states its reach only off the unconditional path
-          occurrences: planStatusOutline(document.plan, documentBranchSelections(document), notApplicableSubtrees(document.plan, documentBranchSelections(document),
-            notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)), occurrenceAttempts(document.returns))
-            .map(({reach, ...row}) => reach === "unconditional" ? row : {...row, reach}),
-          pendingBranchDecisions: pending.map(item => item.nodeId),
-          pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
-            targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))}))};
+        workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => {
+          const selected = documentBranchSelections(document);
+          const notApplicable = notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null);
+          return {workflowId: document.workflowId, threadId: document.threadId,
+            parentWorkflowId: document.parentWorkflowId, revision: document.revision, status: document.status,
+            // every applicable member settled and no decision pending: a document still underway owes its completing apply
+            membersSettled: document.plan !== null && unsettledOccurrences(document.plan, selected, notApplicable).length === 0 &&
+              pendingDecisionsOutside(document.plan, selected, notApplicable).length === 0,
+            // a row states its reach only off the unconditional path
+            occurrences: planStatusOutline(document.plan, selected, notApplicableSubtrees(document.plan, selected, notApplicable), occurrenceAttempts(document.returns))
+              .map(({reach, ...row}) => reach === "unconditional" ? row : {...row, reach}),
+            pendingBranchDecisions: pending.map(item => item.nodeId),
+            pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
+              targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))};
+        })};
     }
-    const binding = (yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" ? "status" : "read")) ??
+    const binding = (yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" || parsed.value.view === "request" ? "status" : "read")) ??
       (interpretationViews.has(parsed.value.view) ? yield* resolveInterpretationReader(parsed.value) : null);
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (parsed.value.view === "instructions" && parsed.value.supervisorThreadId !== binding.threadId)
       return {status: "ok", view: "instructions", version: helperInstructionsVersion, instructions: helperInstructions};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};
-    const {view, section, revision, definitionIds, includeSources, record: viewRecord} = parsed.value;
-    // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal
+    const {view, section, revision, definitionIds, includeSources, record: viewRecord, requestId} = parsed.value;
+    // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal; a request
+    // view names its caller, so only the request's own Supervisor or helper reads it
     const result = yield* conversation.readContextView(binding, {view, ...(section !== undefined ? {section} : {}), ...(revision ? {revision} : {}),
       ...(definitionIds ? {definitionIds} : {}),
-      ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {})}, cancel);
+      ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {}),
+      ...(requestId !== undefined ? {requestId, callerThreadId: parsed.value.supervisorThreadId} : {})}, cancel);
     return Buffer.byteLength(JSON.stringify(result), "utf8") > maxWorkflowReadBytes ? {status: "too_large", reason: "workflow_read_exceeds_response_limit"} : result;
   });
 
@@ -2142,6 +2296,19 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
     const listed = yield* settled(native.listThreads(cancel));
     if (Option.isNone(listed)) return {status: "pending", operationId, reason: "native_lineage_unavailable", retryable: true};
     if (yield* Deferred.isDone(cancel)) return {status: "pending", operationId, reason: "native_lineage_interrupted", retryable: true};
+    // a wait on the requester cites the human's own message, a genuine human message of the root or the main: an agent's send, the
+    // service's notice or the root's own message authorizes no wait on a human
+    if (payload.action === "record_review" && payload.wait?.waitingOn === "requester") {
+      const cited = payload.wait.messageId;
+      if (cited === undefined) return {status: "denied", operationId, reason: "wait_source_not_human"};
+      const root = yield* settled(native.projection(owner.supervisorThreadId, cancel));
+      const main = yield* settled(native.projection(owner.mainThreadId, cancel));
+      if (![root, main].some(read => Option.isSome(read) && read.value.thread.id === (read === root ? owner.supervisorThreadId : owner.mainThreadId) &&
+        genuineHumanMessage(read.value, cited) !== null)) {
+        if (Option.isNone(root) || Option.isNone(main)) return {status: "pending", operationId, reason: "wait_source_read_unavailable", retryable: true};
+        return {status: "denied", operationId, reason: "wait_source_not_human"};
+      }
+    }
 
     // the block after the lineage read: an incomplete lineage or a dead child is a durable denial, any other action but apply commits
     const lineage = yield* admitted((guard, now) => Effect.gen(function* (): Effect.fn.Return<{done: WorkflowWriteResult} | {scope: NativeScope; apply: Extract<WorkflowWritePayload, {action: "apply"}>}> {

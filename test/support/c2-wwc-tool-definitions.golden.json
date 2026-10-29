@@ -1,7 +1,7 @@
 {
   "workflowReadToolDefinition": {
     "name": "workflow_read",
-    "description": "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
+    "description": "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check, the frozen envelope of one of your own check-ins (view request) or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
     "inputSchema": {
       "type": "object",
       "additionalProperties": false,
@@ -61,7 +61,8 @@
             "definitions",
             "instructions",
             "interpretation",
-            "check"
+            "check",
+            "request"
           ],
           "description": "Omit for status: current occurrences, nesting, progress, branch reach, omissions and attempts. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."
         },
@@ -94,6 +95,12 @@
         "record": {
           "type": "object",
           "description": "With view check: the exact compact workflow-proposal record to validate."
+        },
+        "requestId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "With view request: the requestId a check-in or liveness wake of your own names; returns its frozen envelope (rows, counts, handles, routes, pins and indexes), during the turn and after its acknowledgement."
         }
       }
     }
@@ -950,6 +957,10 @@
                 }
               }
             },
+            "repair": {
+              "type": "boolean",
+              "description": "Declares the backward status moves of this apply inside a return region whose failure path is not selected as the correction of a misrecorded status; it starts no attempt and spends no jump. On the selected path a region never moves backward by hand: settle the assessing member and apply the requested return instead."
+            },
             "note": {
               "type": "string",
               "minLength": 1,
@@ -1043,6 +1054,19 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "participantContributionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "observation": {
+                    "type": "string",
+                    "enum": [
+                      "read",
+                      "lifecycle",
+                      "unsupported"
+                    ]
                   }
                 }
               }
@@ -1124,6 +1148,12 @@
               "type": "string",
               "minLength": 1,
               "maxLength": 300
+            },
+            "messageId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200,
+              "description": "With waitingOn requester: the id of the human's own message (web, mobile or a runtime answer) in your own or the main conversation that the wait answers; an agent's, the service's or your own message is refused (wait_source_not_human)."
             }
           }
         }

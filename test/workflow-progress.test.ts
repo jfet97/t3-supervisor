@@ -5,7 +5,7 @@ import { Effect, Schema } from "effect";
 import type { ProjectSupervisorScopeSnapshot } from "../src/supervisor-observation.js";
 import type { WorkflowStateDocument, WorkflowStateEvidence } from "../src/workflow-state-contract.js";
 import type { WorkflowReadResult } from "../src/workflow-write-controller.js";
-import { parseWorkflowProgressPageQuery, WorkflowProgressSnapshotSchema } from "../src/workflow-progress.js";
+import { parseWorkflowProgressPageQuery, WorkflowProgressSnapshotSchema, type WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { readWorkflowProgressPage } from "./support/ctl-progress.js";
 
 const scopeSnapshot = (): ProjectSupervisorScopeSnapshot => ({
@@ -141,6 +141,33 @@ it.effect("workflow progress reuses the owner-bound reader and returns only curr
   assert.equal(result.workflows[0]?.observations[0]?.note, "Observation 24");
   assert.equal("acceptedAgreements" in (result.workflows[0] ?? {}), false);
   assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(result), result);
+}));
+
+it.effect("settlement rows join the current execution's participants on any workflow page: the scope names the execution, so a page without the main document shows them, and other executions are history", () => Effect.gen(function* () {
+  const review = {contributionId: "review", nodeId: "step-review", revision: 1, state: "result", summary: "A reviewer.", references: [], externalRef: null,
+    participant: {kind: "t3_conversation", threadId: "reviewer-local", environmentId: null}, sourceThreadId: "child-thread", sourceRunId: "child-run", sourceMessageId: "message-1",
+    recordedAt: 2, assessment: null} as unknown as WorkflowStateDocument["contributions"][number];
+  const child: WorkflowStateDocument = {...document(), workflowId: "child-workflow", threadId: "child-thread", parentWorkflowId: "main-workflow", parentThreadId: "main-thread", contributions: [review]};
+  const row = (completionId: string | null, state: "superseded" | "settled" | "skipped", reason: string | null, taskId = "task", taskRevision = "source-hash") =>
+    ({taskId, taskRevision, completionId, threadId: "reviewer-local", environmentId: null, state, reason, observedAt: 50});
+  const rows = [row("c-1", "superseded", "activity_changed"), row("c-2", "settled", null), row(null, "skipped", "keep_active", "earlier-task", "old-hash")];
+  const supervision = (currentExecution: NonNullable<ProjectSupervisorScopeSnapshot["currentExecution"]> | null) => ({
+    workflowLocator: () => ({supervisorThreadId: "supervisor-thread", bindingGeneration: 7}),
+    scopeSnapshot: () => ({...scopeSnapshot(), participantSettlements: rows, currentExecution}),
+  });
+  const secondPage = {read: () => ({...readerResult(), workflows: [{document: child, parentNodeReferences: [], pendingBranchDecisions: []}], workflowOffset: 5})};
+  const query = {projectId: "project", mainThreadId: "main-thread", workflowOffset: 5, lineageOffset: 0, limit: 20};
+  const settlementOf = (page: WorkflowProgressSnapshot) => {
+    const participant = page.workflows[0]?.participants?.find(item => item.id === "contribution:review");
+    return [participant?.settlement, participant?.settlementReason];
+  };
+  const current = yield* readWorkflowProgressPage(supervision({taskId: "task", taskRevision: "source-hash", completionId: "c-2"}), secondPage, query);
+  assert.equal(current.status, "ok");
+  assert.deepEqual(settlementOf(current), ["settled", null], "the main document is not on this page, and the current execution's row still shows");
+  assert.deepEqual(settlementOf(yield* readWorkflowProgressPage(supervision({taskId: "task", taskRevision: "source-hash", completionId: "c-1"}), secondPage, query)),
+    ["superseded", "activity_changed"], "an earlier completion of the same task has its own rows");
+  assert.deepEqual(settlementOf(yield* readWorkflowProgressPage(supervision(null), secondPage, query)), ["not_evaluated", null], "without a current execution nothing is current");
+  assert.deepEqual(Schema.decodeUnknownSync(WorkflowProgressSnapshotSchema)(current), current);
 }));
 
 it.effect("workflow progress keeps root identity visible for observe-only coverage without turning other unavailable owners into root", () => Effect.gen(function* () {

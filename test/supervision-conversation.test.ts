@@ -91,7 +91,7 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.equal(paused.conversation!.authorization!.state, "paused");
   assert.equal(paused.conversation!.authorization!.scopeRevision, oldRevision);
   assert.equal(paused.workflowProposalId, oldProposal);
-  const rootDispatches = f.dispatches().filter(call => call.payload.threadId === first.supervisorThreadId && !String(call.payload.text).includes("UNTRUSTED_MONITOR_ENVELOPE"));
+  const rootDispatches = f.dispatches().filter(call => call.payload.threadId === first.supervisorThreadId && !/UNTRUSTED_MONITOR_ENVELOPE|\nCheck-in for main /u.test(String(call.payload.text)));
   assert.equal(new Set(rootDispatches.map(call => call.payload.commandId)).size, 3, "each interpretation has its own stable native command identity");
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1);
   appendSourceMessage(source, "resume-request", 4, "Resume that same investigation and report; still do not fix or deploy.");
@@ -103,7 +103,7 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.equal((yield* f.task())!.conversation!.authorization!.state, "authorized");
   assert.equal((yield* f.task())!.workflowProposalId, oldProposal);
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1, "same-scope resume never reintroduces the plan");
-  assert.equal(f.dispatches().filter(call => !String(call.payload.text).includes("UNTRUSTED_MONITOR_ENVELOPE")).length, 5, "four requester interpretations and one introduction; observe-only check-ins stay internal");
+  assert.equal(f.dispatches().filter(call => !/UNTRUSTED_MONITOR_ENVELOPE|\nCheck-in for main /u.test(String(call.payload.text))).length, 5, "four requester interpretations and one introduction; observe-only check-ins stay internal");
 }));
 
 const heldPlan = Effect.gen(function* () {

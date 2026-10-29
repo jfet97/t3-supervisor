@@ -30,6 +30,31 @@ export const externalContributionDecisions = ["accepted", "needs_more"] as const
 export type ExternalContributionDecision = typeof externalContributionDecisions[number];
 export const externalContributionReferenceKinds = ["file", "url", "source", "text"] as const;
 export type ExternalContributionReference = {kind: typeof externalContributionReferenceKinds[number]; value: string};
+export const externalContributionParticipantKinds = ["t3_conversation", "external", "unknown"] as const;
+/**
+ * The main's optional, generic declaration of who performs a contribution: a T3 conversation (local or in a linked environment), an
+ * opaque external handle, or an unknown capability set. It is untrusted and derives no lineage, scope, authority or settlement.
+ */
+export type ExternalContributionParticipant =
+  | {kind: "t3_conversation"; threadId: string; environmentId: string | null}
+  | {kind: "external"; ref: string}
+  | {kind: "unknown"};
+export const participantReceiptKinds = ["read", "lifecycle", "unsupported"] as const;
+export type ParticipantReceiptKind = typeof participantReceiptKinds[number];
+/**
+ * The root's attributed observation of one contribution's participant, backed by its own completed native tool item (read or lifecycle)
+ * or an explicit statement that no route exists (unsupported); recorded with the exact participant, revision and attempt it concerns.
+ */
+export type WorkflowEvidenceParticipant = {
+  contributionId: string;
+  revision: number;
+  attempt: number;
+  participant: ExternalContributionParticipant | null;
+  receipt: {kind: ParticipantReceiptKind; toolName: string | null; inputDigest: string | null};
+  /** An identical later receipt (same declaration, revision, attempt, kind, tool and actor) updates this entry: how many times, since when. */
+  repeats?: number;
+  firstRecordedAt?: number;
+};
 
 export const externalContributionLimits = {
   maxContributions: 32,
@@ -42,6 +67,7 @@ export const externalContributionLimits = {
   maxReferences: 8,
   maxReferenceValueLength: 500,
   maxExternalRefLength: 200,
+  maxParticipantHandleLength: 200,
   maxAssessmentNoteLength: 2000,
 } as const;
 
@@ -79,6 +105,7 @@ export type ExternalContribution = {
   summary: string;
   references: ExternalContributionReference[];
   externalRef: string | null;
+  participant?: ExternalContributionParticipant | null;
   sourceThreadId: string;
   sourceRunId: string;
   sourceMessageId: string;
@@ -96,6 +123,7 @@ export type ExternalContributionRecord = {
   summary: string;
   references: ExternalContributionReference[];
   externalRef: string | null;
+  participant?: ExternalContributionParticipant | null;
 };
 
 export type ExternalContributionImport = Omit<ExternalContributionRecord, "taskId"> & {
@@ -266,11 +294,16 @@ export type WorkflowStateEvidence = {
   scopeRevision?: string;
   // present only on contribution evidence; the summary and references stay on the current contribution entry
   contribution?: {contributionId: string; revision: number; state: ExternalContributionState | null; decision: ExternalContributionDecision | null};
+  // present only on a participant observation: the receipt the write controller resolved from the root's own native item
+  participant?: WorkflowEvidenceParticipant;
   // present only on selection evidence: the revision, its path and the condition it answered; changed is whether it replaced a different
   // or invalidated choice
   branch?: {revision: number; path: BranchSelectionPath; changed: boolean; condition?: string};
   // present only on return evidence; the region, attempt and closed state stay on the return entry
   return?: {returnId: string; regionNodeIds?: string[]};
+  // present only on the status_changed evidence of an explicit repair: a misrecorded status inside a return region moved backward off
+  // the selected path, starting no attempt and spending no jump
+  repair?: true;
 };
 
 export type WorkflowStateEvidenceInput = {
@@ -285,6 +318,11 @@ export type WorkflowStateEvidenceInput = {
   /** Resolved by the write controller from the cited native item or message and T3's published provider turns; never caller input. */
   sourceProviderTurnId?: string | null;
   sourceProviderTurnStartedAt?: number | null;
+  /** An observation of a contribution's participant: the contribution and what the root's cited own item establishes. */
+  participantContributionId?: string;
+  observation?: ParticipantReceiptKind;
+  /** Resolved by the write controller from the contribution and the root's verified item; never caller input. */
+  participantReceipt?: WorkflowEvidenceParticipant;
 };
 
 export type AcceptedWorkflowAgreementRecord = {
@@ -386,6 +424,8 @@ export type WorkflowApplyInput = {
   plan: WorkflowStatePlan;
   note: string;
   evidence?: WorkflowStateEvidenceInput[];
+  /** Declares this apply's backward status moves inside a return region off its selected path as the correction of a misrecorded status. */
+  repair?: boolean;
 };
 
 export type WorkflowControllerLineage = {
@@ -411,6 +451,8 @@ export type WorkflowMutationReceipt = {
   workflowId: string;
   revision: number;
   stateHash: string;
+  /** The document's own status after the write, separate from the status of its root occurrence. */
+  documentStatus?: WorkflowExecutionStatus;
 };
 
 export type WorkflowMutationResult = WorkflowMutationReceipt | {
@@ -442,6 +484,7 @@ export type WorkflowEnsureResult = WorkflowMutationResult | {
   workflowId: string;
   revision: number;
   stateHash: string;
+  documentStatus?: WorkflowExecutionStatus;
 } | {
   status: "incompatible";
   operationId: string;
@@ -537,6 +580,21 @@ export const ExternalContributionAssessmentSchema = Schema.Struct({
   recordedAt: Schema.Number,
 });
 
+export const ExternalContributionParticipantSchema = Schema.Union([
+  Schema.Struct({kind: Schema.Literal("t3_conversation"), threadId: Schema.String, environmentId: Schema.NullOr(Schema.String)}),
+  Schema.Struct({kind: Schema.Literal("external"), ref: Schema.String}),
+  Schema.Struct({kind: Schema.Literal("unknown")}),
+]);
+export const WorkflowEvidenceParticipantSchema = Schema.Struct({
+  contributionId: Schema.String,
+  revision: Schema.Number,
+  attempt: Schema.Number,
+  participant: Schema.NullOr(ExternalContributionParticipantSchema),
+  receipt: Schema.Struct({kind: Schema.Literals(participantReceiptKinds), toolName: Schema.NullOr(Schema.String), inputDigest: Schema.NullOr(Schema.String)}),
+  repeats: Schema.optionalKey(Schema.Number),
+  firstRecordedAt: Schema.optionalKey(Schema.Number),
+});
+
 export const ExternalContributionSchema = Schema.Struct({
   contributionId: Schema.String,
   nodeId: Schema.String,
@@ -545,6 +603,7 @@ export const ExternalContributionSchema = Schema.Struct({
   summary: Schema.String,
   references: mutableArray(ExternalContributionReferenceSchema),
   externalRef: Schema.NullOr(Schema.String),
+  participant: Schema.optionalKey(Schema.NullOr(ExternalContributionParticipantSchema)),
   sourceThreadId: Schema.String,
   sourceRunId: Schema.String,
   sourceMessageId: Schema.String,
@@ -562,6 +621,7 @@ export const ExternalContributionRecordSchema = Schema.Struct({
   summary: Schema.String,
   references: mutableArray(ExternalContributionReferenceSchema),
   externalRef: Schema.NullOr(Schema.String),
+  participant: Schema.optionalKey(Schema.NullOr(ExternalContributionParticipantSchema)),
 });
 
 export const WorkflowStateEvidenceSchema = Schema.Struct({
@@ -589,9 +649,11 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
     state: Schema.NullOr(Schema.Literals(externalContributionStates)),
     decision: Schema.NullOr(Schema.Literals(externalContributionDecisions)),
   })),
+  participant: Schema.optionalKey(WorkflowEvidenceParticipantSchema),
   branch: Schema.optionalKey(Schema.Struct({revision: Schema.Number, path: Schema.Literals(branchSelectionPaths), changed: Schema.Boolean,
     condition: Schema.optionalKey(Schema.String)})),
   return: Schema.optionalKey(Schema.Struct({returnId: Schema.String, regionNodeIds: Schema.optionalKey(mutableArray(Schema.String))})),
+  repair: Schema.optionalKey(Schema.Literal(true)),
 });
 
 export const WorkflowReturnRunSchema = Schema.Union([
@@ -681,6 +743,7 @@ export const WorkflowMutationReceiptSchema = Schema.Struct({
   workflowId: Schema.String,
   revision: Schema.Number,
   stateHash: Schema.String,
+  documentStatus: Schema.optionalKey(WorkflowExecutionStatusSchema),
 });
 
 // the schemas mirror the hand-written types in both directions
@@ -696,5 +759,7 @@ const mirrors: [
   Same<typeof AcceptedWorkflowAgreementRecordSchema.Type, AcceptedWorkflowAgreementRecord>,
   Same<typeof WorkflowReturnSchema.Type, WorkflowReturn>,
   Same<typeof WorkflowReturnRunSchema.Type, WorkflowReturnRun>,
-] = [true, true, true, true, true, true, true, true, true, true];
+  Same<typeof ExternalContributionParticipantSchema.Type, ExternalContributionParticipant>,
+  Same<typeof WorkflowEvidenceParticipantSchema.Type, WorkflowEvidenceParticipant>,
+] = [true, true, true, true, true, true, true, true, true, true, true, true];
 void mirrors;

@@ -6,9 +6,15 @@ import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} 
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {canonicalizeProposalDraft, proposalContextFromDefinitions, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {workflowMutationLimits, type WorkflowAgreementImport, type WorkflowApplyInput, type WorkflowExecutionStatus, type WorkflowOwner, type WorkflowStateDocument, type WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
-import {backToContext, occurrenceAttempts, planBackTos, planBranches, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns} from "../src/workflow-plan-tree.js";
+import {backToContext, occurrenceAttempts, planBackTos, planBranches, planEntities, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import {effectiveIndex, indexSource, projectIndex} from "./project-definitions-fixture.js";
 import {execute, openWorkflowStores, query, temporaryDirectory} from "./support/g12-stores.js";
+import {guidanceTransaction} from "../src/guidance-sql.js";
+import {createElement} from "react";
+import {renderToStaticMarkup} from "react-dom/server";
+import {progressHistory, progressWorkflow} from "../src/workflow-progress.js";
+import {currentWork, PlanJourney, previousAttempts, readyAfterReturn} from "../ui/src/workflow-journey.js";
+import {historyOperations, operationHeadline, WorkflowHistory} from "../ui/src/workflow-history.js";
 
 // parser and workflow-store proof for a bounded return: the budget is the applied-jump ledger, and resets follow replay scope
 
@@ -87,14 +93,14 @@ it("replay reset follows the resolved region and refuses a missing or unsafe max
 
 const invalidReason = (result: {status: string}) => result.status === "invalid" ? (result as {reason?: string}).reason ?? result.status : result.status;
 
-const open = (nodes: unknown[]) => Effect.gen(function* () {
+const open = (nodes: unknown[], pinned = context) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("return-budget-");
   const stores = yield* openWorkflowStores(directory);
   yield* execute(stores.sql, "INSERT INTO meta VALUES(?,?)", `supervisor_control:${JSON.stringify("project-a")}`, JSON.stringify({generation: 1, enabled: true, manual: true}));
   const reserved = yield* stores.supervisors.reserve("project-a", "main-a", "Main conversation", defaultSupervisorModel, 1, 1);
   yield* stores.supervisors.setBinding({...reserved, state: "ready"});
   const owner: WorkflowOwner = {projectId: "project-a", mainThreadId: "main-a", supervisorThreadId: reserved.threadId, bindingGeneration: reserved.generation};
-  const plan = validateWorkflowPlan(draft(...nodes), context);
+  const plan = validateWorkflowPlan(draft(...nodes), pinned);
   assert.ok(plan?.plan, "the agreed plan resolves");
   const proposal = {status: "proposed", message: "A draft.", workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, ...plan} as WorkflowProposalInfo;
   const binding: WorkflowStateSourceBinding = {workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, definitionsStatus: "ready",
@@ -103,7 +109,7 @@ const open = (nodes: unknown[]) => Effect.gen(function* () {
     objective: "Ship the reviewed change.", agreement: {status: "agreed", message: "Accepted.", proposalId: "proposal-a", agreedAt: 10,
       evidence: {kind: "supervisor_message", messageId: "supervisor-message"}, agentMessageId: "agent-message", workflow: proposal}};
   assert.equal((yield* stores.workflows.importAcceptedAgreement(owner, agreement, 100)).status, "applied");
-  const validation = {pinnedContext: context, originalProposal: proposal, expectedTaskId: "task-a", expectedProposalId: "proposal-a",
+  const validation = {pinnedContext: pinned, originalProposal: proposal, expectedTaskId: "task-a", expectedProposalId: "proposal-a",
     expectedSourceHash: taskSourceHash, acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null};
   const box = {stores};
   const main = () => Effect.map(box.stores.workflows.get("project-a", "main-a"), document => {
@@ -704,6 +710,335 @@ it.live("a later acceptance adds a new return, and a fresh id does not refill a 
   assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.plan)[0]?.budgetId, freshBudget);
   assert.equal(planBackTos(unchanged.acceptedAgreements[1]!.agreement.workflow.plan)[0]?.budgetId, freshBudget);
 }), {timeout: 30_000});
+
+const loopYaml = "name: Loop\ndescription: Repeat work.\nfixed: true\nsequence:\n  - step: {id: work, name: Work, description: Do the work.}\n  - branch:\n      if: Again?\n      then:\n        - back_to(2): work\n";
+
+// the live blocker on 4cd74dd7: after task A completed with one applied jump, task B agreed the same fixed workflow; its new occurrence
+// kept the retained budget, and the next status-only apply failed pinned_definition_context_mismatch because the stored plan was rechecked
+// strictly without its own occurrences as the baseline
+it.live("a status-only apply after a new task agreed the same fixed workflow keeps its occurrence ids, its retained budget and the used count", () => Effect.gen(function* () {
+  const parsed = parseDefinitionWorkflow("loop", loopYaml);
+  const loopContext = {...context, workflows: [{...parsed, summary: "Repeat work.", origin: "project" as const, path: ".t3-supervisor/workflows/loop.yaml", sourceId: "loop"}]};
+  const run = yield* open([{kind: "workflow", definitionId: "loop", reason: "Use the loop."}], loopContext);
+  const statusEdit = (document: WorkflowStateDocument, operationId: string, statuses: Array<{nodeId: string; status: WorkflowExecutionStatus}>,
+    taskStatus: WorkflowExecutionStatus, binding: WorkflowStateSourceBinding, validation: typeof run.validation, proposal: WorkflowProposalInfo) => {
+    const current = new Map(planEntities(document.plan).map(node => [node.nodeId, node.status]));
+    const changed = statuses.filter(item => current.get(item.nodeId) !== item.status);
+    const edited = withOccurrenceStatuses(document.plan!, changed);
+    assert.ok("plan" in edited, JSON.stringify(edited));
+    const evidence: NonNullable<WorkflowApplyInput["evidence"]> = changed.map(item => ({kind: "status_changed" as const, targetNodeId: item.nodeId, note: `${item.nodeId} is ${item.status}.`}));
+    if (taskStatus !== document.status) evidence.push({kind: "status_changed", targetNodeId: null, note: `The task is ${taskStatus}.`});
+    return run.box.stores.workflows.apply(run.owner, {operationId, workflowId: document.workflowId, expectedRevision: document.revision, status: taskStatus,
+      objective: document.objective, sourceBinding: binding, requirements: [...proposal.requirements], issues: [...proposal.issues], plan: edited.plan,
+      note: "Record progress.", evidence}, validation, run.tick());
+  };
+  // task A: work, one applied jump, the second pass, then completed
+  const initial = yield* run.main();
+  const occurrenceA = planEntities(initial.plan).find(node => node.kind === "workflow");
+  const workA = planEntities(initial.plan).find(node => node.kind === "step" && node.localId === "work");
+  assert.ok(occurrenceA && workA);
+  const pass = (document: WorkflowStateDocument, operationId: string) =>
+    statusEdit(document, operationId, [{nodeId: occurrenceA.nodeId, status: "underway"}, {nodeId: workA.nodeId, status: "completed"}], "underway", run.binding, run.validation, run.proposal);
+  const firstPass = yield* pass(initial, "a-work");
+  assert.equal(firstPass.status, "applied", JSON.stringify(firstPass));
+  yield* run.choose("Again?", "then");
+  yield* run.jump("work", "a-jump");
+  const spentA = yield* run.budget("work");
+  assert.equal(spentA.used, 1);
+  const secondPass = yield* pass(yield* run.main(), "a-work-again");
+  assert.equal(secondPass.status, "applied", JSON.stringify(secondPass));
+  yield* run.choose("Again?", "else");
+  const doneA = yield* run.main();
+  const finishedA = yield* statusEdit(doneA, "a-complete", [{nodeId: occurrenceA.nodeId, status: "completed"}], "completed", run.binding, run.validation, run.proposal);
+  assert.equal(finishedA.status, "applied", JSON.stringify(finishedA));
+
+  // task B agrees the same fixed workflow: a new occurrence with the same template path
+  const draftedB = canonicalizeProposalDraft(draft({kind: "workflow", definitionId: "loop", reason: "Use the loop again."}), loopContext, "task-b");
+  assert.ok(draftedB.ok, JSON.stringify(draftedB));
+  if (!draftedB.ok || !draftedB.workflow.plan) return;
+  const proposalB = {status: "proposed", message: "The next draft.", workspaceRoot: "/workspace/project-a", revision: "definitions-1", globalRevision: null, ...draftedB.workflow} as WorkflowProposalInfo;
+  const bindingB: WorkflowStateSourceBinding = {...run.binding, taskId: "task-b", proposalId: "proposal-b", sourceHash: "ship-the-next-change"};
+  const agreementB: WorkflowAgreementImport = {taskId: "task-b", sourceThreadId: "main-a", sourceRunId: "run-b", sourceMessageId: "message-b", sourceHash: "ship-the-next-change",
+    objective: "Ship the next change.", agreement: {status: "agreed", message: "Accepted.", proposalId: "proposal-b", agreedAt: 30,
+      evidence: {kind: "supervisor_message", messageId: "supervisor-message-b"}, agentMessageId: "agent-message-b", workflow: proposalB}};
+  assert.equal((yield* run.box.stores.workflows.importAcceptedAgreement(run.owner, agreementB, run.tick())).status, "applied");
+  const validationB = {pinnedContext: loopContext, originalProposal: proposalB, expectedTaskId: "task-b", expectedProposalId: "proposal-b",
+    expectedSourceHash: "ship-the-next-change", acceptedTaskAgreement: null, acceptedTaskAgreementSourceHash: null};
+  const before = yield* run.main();
+  const appliedB = yield* run.box.stores.workflows.apply(run.owner, {operationId: "b-plan", workflowId: before.workflowId, expectedRevision: before.revision, status: "planned",
+    objective: "Ship the next change.", sourceBinding: bindingB, requirements: [...proposalB.requirements], issues: [...proposalB.issues], plan: draftedB.workflow.plan,
+    note: "Adopt task B.", evidence: [{kind: "status_changed", targetNodeId: null, note: "The next task is planned."}]}, validationB, run.tick());
+  assert.equal(appliedB.status, "applied", JSON.stringify(appliedB));
+  const planned = yield* run.main();
+  const occurrenceB = planEntities(planned.plan).find(node => node.kind === "workflow");
+  const workB = planEntities(planned.plan).find(node => node.kind === "step" && node.localId === "work");
+  assert.ok(occurrenceB && workB);
+  assert.notEqual(occurrenceB.nodeId, occurrenceA.nodeId, "task B is a new occurrence");
+  const returnB = planBackTos(planned.plan)[0];
+  assert.ok(returnB);
+  assert.equal(returnB.budgetId, spentA.node.budgetId, "the store retains the budget at its address, as before");
+  assert.equal(returnBudgetUsed(planned.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1);
+
+  // the blocked live write: a status-only apply with the identities the status read returned
+  const statusOnly = yield* statusEdit(planned, "b-status", [{nodeId: occurrenceB.nodeId, status: "underway"}, {nodeId: workB.nodeId, status: "underway"}], "underway", bindingB, validationB, proposalB);
+  assert.equal(statusOnly.status, "applied", JSON.stringify(statusOnly));
+  const after = yield* run.main();
+  assert.deepEqual(planEntities(after.plan).map(node => node.nodeId), planEntities(planned.plan).map(node => node.nodeId), "occurrence ids are stable");
+  assert.equal(planBackTos(after.plan)[0]?.budgetId, returnB.budgetId, "the retained budget is unchanged");
+  assert.equal(returnBudgetUsed(after.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1, "the used count is unchanged");
+  assert.equal(planEntities(after.plan).find(node => node.nodeId === workB.nodeId)?.status, "underway");
+
+  // provenance stays guarded: task A's binding cannot write task B's plan, and a tampered budget on the retained return is not adopted
+  const stale = yield* statusEdit(after, "b-stale-binding", [{nodeId: workB.nodeId, status: "completed"}], "underway", run.binding, validationB, proposalB);
+  assert.equal(invalidReason(stale), "pinned_definition_context_mismatch");
+  const tampered = JSON.parse(JSON.stringify(after.plan)) as WorkflowPlanGroupInfo;
+  const tamperedReturn = planBackTos(tampered)[0] as {budgetId: string};
+  tamperedReturn.budgetId = "ef".repeat(32);
+  const resubmitted = yield* run.box.stores.workflows.apply(run.owner, {operationId: "b-tampered-budget", workflowId: after.workflowId, expectedRevision: after.revision,
+    status: after.status, objective: after.objective, sourceBinding: bindingB, requirements: [...proposalB.requirements], issues: [...proposalB.issues], plan: tampered,
+    note: "Resend the plan.", evidence: []}, validationB, run.tick());
+  assert.equal(resubmitted.status, "applied", JSON.stringify(resubmitted));
+  const kept = yield* run.main();
+  assert.equal(planBackTos(kept.plan)[0]?.budgetId, returnB.budgetId, "the occurrence keeps its retained budget identity");
+  assert.equal(kept.returnBudgets?.some(item => item.budgetId === "ef".repeat(32)), false);
+  assert.equal(returnBudgetUsed(kept.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1);
+}), {timeout: 30_000});
+
+// G: continuous observation never consumes the evidence history: an identical receipt is one entry that counts its repeats, and an
+// observation-only apply records no plan update, so far more reads than the evidence cap stay writable with history intact
+it.live("repeated identical receipts compact into one counted entry and observation-only applies add no plan_updated, so reads never exhaust the evidence cap", () => Effect.gen(function* () {
+  const run = yield* open([local("work")]);
+  const document = yield* run.main();
+  const work = planEntities(document.plan).find(node => node.kind === "step")!;
+  const recorded = yield* guidanceTransaction(run.box.stores.sql)(run.box.stores.workflows.recordContribution(run.owner, {contributionId: "ext:1", nodeId: work.nodeId, revision: 1,
+    state: "awaiting_result", summary: "External work.", references: [], externalRef: null, participant: {kind: "external", ref: "agent:1"},
+    sourceThreadId: "main-a", sourceRunId: "run-main", sourceMessageId: "message-1"}, 500));
+  assert.equal(recorded.status, "applied", JSON.stringify(recorded));
+  const before = yield* run.main();
+  const receipt = {contributionId: "ext:1", revision: 1, attempt: 1, participant: {kind: "external" as const, ref: "agent:1"}, receipt: {kind: "read" as const, toolName: "mcp__agent__status", inputDigest: "digest"}};
+  const observe = (index: number) => Effect.gen(function* () {
+    const current = yield* run.main();
+    return yield* run.box.stores.workflows.apply(run.owner, {operationId: `observe-${index}`, workflowId: current.workflowId, expectedRevision: current.revision, status: current.status,
+      objective: current.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: current.plan!,
+      note: `Read ${index}.`, evidence: [{kind: "observation", note: `Read ${index}.`, participantContributionId: "ext:1", observation: "read", sourceItemId: `item-${index}`, participantReceipt: receipt}]},
+    run.validation, 1_000 + index);
+  });
+  for (let index = 1; index <= workflowMutationLimits.maxEvidence + 100; index++) {
+    const result = yield* observe(index);
+    assert.equal(result.status, "applied", `read ${index}: ${JSON.stringify(result)}`);
+  }
+  const after = yield* run.main();
+  assert.equal(after.evidence.length, before.evidence.length + 1, "all reads are one receipt entry");
+  const entry = after.evidence.find(item => item.participant)!;
+  assert.deepEqual([entry.participant!.repeats, entry.participant!.firstRecordedAt, entry.recordedAt, entry.sourceItemId, entry.note],
+    [workflowMutationLimits.maxEvidence + 100, 1_001, 1_000 + workflowMutationLimits.maxEvidence + 100, `item-${workflowMutationLimits.maxEvidence + 100}`, `Read ${workflowMutationLimits.maxEvidence + 100}.`]);
+  assert.equal(after.evidence.filter(item => item.kind === "plan_updated").length, before.evidence.filter(item => item.kind === "plan_updated").length, "observation-only applies record no plan update");
+  assert.equal(after.revision, before.revision + workflowMutationLimits.maxEvidence + 100, "every apply still advanced the revision");
+  // a different fact (another tool) is its own entry; a status change still records its plan update
+  const other = yield* run.box.stores.workflows.apply(run.owner, {operationId: "observe-other", workflowId: after.workflowId, expectedRevision: after.revision, status: after.status,
+    objective: after.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: after.plan!, note: "Another tool.",
+    evidence: [{kind: "observation", note: "Another tool.", participantContributionId: "ext:1", observation: "read", sourceItemId: "item-other",
+      participantReceipt: {...receipt, receipt: {...receipt.receipt, toolName: "mcp__agent__log"}}}]}, run.validation, 9_000);
+  assert.equal(other.status, "applied", JSON.stringify(other));
+  const final = yield* run.main();
+  assert.equal(final.evidence.length, after.evidence.length + 1);
+  const progressed = yield* run.advance(final, "work-underway", 9_100, {work: "underway"}, "underway");
+  assert.equal(progressed.status, "applied", JSON.stringify(progressed));
+  assert.equal((yield* run.main()).evidence.filter(item => item.kind === "plan_updated").length, before.evidence.filter(item => item.kind === "plan_updated").length + 1);
+  // one more identical read after the real status change: the compacted row keeps its early sequence while its stored time and write move
+  // to this read, so History dates it by its first read and shows the latest read and the count as a span before the later status change
+  const current = yield* run.main();
+  const again = yield* run.box.stores.workflows.apply(run.owner, {operationId: "observe-after-status", workflowId: current.workflowId, expectedRevision: current.revision, status: current.status,
+    objective: current.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: current.plan!,
+    note: "Read after the status change.", evidence: [{kind: "observation", note: "Read after the status change.", participantContributionId: "ext:1", observation: "read", sourceItemId: "item-late", participantReceipt: receipt}]},
+    run.validation, 9_200);
+  assert.equal(again.status, "applied", JSON.stringify(again));
+  const compacted = yield* run.main();
+  const row = compacted.evidence.find(item => item.participant?.receipt.toolName === "mcp__agent__status")!;
+  assert.deepEqual([row.recordedAt, row.operationId, row.participant!.repeats, row.participant!.firstRecordedAt], [9_200, "observe-after-status", workflowMutationLimits.maxEvidence + 101, 1_001], "the stored row carries the latest read");
+  const history = progressHistory(compacted);
+  const span = history.find(event => event.id === row.id)!;
+  const statusChange = history.find(event => event.kind === "status_changed" && event.targetNodeId === work.nodeId && event.statusTo === "underway")!;
+  assert.ok(span.sequence < statusChange.sequence, "the compacted row keeps its early position");
+  assert.deepEqual([span.recordedAt, span.coverage, span.operationId], [1_001, {firstRecordedAt: 1_001, latestRecordedAt: 9_200, repeats: workflowMutationLimits.maxEvidence + 101}, undefined],
+    "History dates the span by its first read, keeps the latest read and the count, and does not join the later write");
+  assert.ok(span.recordedAt <= statusChange.recordedAt, "semantic history still moves forward");
+  const dated = history.filter(event => event.sequence >= span.sequence).map(event => event.recordedAt);
+  assert.deepEqual(dated, [...dated].sort((left, right) => left - right), "no later-dated point event precedes an older semantic action");
+  const rendered = renderToStaticMarkup(createElement(WorkflowHistory, {workflow: progressWorkflow(compacted, [])}));
+  assert.match(rendered, new RegExp(`Read coverage[^]*?${workflowMutationLimits.maxEvidence + 101} reads, first to latest <time dateTime="${new Date(9_200).toISOString()}"`));
+  assert.ok(rendered.indexOf("Read coverage") < rendered.indexOf("Status recorded · work"), "the span renders before the later status change");
+}), {timeout: 60_000});
+
+// H: the real store's return output, projected and rendered: the returned target is ready, not absent; earlier outcomes on an unselected
+// path are neutral history; previous attempts keep their closed status and selection with reason and source after a fresh selection;
+// history keeps every record of one write under one headline; attempt 1 is explicit and a lane's return leaves the other lane untouched
+it.live("a real return renders a ready target, neutral earlier outcomes, previous attempts, grouped history and explicit attempts", () => Effect.gen(function* () {
+  const run = yield* open([local("implement"), {kind: "parallel", nodes: [
+    {kind: "sequence", nodes: [local("reviewa"), branch("Lane A findings.", [local("fixa"), backTo("reviewa", 2)])]},
+    {kind: "sequence", nodes: [local("reviewb"), branch("Lane B findings.", [local("fixb"), backTo("reviewb", 2)])]},
+  ]}, local("deliver")]);
+  yield* run.complete(["implement", "reviewa", "reviewb"], "first-pass");
+  // lane B: corrections were done, then the decision was revised so the then path is no longer selected
+  yield* run.choose("Lane B findings.", "then");
+  yield* run.complete(["fixb"], "lane-b-fix");
+  yield* run.choose("Lane B findings.", "else");
+  // lane A: findings remain, the correction is done and the return is reached and applied
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix");
+  yield* run.jump("reviewa", "lane-a-return");
+  const document = yield* run.main();
+  const ids = Object.fromEntries(planEntities(document.plan).filter(node => node.kind === "step").map(node => [node.localId, node.nodeId])) as Record<string, string>;
+  const workflow = progressWorkflow(document, []);
+  const attempts = new Map(workflow.attempts!.map(item => [item.nodeId, item.attempt]));
+  assert.deepEqual([attempts.get(ids.reviewa!), attempts.get(ids.fixa!)], [2, 2], "the reopened lane is in attempt 2");
+  assert.deepEqual([attempts.get(ids.reviewb!), attempts.get(ids.fixb!)], [1, 1], "the sibling lane keeps its explicit attempt 1");
+  assert.deepEqual([attempts.get(ids.implement!), attempts.get(ids.deliver!)], [undefined, undefined], "occurrences outside every return region carry no attempt");
+  const statuses = new Map(planEntities(document.plan).map(node => [node.nodeId, node.status]));
+  assert.deepEqual([statuses.get(ids.reviewa!), statuses.get(ids.fixa!), statuses.get(ids.reviewb!), statuses.get(ids.fixb!)], ["planned", "planned", "completed", "completed"],
+    "a real return plans every repeated member and leaves the sibling lane's outcomes in place");
+  // the returned target is ready work while nothing in its region is active
+  const ready = readyAfterReturn(workflow.plan, workflow.returns);
+  assert.deepEqual([...ready], [ids.reviewa], "only the return's target is ready");
+  const render = () => renderToStaticMarkup(createElement(PlanJourney, {node: workflow.plan!, mode: "live", selections: workflow.branchSelections, attempts,
+    returns: workflow.returns, ready, notApplicable: new Set(workflow.notApplicable ?? [])}));
+  let html = render();
+  assert.match(html, /class="journey-stop state-ready"/);
+  assert.match(html, /reviewa<span class="step-flags"><span class="pill">Attempt 2<\/span><\/span><\/span><span class="step-state">Ready to start · attempt 2</);
+  assert.match(html, /fixa<span class="step-flags"><span class="pill">Attempt 2</, "the repeated member shows its attempt");
+  assert.match(html, /reviewb<span class="step-flags"><span class="pill">Attempt 1<\/span><\/span><\/span><span class="step-state">Completed</, "a returnable member shows attempt 1 explicitly");
+  // lane B's completed correction sits on the path no longer selected: history in the current plan, not a live outcome
+  assert.match(html, /class="journey-stop state-historical"/);
+  assert.match(html, /fixb<span class="step-flags"><span class="pill">Attempt 1<\/span><\/span><\/span><span class="step-state">Completed earlier · path not selected</);
+  assert.doesNotMatch(html, /fixb[^]{0,200}state-completed/, "no completed tone on the unselected path");
+  // the closed attempt of lane A: reviewa ended completed, the branch's then selection revision 1 with its reason and source
+  const previous = previousAttempts(ids.reviewa!, workflow.returns);
+  assert.deepEqual(previous.map(item => [item.attempt, item.closed?.status]), [[1, "completed"]]);
+  const laneA = planBranches(workflow.plan).find(item => item.condition === "Lane A findings.")!;
+  assert.deepEqual(previousAttempts(laneA.nodeId, workflow.returns).map(item => item.selection && [item.selection.nodeId, item.selection.revision, item.selection.path, item.selection.reason]),
+    [[laneA.nodeId, 1, "then", "Context decided then."]]);
+  assert.match(html, /Previous attempt 1/);
+  assert.match(html, /then path selected \(revision 1\)/);
+  assert.match(html, /Decision reason: Context decided then\./);
+  assert.match(html, /message <code>main-message-/);
+  // a fresh selection in the new attempt keeps the previous attempt's record
+  yield* run.choose("Lane A findings.", "then");
+  const reselected = progressWorkflow(yield* run.main(), []);
+  const again = renderToStaticMarkup(createElement(PlanJourney, {node: reselected.plan!, mode: "live", selections: reselected.branchSelections, attempts,
+    returns: reselected.returns, ready: readyAfterReturn(reselected.plan, reselected.returns)}));
+  assert.match(again, /Previous attempt 1/);
+  assert.match(again, /then path selected \(revision 1\)/);
+  assert.match(again, /Then path selected/);
+  // history: the return and the task status it records are one write with one headline and two unmerged records in stored order
+  const operations = historyOperations(workflow.history!);
+  const returned = operations.find(operation => operation.some(event => event.kind === "return_applied"))!;
+  assert.equal(returned.length, 2, "the return and its task status share the operation");
+  assert.equal(returned[0]!.operationId, returned[1]!.operationId);
+  assert.equal(returned[0]!.recordedAt, returned[1]!.recordedAt, "equal timestamps stay separate records");
+  assert.ok(returned[0]!.sequence < returned[1]!.sequence);
+  assert.equal(operationHeadline(returned), "Returned to reviewa: attempt 2 starts");
+  const history = renderToStaticMarkup(createElement(WorkflowHistory, {workflow}));
+  assert.match(history, /<h3>Returned to reviewa: attempt 2 starts<\/h3>/);
+  assert.match(history, /2 records of one write/);
+  assert.match(history, /Returned to an earlier step · reviewa/);
+  assert.match(history, /Attempt 2 starts after returning to earlier work/);
+  html = history;
+  assert.ok((html.match(/<li/g) ?? []).length >= workflow.history!.length, "no record is merged away");
+}), {timeout: 30_000});
+
+it.live("overlapping returns leave only the later frontier ready, previous attempts count per occurrence, and independent lanes stay ready beside active work", () => Effect.gen(function* () {
+  const run = yield* open([local("implement"), {kind: "parallel", nodes: [
+    {kind: "sequence", nodes: [local("reviewa"), branch("Lane A findings.", [local("fixa"), backTo("reviewa", 2)])]},
+    {kind: "sequence", nodes: [local("reviewb"), branch("Lane B findings.", [local("fixb"), backTo("reviewb", 2)])]},
+  ]}, branch("Overall findings.", [backTo("implement", 2)]), local("deliver")]);
+  const id = Object.fromEntries(planEntities((yield* run.main()).plan).filter(node => node.kind === "step").map(node => [node.localId, node.nodeId])) as Record<string, string>;
+  yield* run.complete(["implement", "reviewa", "reviewb"], "first-pass");
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix");
+  yield* run.jump("reviewa", "inner-return");
+  // lane A's second attempt finds nothing, lane B found nothing, and the overall decision reopens implementation with both lanes
+  yield* run.complete(["reviewa"], "lane-a-second");
+  yield* run.choose("Lane A findings.", "else");
+  yield* run.choose("Lane B findings.", "else");
+  yield* run.choose("Overall findings.", "then");
+  yield* run.jump("implement", "outer-return");
+  let workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual([...readyAfterReturn(workflow.plan, workflow.returns)], [id.implement], "the inner return's target is superseded by the later return that reopened it");
+  assert.deepEqual(previousAttempts(id.reviewa!, workflow.returns).map(item => [item.attempt, item.closed?.status]), [[1, "completed"], [2, "completed"]], "closed attempts are numbered per occurrence");
+  assert.deepEqual(previousAttempts(id.fixa!, workflow.returns).map(item => item.attempt), [1, 2]);
+  assert.deepEqual(previousAttempts(id.implement!, workflow.returns).map(item => item.attempt), [1]);
+  assert.deepEqual(previousAttempts(id.reviewb!, workflow.returns).map(item => item.attempt), [1]);
+  assert.equal(new Map(workflow.attempts!.map(item => [item.nodeId, item.attempt])).get(id.reviewa!), 3, "the current attempt follows the closed ones");
+  assert.deepEqual(currentWork(workflow), {active: [], ready: ["implement"], decisions: []});
+  // the second pass: lane A returns again while lane B's correction is underway, then lane B returns too
+  yield* run.complete(["implement", "reviewa", "reviewb"], "second-pass");
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix-2");
+  yield* run.jump("reviewa", "lane-a-return-2");
+  yield* run.choose("Lane B findings.", "then");
+  const busy = yield* run.main();
+  assert.equal((yield* run.advance(busy, "lane-b-busy", run.tick(), {fixb: "underway"})).status, "applied");
+  workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual(currentWork(workflow), {active: ["fixb"], ready: ["reviewa"], decisions: []}, "a ready lane stays named beside an unrelated active lane");
+  yield* run.complete(["fixb"], "lane-b-fix-2");
+  yield* run.jump("reviewb", "lane-b-return");
+  workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual([...readyAfterReturn(workflow.plan, workflow.returns)].sort(), [id.reviewa, id.reviewb].sort(), "independent lanes keep their own ready targets");
+  assert.deepEqual(currentWork(workflow).ready.sort(), ["reviewa", "reviewb"]);
+}), {timeout: 60_000});
+
+it.live("a return to a workflow occurrence names that workflow as ready work", () => Effect.gen(function* () {
+  const parsed = parseDefinitionWorkflow("loop", loopYaml);
+  const loopContext = {...context, workflows: [{...parsed, summary: "Repeat work.", origin: "project" as const, path: ".t3-supervisor/workflows/loop.yaml", sourceId: "loop"}]};
+  const run = yield* open([{kind: "workflow", definitionId: "loop", reason: "Use the loop."}, branch("Redo the loop.", [backTo("loop", 2)]), local("deliver")], loopContext);
+  const edit = (statuses: Array<{nodeId: string; status: WorkflowExecutionStatus}>, operationId: string) => Effect.gen(function* () {
+    const document = yield* run.main();
+    const current = new Map(planEntities(document.plan).map(node => [node.nodeId, node.status]));
+    const changed = statuses.filter(item => current.get(item.nodeId) !== item.status);
+    const edited = withOccurrenceStatuses(document.plan!, changed);
+    assert.ok("plan" in edited, JSON.stringify(edited));
+    const evidence: NonNullable<WorkflowApplyInput["evidence"]> = changed.map(item => ({kind: "status_changed" as const, targetNodeId: item.nodeId, note: `${item.nodeId} is ${item.status}.`}));
+    if (document.status !== "underway") evidence.push({kind: "status_changed", targetNodeId: null, note: "The task is underway."});
+    const result = yield* run.box.stores.workflows.apply(run.owner, {operationId, workflowId: document.workflowId, expectedRevision: document.revision, status: "underway",
+      objective: document.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: edited.plan,
+      note: "Record progress.", evidence}, run.validation, run.tick());
+    assert.equal(result.status, "applied", `${operationId} ${JSON.stringify(result)}`);
+  });
+  const entities = planEntities((yield* run.main()).plan);
+  const loop = entities.find(node => node.kind === "workflow")!;
+  const work = entities.find(node => node.kind === "step" && node.localId === "work")!;
+  yield* edit([{nodeId: loop.nodeId, status: "underway"}, {nodeId: work.nodeId, status: "completed"}], "work-done");
+  yield* run.choose("Again?", "else");
+  yield* edit([{nodeId: loop.nodeId, status: "completed"}], "loop-done");
+  yield* run.choose("Redo the loop.", "then");
+  yield* run.jump("loop", "redo");
+  const workflow = progressWorkflow(yield* run.main(), []);
+  assert.deepEqual([...readyAfterReturn(workflow.plan, workflow.returns)], [loop.nodeId]);
+  assert.deepEqual(currentWork(workflow), {active: [], ready: [loop.name], decisions: []}, "the reopened workflow occurrence is current work");
+  assert.deepEqual(previousAttempts(loop.nodeId, workflow.returns).map(item => [item.attempt, item.closed?.status]), [[1, "completed"]]);
+}), {timeout: 60_000});
+
+it.live("a closed attempt keeps its decision reason and source after more than 50 later branch events", () => Effect.gen(function* () {
+  const run = yield* open([local("implement"), {kind: "parallel", nodes: [
+    {kind: "sequence", nodes: [local("reviewa"), branch("Lane A findings.", [local("fixa"), backTo("reviewa", 2)])]},
+    {kind: "sequence", nodes: [local("reviewb"), branch("Lane B findings.", [local("fixb")])]},
+  ]}, local("deliver")]);
+  yield* run.complete(["implement", "reviewa", "reviewb"], "first-pass");
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix");
+  yield* run.jump("reviewa", "lane-a-return");
+  for (let index = 0; index < 52; index++) yield* run.choose("Lane B findings.", index % 2 === 0 ? "then" : "else");
+  const workflow = progressWorkflow(yield* run.main(), []);
+  const laneA = planBranches(workflow.plan).find(item => item.condition === "Lane A findings.")!;
+  assert.equal(workflow.branchEvents!.length, 50, "the recent branch events stay bounded");
+  assert.ok(!workflow.branchEvents!.some(event => event.nodeId === laneA.nodeId), "the bounded recent events no longer hold the closed attempt's selection");
+  assert.deepEqual(previousAttempts(laneA.nodeId, workflow.returns).map(item => [item.attempt, item.selection?.revision, item.selection?.reason, item.selection?.sourceMessageId]),
+    [[1, 1, "Context decided then.", `main-message-${laneA.nodeId}-1`]], "the return record carries the closed selection's reason and source");
+  const html = renderToStaticMarkup(createElement(PlanJourney, {node: workflow.plan!, mode: "live", selections: workflow.branchSelections, returns: workflow.returns}));
+  assert.match(html, /Previous attempt 1/);
+  assert.match(html, /Decision reason: Context decided then\./);
+  assert.match(html, new RegExp(`message <code>main-message-${laneA.nodeId}-1`));
+}), {timeout: 60_000});
 
 it.live("an omitted ledger does not hide an applied jump after the return leaves the plan", () => Effect.gen(function* () {
   const opened = yield* open([local("work"), branch("Findings remain.", [backTo("work", 1)])]);
