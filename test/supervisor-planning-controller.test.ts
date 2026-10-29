@@ -36,6 +36,32 @@ it.effect("a registering helper reads its own reference on demand without receiv
   assert.match(helperInstructions, /request view documents only for complete plans, lineage, history or evidence/u);
   assert.equal((yield* f.workflows.readTool({...input, memberEpoch: member.epoch + 1}, cancel)).status, "denied");
   assert.notEqual((yield* f.workflows.readTool({...input, view: "context"}, cancel)).status, "ok", "registration grants reference reading only");
+  // the root's frozen check-in envelope is the root's own: a registering helper's authority does not read it
+  const request = yield* f.stores.requests.prepare({projectId: "project", supervisorThreadId: f.binding.threadId, kind: "review", taskId: null, text: "Check-in", batch: null,
+    completionMarker: "Supervisor check-in monitor:1 completed", envelope: {threads: []}}, 1);
+  assert.equal((yield* f.workflows.readTool({...input, view: "request", requestId: request.id}, cancel)).status, "denied");
+}));
+
+it.effect("a ready helper reads only its own check-in's frozen rows with view request; the root's request is not owned and an unknown id is unavailable", () => Effect.gen(function* () {
+  const f = yield* fixture();
+  const registered = yield* f.stores.team.registerMember(f.binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "bootstrap-run", now: 1});
+  const member = yield* f.stores.team.markReady(f.binding, registered.threadId, registered.epoch);
+  const cancel = yield* Deferred.make<void>();
+  const authority = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch};
+  const rows = {targets: [{threadId: "main", assignmentRootThreadId: "main", assignmentEpoch: 1, pending: 2, refs: [{sourceItemId: "turn-item:1"}]}], notifications: []};
+  const own = yield* f.stores.requests.prepare({id: "team-review:own", projectId: "project", supervisorThreadId: member.threadId, kind: "review", taskId: null,
+    text: "Helper check-in", batch: null, completionMarker: "Supervisor team check-in team-review:own completed", teamMemberEpoch: member.epoch, envelope: rows}, 1);
+  const root = yield* f.stores.requests.prepare({projectId: "project", supervisorThreadId: f.binding.threadId, kind: "review", taskId: null, text: "Check-in", batch: null,
+    completionMarker: "Supervisor check-in monitor:1 completed", envelope: {threads: []}}, 2);
+  const read = (yield* f.reader.readTool({...authority, view: "request", requestId: own.id}, cancel)) as unknown as {status: string; view: string; request: Record<string, unknown>; envelope: unknown};
+  assert.deepEqual([read.status, read.view, read.request.requestId, read.request.kind, read.envelope], ["ok", "request", own.id, "review", rows]);
+  assert.deepEqual(yield* f.reader.readTool({...authority, view: "request", requestId: root.id}, cancel), {status: "denied", view: "request", reason: "request_not_owned"});
+  assert.deepEqual(yield* f.reader.readTool({...authority, view: "request", requestId: "00000000-0000-4000-8000-000000000000"}, cancel), {status: "unavailable", view: "request", reason: "request_unknown"});
+  // a stale epoch reads nothing, and the root reads its own request but not the helper's
+  assert.equal((yield* f.reader.readTool({...authority, memberEpoch: member.epoch + 1, view: "request", requestId: own.id}, cancel)).status, "denied");
+  const rootAuthority = {supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation};
+  assert.equal(((yield* f.reader.readTool({...rootAuthority, view: "request", requestId: root.id}, cancel)) as {status: string}).status, "ok");
+  assert.deepEqual(yield* f.reader.readTool({...rootAuthority, view: "request", requestId: own.id}, cancel), {status: "denied", view: "request", reason: "request_not_owned"});
 }));
 
 it.effect("a planning pause needs its exact native owner call and preserves one identity on replay", () => Effect.gen(function* () {
@@ -149,12 +175,86 @@ it.effect("a source-bound native pause observes the actor's own ACK and confirms
   assert.equal(((yield* f.controller.call(release)) as {status: string}).status, "recorded");
   yield* f.controller.reconcile(f.binding);
   const notice = sent.find(item => String(item.messageId).includes(":release:"))!;
-  assert.equal(notice.text, `Planning pause ${result.attempt.attemptId} released (planning resolved). Continue your authorised task; human Stops and limits still apply.`);
+  // the fixture task has no proposal yet: planning resolved releases the pause but grants no implementation permission
+  assert.equal(notice.text, `Planning pause ${result.attempt.attemptId} released (planning resolved). This release grants no implementation permission: no workflow proposal is agreed yet; agree the one your Supervisor sends before implementing; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`);
   main.messages.push({id: String(notice.messageId), threadId: "main", runId: "source-run", nodeId: "source-node", role: "user", streaming: false,
     text: String(notice.text), creationSource: "server", createdBy: "system", createdAt: "2026-10-27T12:01:02Z", updatedAt: "2026-10-27T12:01:02Z"});
   yield* f.controller.reconcile(f.binding);
   assert.equal((yield* f.stores.requests.planningAttempts("project"))[0]?.state, "resolved");
   assert.equal(sent.length, 2, "one stable hold and one stable release");
+}));
+
+// the main's prepared proposal as the task carries it before acceptance, and the same proposal recorded as its agreement
+const proposal: WorkflowProposalInfo = {status: "proposed", message: "A complete proposal is waiting for an exact operative acceptance record.",
+  workspaceRoot: "/workspace/project", revision: "definitions-1", globalRevision: null, definitionsStatus: "ready", definitionsComplete: true,
+  requirementsKnown: true, requirements: [], issues: [], plan: null};
+const agreement = {status: "agreed" as const, message: "The operative assistant accepted the Supervisor's exact proposal by its digest.", proposalId: "proposal-a",
+  agreedAt: 1, evidence: {kind: "supervisor_message" as const, messageId: "proposal-message"}, agentMessageId: "acceptance-message", workflow: proposal};
+// the acknowledged pause of the fixture main, through the controller's own hold send and the main's exact ACK
+const acknowledgedPause = (f: Effect.Success<ReturnType<typeof fixture>>, sent: Record<string, unknown>[]) => Effect.gen(function* () {
+  f.proof(f.args);
+  const result = (yield* f.controller.call(f.args)) as Answer;
+  assert.equal(result.status, "recorded");
+  yield* f.controller.reconcile(f.binding);
+  assert.ok(sent.find(item => String(item.messageId).includes(":hold:")), "the hold went out natively");
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: result.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  return result.attempt.attemptId;
+});
+const releaseOf = (sent: Record<string, unknown>[]) => String(sent.find(item => String(item.messageId).includes(":release:"))?.text);
+
+for (const agreed of [false, true])
+it.effect(`a planning-resolved release of a main whose proposal is ${agreed ? "agreed continues the task" : "unagreed grants no implementation permission and names the acceptance route"}, only after the ACK`, () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+    sent.push({...payload});return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+  }};
+  const f = yield* fixture(rpc);
+  yield* f.stores.supervisors.saveTask({...f.task, workflow: proposal, workflowProposalId: "proposal-a", ...(agreed ? {agreement} : {})});
+  f.proof(f.args);
+  const paused = (yield* f.controller.call(f.args)) as Answer;
+  // a release before the main's ACK is refused: the two never race into a release of an unacknowledged pause
+  const early = {...f.args, action: "release", attemptId: paused.attempt.attemptId, operationId: "release-early", resolution: "continue"};
+  delete (early as {targetThreadIds?: unknown}).targetThreadIds;
+  f.proof(early);
+  assert.equal(((yield* f.controller.call(early)) as {reason?: string}).reason, "planning_acks_incomplete");
+  yield* f.controller.reconcile(f.binding);
+  const main = f.projections.get("main")!;
+  main.messages.push({id: "actor-ack", threadId: "main", runId: "source-run", nodeId: "ack-node", role: "assistant", streaming: false,
+    text: `\`\`\`planning-pause-ack\n${JSON.stringify({attemptId: paused.attempt.attemptId, targetThreadId: "main"})}\n\`\`\``, createdAt: "2026-10-27T12:01:01Z", updatedAt: "2026-10-27T12:01:01Z"});
+  (main.nodes as Record<string, unknown>[]).push({id: "ack-node", kind: "assistant_message", threadId: "main", runId: "source-run", rootNodeId: "source-node", parentNodeId: "source-node", providerThreadId: "provider-main", status: "completed"});
+  yield* f.controller.reconcile(f.binding);
+  const release = {...early, operationId: "release-a"};
+  f.proof(release);
+  assert.equal(((yield* f.controller.call(release)) as {status: string}).status, "recorded");
+  yield* f.controller.reconcile(f.binding);
+  const attemptId = paused.attempt.attemptId;
+  // the native send carries the release the main's agreement state decides
+  assert.equal(releaseOf(sent), agreed
+    ? `Planning pause ${attemptId} released (planning resolved). Continue your authorised task; human Stops and limits still apply.`
+    : `Planning pause ${attemptId} released (planning resolved). This release grants no implementation permission: workflow proposal proposal-a is not agreed; read it with supervision_plan {"callerThreadId":"main","taskId":"task-a","proposalId":"proposal-a"} and, if you agree, put its exact acceptance record in your own completed reply; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`);
+  const [stored] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(stored!.targets[0]!.release!.text, releaseOf(sent), "the stored bytes are the sent bytes");
+  assert.equal(sent.length, 2, "one hold and one release");
+}));
+
+it.effect("a pause superseded by a changed task releases the main without implementation permission while nothing is agreed", () => Effect.gen(function* () {
+  const sent: Record<string, unknown>[] = [];
+  const rpc: NativeRpcShape = {call: () => Effect.die(new Error("admitted initiation only")), initiate: (_tag, payload) => {
+    sent.push({...payload});return Effect.succeed({sent: Effect.succeed(true), release: Effect.void, result: Effect.succeed({sequence: sent.length})});
+  }};
+  const f = yield* fixture(rpc);
+  const attemptId = yield* acknowledgedPause(f, sent);
+  // the main's request was replaced by a new task: the attempt is superseded and its delivered hold must be released
+  yield* f.stores.supervisors.saveTask({...f.task, id: "task-b", messageId: "interpretation-b"});
+  yield* f.controller.reconcile(f.binding);
+  const [stored] = yield* f.stores.requests.planningAttempts("project");
+  assert.equal(stored?.state, "superseded");
+  assert.equal(stored?.resolution, "superseded");
+  assert.equal(releaseOf(sent), `Planning pause ${attemptId} released (superseded). This release grants no implementation permission: no workflow proposal is agreed yet; agree the one your Supervisor sends before implementing; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`);
+  assert.doesNotMatch(releaseOf(sent), /Continue your authorised task/u);
 }));
 
 it.effect("an edited requester source cannot receive the earlier planning hold", () => Effect.gen(function* () {

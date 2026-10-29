@@ -25,7 +25,7 @@ import { workflowRequestHash } from "./workflow-write-evidence.js";
 import {
   acknowledgePlanningTarget, closePlanningTarget, createPlanningAttempt, defaultPlanningTimeoutMs, expirePlanningAttempt,
   markPlanningTargetQuiescent, planningTargetAwaited, startPlanningAttempt, PlanningAcknowledgement, planningAttemptAnswer, planningDelivery, planningCanAdopt, planningDraftNotice,
-  planningDraftSections, planningDraftViews, planningHasUnresolvedEffects, planningHoldText, planningReleaseText, planningWaitOpen, resolvePlanningAttempt,
+  planningDraftSections, planningDraftViews, planningHasUnresolvedEffects, planningHoldText, planningReleaseText, planningWaitOpen, resolvePlanningAttempt, unacceptedProposal,
   type PlanningAttempt, type PlanningDelivery, type PlanningTarget,
 } from "./supervisor-planning.js";
 import type { ConversationFacts, RequesterSource } from "./supervision-conversation-contract.js";
@@ -522,7 +522,9 @@ const make = Effect.gen(function* () {
           kind === "hold" && ((yield* guard.supervisionStopped(binding.mainThreadId)) || (!(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId)) || current.state !== "open" || now >= current.deadline)))
           return {_tag: "Answer", value: undefined};
         const anchored = kind === "hold" ? startPlanningAttempt(current, now) : current;
-        const text = kind === "hold" ? planningHoldText(anchored, currentTarget) : planningReleaseText(anchored, currentTarget);
+        // a release reads the main's current agreement state: planning resolved or superseded leaves an unagreed proposal unagreed
+        const text = kind === "hold" ? planningHoldText(anchored, currentTarget)
+          : planningReleaseText(anchored, currentTarget, unacceptedProposal(anchored, currentTarget, currentTask));
         const sending: PlanningDelivery = {...stored, state: "sending", attemptedAt: now, text,
           runId: dispatchMode.type === "steer_active" ? dispatchMode.targetRunId ?? null : null};
         yield* requests.savePlanningAttempt(replaceDelivery(anchored, target.threadId, kind, sending));

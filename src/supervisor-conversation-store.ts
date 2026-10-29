@@ -71,6 +71,8 @@ export type ConversationRequest = {
   reviewOutcome?: ReviewOutcomeRecord;
   /** A liveness wake: the main's completed run, document revision and reported child lifecycle it answers, and how often it repeated. */
   liveness?: LivenessWake;
+  /** The frozen envelope of a check-in or wake: its rows, counts, handles, routes and indexes, read on demand with workflow_read view request. */
+  envelope?: Record<string, unknown>;
 };
 export type LivenessWake = {mainThreadId: string; runId: string; revision: number; children: string[]; /** The root's latest executed terminal run (its native projection) this wake answers; null when none executed. */ rootRunId: string | null; repeat: number};
 export type WorkflowIntroduction = {
@@ -204,6 +206,7 @@ const ConversationRequestDocument = Schema.Struct({
   reviewOutcome: Schema.optionalKey(ReviewOutcomeDocument),
   liveness: Schema.optionalKey(Schema.Struct({mainThreadId: Schema.String, runId: Schema.String, revision: Schema.Number,
     children: Schema.mutable(Schema.Array(Schema.String)), rootRunId: Schema.NullOr(Schema.String), repeat: Schema.Number})),
+  envelope: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
 const DispatchMode = Schema.Union([
   Schema.Struct({ type: Schema.Literal("steer_active"), targetRunId: Schema.String }),
@@ -264,7 +267,7 @@ const decodeNoticeClockRow = decodeGuidanceRow(Schema.Struct({ last_notice_at: S
 const decodeReviewMissesRow = decodeGuidanceRow(Schema.Struct({ review_misses: Schema.Number }), "notice_clock");
 
 type PrepareInput = Pick<ConversationRequest, "projectId" | "supervisorThreadId" | "kind" | "taskId" | "text" | "batch" | "completionMarker"> &
-  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins" | "liveness">>;
+  Partial<Pick<ConversationRequest, "id" | "teamNotificationIds" | "teamEventIds" | "teamMemberEpoch" | "roleVersion" | "reviewPins" | "liveness" | "envelope">>;
 
 /** The conversation store: the durable Supervisor requests, workflow introductions, agreement candidates and notice clocks. */
 export interface SupervisorConversationStoreShape {

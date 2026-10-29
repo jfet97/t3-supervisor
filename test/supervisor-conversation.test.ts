@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Clock, Effect, Exit, Fiber, FileSystem, Schema } from "effect";
+import { Clock, Context, Effect, Exit, Fiber, FileSystem, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { canonicalJson, canonicalStoredJson } from "../src/canonical-json.js";
 import { storedPlanJsonDepth, workflowMutationLimits } from "../src/workflow-state-contract.js";
@@ -18,9 +18,13 @@ import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../
 import { supervisionInterpretationSubmitToolDefinition, supervisionStopToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
-import { prepareWorkflowRequest, proportionatePlanRule, toolRouteReminder, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { interpretationRules, prepareWorkflowRequest, proportionatePlanRule, toolRouteReminder, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
+import { SupervisorIds } from "../src/ids.js";
+import { prepareStopNotice } from "../src/project-supervisor-store.js";
+import { exchangeTable, measureExchange, recordExchangeSamples, type ExchangeRow, type ExchangeSample } from "./support/exchange-audit.js";
 import type { ConversationRequest, ReviewOutcomeKind, WorkflowIntroduction } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
+import { createPlanningAttempt, resolvePlanningAttempt } from "../src/supervisor-planning.js";
 import { T3TransportError } from "../src/t3.js";
 import type { MessageInfo, Projection, RunInfo, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { compactProposalDigest, parseWorkflowAgreementRecord, workflowAgreementPlanHash } from "../src/supervisor-workflow-agreement.js";
@@ -994,9 +998,11 @@ it.effect("a main and two reviewer children share one complete task context and 
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request?.kind === "review" && request.batch);
   assert.equal(request.batch.threads.length, 3);
-  const envelope = JSON.parse(request.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)![1]!);
-  assert.equal(envelope.threads.filter((row: {taskContext?: unknown}) => row.taskContext).length, 1);
-  const context = envelope.threads.find((row: {taskContext?: unknown}) => row.taskContext);
+  type Row = {threadId: string; taskContext?: {taskId: string; taskRevision: string; proposal: {digest?: unknown}}; taskContextThreadId: string; items: unknown[];
+    contact: string; contactLimit?: unknown; activityRefs?: unknown; draft?: unknown; canonicalAuthoringMaterial?: unknown};
+  const envelope = request.envelope as {threads: Row[]};
+  assert.equal(envelope.threads.filter(row => row.taskContext).length, 1);
+  const context = envelope.threads.find(row => row.taskContext) as Row & {taskContext: NonNullable<Row["taskContext"]>};
   assert.equal(context.taskContext.taskId, task.id);
   assert.equal(context.taskContext.taskRevision, task.sourceHash);
   // the row names the proposal and its state; its digest is read with view context
@@ -1035,7 +1041,8 @@ it.effect("a large stored objective stays pull-readable without inflating or blo
   assert.equal(request?.kind, "review");assert.ok(request!.text.length < 3_000, `review prompt ${request!.text.length} characters`);
   assert.equal(request!.text.includes("An unusually long stored objective"), false);
   const prompt = request!.text;
-  assert.match(prompt, /"readItemId":"[^"]+"/u, "the envelope supplies exact native item handles");
+  assert.match(JSON.stringify(request!.envelope), /"readItemId":"[^"]+"/u, "the frozen envelope supplies exact native item handles");
+  assert.doesNotMatch(prompt, /"readItemId"/u, "handles are read with view request, not pushed");
   assert.match(prompt, /under sections monitoring and contact/u);
   // the sections it names say how to read the supplied handles forward and small, and what a message to the operative may carry
   const monitoring = yield* sectionText(fixture, "monitoring");
@@ -1126,7 +1133,7 @@ const recordTurnItem = (projection: Projection, message: MessageInfo): number =>
 
 const supervisorRequestCall = (fixture: Fixture, kind?: "context" | "review") =>
   fixture.calls.find(call => call.payload.threadId === fixture.binding.threadId &&
-    (kind === undefined || String(call.payload.text).includes(kind === "context" ? "This initializes supervision" : "Check-in of this factual change index")));
+    (kind === undefined || String(call.payload.text).includes(kind === "context" ? "This initializes supervision" : "Check-in for main ")));
 
 const workflowValue = (task: TaskRecord): WorkflowPlanValue => ({
   definitionsStatus: task.workflow!.definitionsStatus,
@@ -2201,7 +2208,7 @@ it.effect("a review that records no outcome stays visibly unconfirmed: nothing i
   const {fixture, request, run, pendingIds} = yield* pinnedReview(clock, "outcome-missing");
   // the check-in names its request; the review duty and outcome rules are in the core the root reads
   assert.ok(request.text.includes(`record_review, requestId ${JSON.stringify(request.id)}`));
-  assert.ok(request.text.includes(`"reviewRequestId":${JSON.stringify(request.id)}`));
+  assert.equal((request.envelope as {reviewRequestId?: string}).reviewRequestId, request.id, "the frozen envelope names the review it belongs to");
   const core = String((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})).core);
   assert.ok(core.includes("give corrective guidance only for a concrete, actionable operative mistake or deviation"));
   assert.ok((yield* sectionText(fixture, "monitoring")).includes("decided from the evidence you read and the current workflow"));
@@ -2307,9 +2314,7 @@ it.effect("a 100-item monitor burst freezes and acknowledges all activity while 
   for (let index = 0; index < 100; index++) assert.ok(frozenIds.has(`burst-command-${index}`));
   assert.equal(request.batch.threads[0]?.previewItems.length, 20);
   assert.equal(JSON.stringify(request.batch).includes("PRIVATE_BURST_BODY"), false);
-  const envelopeStart = request.text.indexOf("UNTRUSTED_MONITOR_ENVELOPE\n") + "UNTRUSTED_MONITOR_ENVELOPE\n".length;
-  const envelopeEnd = request.text.indexOf("\nEND_UNTRUSTED_MONITOR_ENVELOPE", envelopeStart);
-  const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as { threads: Array<{ items: Array<{ readItemId: string | null }>;
+  const envelope = request.envelope as { threads: Array<{ items: Array<{ readItemId: string | null }>;
     pendingItemCount: number; taskContext?: {protocolRepair?: {code: string; path: string | null; attempts: number; blocked: boolean}}; canonicalAuthoringMaterial?: unknown }> };
   const preview = envelope.threads[0]?.items ?? [];
   assert.equal(preview.length, 2, "the model receives a bounded preview rather than every frozen activity ID");
@@ -2419,9 +2424,7 @@ it.effect("completed activity first observed on new and reused children is batch
   assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-current-command"), true);
   assert.equal(request.batch.threads.find(item => item.threadId === reused.thread.id)?.items.some(item => item.id === "reused-old-command"), false);
   assert.equal(request.batch.threads.find(item => item.threadId === delegated.thread.id)?.items.some(item => item.id === "delegated-current-command"), true);
-  const envelopeStart = request.text.indexOf("UNTRUSTED_MONITOR_ENVELOPE\n") + "UNTRUSTED_MONITOR_ENVELOPE\n".length;
-  const envelopeEnd = request.text.indexOf("\nEND_UNTRUSTED_MONITOR_ENVELOPE", envelopeStart);
-  const envelope = JSON.parse(request.text.slice(envelopeStart, envelopeEnd)) as {threads: Array<{threadId: string; origin: string; parentThreadId: string | null;
+  const envelope = request.envelope as {threads: Array<{threadId: string; origin: string; parentThreadId: string | null;
     fallbackAncestors: Array<{threadId: string; main: boolean; eligible: boolean; contactable: boolean}>;
     items: Array<{readItemId: string | null; sourceItemId: string | null}>}>};
   const nativeEnvelope = envelope.threads.find(item => item.threadId === child.thread.id);
@@ -2819,7 +2822,7 @@ it.effect("monitoring-only API saves update the idle fallback threshold without 
     activityThreshold: 3,
   });
   yield* fixture.run();
-  const reviewCalls = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && String(call.payload.text).includes("Check-in of this factual change index"));
+  const reviewCalls = fixture.calls.filter(call => call.payload.threadId === fixture.binding.threadId && String(call.payload.text).includes("Check-in for main "));
   assert.equal(reviewCalls.length, 2);
   const resumedPendingIds = new Set((yield* fixture.conversation.monitor.pending(projectId, operativeThreadId)).map(item => item.id));
   const batchIds = new Set((yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))?.batch?.threads[0]?.items.map(item => item.id));
@@ -4162,7 +4165,9 @@ describe("definitions changed before the introduction get autonomous review and 
     yield* fixture.run();
     const request = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
     assert.equal(request.kind, "review");
-    assert.match(request.text, /\nREVIEW \{"taskId":/u);
+    assert.doesNotMatch(request.text, /\nREVIEW /u, "the review data is read with view request, not pushed");
+    assert.equal((request.envelope as {taskId?: string}).taskId, fixture.task.id);
+    assert.match(request.text, /Read its changed entries, user message handles and templates with workflow_read \{"supervisorThreadId":"[^"]+","bindingGeneration":\d+,"requestId":"[^"]+","view":"request"\}/u);
     assert.equal((yield* fixture.conversation.requests.introduction(fixture.task.id))?.state, "context");
     assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
 
@@ -4284,9 +4289,8 @@ it.effect("stale evidence can be renegotiated with a fresh ID in the same chats 
   yield* clock.advance(1);
   yield* fixture.run();
   assert.equal((yield* fixture.conversation.requests.requests(projectId)).find(item => item.id === request?.id)?.state, "completed");
-  const envelope = request!.text.slice(request!.text.indexOf("\nREVIEW ") + "\nREVIEW ".length);
-  assert.ok(request!.text.includes("\nREVIEW "));
-  const proposalId = (JSON.parse(envelope) as {proposalTemplate: {proposalId: string}}).proposalTemplate.proposalId;
+  assert.ok(!request!.text.includes("\nREVIEW "), "the templates are read with view request, not pushed");
+  const proposalId = (request!.envelope as {proposalTemplate: {proposalId: string}}).proposalTemplate.proposalId;
   assert.ok(proposalId);
   yield* appendSupervisorProposal(fixture, proposalId, original.workflow, clock.now + 4);
   yield* observeAgreement(fixture, clock.now + 30_000);
@@ -4531,7 +4535,8 @@ it.effect("untrusted contribution text stays inert and root check-ins carry only
   yield* fixture.conversation.observe(fixture.threadList, clock.now);
   yield* fixture.run();
   const review = String(supervisorRequestCall(fixture, "review")?.payload.text ?? "");
-  const envelope = JSON.parse(review.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)![1]!) as {externalContributions?: unknown};
+  assert.ok(review, "the check-in went out natively");
+  const envelope = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!.envelope as {externalContributions?: unknown};
   assert.deepEqual(envelope.externalContributions, [{mainThreadId: operativeThreadId, workflowId: document.workflowId, open: [{contributionId: "external-review",
     nodeId, inCurrentPlan: true, state: "awaiting_result", revision: 1, decision: null, sourceMessageId: message.id}]}],
   "accepted results leave the open index");
@@ -5178,8 +5183,8 @@ it.effect("a rejected Supervisor proposal gets one focused repair wake per rejec
       assert.equal(pending?.kind, "review", `attempt ${attempt} gets one focused wake`);
       if (pending!.batch) {
         // due activity carries the repair as explicit work in its task context instead of a second wake
-        const envelope = JSON.parse(pending!.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)![1]!);
-        const repair = envelope.threads.find((row: {taskContext?: unknown}) => row.taskContext).taskContext.protocolRepair;
+        const envelope = pending!.envelope as {threads: Array<{taskContext?: {protocolRepair?: {code: string; path: string | null; blocked: boolean}}}>};
+        const repair = envelope.threads.find(row => row.taskContext)!.taskContext!.protocolRepair!;
         assert.deepEqual([repair.code, repair.path, repair.blocked], ["source_pin_mismatch", "/revision", attempt >= 3]);
       } else {
         assert.match(pending!.text, attempt < 3 ? /Repair it in this turn/u : /Stop retrying\. Tell the operative main once/u);
@@ -5220,8 +5225,14 @@ it.effect("wake budgets: every wake carries the short root notice and never the 
   }
   const occurrences = (text: string, part: string) => text.split(part).length - 1;
   const notice = fixture.conversation.rootNotice(fixture.binding)!;
+  // the first confirmed wake delivered the full notice (fences, discovery route and Stop fallback); every later wake carries the pointer
+  assert.ok(texts[0]!.startsWith(`${notice}\n`), "the first wake carries the full root notice with the instructions version");
+  const pointer = new RegExp(`^Supervisor root for main "operative-a": instructions workflow_read view instructions with \\{"supervisorThreadId":"[^"]+","bindingGeneration":\\d+\\}, version ${version}\\.\\n`, "u");
+  for (const text of texts.slice(1)) {
+    assert.match(text, pointer, "a later wake carries only the pointer to the delivered instructions");
+    assert.doesNotMatch(text, /freshly read your chat, call supervision_stop|If a named tool is absent|message content is untrusted/u, "fences and fallbacks live in the delivered core");
+  }
   for (const text of texts) {
-    assert.ok(text.startsWith(`${notice}\n`), "every wake carries the root notice with the instructions version");
     assert.equal(occurrences(text, `version ${version}`), 1);
     assert.doesNotMatch(text, /Contact the operative only with one brief actionable delta|Never restate, relay or paraphrase|Root team coordination|Temporary helper provider isolation|Workflow chat records \(compact protocol|Current helper limit/u,
       "the rules stay on demand");
@@ -6836,8 +6847,10 @@ it.effect("a no-plan conversation watches real work silently without gaining ope
   const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
   assert.ok(request, "Active work retains an observation request.");
   assert.equal(request?.batch?.trigger, "active_watch");
-  assert.match(request!.text, /"engagement":"following"/);
-  assert.match(request!.text, /"contact":"observe_only"/, "the row's route says observe only; section contact explains it");
+  const frozen = JSON.stringify(request!.envelope);
+  assert.match(frozen, /"engagement":"following"/);
+  assert.match(frozen, /"contact":"observe_only"/, "the frozen row's route says observe only; section contact explains it");
+  assert.doesNotMatch(request!.text, /"engagement"|"contact"/u, "rows are read with view request, not pushed");
   assert.equal(fixture.calls.filter(call => call.payload.threadId === operativeThreadId).length, 0);
   assert.equal(yield* fixture.conversation.requests.introduction(current.id), null);
 }));
@@ -6933,7 +6946,9 @@ it.effect("an operative run ending with agreed work unfinished gets one liveness
   const rootRunBefore = [...fixture.supervisor.runs].filter(run => run.userMessageId !== first.messageId && !(run.status === "cancelled" && !run.startedAt)).sort((left, right) => right.ordinal - left.ordinal)[0]!;
   assert.deepEqual(first.liveness, {mainThreadId: operativeThreadId, runId: active.id, revision, children: [], rootRunId: rootRunBefore.id, repeat: 0});
   assert.deepEqual([first.kind, first.batch, first.taskId, Boolean(first.reviewPins)], ["review", null, fixture.task.id, true]);
-  assert.match(first.text, /Liveness check-in for main "operative-a": its latest run "operative-active-run" completed while agreed work is unfinished/u);
+  assert.match(first.text, /Liveness check-in for main "operative-a": run "operative-active-run" completed, workflow revision \d+, repeat 0; agreed work unfinished, no wait recorded\. Read it with workflow_read \{"supervisorThreadId":"[^"]+","bindingGeneration":\d+,"view":"request","requestId":"[^"]+"\}, then resume the watch under sections monitoring and contact\./u);
+  assert.deepEqual(first.envelope, {kind: "liveness", ...first.liveness, unsettled: (first.envelope as {unsettled: string[]}).unsettled}, "the wake's frozen envelope is its key and the unsettled occurrences");
+  assert.ok(((first.envelope as {unsettled: string[]}).unsettled).length > 0, "the agreed work still unsettled is named by node id");
   assert.ok(first.text.includes(`record_review, requestId ${JSON.stringify(first.id)}, at the end of the turn; turn end marker: ${first.completionMarker}.`));
   assert.ok(rootCalls().length > 0 && rootCalls().every(call => (call.payload.dispatchMode as {type: string}).type === "queue_after_active"),
     "every root wake is queued behind an active turn, never steered into it");
@@ -6943,7 +6958,7 @@ it.effect("an operative run ending with agreed work unfinished gets one liveness
   yield* fixture.run();
   const second = (yield* pendingRequest())!;
   assert.deepEqual(second.liveness, {...first.liveness, rootRunId: firstRun.id, repeat: 1}, "the ended liveness turn is the new generation, without waiting the idle age");
-  assert.match(second.text, /\(repeat 1\).*ended again without a recorded wait or progress/u);
+  assert.match(second.text, /repeat 1; agreed work unfinished, no wait recorded, your previous turn ended again without a recorded wait or progress/u);
   yield* fixture.run();
   assert.equal((yield* pendingRequest())?.id, second.id, "no duplicate within one generation");
   assert.equal((yield* recordOutcome(fixture, second)).status, "recorded");
@@ -7067,3 +7082,353 @@ it.effect("a liveness check-in re-arms only on a genuinely executed terminal roo
   const third = (yield* pendingRequest())!;
   assert.deepEqual([third.liveness?.rootRunId, third.liveness?.repeat], ["root-later-turn", 2]);
 }), {timeout: 60_000});
+
+// slice C: the proposal notice after a planning pause follows the pause's actual resolution, through the production conversation and
+// the native dispatch: planning resolved or superseded leaves the proposal to agree first; a timeout, a no-plan release or a deadline
+// that passed while the attempt is still open ends the wait and makes the proposal a suggestion
+for (const [label, resolution, blocking] of [["planning resolved", "continue", true], ["superseded", "superseded", true], ["open within its deadline", "open", true],
+  ["no plan needed", "no_plan", false], ["deadline passed", "timeout", false], ["open past its deadline", "expired", false]] as const)
+it.effect(`the proposal notice after a planning pause that is ${label} is ${blocking ? "blocking" : "a non-blocking suggestion"}`, () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
+  const task = yield* installNestedCatalog(fixture);
+  const created = createPlanningAttempt({id: `pause-${resolution}`, operationId: `pause-operation-${resolution}`, projectId, mainThreadId: operativeThreadId,
+    ownerThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation, taskId: task.id, taskRevision: taskScopeRevision(task),
+    reason: "Plan the export change first", createdAt: clock.now - 1_000, timeoutMs: 60_000,
+    targets: [{threadId: operativeThreadId, recipientThreadId: operativeThreadId, scope: "implementation"}]});
+  const attempt = resolution === "open" ? created : resolution === "expired" ? {...created, deadline: clock.now - 1} : resolvePlanningAttempt(created, resolution, clock.now - 500);
+  yield* fixture.conversation.requests.savePlanningAttempt(attempt);
+  const callsBefore = fixture.calls.length;
+  yield* fixture.run();
+  yield* fixture.run();
+  const dispatched = fixture.calls.slice(callsBefore).filter(call => call.payload.threadId === operativeThreadId);
+  assert.equal(dispatched.length, 1, "one native send: the introduction");
+  const text = String(dispatched[0]!.payload.text);
+  const route = "Acceptance is the exact acceptance record in your own completed reply; a message to your Supervisor records nothing.";
+  assert.ok(text.startsWith(blocking
+    ? `Project Supervisor — workflow proposal\nAgree a proportionate workflow with your Supervisor before continuing. ${route} Read: supervision_plan `
+    : `Project Supervisor — workflow proposal\nNon-blocking workflow suggestion: the earlier planning wait has ended; continue your authorised work while considering it. ${route} Read: supervision_plan `), text);
+  assert.equal((yield* fixture.conversation.requests.introduction(task.id))?.text, text, "the stored notice is the sent notice");
+}));
+
+it.effect("an acceptance relayed to the Supervisor's own thread, published by the Supervisor or still streaming records nothing; the operative's own completed reply does", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  yield* fixture.run();
+  yield* fixture.run();
+  const introduction = (yield* fixture.conversation.requests.introduction(fixture.task.id))!;
+  assert.equal(introduction.state, "sent");
+  const task = (yield* fixture.projectStore.task(fixture.task.threadId))!;
+  const acceptance = preparedAcceptanceRecord(task)!;
+  const fence = workflowFence("workflow-acceptance", acceptance);
+  // the operative relays its exact record to the Supervisor with t3_thread_send: a queued agent-origin message in the root's own thread
+  const relayed = appendRun({projection: fixture.supervisor, id: "relayed-acceptance-run", ordinal: fixture.supervisor.runs.reduce((value, run) => Math.max(value, run.ordinal), 0) + 1,
+    status: "completed", messageId: "relayed-acceptance", text: `From the operative: I accept.\n${fence}`, createdBy: "agent", creationSource: "mcp", now: clock.now + 1});
+  Object.assign(fixture.supervisor.messages.find(message => message.id === relayed.userMessageId)!, {senderThreadId: operativeThreadId});
+  // the Supervisor's own completed answer carries the record, and the operative's reply with it is still streaming
+  appendAssistantTurn(fixture.supervisor, "root-published-acceptance", `The operative accepted:\n${fence}`, clock.now + 2);
+  const notice = fixture.operative.messages.find(message => message.id === introduction.messageId)!;
+  const run = fixture.operative.runs.find(item => item.id === notice.runId)!;
+  yield* appendOperativeAcceptance(fixture, acceptance, clock.now + 3, {run, streaming: true});
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement, undefined, "no private relay, root answer or streaming text is an agreement");
+  assert.equal(yield* fixture.workflows.get(projectId, operativeThreadId), null, "no main workflow document exists without agreement");
+  const exact = yield* appendOperativeAcceptance(fixture, acceptance, clock.now + 4, {run});
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  const agreed = (yield* fixture.projectStore.task(task.threadId))?.agreement;
+  assert.equal(agreed?.status, "agreed");
+  assert.equal(agreed?.agentMessageId, exact.id, "only the operative main's own completed exact record agrees");
+  assert.equal((yield* fixture.workflows.get(projectId, operativeThreadId))?.sourceBinding?.proposalId, acceptance.proposalId);
+}));
+
+it.effect("the negotiation rules name the one acceptance route and the needs_attention outcome of implementation without agreement", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture({now: baseTime});
+  const contact = yield* sectionText(fixture, "contact");
+  assert.match(contact, /If implementation proceeds without agreement, record that check-in as needs_attention and negotiate promptly in one concise delta naming the proposal/u);
+  assert.match(contact, /An acceptance that reaches you privately \(a message to your thread, a queued reply, a quote in a child or a planning release\) records nothing: agreement exists only when workflow_read reports it, so ask for the exact record in the operative's own completed reply/u);
+  const monitoring = yield* sectionText(fixture, "monitoring");
+  assert.match(monitoring, /Implementation proceeding without recorded agreement is needs_attention, with one concise delta naming the proposal sent\./u);
+  const task = yield* installNestedCatalog(fixture);
+  const proposal = workflowProposalText((yield* fixture.projectStore.task(task.threadId))!);
+  assert.match(proposal, /If you agree, put this exact record in your own completed reply; a bare yes, a prose acceptance or a record sent to your Supervisor or relayed by another chat does not count:/u);
+  assert.match(workflowIntroductionText((yield* fixture.projectStore.task(task.threadId))!), /Acceptance is the exact acceptance record in your own completed reply; a message to your Supervisor records nothing\. Read: supervision_plan/u);
+  const core = yield* rootCore(fixture);
+  assert.ok(core.length < 3_400, `root core ${core.length}`);
+}));
+
+// slice F: the exchange audit over the paths the production conversation renders with its fake native, with repeated representative
+// traffic per path where the fixture can produce it (the second sample is measured against the first) and single samples marked
+// unmeasured for repetition: the root notice (full, then the pointer), two interpretation requests, two proposal notices and the
+// proposal read, the read answers, two dispatched definition review wakes beside the builder's text, two routine check-ins with the
+// outcome receipt, two protocol repair wakes, two liveness wakes, the Stop answer, the dispatched Stop notice and settlement command, the
+// native dispatch of a proposal and the own-inbox tool arguments; each row names the read that returns what the wake no longer carries
+it.effect("exchange audit: every rendered root, operative and answer path is measured against the standing reference and its previous wake", () => Effect.gen(function* () {
+  const samples: ExchangeSample[] = [];
+  const rows: ExchangeRow[] = [];
+  const add = (sample: ExchangeSample) => {samples.push(sample);rows.push(measureExchange(sample));};
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const task = yield* installNestedCatalog(fixture);
+  const index = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"});
+  const core = String(index.core);
+  const sectionIds = (index.sections as Array<{id: string}>).map(section => section.id);
+  const sectionTexts: string[] = [];
+  for (const id of sectionIds) sectionTexts.push(yield* sectionText(fixture, id));
+  const rules = [core, ...sectionTexts, interpretationRules];
+  const reader = {supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation};
+  const notice = fixture.conversation.rootNotice(fixture.binding)!;
+  const stored = (yield* fixture.projectStore.task(task.threadId))!;
+  const other = yield* fixture.addOperative("operative-b", "proposal-b");
+  const otherNotice = fixture.conversation.rootNotice(other.binding)!;
+  const otherReader = {supervisorThreadId: other.binding.threadId, bindingGeneration: other.binding.generation};
+  // N1: one interpretation request per task, each the first message of its binding with the full notice
+  const interpretationOf = (owner: TaskRecord, ownerReader: typeof reader) => prepareWorkflowRequest(owner.threadId, owner.sourceMessageId, sourceText, nestedCatalogDefinitions(), {reader: ownerReader,
+    submission: {...ownerReader, taskId: owner.id, attemptId: interpretationAttemptId("7d0c1a52-4f8e-4c4b-9a8b-0d6c2f1e3a4b"), sourcePin: interpretationSourcePin(owner), startVerdict: false}}).requestText;
+  const firstInterpretation = `${notice}\n${interpretationOf(stored, reader)}`;
+  add({path: "N1", label: "interpretation request, task a", text: firstInterpretation, rules, retrievable: ["task context", "rules"], read: "workflow_read view context / view interpretation"});
+  add({path: "N1", label: "interpretation request, task b", text: `${otherNotice}\n${interpretationOf(other.task, otherReader)}`, previous: firstInterpretation, rules, retrievable: ["task context", "rules"], read: "workflow_read view context / view interpretation"});
+  // N6: the proposal notices of both tasks and the blocking/non-blocking variants; R10 the proposal read
+  const blocking = workflowIntroductionText(stored);
+  add({path: "N6", label: "proposal notice, blocking, task a", text: blocking, rules, retrievable: ["proposal", "acceptance record"], read: "supervision_plan"});
+  add({path: "N6", label: "proposal notice, blocking, task b", text: workflowIntroductionText(other.task), previous: blocking, rules, retrievable: ["proposal", "acceptance record"], read: "supervision_plan"});
+  add({path: "N6", label: "proposal notice, non-blocking, task a", text: workflowIntroductionText(stored, false, true), previous: blocking, rules, retrievable: ["proposal", "acceptance record"], read: "supervision_plan"});
+  add({path: "R10", label: "proposal read (supervision_plan)", text: workflowProposalText(stored), rules, args: {callerThreadId: stored.threadId, taskId: stored.id, proposalId: stored.workflowProposalId ?? stored.id}});
+  // R1-R4: the read answers; a second identical read of the default context shows what a pull read repeats by design
+  add({path: "R2", label: "instructions core + index", text: JSON.stringify(index), args: {...reader, view: "instructions"}});
+  for (const [position, id] of sectionIds.entries()) add({path: "R2", label: `instructions section ${id}`, text: sectionTexts[position]!, args: {...reader, view: "instructions", section: id}});
+  add({path: "R1", label: "interpretation rules", text: JSON.stringify(yield* fixture.conversation.readContextView(fixture.binding, {view: "interpretation"})), args: {...reader, view: "interpretation"}});
+  const contextDefault = JSON.stringify(yield* fixture.conversation.readContextView(fixture.binding, {view: "context"}));
+  add({path: "R3", label: "context default", text: contextDefault, args: {...reader, view: "context"}});
+  add({path: "R3", label: "context default, read again (pull read)", text: JSON.stringify(yield* fixture.conversation.readContextView(fixture.binding, {view: "context"})), previous: contextDefault, args: {...reader, view: "context"}});
+  for (const section of ["conversation", "plan", "diagnostics"])
+    add({path: "R3", label: `context section ${section}`, text: JSON.stringify(yield* fixture.conversation.readContextView(fixture.binding, {view: "context", section})), args: {...reader, view: "context", section}});
+  add({path: "R4", label: "definitions index", text: JSON.stringify(yield* fixture.conversation.readContextView(fixture.binding, {view: "definitions"})), args: {...reader, view: "definitions"}});
+  // N5 builder: the pure text beside the dispatched wakes measured below
+  const built = buildProjectDefinitionReviewRequest(stored, nestedCatalogDefinitions(), {...nestedCatalogDefinitions(), revision: "definitions-2"}, fixture.operative, "Supervisor definition check-in audit completed", {...reader, requestId: "00000000-0000-4000-8000-00000000a5a5"});
+  assert.ok(built.text, built.error ?? "");
+  add({path: "N5", label: "definition review (builder text, no notice)", text: built.text, rules, retrievable: ["changed entries", "user message handles", "templates"], read: "workflow_read view request"});
+  if (built.envelope) add({path: "R2", label: "definition review frozen data (view request envelope)", text: JSON.stringify(built.envelope), args: {...reader, view: "request", requestId: "00000000-0000-4000-8000-00000000a5a5"}});
+  // N3: two consecutive routine check-ins; R8 the record_review receipt of the first; R5 the check answer once the reader is admitted
+  yield* appendNoticeForTask(fixture, stored, fixture.operative);
+  const wakes: ConversationRequest[] = [];
+  let receipt: unknown = null;
+  for (let wake = 0; wake < 2; wake++) {
+    for (let position = 0; position < 3; position++) addCommandActivity(fixture.operative, `audit-${wake}-${position}`, "Work", clock.now + position);
+    yield* fixture.conversation.observe(fixture.threadList, clock.now);
+    yield* fixture.run();
+    const request = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+    assert.equal(request?.kind, "review");
+    wakes.push(request!);
+    const run = fixture.supervisor.runs.find(item => item.userMessageId === request!.messageId)!;
+    const recorded = yield* recordOutcome(fixture, request!);
+    assert.equal(recorded.status, "recorded");
+    receipt ??= recorded;
+    completeRun(fixture.supervisor, run, `No intervention needed. ${request!.completionMarker}`, yield* clock.advance(1));
+    yield* fixture.run();
+    yield* clock.advance(61_000);
+  }
+  add({path: "N2", label: "root notice, full (first wake of an instructions version)", text: notice, rules, retrievable: ["core", "sections"], read: "workflow_read view instructions"});
+  const pointer = wakes[1]!.text.split("\n")[0]!;
+  add({path: "N2", label: "root notice, pointer (later wakes)", text: pointer, previous: notice, rules, retrievable: ["core", "sections"], read: "workflow_read view instructions"});
+  add({path: "N3", label: "routine check-in, first wake", text: wakes[0]!.text, rules, retrievable: ["rows", "team policy", "indexes"], read: "workflow_read view request"});
+  add({path: "N3", label: "routine check-in, second wake", text: wakes[1]!.text, previous: wakes[0]!.text, rules, retrievable: ["rows", "team policy", "indexes"], read: "workflow_read view request"});
+  if (wakes[0]!.envelope) add({path: "R2", label: "routine check-in frozen envelope (view request)", text: JSON.stringify(wakes[0]!.envelope), args: {...reader, view: "request", requestId: wakes[0]!.id}});
+  add({path: "R8", label: "record_review receipt", text: JSON.stringify(receipt), args: {...reader, action: "record_review", operationId: "<operationId>", requestId: wakes[0]!.id, outcome: "no_change"}});
+  const controller = yield* writeController({stores: fixture.stores, workflows: fixture.workflows, conversation: fixture.conversation, native: rootNative(fixture.supervisor, () => fixture.threadList)});
+  const checkRecord = compactDraft(stored, workflowRecord(stored, stored.id));
+  add({path: "R5", label: "check answer", text: JSON.stringify(yield* controller.readTool({...reader, view: "check", record: checkRecord})), args: {...reader, view: "check", record: checkRecord}});
+  if (wakes[0]!.envelope) add({path: "R2", label: "view request answer (routine check-in)", text: JSON.stringify(yield* controller.readTool({...reader, view: "request", requestId: wakes[0]!.id})), args: {...reader, view: "request", requestId: wakes[0]!.id}});
+  // Q: the own-inbox and evidence reads are T3's tools; their arguments are what the rules instruct, their results are T3's and unmeasured here
+  const firstItem = wakes[0]!.batch?.threads[0]?.previewItems.find(item => item.readItemId)?.readItemId ?? null;
+  add({path: "Q", label: "own inbox list: t3_queue (own thread), result T3-owned (unmeasured)", text: "", args: {}});
+  add({path: "Q", label: "evidence read: t3_thread_read by readItemId, result T3-owned (unmeasured)", text: "", args: {threadId: operativeThreadId, itemId: firstItem, limit: 5, maxCharsPerItem: 2000}});
+  add({path: "Q", label: "bounded wait: t3_thread_wait five to ten seconds, T3-owned schema and result (unmeasured)", text: ""});
+  // N4: two protocol repair wakes of one rejected proposal (attempt 1, then attempt 2), after the standing instructions were delivered;
+  // the fixture's first run dispatches the proposal natively, which the N6 dispatch row measures
+  const repairFixture = yield* makeFixture(clock);
+  yield* repairFixture.run();
+  const dispatchedIntroduction = repairFixture.calls.find(call => call.payload.threadId === operativeThreadId && call.payload.type === "message.dispatch");
+  assert.ok(dispatchedIntroduction);
+  add({path: "N6", label: "proposal notice, native dispatch (message.dispatch arguments)", text: String(dispatchedIntroduction.payload.text), previous: blocking, rules, args: dispatchedIntroduction.payload});
+  const repairBinding = (yield* repairFixture.projectStore.binding(projectId, operativeThreadId))!;
+  const version = ((yield* repairFixture.conversation.readContextView(repairFixture.binding, {view: "instructions"})) as unknown as {version: string}).version;
+  yield* repairFixture.projectStore.setBinding({...repairBinding, deliveredRoleVersion: version});
+  const repairs: ConversationRequest[] = [];
+  for (const attempt of [1, 2]) {
+    const repairTask = (yield* repairFixture.projectStore.task(repairFixture.task.threadId))!;
+    yield* repairFixture.projectStore.saveTask({...repairTask, workflowProtocolDiagnostic: {role: "supervisor", proposalId: repairTask.id, code: "source_pin_mismatch", detail: null,
+      path: "/revision", expected: "the current revision", attempts: attempt, observedAt: clock.now, messageId: `repair-subject-${attempt}`}});
+    yield* clock.advance(61_000);
+    yield* repairFixture.run();
+    yield* repairFixture.run();
+    const repair = yield* repairFixture.conversation.requests.pending(projectId, repairFixture.binding.threadId);
+    assert.equal(repair?.kind, "review", `repair wake ${attempt}`);
+    repairs.push(repair!);
+    completeRun(repairFixture.supervisor, repairFixture.supervisor.runs.find(run => run.userMessageId === repair!.messageId)!, `Repaired. ${repair!.completionMarker}`, yield* clock.advance(1));
+    yield* repairFixture.run();
+  }
+  add({path: "N4", label: "protocol repair wake, attempt 1", text: repairs[0]!.text, rules, retrievable: ["diagnostics"], read: "workflow_read view context section diagnostics"});
+  add({path: "N4", label: "protocol repair wake, attempt 2", text: repairs[1]!.text, previous: repairs[0]!.text, rules, retrievable: ["diagnostics"], read: "workflow_read view context section diagnostics"});
+  // N5 dispatched: two definition review wakes of one agreed main whose checkout definitions changed twice
+  const reviewFixture = yield* makeFixture(clock, {operativeActive: false});
+  yield* appendNoticeToOperative(reviewFixture);
+  const original = workflowRecord(reviewFixture.task, reviewFixture.task.id);
+  yield* appendSupervisorProposal(reviewFixture, reviewFixture.task.id, original.workflow, clock.now);
+  yield* appendOperativeAcceptance(reviewFixture, original, clock.now + 1);
+  yield* clock.advance(30_000);
+  yield* observeAgreement(reviewFixture, clock.now);
+  assert.equal((yield* reviewFixture.projectStore.task(reviewFixture.task.threadId))?.agreement?.status, "agreed");
+  const reviews: ConversationRequest[] = [];
+  for (const [revision, name] of [["steps-revision-8", "Expanded verification"], ["steps-revision-9", "Expanded verification again"]] as const) {
+    reviewFixture.setDefinitions(renamedStepDefinitions(revision, name));
+    yield* clock.advance(61_000);
+    yield* observeAgreement(reviewFixture, clock.now);
+    yield* reviewFixture.run();
+    const review = yield* reviewFixture.conversation.requests.pending(projectId, reviewFixture.binding.threadId);
+    if (review?.kind !== "review" || !/Definition review for task/u.test(review.text)) break;
+    reviews.push(review);
+    completeRun(reviewFixture.supervisor, reviewFixture.supervisor.runs.find(run => run.userMessageId === review.messageId)!, `Reviewed. ${review.completionMarker}`, yield* clock.advance(1));
+    yield* reviewFixture.run();
+  }
+  assert.ok(reviews.length >= 1, "one dispatched definition review wake at least");
+  add({path: "N5", label: "definition review wake, dispatched, first change", text: reviews[0]!.text, rules, retrievable: ["changed entries", "user message handles", "templates"], read: "workflow_read view request"});
+  if (reviews[1]) add({path: "N5", label: "definition review wake, dispatched, second change", text: reviews[1].text, previous: reviews[0]!.text, rules, retrievable: ["changed entries", "user message handles", "templates"], read: "workflow_read view request"});
+  else add({path: "N5", label: "definition review wake, dispatched, second change (not produced by this fixture: repetition unmeasured)", text: ""});
+  // L: the liveness wakes of an agreed main idle after its run; R6/R7 the status and documents answers of its workflow (status read twice)
+  const {fixture: agreedFixture, pendingRequest, confirmNoChange, settle} = yield* idleAgreedMain(clock);
+  const first = yield* settle;
+  assert.ok(first?.liveness, JSON.stringify(first));
+  add({path: "L", label: "liveness wake, first", text: first!.text, rules, retrievable: ["unsettled occurrences", "key"], read: "workflow_read view request"});
+  yield* confirmNoChange(first!);
+  yield* agreedFixture.run();
+  const second = (yield* pendingRequest())!;
+  assert.ok(second?.liveness, JSON.stringify(second));
+  add({path: "L", label: "liveness wake, repeat", text: second.text, previous: first!.text, rules, retrievable: ["unsettled occurrences", "key"], read: "workflow_read view request"});
+  const agreedController = yield* writeController({stores: agreedFixture.stores, workflows: agreedFixture.workflows, conversation: agreedFixture.conversation,
+    native: rootNative(agreedFixture.supervisor, () => agreedFixture.threadList)});
+  const locator = {supervisorThreadId: agreedFixture.binding.threadId, bindingGeneration: agreedFixture.binding.generation};
+  if (first!.envelope) add({path: "R2", label: "view request answer (liveness wake)", text: JSON.stringify(yield* agreedController.readTool({...locator, view: "request", requestId: first!.id})), args: {...locator, view: "request", requestId: first!.id}});
+  const status = JSON.stringify(yield* agreedController.readTool({...locator, view: "status"}));
+  add({path: "R6", label: "status view", text: status, args: {...locator, view: "status"}});
+  add({path: "R6", label: "status view, read again (pull read)", text: JSON.stringify(yield* agreedController.readTool({...locator, view: "status"})), previous: status, args: {...locator, view: "status"}});
+  add({path: "R7", label: "documents view", text: JSON.stringify(yield* agreedController.readTool({...locator, view: "documents"})), args: {...locator, view: "documents"}});
+  // R14, N7, N11: a direct human Stop answered natively, its one operative notice and the root's settlement command as dispatched
+  const stopFixture = yield* makeFixture(clock);
+  yield* appendNoticeForTask(stopFixture, stopFixture.task, stopFixture.operative);
+  const service = stopFixture.makeProjectSupervisor();
+  const human = appendActualUserMessage(stopFixture.supervisor, "audit-human-stop", "Stop supervising this chat.", clock.now);
+  const stopArgs = {callerThreadId: stopFixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: "audit-stop"};
+  const stopAnswer = yield* (yield* nativeStopController(stopFixture, stopFixture.supervisor, human, stopArgs, "audit-stop-call", service)).stop(stopArgs);
+  add({path: "R14", label: "supervision_stop answer", text: JSON.stringify(stopAnswer), args: stopArgs});
+  add({path: "R14", label: "supervision_start answer (not exercised by this fixture: unmeasured)", text: ""});
+  yield* service.cycle;
+  const stopDispatch = stopFixture.calls.find(call => call.payload.type === "message.dispatch" && call.payload.threadId === operativeThreadId);
+  const settleCommand = stopFixture.calls.find(call => call.payload.type === "thread.settle");
+  assert.ok(stopDispatch && settleCommand, "the Stop dispatches one notice and settles the idle root");
+  const stopTexts = [String(stopDispatch.payload.text), (yield* prepareStopNotice(Context.get(stopFixture.stores.context, SupervisorIds), other.binding, clock.now, null)).text];
+  add({path: "N7", label: "stop notice, dispatched (message.dispatch arguments)", text: stopTexts[0]!, args: stopDispatch.payload});
+  add({path: "N7", label: "stop notice, another binding", text: stopTexts[1]!, previous: stopTexts[0]!});
+  add({path: "N11", label: "settlement command (thread.settle arguments; no text)", text: "", args: settleCommand.payload});
+  add({path: "N9", label: "interpretation answers (supervision_interpretation_submit; measured in test/interpretation-submission.test.ts, not re-measured here: unmeasured)", text: ""});
+  recordExchangeSamples("rendered-paths", samples);
+  console.log(`EXCHANGE AUDIT (rendered paths)\n${exchangeTable(rows)}`);
+  // transport neutrality on every rendered path: no gateway product, wrapper or recipe is named
+  for (const sample of samples) assert.doesNotMatch(sample.text, /mcpx|t3-supervisor-workflows|code-mode|functions\.exec/iu, sample.label);
+  // the first wake of an instructions version carries the full notice, whose discovery route the core also states; every later routine
+  // wake, liveness wake, repair wake and definition review wake repeats nothing of the reference and carries no rows, handles or templates
+  const row = (label: string) => rows.find(item => item.label === label)!;
+  const route = Buffer.byteLength(toolRouteReminder, "utf8");
+  for (const label of ["root notice, full (first wake of an instructions version)", "interpretation request, task a", "routine check-in, first wake", "definition review wake, dispatched, first change"])
+    assert.ok(row(label).ruleBytes <= route, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
+  for (const label of ["root notice, pointer (later wakes)", "routine check-in, second wake", "liveness wake, first", "liveness wake, repeat", "protocol repair wake, attempt 1", "protocol repair wake, attempt 2"]) {
+    assert.equal(row(label).ruleBytes, 0, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
+    assert.ok(row(label).bytes < 1_000, `${label}: ${row(label).bytes} bytes`);
+  }
+  for (const sample of samples.filter(item => ["N3", "L", "N4", "N5"].includes(item.path) && item.text))
+    assert.doesNotMatch(sample.text, /"readItemId"|"taskContext"|"fallbackAncestors"|"decisionTemplate"|"userMessages"|UNTRUSTED|"unsettled"/u, `${sample.label} pushes retrievable payload`);
+  // what the second wake repeats of the first is its identities and the outcome sentence, never rows
+  assert.ok(row("routine check-in, second wake").duplicateBytes! < 300, `second wake duplicates ${row("routine check-in, second wake").duplicateBytes} bytes`);
+  assert.ok(row("liveness wake, repeat").duplicateBytes! < 300, `repeat wake duplicates ${row("liveness wake, repeat").duplicateBytes} bytes`);
+}));
+
+// slice F: the routine check-in is one line of identities, counts and its read route, and workflow_read view request returns its frozen
+// envelope (the rows, routes, pins and indexes the wake used to carry inline) to the root that owns it, during the turn and after its
+// acknowledgement; another Supervisor's request is denied and an unknown one is unavailable
+it.effect("workflow_read view request returns the root's own frozen check-in envelope, denies another Supervisor's request and stays readable after acknowledgement", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const task = yield* installNestedCatalog(fixture);
+  yield* appendNoticeForTask(fixture, (yield* fixture.projectStore.task(task.threadId))!, fixture.operative);
+  for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `request-view-${index}`, "Work", clock.now + index);
+  yield* fixture.conversation.observe(fixture.threadList, clock.now);
+  yield* fixture.run();
+  const request = (yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId))!;
+  assert.equal(request.kind, "review");
+  assert.ok(request.batch && request.envelope);
+  const reader = {supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation};
+  const envelope = request.envelope as {threads: Array<Record<string, unknown>>; team?: unknown; requestId: string; reviewRequestId: string};
+  // the exact rendered wake: the first wake of this instructions version carries the full notice, then one line
+  const priorityKinds = [...new Set(request.batch.threads.flatMap(thread => thread.priorityKinds))];
+  assert.equal(request.text, `${fixture.conversation.rootNotice(fixture.binding)}\nCheck-in for main "operative-a": change index (${request.batch.trigger}; pending ${request.batch.pendingItemCount}; threads ${envelope.threads.length}${priorityKinds.length ? `; priority ${priorityKinds.join(", ")}` : ""}). ` +
+    `Read it with workflow_read ${JSON.stringify({...reader, view: "request", requestId: request.id})}, then act under sections monitoring and contact. ` +
+    `Outcome: one workflow_write record_review, requestId ${JSON.stringify(request.id)}, at the end of the turn; turn end marker: ${request.completionMarker}.`);
+  assert.doesNotMatch(request.text, /taskContext|fallbackAncestors|readItemId|UNTRUSTED|"threads"|maxHelpersPerRoot/u, "rows, routes, handles and team policy are read, not pushed");
+  assert.equal(fixture.calls.find(call => call.payload.messageId === request.messageId)?.payload.text, request.text, "the native send carries the one-line wake");
+  // the frozen envelope carries what the wake used to: rows with identities, counts, handles, lifecycle and routes, and the team policy
+  const row = envelope.threads[0]!;
+  for (const key of ["threadId", "mainThreadId", "taskContextThreadId", "taskContext", "pendingItemCount", "priorityKinds", "lifecycle", "parentThreadId", "origin", "depth", "contact", "fallbackAncestors", "scopeComplete", "items"])
+    assert.ok(key in row, key);
+  assert.equal(envelope.reviewRequestId, request.id);
+  assert.ok(envelope.team, "the live helper policy rides the envelope");
+  // the reader admits the root's own reads once the project's workflow editing is enabled, as every root read is
+  const control = yield* fixture.projectStore.control(projectId);
+  if (!control.effectiveEnabled) yield* fixture.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: []});
+  const controller = yield* writeController({stores: fixture.stores, workflows: fixture.workflows, conversation: fixture.conversation, native: rootNative(fixture.supervisor, () => fixture.threadList)});
+  const read = (yield* controller.readTool({...reader, view: "request", requestId: request.id})) as {status: string; view: string; request: Record<string, unknown>; envelope: unknown};
+  assert.equal(read.status, "ok");
+  assert.equal(read.view, "request");
+  assert.deepEqual(read.envelope, request.envelope, "the read returns the exact frozen envelope");
+  assert.deepEqual([read.request.requestId, read.request.kind, read.request.taskId, read.request.completionMarker, read.request.createdAt],
+    [request.id, "review", null, request.completionMarker, request.createdAt]);
+  assert.deepEqual(read.request.reviewPins, request.reviewPins, "the pins the outcome is bound to are part of the read");
+  // membership is frozen: activity after the wake changes nothing in it
+  for (let index = 3; index < 6; index++) addCommandActivity(fixture.operative, `request-view-${index}`, "Work", clock.now + index);
+  yield* fixture.conversation.observe(fixture.threadList, clock.now);
+  assert.deepEqual((yield* controller.readTool({...reader, view: "request", requestId: request.id})) as unknown, read as unknown);
+  // another Supervisor of the same project cannot read it, an unknown id is unavailable, and the arguments are exact
+  const other = yield* fixture.addOperative("operative-b", "proposal-b");
+  assert.deepEqual(yield* controller.readTool({supervisorThreadId: other.binding.threadId, bindingGeneration: other.binding.generation, view: "request", requestId: request.id}),
+    {status: "denied", view: "request", reason: "request_not_owned"});
+  assert.deepEqual(yield* controller.readTool({...reader, view: "request", requestId: "00000000-0000-4000-8000-000000000000"}), {status: "unavailable", view: "request", reason: "request_unknown"});
+  assert.deepEqual(yield* controller.readTool({...reader, view: "request"}), {status: "invalid", reason: "invalid_read_arguments"});
+  assert.deepEqual(yield* controller.readTool({...reader, view: "context", requestId: request.id}), {status: "invalid", reason: "invalid_read_arguments"});
+  // after the root recorded its outcome and ended the turn with the marker, the request is history and still readable as it was
+  assert.equal((yield* recordOutcome(fixture, request)).status, "recorded");
+  completeRun(fixture.supervisor, fixture.supervisor.runs.find(run => run.userMessageId === request.messageId)!, `Recorded. ${request.completionMarker}`, yield* clock.advance(1));
+  yield* fixture.run();
+  assert.equal(yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId), null);
+  const history = (yield* controller.readTool({...reader, view: "request", requestId: request.id})) as unknown as {status: string; request: {state: string; reviewOutcome?: {outcome: string; state: string}}; envelope: unknown};
+  assert.equal(history.status, "ok");
+  assert.equal(history.request.state, "completed");
+  assert.deepEqual([history.request.reviewOutcome?.outcome, history.request.reviewOutcome?.state], ["no_change", "confirmed"]);
+  assert.deepEqual(history.envelope, request.envelope, "acknowledgement changes nothing in the frozen envelope");
+}));
+
+it.effect("workflow_read view request returns a liveness wake's key, generation and unsettled occurrences", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const {fixture, settle} = yield* idleAgreedMain(clock);
+  const wake = yield* settle;
+  assert.ok(wake?.liveness, JSON.stringify(wake));
+  const controller = yield* writeController({stores: fixture.stores, workflows: fixture.workflows, conversation: fixture.conversation, native: rootNative(fixture.supervisor, () => fixture.threadList)});
+  const read = (yield* controller.readTool({supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation, view: "request", requestId: wake!.id})) as unknown as
+    {status: string; request: {liveness?: unknown; taskId: string | null}; envelope: {kind: string; unsettled: string[]; rootRunId: string | null}};
+  assert.equal(read.status, "ok");
+  assert.deepEqual(read.request.liveness, wake!.liveness);
+  assert.equal(read.request.taskId, fixture.task.id);
+  assert.equal(read.envelope.kind, "liveness");
+  assert.equal(read.envelope.rootRunId, wake!.liveness!.rootRunId);
+  const document = (yield* fixture.workflows.get(projectId, operativeThreadId))!;
+  const planned = document.plan!.nodes.flatMap(node => node.kind === "step" && node.status !== "completed" ? [node.nodeId] : []);
+  assert.ok(planned.length > 0);
+  assert.deepEqual(read.envelope.unsettled, planned, "the unsettled occurrences the wake is about are named by node id");
+}));

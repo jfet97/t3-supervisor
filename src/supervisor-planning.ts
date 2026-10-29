@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { messageReadRule } from "./message-read-handle.js";
+import type { TaskRecord } from "./project-supervisor-store.js";
 import { planningTimeoutBounds } from "./supervisor-planning-contract.js";
 import type { NewPlanningAttempt, PlanningAttempt, PlanningAcknowledgement, PlanningDelivery, PlanningDraftView, PlanningTarget } from "./supervisor-planning-contract.js";
 export * from "./supervisor-planning-contract.js";
@@ -113,9 +114,38 @@ export const planningHoldText = (attempt: PlanningAttempt, target: PlanningTarge
 
 const releaseNotes = {continue: "planning resolved", no_plan: "no plan needed", timeout: "deadline passed", superseded: "superseded"} as const;
 
-/** A release names the attempt and its resolution; a continued child is pointed to its own scoped plan, and a parent relays a child's. */
-export const planningReleaseText = (attempt: PlanningAttempt, target: PlanningTarget): string =>
-  `${target.threadId !== target.recipientThreadId ? `Relay to child ${target.threadId}: planning` : "Planning"} pause ${attempt.id} released (${releaseNotes[attempt.resolution ?? "continue"]}). Continue your authorised task; human Stops and limits still apply.${target.scopedWorkflowId && attempt.resolution === "continue" ? ` Read your scoped plan with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: attempt.taskId, proposalId: target.scopedWorkflowId})}; a parent relays it if the child cannot call it.` : ""}`;
+/** The main's current proposal that a release leaves unagreed: the task and, when a proposal exists to read, its id. */
+export type PlanningReleasePending = {taskId: string; proposalId: string | null};
+
+/**
+ * What a continue or superseded release of the main leaves unagreed: planning resolved or ended, but the main's current proposal is not
+ * its recorded agreement, so the release grants no implementation permission. Null for a child target, for a genuine timeout or
+ * no-plan release, and when the current proposal is agreed.
+ */
+export const unacceptedProposal = (attempt: Pick<PlanningAttempt, "mainThreadId" | "taskId" | "resolution">, target: Pick<PlanningTarget, "threadId">,
+  task: Pick<TaskRecord, "id" | "workflowProposalId" | "agreement" | "workflow"> | null | undefined): PlanningReleasePending | null => {
+  if (target.threadId !== attempt.mainThreadId || attempt.resolution !== "continue" && attempt.resolution !== "superseded") return null;
+  if (!task) return {taskId: attempt.taskId, proposalId: null};
+  const proposalId = task.workflowProposalId ?? task.id;
+  if (task.agreement?.status === "agreed" && task.agreement.proposalId === proposalId) return null;
+  return {taskId: task.id, proposalId: task.workflow ? proposalId : null};
+};
+
+/**
+ * A release names the attempt and its resolution; a continued child is pointed to its own scoped plan, and a parent relays a child's.
+ * A continue or superseded release whose main proposal is unagreed grants no implementation permission: it names the proposal and the
+ * only acceptance route, the exact record in the operative's own completed reply; a timeout or no-plan release continues the task.
+ */
+export const planningReleaseText = (attempt: PlanningAttempt, target: PlanningTarget, pending: PlanningReleasePending | null = null): string => {
+  const released = `${target.threadId !== target.recipientThreadId ? `Relay to child ${target.threadId}: planning` : "Planning"} pause ${attempt.id} released (${releaseNotes[attempt.resolution ?? "continue"]}).`;
+  if (pending) {
+    const route = pending.proposalId
+      ? `workflow proposal ${pending.proposalId} is not agreed; read it with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: pending.taskId, proposalId: pending.proposalId})} and, if you agree, put its exact acceptance record in your own completed reply`
+      : "no workflow proposal is agreed yet; agree the one your Supervisor sends before implementing";
+    return `${released} This release grants no implementation permission: ${route}; a record sent to your Supervisor or relayed by another chat records nothing. Evidence gathering may continue; human Stops and limits still apply.`;
+  }
+  return `${released} Continue your authorised task; human Stops and limits still apply.${target.scopedWorkflowId && attempt.resolution === "continue" ? ` Read your scoped plan with supervision_plan ${JSON.stringify({callerThreadId: target.threadId, taskId: attempt.taskId, proposalId: target.scopedWorkflowId})}; a parent relays it if the child cannot call it.` : ""}`;
+};
 
 /** The drafter's only read: its attempt's pins and one view, proven by the drafter's own executed call of exactly these arguments. */
 export const planningDraftRead = (attempt: PlanningAttempt, view: PlanningDraftView) => ({supervisorThreadId: attempt.ownerThreadId,

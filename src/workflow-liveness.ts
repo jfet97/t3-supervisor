@@ -21,6 +21,11 @@ export const agreedWorkUnfinished = (document: Pick<WorkflowStateDocument, "retu
     notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)).length > 0;
 };
 
+/** The node ids of the applicable occurrences still unsettled under the current selections: what a liveness wake is about. */
+export const unsettledNodeIds = (document: Pick<WorkflowStateDocument, "plan" | "branchSelections" | "evidence" | "sourceBinding">): string[] =>
+  unsettledOccurrences(document.plan, documentBranchSelections(document), notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))
+    .map(node => node.nodeId);
+
 /**
  * Whether a confirmed review outcome records a current explicit wait for a task: it names who acts next, it is pinned to the task's
  * revision and it was recorded after the main's latest run finished; an earlier or unpinned wait is history.

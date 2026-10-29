@@ -151,9 +151,9 @@ export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "record_review"; operationId: string; requestId: string; outcome: ReviewOutcomeKind; reason?: string; applyOperationIds?: string[]; wait?: ReviewWaitInfo}
 );
 
-export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check";
+export type SupervisorContextViewName = "context" | "definitions" | "instructions" | "interpretation" | "check" | "request";
 export type SupervisorContextViewInput = {view: SupervisorContextViewName; section?: string; revision?: "approved" | "observed"; definitionIds?: string[];
-  includeSources?: boolean; record?: unknown};
+  includeSources?: boolean; record?: unknown; requestId?: string; callerThreadId?: string};
 export type SupervisorContextViewResult = {status: string; view: SupervisorContextViewName; [key: string]: unknown};
 // the views an interpretation request needs: its current pins, its rules, the root's instructions and the definitions it plans from
 const interpretationViews: ReadonlySet<string> = new Set<SupervisorContextViewName>(["context", "interpretation", "instructions", "definitions"]);
@@ -176,6 +176,8 @@ export type SupervisionStopResult =
 export type WorkflowReadPayload = WorkflowLocator & {
   view?: SupervisorContextViewName | "status" | "documents";
   section?: string;
+  /** With view request: the id of the caller's own check-in or wake whose frozen envelope is read. */
+  requestId?: string;
   revision?: "approved" | "observed";
   definitionIds?: string[];
   includeSources?: boolean;
@@ -718,20 +720,22 @@ const parseWritePayload = (value: unknown): ParsedInput => {
 
 const parseReadPayload = (value: unknown): ParsedReadInput => {
   if (!isRecord(value) || !hasExactKeys(value, ["supervisorThreadId", "bindingGeneration"],
-    ["view", "section", "revision", "definitionIds", "includeSources", "record", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
+    ["view", "section", "revision", "definitionIds", "includeSources", "record", "requestId", "workflowId", "workflowOffset", "lineageOffset", "limit", ...authorityKeys])) return {ok: false, reason: "invalid_read_arguments"};
   const locator = parseLocator(value);
   // compact status and explicit complete records page the same workflows
   if (value.view === "status" || value.view === "documents") {
     const documents = parseReadPayload(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "view")));
-    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record"].every(key => value[key] === undefined) &&
+    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record", "requestId"].every(key => value[key] === undefined) &&
       (value.view === "documents" || value.lineageOffset === undefined)
       ? {ok: true, value: {...documents.value, view: value.view}} : {ok: false, reason: "invalid_read_arguments"};
   }
   if (value.view !== undefined) {
-    if (!locator || !["context", "definitions", "instructions", "interpretation", "check"].includes(String(value.view)) ||
+    if (!locator || !["context", "definitions", "instructions", "interpretation", "check", "request"].includes(String(value.view)) ||
       value.definitionIds !== undefined && (!Array.isArray(value.definitionIds) || value.definitionIds.length > 50 || !value.definitionIds.every(id => isId(id))) ||
       value.includeSources !== undefined && typeof value.includeSources !== "boolean" || value.view !== "check" && value.record !== undefined ||
       value.view === "check" && value.record === undefined || value.workflowId !== undefined || value.workflowOffset !== undefined ||
+      // a request view names exactly one request id and nothing else of the other views
+      value.view !== "request" && value.requestId !== undefined || value.view === "request" && !isId(value.requestId) ||
       value.section !== undefined && (!["instructions", "interpretation", "context"].includes(String(value.view)) || !isId(value.section)) ||
       value.revision !== undefined && (value.view !== "definitions" || value.revision !== "approved" && value.revision !== "observed") ||
       value.lineageOffset !== undefined || value.limit !== undefined) return {ok: false, reason: "invalid_read_arguments"};
@@ -740,9 +744,10 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
       ...(value.revision === "approved" || value.revision === "observed" ? {revision: value.revision} : {}),
       ...(Array.isArray(value.definitionIds) ? {definitionIds: value.definitionIds as string[]} : {}),
       ...(typeof value.includeSources === "boolean" ? {includeSources: value.includeSources} : {}),
-      ...(value.record !== undefined ? {record: value.record} : {})}};
+      ...(value.record !== undefined ? {record: value.record} : {}),
+      ...(typeof value.requestId === "string" ? {requestId: value.requestId} : {})}};
   }
-  if (!locator || value.section !== undefined || value.revision !== undefined || value.workflowId !== undefined && !isId(value.workflowId) ||
+  if (!locator || value.section !== undefined || value.revision !== undefined || value.requestId !== undefined || value.workflowId !== undefined && !isId(value.workflowId) ||
     value.workflowOffset !== undefined && (!Number.isSafeInteger(value.workflowOffset) || (value.workflowOffset as number) < 0 || (value.workflowOffset as number) > 10_000) ||
     value.lineageOffset !== undefined && (!Number.isSafeInteger(value.lineageOffset) || (value.lineageOffset as number) < 0 || (value.lineageOffset as number) > 10_000) ||
     value.limit !== undefined && (!Number.isSafeInteger(value.limit) || (value.limit as number) < 1 || (value.limit as number) > maxWorkflowReadDocs))
@@ -1008,7 +1013,7 @@ export const supervisionInterpretationSubmitToolDefinition = {
 
 export const workflowReadToolDefinition = {
   name: "workflow_read",
-  description: "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
+  description: "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check, the frozen envelope of one of your own check-ins (view request) or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
   // the read input names no plan, so it advertises none of the plan schema
   inputSchema: {
     type: "object",
@@ -1020,13 +1025,14 @@ export const workflowReadToolDefinition = {
       workflowOffset: {type: "integer", minimum: 0, maximum: 10_000},
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
-      view: {type: "string", enum: ["status", "documents", "context", "definitions", "instructions", "interpretation", "check"],
+      view: {type: "string", enum: ["status", "documents", "context", "definitions", "instructions", "interpretation", "check", "request"],
         description: "Omit for status: current occurrences, nesting, progress, branch reach, omissions and attempts. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."},
       section: {type: "string", description: "With view instructions: one section id from its index. With view interpretation: \"plan\", read only when a plan is needed. With view context: \"conversation\", \"plan\" or \"diagnostics\"."},
       revision: {type: "string", enum: ["approved", "observed"], description: "With view definitions: the approved definitions of the task (default) or the checkout's current ones."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
       includeSources: {type: "boolean", description: "With view definitions: also return raw definition source files, for diagnosing invalid or incomplete definitions."},
       record: {type: "object", description: "With view check: the exact compact workflow-proposal record to validate."},
+      requestId: {...idSchema(), description: "With view request: the requestId a check-in or liveness wake of your own names; returns its frozen envelope (rows, counts, handles, routes, pins and indexes), during the turn and after its acknowledgement."},
     },
   },
 } as const;
@@ -2108,17 +2114,19 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
               targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))};
         })};
     }
-    const binding = (yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" ? "status" : "read")) ??
+    const binding = (yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" || parsed.value.view === "request" ? "status" : "read")) ??
       (interpretationViews.has(parsed.value.view) ? yield* resolveInterpretationReader(parsed.value) : null);
     if (!binding) return {status: "denied", reason: "owner_not_current_ready_enabled"};
     if (parsed.value.view === "instructions" && parsed.value.supervisorThreadId !== binding.threadId)
       return {status: "ok", view: "instructions", version: helperInstructionsVersion, instructions: helperInstructions};
     if (!conversation) return {status: "unavailable", reason: "context_views_unavailable"};
-    const {view, section, revision, definitionIds, includeSources, record: viewRecord} = parsed.value;
-    // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal
+    const {view, section, revision, definitionIds, includeSources, record: viewRecord, requestId} = parsed.value;
+    // the call's cancel (the caller's own or the 10 s tool deadline) reaches the view's definitions read as its abort signal; a request
+    // view names its caller, so only the request's own Supervisor or helper reads it
     const result = yield* conversation.readContextView(binding, {view, ...(section !== undefined ? {section} : {}), ...(revision ? {revision} : {}),
       ...(definitionIds ? {definitionIds} : {}),
-      ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {})}, cancel);
+      ...(includeSources !== undefined ? {includeSources} : {}), ...(viewRecord !== undefined ? {record: viewRecord} : {}),
+      ...(requestId !== undefined ? {requestId, callerThreadId: parsed.value.supervisorThreadId} : {})}, cancel);
     return Buffer.byteLength(JSON.stringify(result), "utf8") > maxWorkflowReadBytes ? {status: "too_large", reason: "workflow_read_exceeds_response_limit"} : result;
   });
 

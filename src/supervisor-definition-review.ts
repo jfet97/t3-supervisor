@@ -323,8 +323,9 @@ export const buildProjectDefinitionReviewRequest = (
   observedValue: ProjectDefinitionSnapshot,
   agent: Projection,
   completionMarker: string,
-): {text: string | null; error: string | null; characters: number | null} => {
-  const invalid = {text: null, error: "Definition-recovery input failed validation.", characters: null};
+  read?: {supervisorThreadId: string; bindingGeneration: number; requestId: string},
+): {text: string | null; envelope: Record<string, unknown> | null; error: string | null; characters: number | null} => {
+  const invalid = {text: null, envelope: null, error: "Definition-recovery input failed validation.", characters: null};
   const approved = snapshot(approvedValue, task, ["ready"]);
   const observed = snapshot(observedValue, task, ["ready", "missing", "invalid"]);
   if (!approved?.revision || !observed || approved.workspaceRoot !== observed.workspaceRoot ||
@@ -361,9 +362,12 @@ export const buildProjectDefinitionReviewRequest = (
     proposalTemplate: observed.status === "ready" && observed.complete ? {taskId: task.id, taskRevision: taskScopeRevision(task), proposalId,
       revision: observed.revision, draft: {requirements: [], plan: {kind: "sequence", nodes: []}}} : null,
   };
-  const request = `Definition review for task ${task.id}${changed ? ": project definitions changed after approval" : ": approved definitions were restored or authorized; reassess"}. ` +
-    "Follow workflow_read view instructions sections definitions and authoring; read the entries with view definitions (revision \"approved\" or \"observed\", definitionIds, includeSources) and the user messages by their readItemId in the main; a decision cites their messageIds. " +
-    `End your final response with this exact marker: ${completionMarker}.\nREVIEW ${JSON.stringify(data)}`;
-  return request.length <= MAX_PROMPT_CHARS ? {text: request, error: null, characters: request.length}
-    : {text: null, error: `Definition-recovery request exceeds its limit (${request.length}/${MAX_PROMPT_CHARS} characters).`, characters: request.length};
+  // the wake names the task, the revisions and the reads: the changed entries, the user messages' handles and the exact templates are
+  // its frozen envelope, read with view request; definitions and messages are read by their own routes
+  const request = `Definition review for task ${task.id}${changed ? ": project definitions changed after approval" : ": approved definitions were restored or authorized; reassess"} (approved ${approved.revision}, observed ${observed.revision}). ` +
+    `Read its changed entries, user message handles and templates with workflow_read ${read ? JSON.stringify({...read, view: "request"}) : "view request and this check-in's requestId"}; ` +
+    "follow workflow_read view instructions sections definitions and authoring; read the entries with view definitions (revision \"approved\" or \"observed\", definitionIds, includeSources) and the user messages by their readItemId in the main; a decision cites their messageIds. " +
+    `End your final response with this exact marker: ${completionMarker}.`;
+  return request.length <= MAX_PROMPT_CHARS ? {text: request, envelope: data, error: null, characters: request.length}
+    : {text: null, envelope: null, error: `Definition-recovery request exceeds its limit (${request.length}/${MAX_PROMPT_CHARS} characters).`, characters: request.length};
 };

@@ -57,9 +57,13 @@ export const planningFixture = (rpc?: NativeRpcShape, options: {
     return read;
   }),
     turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions});
-  const views = Context.add(built.context, SupervisorConversation, Context.get(yield* Layer.build(SupervisorConversation.layer.pipe(
-    Layer.provide(Layer.succeedContext(built.context)))), SupervisorConversation));
+  const conversation = Context.get(yield* Layer.build(SupervisorConversation.layer.pipe(Layer.provide(Layer.succeedContext(built.context)))), SupervisorConversation);
+  const views = Context.add(built.context, SupervisorConversation, conversation);
   const context = yield* Layer.build(SupervisorPlanningController.layer.pipe(Layer.provide(Layer.succeedContext(views))));
+  // the same controllers once more with the conversation's views wired in: the workflow_read of a root or helper that serves context,
+  // instructions and the frozen request envelopes, as the production reader does
+  const withViews = yield* teamControllers(stores, policy, {listThreads: () => Effect.succeed(threads), projection: id => Effect.sync(() => projections.get(id)!),
+    turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions, conversation});
   const controller = Context.get(context, SupervisorPlanningController);
   /** One executed supervision_planning call of `threadId` with exactly `input`, in a completed run of that thread's own. */
   const callAs = (threadId: string, input: Record<string, unknown>) => {
@@ -81,7 +85,7 @@ export const planningFixture = (rpc?: NativeRpcShape, options: {
   const proof = (input: Record<string, unknown>) => callAs(binding.threadId, input);
   const args = {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, taskId: task.id, taskRevision: task.sourceHash,
     action: "pause", operationId: "pause-a", targetThreadIds: ["main"], reason: "Prepare the requested plan"};
-  return {stores, policy, binding, task, threads, projections, details, controller, args, proof, callAs, workflows: built.workflows,
+  return {stores, policy, binding, task, threads, projections, details, controller, args, proof, callAs, workflows: built.workflows, reader: withViews.workflows,
     gate: Context.get(built.context, SupervisionGate),
     states: Context.get(built.context, WorkflowStateStore), conversation: Context.get(views, SupervisorConversation)};
 });

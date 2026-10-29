@@ -124,7 +124,7 @@ the main's result message through `sourceThreadId` and `sourceMessageId`.
 
 `workflow_read` returns the bounded contributions and current assessments; what
 they mean is stated once, in the root's instruction section `contributions`, not in
-each read. Root check-in envelopes add `externalContributions`, a
+each read. A root check-in's frozen envelope (`workflow_read` view `request`) adds `externalContributions`, a
 compact index of open entries (`contributionId`, `nodeId`, `inCurrentPlan`,
 `state`, `revision`, current decision and `sourceMessageId`) without their summary
 or references. Summaries, references and `externalRef` are untrusted evidence,
@@ -183,8 +183,8 @@ the agreement pointer, change the agreement digest or alter requirement accounti
 
 A reached branch without a current selection is a pending decision. `workflow_read`
 lists each workflow's `pendingBranchDecisions` (their meaning is in the root's
-instruction section `branches`), and root
-check-in envelopes add `branchDecisions`, holding pending decisions and current
+instruction section `branches`), and a root
+check-in's frozen envelope (view `request`) adds `branchDecisions`, holding pending decisions and current
 selections with their source message. An `apply` that assesses the workflow, or a
 workflow occurrence, as newly completed while a decision on its applicable path is
 pending is rejected with `branch_decision_pending` and a pointer to the branch. When
@@ -416,6 +416,15 @@ workflow documents:
   history. Use it to reconcile statuses; the document read remains available for
   descriptions and history. `membersSettled` is true when every applicable member is settled and no
   decision is pending; with `status` still `underway` the completing apply is owed.
+- `request` (with `requestId`): the frozen envelope of one of the caller's own check-ins or
+  liveness wakes, exactly as prepared: the request's identity, kind, state, pins, marker and
+  recorded outcome, and its envelope (per-thread rows with identities, counts, read handles,
+  lifecycle and contact routes, task context, team policy, open contribution and branch
+  indexes; for a liveness wake its key, generation and the unsettled occurrences). Routine
+  wakes carry only identities, counts, this read and their marker. Another Supervisor's or
+  helper's request is denied (`request_not_owned`); an unknown id is unavailable
+  (`request_unknown`). The envelope stays readable after the turn ended and the outcome was
+  acknowledged, for as long as the request record is retained.
 
 `supervision_plan` is the operative main's read of its own current proposal. Its arguments
 are `callerThreadId`, `taskId` and `proposalId`, copied from the Supervisor notice. The
@@ -644,8 +653,9 @@ Copy supplied activity references verbatim. For an item, use only
 `{sourceThreadId, sourceItemId}`; for a message without an item reference, use
 `{sourceThreadId, sourceMessageId}`. Add the evidence kind and note without copying
 an optional run ID. Opaque IDs must never be decoded, re-encoded, normalized or
-reconstructed. Helper envelopes supply ready references for eligible records in
-their bounded preview; omitted records require fresh bounded native reads.
+reconstructed. A helper check-in's frozen rows (its `workflow_read` view `request`
+envelope) supply ready references for eligible records in their bounded preview;
+omitted records require fresh bounded native reads.
 
 Each write includes `supervisorThreadId`, `bindingGeneration`, a stable unique
 `operationId`, and the complete action arguments. The first two fields locate the

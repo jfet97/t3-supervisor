@@ -84,14 +84,14 @@ for (const variant of ["identical", "retained", "changed", "stopped"] as const) 
       assert.equal(current.id, task.id);
       assert.equal(f.binding.threadId, task.supervisorThreadId);
       assert.equal(current.definitionReview, undefined);
-      assert.equal(f.rootSends().filter(command => !String(command.text).includes("UNTRUSTED_MONITOR_ENVELOPE")).length, 2);
+      assert.equal(f.rootSends().filter(command => !/UNTRUSTED_MONITOR_ENVELOPE|\nCheck-in for main /u.test(String(command.text))).length, 2);
       yield* f.core.requests.noticeSent(f.binding.threadId, 0);
       yield* f.runOnce();
       yield* f.runOnce();
       assert.equal(f.operativeSends().length, 1);
       assert.equal(f.interpretationDispatches().length, 2);
       assert.ok(f.rootSends().every(command => !String(command.text).includes("UNTRUSTED_PROJECT_DEFINITION_REVIEW_ENVELOPE")));
-      assert.equal(f.rootSends().filter(command => !String(command.text).includes("UNTRUSTED_MONITOR_ENVELOPE")).length, 2);
+      assert.equal(f.rootSends().filter(command => !/UNTRUSTED_MONITOR_ENVELOPE|\nCheck-in for main /u.test(String(command.text))).length, 2);
     } else {
       const current = yield* f.task();
       assert.equal(f.operativeSends().length, 0);

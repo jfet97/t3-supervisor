@@ -98,7 +98,7 @@ export function teamNotificationEvidence(projection: Projection, notification: T
 }
 
 // one check-in target: its pins, counts and exact handles; whether it may be written is stated only when it may not
-const checkinTarget = (target: TeamRequestTarget, monitored: SupervisorMonitorThreadBatch, thread: ThreadInfo | undefined) => {
+export const checkinTarget = (target: TeamRequestTarget, monitored: SupervisorMonitorThreadBatch, thread: ThreadInfo | undefined) => {
   const writable = Boolean(thread && !thread.archivedAt && !thread.deletedAt);
   const refs = monitored.previewItems.flatMap(item => {
     const reference = helperActivityReference(target.targetThreadId, item);
@@ -110,11 +110,16 @@ const checkinTarget = (target: TeamRequestTarget, monitored: SupervisorMonitorTh
     ...(writable ? {} : {writable: false, reason: thread ? "target_archived_or_deleted" as const : "target_thread_unavailable" as const})};
 };
 
-// a check-in is one event: the helper's authority once, its targets, the handles of its open notifications and its marker
-const helperCheckinText = (authority: {supervisorThreadId: string; bindingGeneration: number; memberEpoch: number},
-  targets: ReadonlyArray<ReturnType<typeof checkinTarget>>, notifications: ReadonlyArray<TeamNotification>, completionMarker: string): string =>
-  `${helperCore}\nHelper check-in: assess these targets.\nauthority ${JSON.stringify(authority)}\ntargets ${JSON.stringify(targets)}\n` +
-  `${notifications.length ? `notifications ${JSON.stringify(notifications.map(value => ({id: value.id, kind: value.kind})))}\n` : ""}End with: ${completionMarker}`;
+// a check-in is one event: the helper's authority once, its target ids, the ids of its open notifications, the read of its frozen rows
+// and its marker; the rows (pins, counts, exact handles, writability) are the request's envelope, read with view request
+export const helperCheckinText = (authority: {supervisorThreadId: string; bindingGeneration: number; memberEpoch: number},
+  targetIds: readonly string[], notifications: ReadonlyArray<TeamNotification>, completionMarker: string, requestId: string): string =>
+  `${helperCore}\nHelper check-in: assess these targets.\nauthority ${JSON.stringify(authority)}\ntargets ${JSON.stringify(targetIds)}\n` +
+  `${notifications.length ? `notifications ${JSON.stringify(notifications.map(value => ({id: value.id, kind: value.kind})))}\n` : ""}` +
+  `Rows: workflow_read ${JSON.stringify({...authority, view: "request", requestId})}\nEnd with: ${completionMarker}`;
+/** The frozen rows of a helper check-in: each target's pins, counts and exact handles, and its open notifications. */
+export const helperCheckinEnvelope = (targets: ReadonlyArray<ReturnType<typeof checkinTarget>>, notifications: ReadonlyArray<TeamNotification>): Record<string, unknown> =>
+  ({targets, notifications: notifications.map(value => ({id: value.id, kind: value.kind}))});
 
 
 type Cancel = Deferred.Deferred<void> | undefined;
@@ -889,26 +894,28 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
           ...notification.remainingAssignmentRoots];
         return !notificationRoots.length || notificationRoots.some(root => selectedAssignmentRoots.has(root));
       });
-      const text = helperCheckinText(authority, targets.map((target, index) => checkinTarget(target, targetThreads[index]!, threadsById.get(target.targetThreadId))),
-        notifications, completionMarker);
-      return {batch: reviewBatch, targets, notifications, text};
+      const rows = targets.map((target, index) => checkinTarget(target, targetThreads[index]!, threadsById.get(target.targetThreadId)));
+      const envelope = helperCheckinEnvelope(rows, notifications);
+      const text = helperCheckinText(authority, targets.map(target => target.targetThreadId), notifications, completionMarker, requestId);
+      return {batch: reviewBatch, targets, notifications, text, envelope};
     };
-    // a check-in fits only when its T3 rendering stays within the bound and its delivery stays provable
-    const budget = (text: string) => helperDeliveryBudget(conversationRequestMessageId(requestId), text, maxHelperCheckinRenderedLength);
+    // a check-in fits only when its T3 rendering plus the frozen rows it reads stay within the bound and its delivery stays provable
+    const budget = (review: {text: string; envelope: Record<string, unknown>}) =>
+      helperDeliveryBudget(conversationRequestMessageId(requestId), review.text, maxHelperCheckinRenderedLength, JSON.stringify(review.envelope));
     let selectedTargets: TeamRequestTarget[] = [];
     let selectedReview: ReturnType<typeof buildReview> = null;
     const unprocessableTargets: Array<{target: TeamRequestTarget; reason: "monitor_thread_missing" | "rendered_too_large" | "body_too_large"}> = [];
     for (const target of batch.targets) {
       const candidateTargets = [...selectedTargets, target];
       const candidate = buildReview(candidateTargets);
-      if (candidate && budget(candidate.text) === "fits") {
+      if (candidate && budget(candidate) === "fits") {
         selectedTargets = candidateTargets;
         selectedReview = candidate;
         continue;
       }
       const singleTarget = buildReview([target]);
       if (!singleTarget) {unprocessableTargets.push({target, reason: "monitor_thread_missing"});continue;}
-      const reason = budget(singleTarget.text);
+      const reason = budget(singleTarget);
       if (reason !== "fits") unprocessableTargets.push({target, reason});
     }
     if (unprocessableTargets.length) {
@@ -933,7 +940,7 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     const request = yield* gate.admit((guard) => transaction(Effect.gen(function* () {
       if (yield* stoppedWith(guard, binding.mainThreadId)) return null;
       const value = yield* requests.prepare({id: requestId, projectId: binding.projectId, supervisorThreadId: member.threadId,
-        kind: "review", taskId: null, text: review.text, batch: review.batch, completionMarker,
+        kind: "review", taskId: null, text: review.text, batch: review.batch, completionMarker, envelope: review.envelope,
         teamNotificationIds: review.notifications.map(item => item.id)}, now);
       yield* teamStore.recordRequest(binding, {requestId: value.id, memberThreadId: member.threadId, memberEpoch: member.epoch,
         targets: review.targets, parentById: parents, now});
