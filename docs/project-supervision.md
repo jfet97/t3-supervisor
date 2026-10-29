@@ -406,9 +406,13 @@ target's cursor, completes cut-off text, consumes its own inbox at each boundary
 with one bounded `t3_thread_wait` of five to ten seconds on the active target (it waits
 for run completion, not new activity), assesses and acts with one delta when needed.
 The turn ends only when the agreed work is complete or in explicit standby (a recorded
-wait naming who acts next), when a wait returns `next` or an end-turn, on context
-rotation, on a genuine human Stop, or for genuine external waiting a native watch owns;
-an operative run that ended with agreed duties still planned is not an ending. Child
+wait naming who acts next), when a wait result names the next action or tells the model to
+end the turn, on context rotation, on a genuine human Stop, or for genuine external waiting
+that a native watcher reports (never the operative's own running turn). A timed-out wait
+while the target still runs is not an ending, however many waits timed out: the service
+reads forward and waits again. An operative run that ended with agreed duties still
+planned is not an ending either. Check-in and liveness wakes point at the same endings:
+the watch outcome is recorded when the watch ends, not at a fixed per-wake point. Child
 lists are metadata, not transcript reads. When T3 requires a yield, the service promptly
 continues verified active work. Active following bypasses the idle age/count thresholds
 and cooldown, and never steers into a Supervisor's ongoing thinking. One model turn runs
