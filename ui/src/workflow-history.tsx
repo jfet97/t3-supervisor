@@ -26,7 +26,7 @@ export function WorkflowHistory({workflow}: {workflow: WorkflowProgressWorkflow 
       </div>)}
     </div></EntityDetails>}
     {events.length === 0 ? <p>No history records were returned.</p> : <ol className="workflow-history-list" role="list">{events.map(event => <li key={event.id}>
-      <div className="text-group"><h3>{labels[event.kind] ?? "Workflow record"}{event.targetNodeName ? ` · ${event.targetNodeName}` : ""}</h3>
+      <div className="text-group"><h3>{event.repair ? "Status corrected" : labels[event.kind] ?? "Workflow record"}{event.targetNodeName ? ` · ${event.targetNodeName}` : ""}</h3>
         <p className="small muted"><time dateTime={new Date(event.recordedAt).toISOString()}>{new Date(event.recordedAt).toLocaleString()}</time>{event.attempt !== null && <> · Attempt {event.attempt}</>}</p></div>
       {event.statusTo && <p>{event.statusFrom ? `${status[event.statusFrom]} → ` : ""}{status[event.statusTo]}</p>}
       <p>{event.note}</p>

@@ -30,6 +30,7 @@ export const WorkflowHistoryEventSchema = Schema.Struct({
   targetNodeId: NullableText, targetNodeName: NullableText, attempt: Schema.NullOr(Schema.Number),
   statusFrom: Schema.NullOr(WorkflowExecutionStatus), statusTo: Schema.NullOr(WorkflowExecutionStatus),
   sourceThreadId: NullableText, sourceMessageId: NullableText, sourceItemId: NullableText, note: Schema.String,
+  repair: Schema.optionalKey(Schema.Literal(true)),
 });
 export type WorkflowHistoryEvent = typeof WorkflowHistoryEventSchema.Type;
 
@@ -44,7 +45,7 @@ export const progressHistory = (document: WorkflowStateDocument): WorkflowHistor
     return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: item.recordedAt, targetNodeId: item.targetNodeId,
       targetNodeName: item.targetNodeName, attempt: item.targetNodeId ? attempts.get(item.targetNodeId) ?? 1 : null,
       statusFrom: item.statusFrom, statusTo: item.statusTo, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
-      sourceItemId: item.sourceItemId ?? null, note: item.note};
+      sourceItemId: item.sourceItemId ?? null, note: item.note, ...(item.repair === true ? {repair: true as const} : {})};
   });
 };
 

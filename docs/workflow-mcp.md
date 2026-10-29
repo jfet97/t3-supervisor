@@ -225,6 +225,23 @@ possible. A pending entry whose return is no longer reached, or has left the pla
 dismissed with `return_dismissed` evidence. Entries are never removed, and a workflow
 holds at most 100.
 
+The region of a return the current selections reach, its failure path selected or the
+return lying on every path, is one real boundary. An `apply` that moves a status inside
+that region backward (completed or underway to planned, completed to underway) is
+rejected with `return_required` and a pointer to the reopened occurrence, whether it
+also settles the assessing member in the same write or reopens first and settles later.
+The assessing member settles alone, the service requests the return, and `apply_return`
+starts the next attempt; attempts and budgets change nowhere else. With that return's
+budget spent the same backward move is `return_budget_exhausted`. Off the selected
+path, no failure path selected yet or the `else` path taken, a backward move inside a
+region is a misrecorded status: the apply needs `repair: true` with the usual
+`status_changed` evidence and a note, is rejected with `status_repair_required` without
+the flag, records that evidence flagged `repair: true` (History shows "Status
+corrected"), consumes no budget and starts no attempt; `repair: true` on an apply that
+moves no such status is `repair_not_applicable`. Backward moves outside every return
+region, and the reassessment a changed task scope requires, are unaffected. A region
+whose return already waits keeps `return_pending`.
+
 When the successful jumps reach `maximum`, the document records an `exhausted`
 return and `return_budget_exhausted` evidence instead of another pending request.
 An `apply` that would complete the task or enter work after that return is rejected
@@ -397,7 +414,8 @@ workflow documents:
   reference, nesting, status, branch reach (stated only off the unconditional path) and
   visible omissions, plus pending decisions, without descriptions, accepted snapshots or
   history. Use it to reconcile statuses; the document read remains available for
-  descriptions and history.
+  descriptions and history. `membersSettled` is true when every applicable member is settled and no
+  decision is pending; with `status` still `underway` the completing apply is owed.
 
 `supervision_plan` is the operative main's read of its own current proposal. Its arguments
 are `callerThreadId`, `taskId` and `proposalId`, copied from the Supervisor notice. The
@@ -529,7 +547,9 @@ matching valid definition snapshot; live edits cannot self-authorize their sourc
 binding or weaken fixed/required commitments. Invalid/incomplete source material
 supports provisional dialogue, while source-bound writes wait for a valid pin.
 
-Stored workflow documents and immutable receipts use `formatVersion: 2`. Plans
+Stored workflow documents and immutable receipts use `formatVersion: 2`. An applied,
+created or exists receipt also states `documentStatus`, the document's own status after
+the write, separate from the status of its root occurrence. Plans
 retain nested groups and per-occurrence `nodeId` values separately from reusable
 `definitionId` or task-local `localId` values. The service derives the task ID,
 task source hash and definition source binding from its current trusted proposal
@@ -543,7 +563,7 @@ Old prototype documents remain explicitly incompatible and are not migrated or
 silently reinterpreted; their historical rows and unrelated service state remain.
 
 Apply requires `operationId`, `workflowId`, `expectedRevision` and `note`. Status,
-objective, requirements, plan, statuses, omit and evidence are optional; omitted plan fields are preserved
+objective, requirements, plan, statuses, omit, evidence and repair are optional; omitted plan fields are preserved
 from the current document inside the revision-checked transaction. This permits a
 status or objective change without resending an entire plan. `statuses` lists up to
 100 `{nodeId, status}` edits of existing occurrences, merged into the current plan
@@ -553,7 +573,9 @@ unstarted members declared by flexible workflows; the main workflow accepts one 
 the operative has accepted the current proposal and it omits the same member of the same
 occurrence. Members with recorded progress, fixed members and an omission that would
 empty a workflow or branch path, directly or through a nested group, are refused.
-Neither may be combined with `plan` (`plan_edit_conflict`). Evidence of kind
+Neither may be combined with `plan` (`plan_edit_conflict`). `repair: true` declares the
+apply's backward status moves inside a return region off its selected path as the
+correction of a misrecorded status (see Returns and attempts). Evidence of kind
 `not_applicable` records that a planned member of a fixed workflow, with no recorded
 progress inside it, does not apply to the current task scope; it changes no status, is refused for any other target
 (`not_applicable_invalid`) and stops counting after a later status change or scope

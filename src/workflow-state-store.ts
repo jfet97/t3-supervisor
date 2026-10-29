@@ -787,6 +787,55 @@ const pendingReturnProblem = (current: WorkflowStateDocument, input: Pick<Workfl
   return null;
 };
 
+const returnRequiredExpected = "the selected path returns through this back_to: settle the assessing member only, let the service request the return, then start the " +
+  "next attempt with supervision_planning action apply_return; no status inside the return's region moves backward by hand.";
+const statusRepairRequiredExpected = "a status inside a return region moves backward, off the selected path, only as the correction of a misrecorded status: resend this " +
+  "apply with repair: true and status_changed evidence whose note says what was misrecorded; a repair starts no attempt and spends no jump.";
+const repairNotApplicableExpected = "send repair: true only with an apply that moves a status backward inside a return region whose failure path is not selected; " +
+  "this apply moves none.";
+/**
+ * The one return boundary. Inside the region of a back_to the current selections reach, its failure path selected or the return lying on
+ * every path, no status moves backward by hand: the assessing member settles, the service requests the return and the Supervisor applies
+ * it, which alone starts an attempt and spends a jump; with that return's budget spent the failure stays unresolved. Off the selected
+ * path a backward move inside a region is a misrecorded status, corrected only as an explicit repair, which starts no attempt. A region
+ * whose return already waits keeps the pending-return rule. Backward moves outside every region, and the reassessment a changed scope
+ * requires, are unaffected.
+ */
+const returnBoundaryProblem = (current: WorkflowStateDocument, input: Pick<WorkflowApplyInput, "repair">, nextPlan: WorkflowStatePlan,
+  selections: readonly BranchSelection[], returnBudgets: readonly ReturnBudget[], scopeReassessment: boolean):
+  {problem: WorkflowApplyDiagnostic} | {repaired: ReadonlySet<string>} => {
+  const repaired = new Set<string>();
+  const notApplicable = (): {problem: WorkflowApplyDiagnostic} => ({problem: {code: "repair_not_applicable", path: "/repair", expected: repairNotApplicableExpected}});
+  if (!nextPlan || scopeReassessment) return input.repair === true ? notApplicable() : {repaired};
+  const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
+  const backward = collectPlanEntities(nextPlan).filter(node => {
+    const before = previous.get(node.nodeId);
+    return before !== undefined && (node.status === "planned" && (before === "completed" || before === "underway") || node.status === "underway" && before === "completed");
+  });
+  const selected = effectiveBranchSelections(nextPlan, selections);
+  const reach = new Map(planReach(nextPlan, selected).map(({node, reach}) => [node, reach] as const));
+  // a region whose return already waits is the pending-return rule's to refuse, flag or not
+  const waiting = new Set(current.returns.flatMap(entry => entry.state === "pending" ? [entry.backToNodeId] : []));
+  const waitingRegions = new Set(current.returns.flatMap(entry => entry.state === "pending" ? entry.regionNodeIds : []));
+  const held = backward.some(node => waitingRegions.has(node.nodeId));
+  for (const backTo of planBackTos(nextPlan)) {
+    if (waiting.has(backTo.nodeId)) continue;
+    const resolved = resolveBackTo(nextPlan, backTo.nodeId);
+    if (!resolved.ok) continue;
+    const region = new Set(resolved.regionNodeIds);
+    const moved = backward.find(node => region.has(node.nodeId));
+    if (!moved) continue;
+    const path = planStatusPointer(nextPlan, moved) ?? "/plan";
+    if (applicableReach(reach.get(backTo) ?? "unconditional")) {
+      const exhausted = returnBudgetUsed(ledgerEvents(returnBudgets, backTo.budgetId)) >= backTo.maximum;
+      return {problem: exhausted ? {code: "return_budget_exhausted", path, expected: returnBudgetExhaustedExpected} : {code: "return_required", path, expected: returnRequiredExpected}};
+    }
+    if (input.repair !== true) return {problem: {code: "status_repair_required", path, expected: statusRepairRequiredExpected}};
+    for (const node of backward) if (region.has(node.nodeId)) repaired.add(node.nodeId);
+  }
+  return input.repair === true && repaired.size === 0 && !held ? notApplicable() : {repaired};
+};
+
 // a status or applicability assertion never rests on an execution a return retired; a reference without a thread cites the workflow's own
 const retiredRunProblem = (current: WorkflowStateDocument, evidence: readonly WorkflowStateEvidenceInput[]): WorkflowApplyDiagnostic | null => {
   const index = evidence.findIndex(item => (item.kind === "status_changed" || item.kind === "not_applicable") &&
@@ -962,7 +1011,8 @@ const recordedProgressProblem = (current: WorkflowStateDocument, input: Workflow
 const validApplyInput = (value: unknown): boolean => isRecord(value) &&
   validId(value.operationId) && validId(value.workflowId) && Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 &&
   validText(value.note) && isStatus(value.status) && (value.objective === null || validText(value.objective)) &&
-  validSourceBinding(value.sourceBinding) && validRequirements(value.requirements) && validIssues(value.issues) && validApplyPlan(value.plan) && validEvidenceInput(value.evidence);
+  validSourceBinding(value.sourceBinding) && validRequirements(value.requirements) && validIssues(value.issues) && validApplyPlan(value.plan) && validEvidenceInput(value.evidence) &&
+  (value.repair === undefined || typeof value.repair === "boolean");
 
 const validDocument = (value: Record<string, unknown>): boolean => value.formatVersion === 2 && validId(value.workflowId) &&
   validId(value.projectId) && validId(value.mainThreadId) && validId(value.threadId) &&
@@ -983,7 +1033,7 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   returnBudgetCoverage(value) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
     validId(item.id) && validId(item.operationId) && (workflowEvidenceKinds as readonly string[]).includes(String(item.kind)) &&
-    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) &&
+    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) && (item.repair === undefined || item.repair === true) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
@@ -1067,7 +1117,7 @@ const classifyReceipt = (operationId: string, text: string): WorkflowMutationRes
 };
 
 const workflowReceipt = (status: "applied" | "created", operationId: string, document: WorkflowStateDocument): WorkflowMutationReceipt =>
-  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2});
+  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2, documentStatus: document.status});
 
 // the plan and evidence checks, as pure functions
 const normalizeWorkflowPlan = (input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
@@ -1363,6 +1413,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
           (item.sourceMessageId || item.sourceItemId)))
         return {status: "invalid", operationId: input.operationId, reason: "scope_assessment_required"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     }
+    const boundary = returnBoundaryProblem(current, validatedInput, nextPlan, branchState.selections, returnBudgets, scopeReassessment);
+    if ("problem" in boundary) return {status: "invalid", operationId: input.operationId, reason: boundary.problem.code, diagnostic: boundary.problem} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
     const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
     const evidence = [...current.evidence];
@@ -1379,6 +1431,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note,
         ...(typeof item.sourceProviderTurnId === "string"
           ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
+        ...(item.kind === "status_changed" && nodeId !== null && boundary.repaired.has(nodeId) ? {repair: true as const} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1441,7 +1494,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     if (existing) {
       const decoded = classifyWorkflowRow(existing);
       if (decoded.status === "incompatible") return {...decoded, operationId};
-      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision,
+      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision, documentStatus: decoded.document.status,
         stateHash: fingerprint(decoded.document), formatVersion: 2} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
     }
     const document = yield* emptyDocument(owner, owner.mainThreadId, null, null, 1, at);

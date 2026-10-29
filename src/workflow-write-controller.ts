@@ -77,7 +77,7 @@ import { InterpretationWake } from "./interpretation-wake.js";
 import { logEvent, type LogFields } from "./logging.js";
 import {branchConditionMaxLength, definitionSnapshotIndexed, returnBudgetMaximum, type ProjectDefinitionSnapshot} from "./project-definitions-contract.js";
 import type {WorkflowProtocolDiagnostic, WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import {currentPendingDecisions, occurrenceAttempts, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanReach, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
+import {currentPendingDecisions, occurrenceAttempts, pendingDecisionsOutside, planEntities, planNodeAtPointer, planStatusPointer, planOmissionKeys, planStatusOutline, notApplicableSubtrees, unsettledOccurrences, withOccurrenceStatuses, withOmissions, type OmissionEditProblem, type PlanReach, type PlanStatusOutlineRow} from "./workflow-plan-tree.js";
 
 // the native item read returned no item record
 export class WorkflowNativeItemUnavailable extends Data.TaggedError("WorkflowNativeItemUnavailable") {}
@@ -140,7 +140,7 @@ export type WorkflowStatusEdit = {nodeId: string; status: WorkflowExecutionStatu
 export type WorkflowOmissionEdit = {nodeId: string; reason: string};
 export type WorkflowApplyPatch = Pick<WorkflowApplyInput, "operationId" | "workflowId" | "expectedRevision" | "note"> &
   Partial<Pick<WorkflowApplyInput, "status" | "objective" | "sourceBinding" | "requirements" | "issues" | "plan">> &
-  {statuses?: WorkflowStatusEdit[]; omit?: WorkflowOmissionEdit[]; evidence?: WorkflowStateEvidenceInput[]};
+  {statuses?: WorkflowStatusEdit[]; omit?: WorkflowOmissionEdit[]; evidence?: WorkflowStateEvidenceInput[]; repair?: boolean};
 
 export type WorkflowWritePayload = WorkflowLocator & (
   | {action: "ensure_main"; operationId: string; note: string}
@@ -162,7 +162,7 @@ const interpretationViews: ReadonlySet<string> = new Set<SupervisorContextViewNa
 export type StatusViewRow = Omit<PlanStatusOutlineRow, "reach"> & {reach?: Exclude<PlanReach, "unconditional">};
 export type WorkflowStatusViewResult = {status: "ok"; view: "status"; mainTaskAgreementStatus: "agreed" | "stale" | null;
   workflowOffset: number; workflowHasMore: boolean; workflows: Array<{workflowId: string; threadId: string; parentWorkflowId: string | null;
-    revision: number; status: WorkflowExecutionStatus; occurrences: StatusViewRow[]; pendingBranchDecisions: string[];
+    revision: number; status: WorkflowExecutionStatus; membersSettled: boolean; occurrences: StatusViewRow[]; pendingBranchDecisions: string[];
     pendingReturns: Array<{returnId: string; backToNodeId: string; targetNodeId: string; attempt: number; regionNodeIds: string[]; reason: string; requestedAt: number}>}>};
 export type SupervisionStartInput = {callerThreadId: string; userMessageId: string; operationId: string};
 export type SupervisionStartResult = {status: "pending" | "active" | "rejected" | "denied" | "invalid" | "unavailable"; reason: string; retryable?: boolean};
@@ -534,6 +534,7 @@ const omissionProblemExpected: Record<OmissionEditProblem, string> = {
 // a store pointer into the edited plan of an apply without a plan, mapped to the status edit that set that occurrence's status
 const statusEditPointer = (plan: WorkflowApplyInput["plan"], currentPlan: WorkflowApplyInput["plan"], path: string, edits: readonly WorkflowStatusEdit[]): string => {
   if (path === "/status") return "/input/status";
+  if (path === "/repair") return "/input/repair";
   if (path.startsWith("/evidence/")) return `/input${path}`;
   const node = planNodeAtPointer(plan, path);
   if (!node || !("nodeId" in node)) return "/input/statuses";
@@ -550,6 +551,7 @@ const statusEditPointer = (plan: WorkflowApplyInput["plan"], currentPlan: Workfl
 // paths use the same /input base as the other apply diagnostics.
 export const submittedApplyPointer = (submittedPlan: unknown, path: string): string => {
   if (path === "/status") return "/input/status";
+  if (path === "/repair") return "/input/repair";
   if (path.startsWith("/evidence/")) return `/input${path}`;
   const segments = path.split("/").slice(1);
   const status = segments.at(-1) === "status";
@@ -636,7 +638,7 @@ const applyInputDiagnostic = (value: unknown): WorkflowApplyDiagnostic | null =>
 
 const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
   if (!isRecord(value) || !hasExactKeys(value,
-    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "statuses", "omit", "evidence"])) return null;
+    ["operationId", "workflowId", "expectedRevision", "note"], ["status", "objective", "sourceBinding", "requirements", "issues", "plan", "statuses", "omit", "evidence", "repair"])) return null;
   if (!isId(value.operationId) || !isId(value.workflowId) || !Number.isSafeInteger(value.expectedRevision) ||
     (value.expectedRevision as number) < 1 || value.status !== undefined && !isStatus(value.status) ||
     value.objective !== undefined && !(value.objective === null || isText(value.objective, workflowMutationLimits.maxTextLength)) ||
@@ -644,6 +646,7 @@ const parseApplyInput = (value: unknown): WorkflowApplyPatch | null => {
     value.sourceBinding !== undefined && !validSourceBindingInput(value.sourceBinding) ||
     value.requirements !== undefined && !validRequirementInput(value.requirements) ||
     value.issues !== undefined && !validIssueInput(value.issues) ||
+    value.repair !== undefined && typeof value.repair !== "boolean" ||
     value.plan !== undefined && value.plan !== null && !validPlanRequest(value.plan) ||
     conflictingEditsDiagnostic(value) || evidenceDiagnostic(value.evidence) ||
     value.statuses !== undefined && statusEditsDiagnostic(value.statuses) ||
@@ -900,6 +903,8 @@ const applyInputSchema = {
       items: {type: "object", additionalProperties: false, required: ["nodeId", "reason"], properties: {
         nodeId: idSchema(64), reason: textSchema(maxPlanReasonLength),
       }}},
+    repair: {type: "boolean",
+      description: "Declares the backward status moves of this apply inside a return region whose failure path is not selected as the correction of a misrecorded status; it starts no attempt and spends no jump. On the selected path a region never moves backward by hand: settle the assessing member and apply the requested return instead."},
     note: textSchema(workflowMutationLimits.maxTextLength),
     evidence: {type: "array", maxItems: workflowMutationLimits.maxEvidencePerApply, items: {
       type: "object", additionalProperties: false, required: ["kind", "note"], properties: {
@@ -1593,6 +1598,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       plan: payload.input.plan === undefined ? editedPlan : payload.input.plan,
       note: payload.input.note,
       ...(payload.input.evidence !== undefined ? {evidence: validatedEvidence ?? payload.input.evidence} : {}),
+      ...(payload.input.repair !== undefined ? {repair: payload.input.repair} : {}),
     };
     const candidate = {...applyInput, sourceBinding: effectiveSourceBinding};
     const target = {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId};
@@ -2086,15 +2092,21 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       if (documents.status !== "ok") return documents;
       return {status: "ok", view: "status", mainTaskAgreementStatus: documents.mainTaskAgreementStatus,
         workflowOffset: documents.workflowOffset, workflowHasMore: documents.workflowHasMore,
-        workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => ({workflowId: document.workflowId, threadId: document.threadId,
-          parentWorkflowId: document.parentWorkflowId, revision: document.revision, status: document.status,
-          // a row states its reach only off the unconditional path
-          occurrences: planStatusOutline(document.plan, documentBranchSelections(document), notApplicableSubtrees(document.plan, documentBranchSelections(document),
-            notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)), occurrenceAttempts(document.returns))
-            .map(({reach, ...row}) => reach === "unconditional" ? row : {...row, reach}),
-          pendingBranchDecisions: pending.map(item => item.nodeId),
-          pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
-            targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))}))};
+        workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => {
+          const selected = documentBranchSelections(document);
+          const notApplicable = notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null);
+          return {workflowId: document.workflowId, threadId: document.threadId,
+            parentWorkflowId: document.parentWorkflowId, revision: document.revision, status: document.status,
+            // every applicable member settled and no decision pending: a document still underway owes its completing apply
+            membersSettled: document.plan !== null && unsettledOccurrences(document.plan, selected, notApplicable).length === 0 &&
+              pendingDecisionsOutside(document.plan, selected, notApplicable).length === 0,
+            // a row states its reach only off the unconditional path
+            occurrences: planStatusOutline(document.plan, selected, notApplicableSubtrees(document.plan, selected, notApplicable), occurrenceAttempts(document.returns))
+              .map(({reach, ...row}) => reach === "unconditional" ? row : {...row, reach}),
+            pendingBranchDecisions: pending.map(item => item.nodeId),
+            pendingReturns: document.returns.filter(item => item.state === "pending").map(item => ({returnId: item.returnId, backToNodeId: item.backToNodeId,
+              targetNodeId: item.targetNodeId, attempt: item.attempt, regionNodeIds: [...item.regionNodeIds], reason: item.reason, requestedAt: item.requestedAt}))};
+        })};
     }
     const binding = (yield* resolveBinding(parsed.value, parsed.value.view === "instructions", parsed.value.view === "context" ? "status" : "read")) ??
       (interpretationViews.has(parsed.value.view) ? yield* resolveInterpretationReader(parsed.value) : null);

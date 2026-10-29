@@ -950,6 +950,10 @@
                 }
               }
             },
+            "repair": {
+              "type": "boolean",
+              "description": "Declares the backward status moves of this apply inside a return region whose failure path is not selected as the correction of a misrecorded status; it starts no attempt and spends no jump. On the selected path a region never moves backward by hand: settle the assessing member and apply the requested return instead."
+            },
             "note": {
               "type": "string",
               "minLength": 1,

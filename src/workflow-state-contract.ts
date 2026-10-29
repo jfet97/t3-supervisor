@@ -271,6 +271,9 @@ export type WorkflowStateEvidence = {
   branch?: {revision: number; path: BranchSelectionPath; changed: boolean; condition?: string};
   // present only on return evidence; the region, attempt and closed state stay on the return entry
   return?: {returnId: string; regionNodeIds?: string[]};
+  // present only on the status_changed evidence of an explicit repair: a misrecorded status inside a return region moved backward off
+  // the selected path, starting no attempt and spending no jump
+  repair?: true;
 };
 
 export type WorkflowStateEvidenceInput = {
@@ -386,6 +389,8 @@ export type WorkflowApplyInput = {
   plan: WorkflowStatePlan;
   note: string;
   evidence?: WorkflowStateEvidenceInput[];
+  /** Declares this apply's backward status moves inside a return region off its selected path as the correction of a misrecorded status. */
+  repair?: boolean;
 };
 
 export type WorkflowControllerLineage = {
@@ -411,6 +416,8 @@ export type WorkflowMutationReceipt = {
   workflowId: string;
   revision: number;
   stateHash: string;
+  /** The document's own status after the write, separate from the status of its root occurrence. */
+  documentStatus?: WorkflowExecutionStatus;
 };
 
 export type WorkflowMutationResult = WorkflowMutationReceipt | {
@@ -442,6 +449,7 @@ export type WorkflowEnsureResult = WorkflowMutationResult | {
   workflowId: string;
   revision: number;
   stateHash: string;
+  documentStatus?: WorkflowExecutionStatus;
 } | {
   status: "incompatible";
   operationId: string;
@@ -592,6 +600,7 @@ export const WorkflowStateEvidenceSchema = Schema.Struct({
   branch: Schema.optionalKey(Schema.Struct({revision: Schema.Number, path: Schema.Literals(branchSelectionPaths), changed: Schema.Boolean,
     condition: Schema.optionalKey(Schema.String)})),
   return: Schema.optionalKey(Schema.Struct({returnId: Schema.String, regionNodeIds: Schema.optionalKey(mutableArray(Schema.String))})),
+  repair: Schema.optionalKey(Schema.Literal(true)),
 });
 
 export const WorkflowReturnRunSchema = Schema.Union([
@@ -681,6 +690,7 @@ export const WorkflowMutationReceiptSchema = Schema.Struct({
   workflowId: Schema.String,
   revision: Schema.Number,
   stateHash: Schema.String,
+  documentStatus: Schema.optionalKey(WorkflowExecutionStatusSchema),
 });
 
 // the schemas mirror the hand-written types in both directions

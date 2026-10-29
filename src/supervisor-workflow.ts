@@ -77,7 +77,7 @@ export type WorkflowApplyDiagnostic = {
     "missing_status_changed_evidence" | "branch_condition_invalid" | "branch_decision_pending" | "evidence_entry_invalid" |
     "evidence_reference_invalid" | "status_edit_invalid" | "status_edit_unknown_node" | "status_unchanged" | "omission_invalid" |
     "omission_not_allowed" | "omission_not_negotiated" | "plan_edit_conflict" | "sequence_order" | "nested_status_inconsistent" |
-    "completion_unfinished" | "not_applicable_invalid" | "back_to_target_invalid" | BackToProblem | "return_pending" | "return_budget_exhausted" | "retired_run_evidence" |
+    "completion_unfinished" | "not_applicable_invalid" | "back_to_target_invalid" | BackToProblem | "return_pending" | "return_budget_exhausted" | "return_required" | "status_repair_required" | "repair_not_applicable" | "retired_run_evidence" |
     DefinitionReferenceProblemCode;
   path: string;
   expected: string;

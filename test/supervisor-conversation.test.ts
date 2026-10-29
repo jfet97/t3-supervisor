@@ -1374,6 +1374,9 @@ it.effect("workflow editing guidance tells authors to start live steps planned a
   const role = yield* fixture.conversation.roleFor(fixture.binding);
   assert.match(role, /New live steps start "planned"; when a plan is first agreed, reconcile its members in order against actual prior evidence/u);
   assert.match(role, /apply statuses, without resending the plan/u);
+  assert.match(role, /never reopen its target or any member of that return's region by statuses \(return_required\)/u);
+  assert.match(role, /resend the apply with repair: true and a status_changed note saying what was misrecorded \(status_repair_required otherwise\)/u);
+  assert.match(role, /view status marks membersSettled while the document itself is still underway, and every applied receipt states documentStatus/u);
   assert.match(role, /draft pull request or a failing test run during implementation, is an observation on that member, which stays planned/u);
   assert.match(role, /A member that does not apply is never completed/u);
   // revisions follow the same proportionate rule as the first plan, and an operative's scope exclusion is answered with a smaller plan
