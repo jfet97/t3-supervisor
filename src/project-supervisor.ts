@@ -1350,6 +1350,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
               proposalId: retained.workflowProposalId ?? retained.agreement?.proposalId ?? retained.id});
           }
           const status = conversation?.authorization || next.objective !== null ? "inferred" as const : "needs_context" as const;
+          // the root executed this request and submitted: the full notice it carried delivered this instructions version
+          if (job.requestRoleVersion) {
+            const owner = yield* store.bindingForSupervisor(job.supervisorThreadId);
+            if (owner && owner.deliveredRoleVersion !== job.requestRoleVersion) yield* store.setBinding({...owner, deliveredRoleVersion: job.requestRoleVersion});
+          }
           yield* complete(next, status, next.objective, payload.reason);return status;
         }));
       }));
@@ -1493,8 +1498,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const requesters = yield* requesterPolicy(preparing.projectId);
         // an agent request is introduced to the Supervisor as the launching agent's, never as the human's
         const requester = sourceRun ? taskRequester(source, sourceRun, message, requesters) : null;
-        // the request carries the root notice: the binding fences and the instructions handle, never the rules themselves
-        const notice = conversation.rootNotice(owner);
+        // the request carries the root notice: the binding fences and the instructions handle, never the rules themselves; in full until a
+        // completed turn confirmed this instructions version, then the one-line pointer, as every other root wake of the binding
+        const wake = yield* conversation.rootWake(owner);
+        const notice = wake?.text ?? null;
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
         // the genuine requester messages and operative replies since the activation floor, each with the exact native turn item T3 reads it
@@ -1525,6 +1532,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const attempt: InterpretationAttempt = retained ?? {attemptId: interpretationAttemptId(mintedUuid), key: built.key};
         const next: TaskRecord = {...preparing, requestText: built.requestText, definitionContext: built.request.context,
           definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, interpretationSources};
+        delete next.requestRoleVersion;
+        if (wake?.roleVersion) next.requestRoleVersion = wake.roleVersion;
         yield* store.saveTask(next);
         return next;
       }));

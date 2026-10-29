@@ -558,6 +558,11 @@ export interface SupervisorConversationShape {
   readonly hasInflight: (projectId: string, supervisorThreadId: string) => Effect.Effect<boolean, SupervisionStoreError>;
   /** What a root message carries instead of its rules: the binding fences and the instructions handle (none without workflow state). */
   readonly rootNotice: (binding: BindingRecord) => string | null;
+  /**
+   * The version-aware form of the root notice for a request that will be confirmed by a completed turn: the full notice with the version
+   * to confirm until that version was delivered, then the one-line pointer; null without workflow state.
+   */
+  readonly rootWake: (binding: BindingRecord) => Effect.Effect<{text: string; roleVersion?: string} | null, SupervisionStoreError>;
   readonly retry: (projectId: string, supervisorThreadId: string) => Effect.Effect<void, SupervisionStoreError>;
   // runs inside the Stop bookkeeping section's transaction
   readonly fenceStoppedSupervision: (binding: BindingRecord) => Effect.Effect<void, SupervisionStoreError>;
@@ -888,6 +893,15 @@ Turns without a service request: do pending context/planning work, then keep the
   // of the full notice were delivered with the first confirmed wake of this version and live in the core
   const rootNoticeCompact = (binding: BindingRecord): string =>
     `Supervisor root for main ${JSON.stringify(binding.mainThreadId)}: instructions workflow_read view instructions with ${JSON.stringify(readerOf(binding))}, version ${instructionsVersion(binding)}.`;
+  // every root wake with workflow state, interpretation requests included, carries the full notice until a completed turn confirmed this
+  // instructions version, then the pointer; null without workflow state, whose role the workflowless wake delivers in full
+  const rootWake = (binding: BindingRecord): Effect.Effect<{text: string; roleVersion?: string} | null, SupervisionStoreError> =>
+    Effect.map(store.binding(binding.projectId, binding.mainThreadId), (current) => {
+      const notice = rootNotice(binding);
+      if (!notice) return null;
+      const version = instructionsVersion(binding);
+      return current?.deliveredRoleVersion === version ? {text: rootNoticeCompact(binding)} : {text: notice, roleVersion: version};
+    });
   const wakeRole = (binding: BindingRecord) => Effect.map(store.binding(binding.projectId, binding.mainThreadId), (current): {text: string; roleVersion?: string} => {
     const notice = rootNotice(binding);
     if (notice) {
@@ -1384,11 +1398,12 @@ Turns without a service request: do pending context/planning work, then keep the
         const blocked = (diagnostic.attempts ?? 1) >= 3;
         const completionMarker = `Supervisor protocol repair ${task.id}:${diagnostic.observedAt} completed`;
         const role = yield* wakeRole(binding);
-        const repair = JSON.stringify({proposalId: diagnostic.proposalId, code: diagnostic.code, detail: diagnostic.detail ?? null, path: diagnostic.path ?? null,
-          expected: diagnostic.expected ?? null, attempts: diagnostic.attempts ?? 1});
+        // the wake names the task, the proposal, the code and the attempt; the rejection's path, expected shape and detail are read with
+        // view context section diagnostics, which serves the current diagnostic
+        const identity = `proposal ${diagnostic.proposalId} for task ${task.id} (code ${diagnostic.code}, attempt ${diagnostic.attempts ?? 1} of 3)`;
         const text = `${role.text}\n${blocked
-          ? `Your workflow-proposal for task ${task.id} was rejected three times. Stop retrying. Tell the operative main once, concisely, that workflow agreement is blocked and name the code; do not claim agreement.`
-          : `Your published workflow-proposal for task ${task.id} was rejected: repair it in this turn as section authoring describes, from current view context pins, confirmed with view check.`} Rejection: ${repair}. End your final response with this exact marker: ${completionMarker}.`;
+          ? `Your workflow-${identity} was rejected three times. Stop retrying. Tell the operative main once, concisely, that workflow agreement is blocked and name the code; do not claim agreement.`
+          : `Your published workflow-${identity} was rejected: read its path, expected shape and detail with workflow_read ${JSON.stringify({...readerOf(binding), view: "context", section: "diagnostics"})}, then repair it in this turn as section authoring describes, from current view context pins, confirmed with view check.`} End your final response with this exact marker: ${completionMarker}.`;
         const fresh = yield* store.task(task.threadId);
         if (!fresh || fresh.id !== task.id || fresh.workflowProtocolDiagnostic?.observedAt !== diagnostic.observedAt) continue;
         yield* store.saveTask({...fresh, protocolRepairNoticeAt: diagnostic.observedAt, updatedAt: now});
@@ -3225,7 +3240,7 @@ Turns without a service request: do pending context/planning work, then keep the
       }
     }
   }));
-  const service: SupervisorConversationShape = {run, observe, reconcileStopNotice, reconcileStopped, readContextView, operativeProposal, status, hasInflight, rootNotice,
+  const service: SupervisorConversationShape = {run, observe, reconcileStopNotice, reconcileStopped, readContextView, operativeProposal, status, hasInflight, rootNotice, rootWake,
     retry, fenceStoppedSupervision};
   // internal steps on their own, for the suites that drive them directly (test seams)
   const seams = {sendIntroduction, cachedProvisionalDefinitions, dialogueDefinitions, compactRecordProblem, humanMessageSince,

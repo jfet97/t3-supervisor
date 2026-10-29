@@ -5187,8 +5187,13 @@ it.effect("a rejected Supervisor proposal gets one focused repair wake per rejec
         const repair = envelope.threads.find(row => row.taskContext)!.taskContext!.protocolRepair!;
         assert.deepEqual([repair.code, repair.path, repair.blocked], ["source_pin_mismatch", "/revision", attempt >= 3]);
       } else {
-        assert.match(pending!.text, attempt < 3 ? /Repair it in this turn/u : /Stop retrying\. Tell the operative main once/u);
-        assert.match(pending!.text, /"path":"\/revision"/u);
+        assert.match(pending!.text, attempt < 3 ? /repair it in this turn/u : /Stop retrying\. Tell the operative main once/u);
+        // the wake names the proposal, the code and the attempt; the rejection's path and expected shape are read with view context diagnostics
+        assert.match(pending!.text, new RegExp(`proposal ${task.id} for task ${task.id} \\(code source_pin_mismatch, attempt ${attempt} of 3\\)`, "u"));
+        assert.doesNotMatch(pending!.text, /"path"|"expected"|"detail"|Rejection:/u, "diagnostic data is read, not pushed");
+        if (attempt < 3) assert.match(pending!.text, /read its path, expected shape and detail with workflow_read \{"supervisorThreadId":"[^"]+","bindingGeneration":\d+,"view":"context","section":"diagnostics"\}/u);
+        const served = (yield* fixture.conversation.readContextView(fixture.binding, {view: "context", section: "diagnostics"})) as unknown as {protocolRepair: {code: string; path: string | null; expected?: string | null; attempts?: number; blocked: boolean}};
+        assert.deepEqual([served.protocolRepair.code, served.protocolRepair.path, served.protocolRepair.attempts ?? 1, served.protocolRepair.blocked], ["source_pin_mismatch", "/revision", attempt, attempt >= 3]);
       }
       const run = fixture.supervisor.runs.find(item => item.userMessageId === pending!.messageId)!;
       completeRun(fixture.supervisor, run, `Handled. ${pending!.completionMarker}`, clock.now);
@@ -7320,7 +7325,61 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
   const stopArgs = {callerThreadId: stopFixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: human.id, operationId: "audit-stop"};
   const stopAnswer = yield* (yield* nativeStopController(stopFixture, stopFixture.supervisor, human, stopArgs, "audit-stop-call", service)).stop(stopArgs);
   add({path: "R14", label: "supervision_stop answer", text: JSON.stringify(stopAnswer), args: stopArgs});
-  add({path: "R14", label: "supervision_start answer (not exercised by this fixture: unmeasured)", text: ""});
+  // R14 Start: a genuine human resume in a stopped Supervisor, answered through the production Start control
+  const stopped = yield* stoppedReviewedTask(clock);
+  const resume = appendActualUserMessage(stopped.fixture.supervisor, "audit-human-resume", "Please resume supervising this chat now.", clock.now + 1);
+  const startArgs = {callerThreadId: stopped.binding.threadId, userMessageId: resume.id, operationId: "audit-resume"};
+  const starter = yield* nativeStartController(stopped.fixture, stopped.fixture.supervisor, startArgs, "audit-resume-call", stopped.service, resume.runId!);
+  add({path: "R14", label: "supervision_start answer", text: JSON.stringify(yield* starter.start()), args: startArgs});
+  // R9 and N1 as dispatched: an edited source is interpreted again in the same binding; the first request of the binding carries the full
+  // notice, its verified submission confirms the version, and the next interpretation of the same binding carries the pointer
+  const interp = yield* makeFixture(clock, {operativeActive: false});
+  const interpControl = yield* interp.projectStore.control(projectId);
+  yield* interp.projectStore.saveControl(projectId, interpControl.generation, true, {snapshotSequence: 1, threads: []});
+  const interpService = interp.makeProjectSupervisor();
+  // a check-in the activity observation raised meanwhile is answered and closed first, so the queued interpretation is next
+  const drainPendingReview = Effect.fnUntraced(function* () {
+    for (let round = 0; round < 3; round++) {
+      const pending = yield* interp.conversation.requests.pending(projectId, interp.binding.threadId);
+      if (!pending) return;
+      assert.equal(pending.kind, "review", `only a review check-in may be pending here: ${pending.kind}`);
+      assert.equal((yield* recordOutcome(interp, pending)).status, "recorded");
+      completeRun(interp.supervisor, interp.supervisor.runs.find(run => run.userMessageId === pending.messageId)!, `Reviewed. ${pending.completionMarker}`, yield* clock.advance(1));
+      yield* interp.run();
+      yield* clock.advance(31_000);
+    }
+  });
+  const interpretationOfEdit = Effect.fnUntraced(function* (text: string, objective: string) {
+    interp.operative.messages.find(message => message.id === interp.task.sourceMessageId)!.text = text;
+    yield* observeAgreement(interp, clock.now);
+    yield* drainPendingReview();
+    // the activation boundary predates the task's source run, as discovery requires (saved freshly before each cycle, as the re-interpretation cases do)
+    const currentControl = yield* interp.projectStore.control(projectId);
+    yield* interp.projectStore.saveControl(projectId, currentControl.generation, true, {snapshotSequence: 1, threads: []});
+    const callsBefore = interp.calls.length;
+    yield* interpService.cycle;
+    const dispatched = interp.calls.slice(callsBefore).find(call => call.payload.threadId === interp.binding.threadId && String(call.payload.text).includes("Interpretation requested"));
+    assert.ok(dispatched, `the edited source is interpreted again (task ${(yield* interp.projectStore.task(interp.task.threadId))?.status})`);
+    const queued = (yield* interp.projectStore.task(interp.task.threadId))!;
+    const run = interp.supervisor.runs.find(item => item.userMessageId === queued.messageId);
+    assert.ok(run);
+    const submitter = yield* interpretationSubmitter({stores: interp.stores, workflows: interp.workflows, projections: new Map([[interp.supervisor.thread.id, interp.supervisor], [interp.operative.thread.id, interp.operative]])});
+    const submissionArgs = submissionArguments(queued, {objective, reason: "Source edited.", sourceMessageIds: [queued.sourceMessageId], supervision: "needed",
+      workflow: {requirements: [{kind: "step", id: "test-plan", applies: true, reason: "Verification required."}], plan: {kind: "sequence", nodes: [{kind: "step", definitionId: "test-plan", reason: "Verify import."}]}}});
+    const submitted = yield* submitter.submit(queued, submissionArgs);
+    assert.equal(submitted.status, "submitted", JSON.stringify(submitted));
+    completeRun(interp.supervisor, run, "Submitted the interpretation.", clock.now);
+    yield* interpService.cycle;
+    yield* interpService.cycle;
+    assert.equal((yield* interp.projectStore.task(interp.task.threadId))?.status, "inferred");
+    return {text: String(dispatched.payload.text), dispatch: dispatched.payload, submissionArgs, submitted};
+  });
+  const firstDispatchedInterpretation = yield* interpretationOfEdit(editedSourceText, "Implement separate import flow.");
+  add({path: "N1", label: "interpretation request, dispatched, first of the binding (full notice)", text: firstDispatchedInterpretation.text, rules, retrievable: ["task context", "rules"], read: "workflow_read view context / view interpretation", args: firstDispatchedInterpretation.dispatch});
+  add({path: "R9", label: "supervision_interpretation_submit answer", text: JSON.stringify(firstDispatchedInterpretation.submitted), args: firstDispatchedInterpretation.submissionArgs});
+  const secondDispatchedInterpretation = yield* interpretationOfEdit("Implement a separate import flow with a second revised goal.", "Implement separate import flow, second revision.");
+  add({path: "N1", label: "interpretation request, dispatched, later request of the same binding (pointer)", text: secondDispatchedInterpretation.text, previous: firstDispatchedInterpretation.text, rules, retrievable: ["task context", "rules"], read: "workflow_read view context / view interpretation", args: secondDispatchedInterpretation.dispatch});
+  add({path: "R9", label: "supervision_interpretation_submit answer, second", text: JSON.stringify(secondDispatchedInterpretation.submitted), previous: JSON.stringify(firstDispatchedInterpretation.submitted), args: secondDispatchedInterpretation.submissionArgs});
   yield* service.cycle;
   const stopDispatch = stopFixture.calls.find(call => call.payload.type === "message.dispatch" && call.payload.threadId === operativeThreadId);
   const settleCommand = stopFixture.calls.find(call => call.payload.type === "thread.settle");
@@ -7329,7 +7388,6 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
   add({path: "N7", label: "stop notice, dispatched (message.dispatch arguments)", text: stopTexts[0]!, args: stopDispatch.payload});
   add({path: "N7", label: "stop notice, another binding", text: stopTexts[1]!, previous: stopTexts[0]!});
   add({path: "N11", label: "settlement command (thread.settle arguments; no text)", text: "", args: settleCommand.payload});
-  add({path: "N9", label: "interpretation answers (supervision_interpretation_submit; measured in test/interpretation-submission.test.ts, not re-measured here: unmeasured)", text: ""});
   recordExchangeSamples("rendered-paths", samples);
   console.log(`EXCHANGE AUDIT (rendered paths)\n${exchangeTable(rows)}`);
   // transport neutrality on every rendered path: no gateway product, wrapper or recipe is named
@@ -7340,12 +7398,15 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
   const route = Buffer.byteLength(toolRouteReminder, "utf8");
   for (const label of ["root notice, full (first wake of an instructions version)", "interpretation request, task a", "routine check-in, first wake", "definition review wake, dispatched, first change"])
     assert.ok(row(label).ruleBytes <= route, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
-  for (const label of ["root notice, pointer (later wakes)", "routine check-in, second wake", "liveness wake, first", "liveness wake, repeat", "protocol repair wake, attempt 1", "protocol repair wake, attempt 2"]) {
+  for (const label of ["root notice, pointer (later wakes)", "routine check-in, second wake", "liveness wake, first", "liveness wake, repeat", "protocol repair wake, attempt 1", "protocol repair wake, attempt 2",
+    "interpretation request, dispatched, later request of the same binding (pointer)"]) {
     assert.equal(row(label).ruleBytes, 0, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
     assert.ok(row(label).bytes < 1_000, `${label}: ${row(label).bytes} bytes`);
   }
   for (const sample of samples.filter(item => ["N3", "L", "N4", "N5"].includes(item.path) && item.text))
-    assert.doesNotMatch(sample.text, /"readItemId"|"taskContext"|"fallbackAncestors"|"decisionTemplate"|"userMessages"|UNTRUSTED|"unsettled"/u, `${sample.label} pushes retrievable payload`);
+    assert.doesNotMatch(sample.text, /"readItemId"|"taskContext"|"fallbackAncestors"|"decisionTemplate"|"userMessages"|UNTRUSTED|"unsettled"|"expected"|"detail"|Rejection:/u, `${sample.label} pushes retrievable payload`);
+  assert.ok(row("interpretation request, dispatched, first of the binding (full notice)").ruleBytes <= route);
+  assert.ok(row("interpretation request, dispatched, later request of the same binding (pointer)").bytes < 700, `pointer interpretation request ${row("interpretation request, dispatched, later request of the same binding (pointer)").bytes} bytes`);
   // what the second wake repeats of the first is its identities and the outcome sentence, never rows
   assert.ok(row("routine check-in, second wake").duplicateBytes! < 300, `second wake duplicates ${row("routine check-in, second wake").duplicateBytes} bytes`);
   assert.ok(row("liveness wake, repeat").duplicateBytes! < 300, `repeat wake duplicates ${row("liveness wake, repeat").duplicateBytes} bytes`);
