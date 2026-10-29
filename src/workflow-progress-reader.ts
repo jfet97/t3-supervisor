@@ -74,11 +74,11 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
   const scopeRows = new Map(scope.threads.map(thread => [thread.threadId, thread]));
   const owners = new Map<string, ParticipantCoverageOwner>(coverage.map(item => [item.threadId, item.state]));
   const linkedChildren = (threadId: string) => read.workflows.filter(item => item.document.parentThreadId === threadId).map(item => item.document.threadId);
-  // the binding's recorded settlements of the participants of the main's current task and revision, by thread and environment; the rows
-  // of earlier tasks are history and prove nothing here
-  const mainBinding = read.workflows.find(item => item.document.threadId === query.mainThreadId)?.document.sourceBinding ?? null;
+  // the binding's settlement rows of the main's current execution, by thread and environment, whatever workflow page this is: the scope
+  // names that execution itself, and the rows of earlier tasks and completions are history that proves nothing here
+  const execution = scope.currentExecution ?? null;
   const settlements = new Map<string, ParticipantSettlementView>((scope.participantSettlements ?? [])
-    .filter(item => mainBinding !== null && item.taskId === mainBinding.taskId && item.taskRevision === mainBinding.sourceHash)
+    .filter(item => execution !== null && item.taskId === execution.taskId && item.taskRevision === execution.taskRevision && item.completionId === execution.completionId)
     .map(item => [settlementKey(item.threadId, item.environmentId), {state: item.state, reason: item.reason}]));
   return bounded({
     status: "ok",

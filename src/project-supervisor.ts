@@ -1,5 +1,6 @@
 import { emptyConversation } from "./supervision-conversation-contract.js";
-import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
+import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision, taskScopeRevision } from "./supervision-conversation.js";
+import { completionRecordId } from "./workflow-progress.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { posix, resolve } from "node:path";
 import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
@@ -529,12 +530,17 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     }
     if (issues.length > 100) issues.splice(100);
     if (!resolved) complete = false;
+    // the main's current execution, so a reader on any workflow page tells the current settlement rows from history
+    const task = yield* store.task(mainThreadId);
+    const document = task && workflows ? yield* attempt(workflows.get(projectId, mainThreadId)) : null;
+    const currentExecution = task ? {taskId: task.id, taskRevision: taskScopeRevision(task), completionId: document?.ok && document.value ? completionRecordId(document.value) : null} : null;
     return {projectId, mainThreadId, supervisorThreadId: binding?.threadId ?? null, bindingGeneration: binding?.generation ?? null,
       observedAt, lineageTotal, lineageOffset, lineageHasMore,
-      complete: complete && Boolean(resolved?.complete), issues, threads: observedRows,
-      // the completed task's participant settlements as the lifecycle recorded them; nothing here is evaluated anew
+      complete: complete && Boolean(resolved?.complete), issues, threads: observedRows, currentExecution,
+      // the participant settlements as the lifecycle recorded them, every execution; nothing here is evaluated anew
       ...(binding?.participantSettlements?.length ? {participantSettlements: binding.participantSettlements.map(item => ({taskId: item.taskId, taskRevision: item.taskRevision,
-        threadId: item.threadId, environmentId: item.environmentId, state: item.state, reason: item.reason ?? null, observedAt: item.observedAt}))} : {})} satisfies ProjectSupervisorScopeSnapshot;
+        completionId: item.completionId, threadId: item.threadId, environmentId: item.environmentId, state: item.state, reason: item.reason ?? null,
+        observedAt: item.observedAt}))} : {})} satisfies ProjectSupervisorScopeSnapshot;
   });
   // the shared activation boundary read of concurrent folder checks: its first caller runs it under the 30 s deadline, and when
   // that caller ends without a result its joined callers see a failed read

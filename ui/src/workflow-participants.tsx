@@ -24,7 +24,8 @@ const settlementText: Record<WorkflowProgressParticipant["settlement"], string> 
   settled: "Settled", superseded: "Settlement superseded by new activity", unresolved: "Unresolved", skipped: "Not settled"};
 const settlementReasonText: Record<string, string> = {unavailable: "the conversation could not be read", not_quiet: "the conversation still has work",
   settle_rejected: "T3 rejected the settle command: the conversation changed or its user chose", snapshot_unavailable: "its read carries no update time to settle on",
-  environment_settle_unsupported: "no supported route settles a conversation in another environment", keep_active: "its user keeps it active"};
+  environment_settle_unsupported: "no supported route settles a conversation in another environment", keep_active: "its user keeps it active",
+  activity_changed: "the conversation changed after the command", attempts_exhausted: "its command was sent three times without a reply"};
 const settlementLine = (participant: WorkflowProgressParticipant) => `${settlementText[participant.settlement]}${participant.settlementReason
   ? ` (${settlementReasonText[participant.settlementReason] ?? participant.settlementReason})` : ""}`;
 const threadHref = (threadId: string) => `t3-thread://v1/${threadId}`;

@@ -402,6 +402,9 @@ const ownerOf = (state: ParticipantCoverageOwner | undefined): WorkflowProgressP
  * main-reported participants of this document's contributions with the root's receipts that are current for the declaration, revision
  * and attempt; earlier receipts stay counted as history. Nothing here settles anything.
  */
+/** The id of a main document's latest completion record (its status moved to completed), or null while it never completed. */
+export const completionRecordId = (document: Pick<WorkflowStateDocument, "evidence">): string | null =>
+  document.evidence.filter(item => item.targetNodeId === null && item.statusTo === "completed" && item.statusFrom !== "completed").at(-1)?.id ?? null;
 /** The key of a participant's settlement: its thread id, qualified by its environment when it is not local. */
 export const settlementKey = (threadId: string, environmentId: string | null | undefined): string => `${environmentId ?? ""}:${threadId}`;
 export type ParticipantSettlementView = {state: ParticipantSettlementState; reason: string | null};
