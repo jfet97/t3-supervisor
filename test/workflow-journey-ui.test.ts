@@ -287,7 +287,9 @@ it("a decision changed after completion keeps the recorded status but presents c
   if (record.kind !== "live") throw new Error("live workflow expected");
   const html = renderToStaticMarkup(createElement(PlanJourney, {node: record.plan, mode: "live", notes: stepNotes(task, record), selections: record.workflow.branchSelections}));
   assert.match(html, /class="step-state">Else path selected</);
-  assert.match(branchSection(html, "Then"), /Single independent review.*class="step-state">Completed · path not selected</su, "work on the earlier path stays as history");
+  assert.match(branchSection(html, "Then"), /Single independent review.*class="step-state">Completed earlier · path not selected</su, "work on the earlier path stays as history");
+  assert.match(branchSection(html, "Then"), /class="journey-stop state-historical"/, "an outcome on the path no longer selected has no live tone");
+  assert.doesNotMatch(branchSection(html, "Then"), /journey-stop state-completed/);
   const outcome = renderToStaticMarkup(createElement(TaskOutcome, {assessment: record.workflow.assessment ?? null, fallback: "No assessment", stopped: false}));
   assert.match(outcome, /<strong>Completion needs reassessment<\/strong>/);
   assert.match(outcome, /A branch decision changed after this completion was assessed/);

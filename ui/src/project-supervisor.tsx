@@ -7,7 +7,7 @@ import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import {GuideLink} from "./guide-link.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
-import {alignmentLabel, completionTimes, currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
+import {alignmentLabel, completionTimes, currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, readyAfterReturn, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
@@ -597,8 +597,11 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow), notApplicable) : null;
   const steps = live?.steps ?? (record.kind === "none" ? [] : planSteps(record.plan));
   const reachedDecisions = record.kind === "live" ? reachedPendingBranchDecisions(record.plan, currentBranchPaths(record.workflow), notApplicable ?? new Set()) : [];
-  const current = live ? [...steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name),
-    ...reachedDecisions.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
+  // right after an applied return every repeated member is planned: the return's target is ready work, named here until it starts
+  const active = live ? steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name) : [];
+  const readyIds = record.kind === "live" ? readyAfterReturn(record.plan, record.workflow.returns) : new Set<string>();
+  const ready = active.length ? [] : steps.filter(step => readyIds.has(step.nodeId)).map(step => `${step.name} · ready to start`);
+  const current = live ? [...active, ...ready, ...reachedDecisions.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
   const latestObservation = record.kind === "live" ? [...record.workflow.observations].sort((a, b) => b.recordedAt - a.recordedAt)[0] : undefined;
   const retained = mainWorkflow && record.kind !== "live" ? [mainWorkflow] : [];
   const staleAgreement = task?.agreement?.status === "stale" ? task.agreement : null;
@@ -656,7 +659,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           ? <p className="muted">{task?.supervision === "not_needed" && !task.agreement ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
             : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
-            completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt]))} : {})}/>}
+            completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt])),
+            returns: record.workflow.returns, branchEvents: record.workflow.branchEvents, ready: readyIds} : {})}/>}
       </section>
       <aside className="workflow-context">
         <TaskAlignment task={task} changedSinceAcceptance={changedSinceAcceptance} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>

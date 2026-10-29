@@ -3,12 +3,13 @@ import React from "react";
 import {DefinitionReferences} from "./definition-references.js";
 import type { TaskInterpretationInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowAssessmentInfo } from "../../src/workflow-assessment.js";
-import type { WorkflowProgressBranchSelection, WorkflowProgressContribution, WorkflowProgressObservation, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
+import type { WorkflowProgressBranchEvent, WorkflowProgressBranchSelection, WorkflowProgressContribution, WorkflowProgressObservation, WorkflowProgressReturn, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { branchPathGroups, isPlanGroup, pendingBranchDecisions, planBranches, planEntities, planReach, type BranchPath, type PlanReach } from "../../src/workflow-plan-tree.js";
 import { GuideLink } from "./guide-link.js";
 import { acceptedAgreement, pendingProposal, statusRecord, type PlanChange, type PlanChangeField, type StepNotes } from "./task-record.js";
 
 const states = {planned: "Planned", underway: "In progress", completed: "Completed", needs_attention: "Needs attention"} as const;
+const reachText = {not_selected: "path not selected", undecided: "awaiting decision", unconditional: "", selected: ""} as const;
 const recordStates = {planned: "planned", underway: "in progress", completed: "completed", needs_attention: "needs attention"} as const;
 export type JourneyMode = "live" | "agreed" | "proposed" | "historical";
 const modeLabels = {agreed: "Accepted", proposed: "Proposed", historical: "In earlier plan"} as const;
@@ -74,6 +75,22 @@ export function liveProgress(plan: WorkflowPlanGroupInfo | null, selected: Reado
   return {steps, pending: pendingBranchDecisions(plan, selected).filter(branch => !notApplicable.has(branch.nodeId))};
 }
 
+/**
+ * The occurrences an applied return reopened whose attempt has not started: the return's target while no member of its region is
+ * underway or flagged. Right after a return every repeated member is planned, so the target is ready work, not absent work.
+ */
+export const readyAfterReturn = (plan: WorkflowPlanGroupInfo | null, returns: readonly WorkflowProgressReturn[] | undefined): ReadonlySet<string> => {
+  const ready = new Set<string>();
+  if (!plan) return ready;
+  const statuses = new Map(planEntities(plan).map(node => [node.nodeId, node.status] as const));
+  for (const item of returns ?? []) {
+    if (item.state !== "applied" || item.resolvedAt === null) continue;
+    const active = item.regionNodeIds.some(nodeId => statuses.get(nodeId) === "underway" || statuses.get(nodeId) === "needs_attention");
+    if (!active && statuses.get(item.targetNodeId) === "planned") ready.add(item.targetNodeId);
+  }
+  return ready;
+};
+
 export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) => Boolean(acceptedAgreement(task) && !pendingProposal(task));
 
 // quick routine work needs no plan: nothing is proposed or awaits acceptance, unless an earlier plan was accepted
@@ -102,6 +119,27 @@ const notApplicableRecord = (records: readonly WorkflowProgressObservation[] | u
   const latest = [...records ?? []].reverse().find(item => item.kind === "status_changed" || item.kind === "not_applicable");
   return latest?.kind === "not_applicable" ? latest : null;
 };
+
+/** The closed attempts of one occurrence, oldest first: what each applied return recorded for it when the attempt ended. */
+export const previousAttempts = (nodeId: string, returns: readonly WorkflowProgressReturn[] | undefined) => (returns ?? [])
+  .filter(item => item.state === "applied" && (item.closed?.some(closed => closed.nodeId === nodeId) || item.closedSelections?.some(selection => selection.nodeId === nodeId)))
+  .sort((left, right) => left.attempt - right.attempt)
+  .map(item => ({attempt: item.attempt, returnId: item.returnId, targetName: item.targetName, reason: item.reason, resolvedAt: item.resolvedAt,
+    closed: item.closed?.find(closed => closed.nodeId === nodeId) ?? null, selection: item.closedSelections?.find(selection => selection.nodeId === nodeId) ?? null}));
+
+function PreviousAttempts({nodeId, returns, branchEvents}: {nodeId: string; returns: readonly WorkflowProgressReturn[] | undefined; branchEvents: readonly WorkflowProgressBranchEvent[] | undefined}) {
+  const earlier = previousAttempts(nodeId, returns);
+  if (!earlier.length) return null;
+  return <>{earlier.map(item => {
+    const decision = item.selection ? (branchEvents ?? []).find(event => event.kind === "selected" && event.nodeId === nodeId && event.revision === item.selection!.revision) ?? null : null;
+    return <EntityDetails key={item.returnId} title={<>Previous attempt {item.attempt}</>} className="step-history previous-attempt"><div className="text-group small">
+      <p>{item.closed ? <>Ended {recordStates[item.closed.status]}{item.closed.contributorThreadIds.length ? <> · {item.closed.contributorThreadIds.length} {item.closed.contributorThreadIds.length === 1 ? "contributor" : "contributors"}</> : null}</> : "Decision of the closed attempt"}
+        {item.selection && <> · {item.selection.path === "then" ? "then path" : "else path"} selected (revision {item.selection.revision})</>}</p>
+      {decision && <p>Decision reason: {decision.note}{decision.sourceThreadId && <> · <a href={`t3-thread://v1/${decision.sourceThreadId}`}>Open conversation</a></>}{decision.sourceMessageId && <> · message <code>{decision.sourceMessageId}</code></>}</p>}
+      <p className="muted">Closed by the return to {item.targetName ?? "an earlier step"}{item.resolvedAt !== null ? ` · ${formatTime(item.resolvedAt)}` : ""}: {item.reason}</p>
+    </div></EntityDetails>;
+  })}</>;
+}
 
 /** The step's records: the status record that explains its current state, then any other notes about it. */
 function StepRecords({status, records}: {status: keyof typeof states; records: readonly WorkflowProgressObservation[] | undefined}) {
@@ -145,8 +183,14 @@ type JourneyProps = {
   completions?: ReadonlyMap<string, number | null> | undefined;
   /** Occurrences of this live workflow settled by a current not-applicable assessment, with everything inside an assessed workflow. */
   notApplicable?: ReadonlySet<string> | undefined;
-  /** The current attempt of each occurrence of this live workflow that a return reopened. */
+  /** The current attempt of each occurrence of this live workflow inside a return's region. */
   attempts?: ReadonlyMap<string, number> | undefined;
+  /** The returns of this live workflow: the closed attempts and the occurrences ready to start after a return. */
+  returns?: readonly WorkflowProgressReturn[] | undefined;
+  /** The recorded branch events of this live workflow, for the reason and source of a closed attempt's selection. */
+  branchEvents?: readonly WorkflowProgressBranchEvent[] | undefined;
+  /** The occurrences ready to start after an applied return (readyAfterReturn over the whole live plan). */
+  ready?: ReadonlySet<string> | undefined;
 };
 
 const pathLabel = {then: "Then path", else: "Else path"} as const;
@@ -157,7 +201,7 @@ const deeper = (outer: PlanReach, inner: PlanReach): PlanReach => {
 };
 
 /** A branch shows its condition, both labelled paths and, on a live workflow, the operative's decision; the next item follows it. */
-function BranchJourney({node, mode, notes, contributions, selections, completions, notApplicable, attempts, reach}: JourneyProps & {node: Extract<WorkflowPlanNodeInfo, {kind: "branch"}>; mode: JourneyMode; notes: StepNotes; reach: PlanReach}) {
+function BranchJourney({node, mode, notes, contributions, selections, completions, notApplicable, attempts, returns, branchEvents, ready, reach}: JourneyProps & {node: Extract<WorkflowPlanNodeInfo, {kind: "branch"}>; mode: JourneyMode; notes: StepNotes; reach: PlanReach}) {
   const live = mode === "live";
   const current = live ? selections?.find(item => item.nodeId === node.nodeId && item.current) : undefined;
   const earlier = live && !current ? selections?.find(item => item.nodeId === node.nodeId) : undefined;
@@ -172,16 +216,18 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
   const pathText: Record<PlanReach, string | null> = assessed ? {unconditional: null, selected: "Not applicable", undecided: "Not applicable", not_selected: "Not applicable"}
     : {unconditional: null, selected: "Selected", undecided: "Awaiting decision", not_selected: "Not selected"};
   const childProps = {mode, notes, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
-    ...(notApplicable ? {notApplicable} : {}), ...(attempts ? {attempts} : {})};
+    ...(notApplicable ? {notApplicable} : {}), ...(attempts ? {attempts} : {}), ...(returns ? {returns} : {}), ...(branchEvents ? {branchEvents} : {}), ...(ready ? {ready} : {})};
+  const attempt = live ? attempts?.get(node.nodeId) : undefined;
   // the condition, the decision and its short reason stay primary; provenance, history and the plan note are inspectable details
   return <div className={`journey-branch${pending ? " decision-pending" : ""}`} role="group" aria-label={`Branch: if ${node.condition}`}>
     <div className="branch-head">
       <StepMark state={pending ? "decision-pending" : "decision"}/>
-      <p className="branch-condition"><span className="branch-label">Branch</span> <span>If {node.condition}</span></p>
+      <p className="branch-condition"><span className="branch-label">Branch</span> <span>If {node.condition}</span>{attempt && <span className="pill">Attempt {attempt}</span>}</p>
       <span className="step-state">{decision}</span>
     </div>
     <div className="branch-explanation small">
       {current && <p>Reason: {current.reason}</p>}
+      {live && <PreviousAttempts nodeId={node.nodeId} returns={returns} branchEvents={branchEvents}/>}
       <p className="branch-help"><GuideLink topic="branches">How branches work</GuideLink></p>
       {(current || earlier || node.reason) && <EntityDetails title={<>Decision details</>} className="branch-details"><div className="stack">
         {current && <p>Recorded by the agent as revision {current.revision} · {formatTime(current.recordedAt)} · <a href={`t3-thread://v1/${current.sourceThreadId}`}>Open conversation</a> · message <code>{current.sourceMessageId}</code>. A selection records the decision, not completed work.</p>}
@@ -201,10 +247,10 @@ function BranchJourney({node, mode, notes, contributions, selections, completion
 }
 
 /** Preserves sequence, parallel, branch and nested workflow boundaries without deriving parent completion from children. */
-export function PlanJourney({node, mode = "proposed", notes = noNotes, contributions, selections, completions, notApplicable, attempts, reach = "unconditional"}: JourneyProps) {
+export function PlanJourney({node, mode = "proposed", notes = noNotes, contributions, selections, completions, notApplicable, attempts, returns, branchEvents, ready: readyIds, reach = "unconditional"}: JourneyProps) {
   const live = mode === "live";
   const passed = {mode, notes, reach, ...(contributions ? {contributions} : {}), ...(selections ? {selections} : {}), ...(completions ? {completions} : {}),
-    ...(notApplicable ? {notApplicable} : {}), ...(attempts ? {attempts} : {})};
+    ...(notApplicable ? {notApplicable} : {}), ...(attempts ? {attempts} : {}), ...(returns ? {returns} : {}), ...(branchEvents ? {branchEvents} : {}), ...(readyIds ? {ready: readyIds} : {})};
   if (isPlanGroup(node)) {
     const List = node.kind === "parallel" ? "ul" : "ol";
     return <div className={`journey-group group-${node.kind}`}>
@@ -222,12 +268,16 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
   // the current not-applicable set takes precedence over the alternative labels of the paths inside an assessed occurrence
   const assessedNotApplicable = live && node.status === "planned" && notApplicable?.has(node.nodeId) === true;
   const alternative = live && !assessedNotApplicable && node.status === "planned" && (reach === "not_selected" || reach === "undecided");
+  // a recorded outcome on a path that is not selected or awaits a decision is history in the current plan, shown without a live tone
+  const historical = live && node.status !== "planned" && (reach === "not_selected" || reach === "undecided");
+  // the target of an applied return whose attempt has not started is ready work, not a step that never started
+  const ready = live && node.status === "planned" && !alternative && !assessedNotApplicable && (readyIds?.has(node.nodeId) ?? false);
   // the completion time comes from the whole record; the retained observations can no longer hold an older completion
   const reassess = live && reach !== "not_selected" && node.kind === "workflow" ? completionReassessment(node, selections ?? [], completions?.get(node.nodeId), notApplicable) : null;
-  const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : reassess ? "needs_attention" : node.status;
+  const state = !live ? mode === "proposed" ? "proposed" : "planned" : alternative ? reach : historical ? "historical" : reassess ? "needs_attention" : ready ? "ready" : node.status;
   const label = !live ? modeLabels[mode] : alternative ? reach === "not_selected" ? "Not selected" : "Awaiting decision"
-    : reassess ? "Completed earlier · needs reassessment" : reach === "not_selected" ? `${states[node.status]} · path not selected`
-    : assessedNotApplicable ? "Not applicable" : states[node.status];
+    : historical ? `${states[node.status]} earlier · ${reachText[reach]}` : reassess ? "Completed earlier · needs reassessment"
+    : assessedNotApplicable ? "Not applicable" : ready ? `Ready to start${attempt ? ` · attempt ${attempt}` : ""}` : states[node.status];
   const accepted = notes.agreed?.get(node.nodeId)?.node;
   const proposed = notes.proposed?.get(node.nodeId)?.node;
   const acceptedNote = accepted && accepted.reason !== node.reason ? accepted.reason : null;
@@ -250,6 +300,7 @@ export function PlanJourney({node, mode = "proposed", notes = noNotes, contribut
         {proposedNote && <div className="step-note proposed"><strong>Proposed plan note · awaiting acceptance</strong><p>{proposedNote}</p></div>}
         {reassess && <p className="notice">{reassessmentNotice[reassess]} The recorded status stays as history.</p>}
         {live && <StepRecords status={node.status} records={notes.records?.get(node.nodeId)}/>}
+        {live && <PreviousAttempts nodeId={node.nodeId} returns={returns} branchEvents={branchEvents}/>}
         {node.kind === "workflow" && node.omissions.length > 0 && <div className="step-note"><strong>Not applicable in this plan</strong><ul className="stack">{node.omissions.map((omission, index) =>
           <li key={`${omission.templatePath}:${omission.id}:${index}`}><strong>{omission.name}</strong> <span className="muted">({omission.kind} {omission.id})</span> — {omission.reason}</li>)}</ul></div>}
         {node.resolution !== "resolved" && <p className="notice">Definition {node.resolution}. Some commitments still need clarification.</p>}

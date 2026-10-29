@@ -413,6 +413,10 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .branch-path-label > span:not(.pill) { color: var(--quiet); font-weight: 400; font-size: .8rem; }
 .branch-path > .journey-group { margin-top: 4px; }
 .step-mark.state-not_selected, .step-mark.state-undecided { border-style: dashed; }
+.step-mark.state-historical { border-style: dashed; color: var(--quiet); background: transparent; }
+.state-historical > .journey-step > summary .step-state { background: transparent; color: var(--quiet); border: 1px dashed var(--line); }
+.step-mark.state-ready { border-style: solid; color: var(--blue); border-color: var(--blue); }
+.state-ready > .journey-step > summary .step-state { background: transparent; color: var(--blue); border: 1px solid var(--blue); }
 /* a decision marker is neither completed nor underway work: a neutral fork, amber only while the decision is pending */
 .step-mark.state-decision, .step-mark.state-decision-pending { border-radius: 7px; }
 .step-mark.state-decision-pending { background: light-dark(#fcf0d9, #4c3a1c); color: light-dark(#7b4b0d, #f4d699); border-color: light-dark(#99631b, #f4d699); }
@@ -768,5 +772,7 @@ select { max-width: 36rem; }
 .workflow-history-list > li:first-child { padding-block-start: 0; border-block-start: 0; }
 .workflow-history-list p { margin: 0; max-inline-size: 75ch; }
 .workflow-history-list h3 { margin: 0; font-size: 16px; }
+.history-operation-records { list-style: none; margin: 0; padding: 0 0 0 14px; border-inline-start: 2px solid var(--line); display: grid; gap: 12px; }
+.history-operation-records > li { display: grid; gap: 4px; }
 .activity-awareness code, .workflow-history code { overflow-wrap: anywhere; }
 .planning-status { padding-block-end: 22px; border-block-end: 1px solid var(--line); }

@@ -9,6 +9,11 @@ import {workflowMutationLimits, type WorkflowAgreementImport, type WorkflowApply
 import {backToContext, occurrenceAttempts, planBackTos, planBranches, planEntities, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns, withOccurrenceStatuses} from "../src/workflow-plan-tree.js";
 import {effectiveIndex, indexSource, projectIndex} from "./project-definitions-fixture.js";
 import {execute, openWorkflowStores, query, temporaryDirectory} from "./support/g12-stores.js";
+import {createElement} from "react";
+import {renderToStaticMarkup} from "react-dom/server";
+import {progressWorkflow} from "../src/workflow-progress.js";
+import {PlanJourney, previousAttempts, readyAfterReturn} from "../ui/src/workflow-journey.js";
+import {historyOperations, operationHeadline, WorkflowHistory} from "../ui/src/workflow-history.js";
 
 // parser and workflow-store proof for a bounded return: the budget is the applied-jump ledger, and resets follow replay scope
 
@@ -796,6 +801,81 @@ it.live("a status-only apply after a new task agreed the same fixed workflow kee
   assert.equal(planBackTos(kept.plan)[0]?.budgetId, returnB.budgetId, "the occurrence keeps its retained budget identity");
   assert.equal(kept.returnBudgets?.some(item => item.budgetId === "ef".repeat(32)), false);
   assert.equal(returnBudgetUsed(kept.returnBudgets?.find(item => item.budgetId === returnB.budgetId)?.events ?? []), 1);
+}), {timeout: 30_000});
+
+// H: the real store's return output, projected and rendered: the returned target is ready, not absent; earlier outcomes on an unselected
+// path are neutral history; previous attempts keep their closed status and selection with reason and source after a fresh selection;
+// history keeps every record of one write under one headline; attempt 1 is explicit and a lane's return leaves the other lane untouched
+it.live("a real return renders a ready target, neutral earlier outcomes, previous attempts, grouped history and explicit attempts", () => Effect.gen(function* () {
+  const run = yield* open([local("implement"), {kind: "parallel", nodes: [
+    {kind: "sequence", nodes: [local("reviewa"), branch("Lane A findings.", [local("fixa"), backTo("reviewa", 2)])]},
+    {kind: "sequence", nodes: [local("reviewb"), branch("Lane B findings.", [local("fixb"), backTo("reviewb", 2)])]},
+  ]}, local("deliver")]);
+  yield* run.complete(["implement", "reviewa", "reviewb"], "first-pass");
+  // lane B: corrections were done, then the decision was revised so the then path is no longer selected
+  yield* run.choose("Lane B findings.", "then");
+  yield* run.complete(["fixb"], "lane-b-fix");
+  yield* run.choose("Lane B findings.", "else");
+  // lane A: findings remain, the correction is done and the return is reached and applied
+  yield* run.choose("Lane A findings.", "then");
+  yield* run.complete(["fixa"], "lane-a-fix");
+  yield* run.jump("reviewa", "lane-a-return");
+  const document = yield* run.main();
+  const ids = Object.fromEntries(planEntities(document.plan).filter(node => node.kind === "step").map(node => [node.localId, node.nodeId])) as Record<string, string>;
+  const workflow = progressWorkflow(document, []);
+  const attempts = new Map(workflow.attempts!.map(item => [item.nodeId, item.attempt]));
+  assert.deepEqual([attempts.get(ids.reviewa!), attempts.get(ids.fixa!)], [2, 2], "the reopened lane is in attempt 2");
+  assert.deepEqual([attempts.get(ids.reviewb!), attempts.get(ids.fixb!)], [1, 1], "the sibling lane keeps its explicit attempt 1");
+  assert.deepEqual([attempts.get(ids.implement!), attempts.get(ids.deliver!)], [undefined, undefined], "occurrences outside every return region carry no attempt");
+  const statuses = new Map(planEntities(document.plan).map(node => [node.nodeId, node.status]));
+  assert.deepEqual([statuses.get(ids.reviewa!), statuses.get(ids.fixa!), statuses.get(ids.reviewb!), statuses.get(ids.fixb!)], ["planned", "planned", "completed", "completed"],
+    "a real return plans every repeated member and leaves the sibling lane's outcomes in place");
+  // the returned target is ready work while nothing in its region is active
+  const ready = readyAfterReturn(workflow.plan, workflow.returns);
+  assert.deepEqual([...ready], [ids.reviewa], "only the return's target is ready");
+  const render = () => renderToStaticMarkup(createElement(PlanJourney, {node: workflow.plan!, mode: "live", selections: workflow.branchSelections, attempts,
+    returns: workflow.returns, branchEvents: workflow.branchEvents, ready, notApplicable: new Set(workflow.notApplicable ?? [])}));
+  let html = render();
+  assert.match(html, /class="journey-stop state-ready"/);
+  assert.match(html, /reviewa<span class="step-flags"><span class="pill">Attempt 2<\/span><\/span><\/span><span class="step-state">Ready to start · attempt 2</);
+  assert.match(html, /fixa<span class="step-flags"><span class="pill">Attempt 2</, "the repeated member shows its attempt");
+  assert.match(html, /reviewb<span class="step-flags"><span class="pill">Attempt 1<\/span><\/span><\/span><span class="step-state">Completed</, "a returnable member shows attempt 1 explicitly");
+  // lane B's completed correction sits on the path no longer selected: history in the current plan, not a live outcome
+  assert.match(html, /class="journey-stop state-historical"/);
+  assert.match(html, /fixb<span class="step-flags"><span class="pill">Attempt 1<\/span><\/span><\/span><span class="step-state">Completed earlier · path not selected</);
+  assert.doesNotMatch(html, /fixb[^]{0,200}state-completed/, "no completed tone on the unselected path");
+  // the closed attempt of lane A: reviewa ended completed, the branch's then selection revision 1 with its reason and source
+  const previous = previousAttempts(ids.reviewa!, workflow.returns);
+  assert.deepEqual(previous.map(item => [item.attempt, item.closed?.status]), [[1, "completed"]]);
+  const laneA = planBranches(workflow.plan).find(item => item.condition === "Lane A findings.")!;
+  assert.deepEqual(previousAttempts(laneA.nodeId, workflow.returns).map(item => item.selection), [{nodeId: laneA.nodeId, revision: 1, path: "then"}]);
+  assert.match(html, /Previous attempt 1/);
+  assert.match(html, /then path selected \(revision 1\)/);
+  assert.match(html, /Decision reason: Context decided then\./);
+  assert.match(html, /message <code>main-message-/);
+  // a fresh selection in the new attempt keeps the previous attempt's record
+  yield* run.choose("Lane A findings.", "then");
+  const reselected = progressWorkflow(yield* run.main(), []);
+  const again = renderToStaticMarkup(createElement(PlanJourney, {node: reselected.plan!, mode: "live", selections: reselected.branchSelections, attempts,
+    returns: reselected.returns, branchEvents: reselected.branchEvents, ready: readyAfterReturn(reselected.plan, reselected.returns)}));
+  assert.match(again, /Previous attempt 1/);
+  assert.match(again, /then path selected \(revision 1\)/);
+  assert.match(again, /Then path selected/);
+  // history: the return and the task status it records are one write with one headline and two unmerged records in stored order
+  const operations = historyOperations(workflow.history!);
+  const returned = operations.find(operation => operation.some(event => event.kind === "return_applied"))!;
+  assert.equal(returned.length, 2, "the return and its task status share the operation");
+  assert.equal(returned[0]!.operationId, returned[1]!.operationId);
+  assert.equal(returned[0]!.recordedAt, returned[1]!.recordedAt, "equal timestamps stay separate records");
+  assert.ok(returned[0]!.sequence < returned[1]!.sequence);
+  assert.equal(operationHeadline(returned), "Returned to reviewa: attempt 2 starts");
+  const history = renderToStaticMarkup(createElement(WorkflowHistory, {workflow}));
+  assert.match(history, /<h3>Returned to reviewa: attempt 2 starts<\/h3>/);
+  assert.match(history, /2 records of one write/);
+  assert.match(history, /Returned to an earlier step · reviewa/);
+  assert.match(history, /Attempt 2 starts after returning to earlier work/);
+  html = history;
+  assert.ok((html.match(/<li/g) ?? []).length >= workflow.history!.length, "no record is merged away");
 }), {timeout: 30_000});
 
 it.live("an omitted ledger does not hide an applied jump after the return leaves the plan", () => Effect.gen(function* () {

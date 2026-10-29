@@ -314,7 +314,13 @@ operation ID and checks the expected revision.
 
 An occurrence's attempt is one more than the number of applied returns whose region
 holds it. View `status` adds `attempt` to reopened occurrences and lists each
-workflow's `pendingReturns`; the progress snapshot adds `returns` and `attempts`.
+workflow's `pendingReturns`; the progress snapshot adds `returns` (with `closed`,
+`closedSelections` and `retiredRuns` of each applied return) and `attempts`, which
+lists every occurrence inside a return's region, attempt 1 explicit, so attempts
+only ever grow and occurrences outside every region carry none. Each history event
+carries the `operationId` of the write that recorded it; the dashboard groups the
+consecutive events of one write and never merges records, including records that
+share a timestamp.
 Output of a closed attempt never counts for the next one. A branch-selection record
 from a message created before an applied return reopened its branch, or from a run
 that return retired, is `branch_record_outdated`. A `status_changed` or

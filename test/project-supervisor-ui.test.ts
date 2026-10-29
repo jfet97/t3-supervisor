@@ -11,6 +11,7 @@ import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestEr
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
 import { fixtureJourney } from "./ui-fixture/journey.js";
 import { PlanJourney } from "../ui/src/workflow-journey.js";
+import { historyOperations, operationHeadline, WorkflowHistory as WorkflowHistoryView } from "../ui/src/workflow-history.js";
 
 // the client helpers are Effects on the page runtime of each test; they resolve request paths against the page location.
 // they run over a stubbed browser fetch without time, so these tests are it.effect
@@ -1334,6 +1335,50 @@ it("a returned task shows reopened implementation as current work, keeping futur
   assert.doesNotMatch(html, /Now: [^<]*Decide:/);
   assert.match(html, /1 branch decision pending/);
   assert.match(html, /Attempt 2/);
+});
+
+it("right after a real return every repeated member is planned, so Now names the returned target as ready to start instead of vanishing", () => {
+  const journey = fixtureJourney("returned", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const main = journey.progress.workflows[0]!;
+  const planned = (plan: typeof main.plan): typeof main.plan => plan && {...plan, nodes: plan.nodes.map(node => node.kind === "sequence" || node.kind === "parallel" ? planned(node)!
+    : node.kind === "workflow" ? {...node, plan: planned(node.plan)} : node.kind === "step" && node.nodeId === "packing-implement" ? {...node, status: "planned" as const} : node)};
+  const justReturned = {...journey.progress, workflows: [{...main, plan: planned(main.plan)}, ...journey.progress.workflows.slice(1)]};
+  const html = renderWorkspace([justReturned], journey.task);
+  assert.match(html, /Now: Implement within scope · ready to start<\/p>/);
+  assert.match(html, /class="journey-stop state-ready"/);
+  assert.match(html, /Ready to start · attempt 2/);
+  assert.doesNotMatch(html, /Now: <\/p>/);
+  // once the target starts, Now names the active step and ready disappears
+  assert.match(renderWorkspace([journey.progress], journey.task), /Now: Implement within scope<\/p>/);
+  assert.doesNotMatch(renderWorkspace([journey.progress], journey.task), /ready to start/);
+});
+
+it("history groups the records of one write under a derived headline without merging equal timestamps, and same-status arrows never head a group", () => {
+  const event = (id: string, sequence: number, operationId: string, kind: string, extra: Record<string, unknown> = {}) => ({id, sequence, kind, recordedAt: 1_800_000_000_000, operationId,
+    targetNodeId: null, targetNodeName: null, attempt: null, statusFrom: null, statusTo: null, sourceThreadId: null, sourceMessageId: null, sourceItemId: null, note: `${id} note`, ...extra}) as never;
+  const events = [
+    event("r", 1, "op-return", "return_applied", {targetNodeId: "implement", targetNodeName: "Implement", attempt: 2, statusFrom: "completed", statusTo: "planned"}),
+    event("t", 2, "op-return", "status_changed", {statusFrom: "underway", statusTo: "underway"}),
+    event("a", 3, "op-progress", "status_changed", {targetNodeId: "verify", targetNodeName: "Verify", attempt: 2, statusFrom: "planned", statusTo: "completed"}),
+    event("b", 4, "op-progress", "status_changed", {targetNodeId: "review", targetNodeName: "Review", attempt: 2, statusFrom: "planned", statusTo: "underway"}),
+    event("c", 5, "op-progress", "status_changed", {targetNodeId: "deliver", targetNodeName: "Deliver", attempt: 1, statusFrom: "planned", statusTo: "planned"}),
+    event("d", 6, "op-later", "observation", {targetNodeId: "review", targetNodeName: "Review", attempt: 2}),
+    event("e", 7, "op-progress", "note", {targetNodeId: "review", targetNodeName: "Review", attempt: 2}),
+  ];
+  const operations = historyOperations(events);
+  assert.deepEqual(operations.map(operation => operation.map(item => (item as {id: string}).id)), [["r", "t"], ["a", "b", "c"], ["d"], ["e"]], "only consecutive records of one write group; a later record of an earlier write is its own entry");
+  assert.equal(operationHeadline(operations[0]!), "Returned to Implement: attempt 2 starts");
+  assert.equal(operationHeadline(operations[1]!), "Verify completed, Review in progress", "a same-status arrow is not part of the headline");
+  assert.equal(operationHeadline(operations[2]!), "Work observed · Review");
+  const workflow = {...progressSnapshot.workflows[0]!, history: events, historyComplete: true};
+  const html = renderToStaticMarkup(createElement(WorkflowHistoryView, {workflow}));
+  assert.match(html, /<h3>Verify completed, Review in progress<\/h3>/);
+  assert.match(html, /3 records of one write/);
+  assert.match(html, /planned → planned \(unchanged\)/, "the same-status record stays visible as a detail");
+  assert.match(html, /<h3>Returned to Implement: attempt 2 starts<\/h3>/);
+  assert.match(html, /in progress → in progress \(unchanged\)/);
+  const grouped = operations.filter(operation => operation.length > 1).reduce((count, operation) => count + operation.length, 0);
+  assert.equal((html.match(/<li/g) ?? []).length, operations.length + grouped, "every record of a grouped write is listed; none is merged");
 });
 
 it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {

@@ -1,7 +1,7 @@
 import { Schema } from "effect";
 import { ProjectSupervisorScopeSnapshotSchema, type ProjectSupervisorScopeSnapshot, type ProjectSupervisorScopeThread } from "./supervisor-observation.js";
 import { WorkflowExecutionStatus, WorkflowPlanGroupSchema, type WorkflowPlanGroupInfo } from "./project-supervisor-contract.js";
-import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBranches, planEntities } from "./workflow-plan-tree.js";
+import { effectiveBranchSelections, notApplicableNodeIds, notApplicableSubtrees, occurrenceAttempts, planBackTos, planBranches, planEntities, resolveBackTo } from "./workflow-plan-tree.js";
 import { branchSelectionPaths, currentAcceptedProposalId, externalContributionDecisions, externalContributionReferenceKinds, externalContributionStates,
   participantReceiptKinds, WorkflowReturnRunSchema, type ExternalContributionParticipant, type WorkflowStateDocument, type WorkflowStateEvidence } from "./workflow-state-contract.js";
 
@@ -27,6 +27,8 @@ export type WorkflowProgressObservation = typeof WorkflowProgressObservationSche
 
 export const WorkflowHistoryEventSchema = Schema.Struct({
   id: Schema.String, sequence: Schema.Number, kind: Schema.String, recordedAt: Schema.Number,
+  /** The write that recorded this event; consecutive events of one write are one operation, never merged into one record. */
+  operationId: Schema.optionalKey(Schema.String),
   targetNodeId: NullableText, targetNodeName: NullableText, attempt: Schema.NullOr(Schema.Number),
   statusFrom: Schema.NullOr(WorkflowExecutionStatus), statusTo: Schema.NullOr(WorkflowExecutionStatus),
   sourceThreadId: NullableText, sourceMessageId: NullableText, sourceItemId: NullableText, note: Schema.String,
@@ -42,7 +44,7 @@ export const progressHistory = (document: WorkflowStateDocument): WorkflowHistor
       const returned = document.returns.find(returned => returned.returnId === item.return!.returnId && returned.state === "applied");
       for (const id of returned?.regionNodeIds ?? []) attempts.set(id, (attempts.get(id) ?? 1) + 1);
     }
-    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: item.recordedAt, targetNodeId: item.targetNodeId,
+    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: item.recordedAt, operationId: item.operationId, targetNodeId: item.targetNodeId,
       targetNodeName: item.targetNodeName, attempt: item.targetNodeId ? attempts.get(item.targetNodeId) ?? 1 : null,
       statusFrom: item.statusFrom, statusTo: item.statusTo, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
       sourceItemId: item.sourceItemId ?? null, note: item.note, ...(item.repair === true ? {repair: true as const} : {})};
@@ -151,6 +153,8 @@ export const WorkflowProgressReturnSchema = Schema.Struct({
   requestedAt: Schema.Number,
   resolvedAt: Schema.NullOr(Schema.Number),
   closed: Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, status: WorkflowExecutionStatus, contributorThreadIds: Schema.Array(Schema.String)}))),
+  /** The branch selections that were current in the closed attempt; their reason and source stay on the branch events of that revision. */
+  closedSelections: Schema.optionalKey(Schema.NullOr(Schema.Array(Schema.Struct({nodeId: Schema.String, revision: Schema.Number, path: Schema.Literals(branchSelectionPaths)})))),
   retiredRuns: Schema.Array(WorkflowReturnRunSchema),
   note: NullableText,
 });
@@ -194,7 +198,7 @@ export const WorkflowProgressWorkflowSchema = Schema.Struct({
   /** Occurrences settled by a current not-applicable assessment, including everything inside an assessed workflow. */
   notApplicable: Schema.optionalKey(Schema.Array(Schema.String)),
   returns: Schema.optionalKey(Schema.Array(WorkflowProgressReturnSchema)),
-  /** The current attempt of each occurrence an applied return reopened; any other occurrence is in its first attempt. */
+  /** The current attempt of every occurrence inside a return's region: 1 until an applied return reopens it, one more per applied return holding it. */
   attempts: Schema.optionalKey(Schema.Array(Schema.Struct({nodeId: Schema.String, attempt: Schema.Number}))),
   /** Every participant of this workflow's occurrences: attached native descendants, linked children without a role, declared participants. */
   participants: Schema.optionalKey(Schema.Array(WorkflowProgressParticipantSchema)),
@@ -346,6 +350,7 @@ const progressReturns = (document: WorkflowStateDocument): WorkflowProgressRetur
     targetName: contributionNodeName(document, item.targetNodeId, planNames), regionNodeIds: [...item.regionNodeIds], attempt: item.attempt, state: item.state,
     reason: item.reason, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId, requestedAt: item.requestedAt, resolvedAt: item.resolvedAt,
     closed: item.closed ? item.closed.map(closed => ({nodeId: closed.nodeId, status: closed.status, contributorThreadIds: [...closed.contributorThreadIds]})) : null,
+    closedSelections: item.closedSelections ? item.closedSelections.map(selection => ({nodeId: selection.nodeId, revision: selection.revision, path: selection.path})) : null,
     retiredRuns: item.retiredRuns.map(run => run.kind === "provider_turns" ? {...run, providerTurnIds: [...run.providerTurnIds]} : {...run}),
     note: item.resolution?.note ?? null}));
 };
@@ -416,6 +421,21 @@ export const workflowParticipants = (document: WorkflowStateDocument, linkedChil
   return [...native, ...declared];
 };
 
+/**
+ * The attempt of every occurrence a return can repeat: attempt 1 is explicit inside each return's region, and an applied return adds one
+ * for each occurrence its region holds, so attempts only ever grow; a nested budget reset changes no attempt, and occurrences outside every
+ * region are listed nowhere.
+ */
+export const returnableAttempts = (document: Pick<WorkflowStateDocument, "plan" | "returns">): Map<string, number> => {
+  const attempts = new Map<string, number>();
+  if (document.plan) for (const backTo of planBackTos(document.plan)) {
+    const resolved = resolveBackTo(document.plan, backTo.nodeId);
+    if (resolved.ok) for (const nodeId of resolved.regionNodeIds) attempts.set(nodeId, 1);
+  }
+  for (const [nodeId, attempt] of occurrenceAttempts(document.returns ?? [])) attempts.set(nodeId, Math.max(attempts.get(nodeId) ?? 1, attempt));
+  return attempts;
+};
+
 export const progressWorkflow = (document: WorkflowStateDocument, parentNodeReferences: readonly ParentNodeReference[]): WorkflowProgressWorkflow => ({
   workflowId: document.workflowId,
   projectId: document.projectId,
@@ -456,5 +476,5 @@ export const progressWorkflow = (document: WorkflowStateDocument, parentNodeRefe
   notApplicable: [...notApplicableSubtrees(document.plan, effectiveBranchSelections(document.plan, document.branchSelections ?? []),
     notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null))],
   returns: progressReturns(document),
-  attempts: [...occurrenceAttempts(document.returns ?? [])].map(([nodeId, attempt]) => ({nodeId, attempt})),
+  attempts: [...returnableAttempts(document)].map(([nodeId, attempt]) => ({nodeId, attempt})),
 });
