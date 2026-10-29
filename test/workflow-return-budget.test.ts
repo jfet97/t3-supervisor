@@ -12,7 +12,7 @@ import {execute, openWorkflowStores, query, temporaryDirectory} from "./support/
 import {guidanceTransaction} from "../src/guidance-sql.js";
 import {createElement} from "react";
 import {renderToStaticMarkup} from "react-dom/server";
-import {progressWorkflow} from "../src/workflow-progress.js";
+import {progressHistory, progressWorkflow} from "../src/workflow-progress.js";
 import {currentWork, PlanJourney, previousAttempts, readyAfterReturn} from "../ui/src/workflow-journey.js";
 import {historyOperations, operationHeadline, WorkflowHistory} from "../ui/src/workflow-history.js";
 
@@ -845,6 +845,29 @@ it.live("repeated identical receipts compact into one counted entry and observat
   const progressed = yield* run.advance(final, "work-underway", 9_100, {work: "underway"}, "underway");
   assert.equal(progressed.status, "applied", JSON.stringify(progressed));
   assert.equal((yield* run.main()).evidence.filter(item => item.kind === "plan_updated").length, before.evidence.filter(item => item.kind === "plan_updated").length + 1);
+  // one more identical read after the real status change: the compacted row keeps its early sequence while its stored time and write move
+  // to this read, so History dates it by its first read and shows the latest read and the count as a span before the later status change
+  const current = yield* run.main();
+  const again = yield* run.box.stores.workflows.apply(run.owner, {operationId: "observe-after-status", workflowId: current.workflowId, expectedRevision: current.revision, status: current.status,
+    objective: current.objective, sourceBinding: run.binding, requirements: [...run.proposal.requirements], issues: [...run.proposal.issues], plan: current.plan!,
+    note: "Read after the status change.", evidence: [{kind: "observation", note: "Read after the status change.", participantContributionId: "ext:1", observation: "read", sourceItemId: "item-late", participantReceipt: receipt}]},
+    run.validation, 9_200);
+  assert.equal(again.status, "applied", JSON.stringify(again));
+  const compacted = yield* run.main();
+  const row = compacted.evidence.find(item => item.participant?.receipt.toolName === "mcp__agent__status")!;
+  assert.deepEqual([row.recordedAt, row.operationId, row.participant!.repeats, row.participant!.firstRecordedAt], [9_200, "observe-after-status", workflowMutationLimits.maxEvidence + 101, 1_001], "the stored row carries the latest read");
+  const history = progressHistory(compacted);
+  const span = history.find(event => event.id === row.id)!;
+  const statusChange = history.find(event => event.kind === "status_changed" && event.targetNodeId === work.nodeId && event.statusTo === "underway")!;
+  assert.ok(span.sequence < statusChange.sequence, "the compacted row keeps its early position");
+  assert.deepEqual([span.recordedAt, span.coverage, span.operationId], [1_001, {firstRecordedAt: 1_001, latestRecordedAt: 9_200, repeats: workflowMutationLimits.maxEvidence + 101}, undefined],
+    "History dates the span by its first read, keeps the latest read and the count, and does not join the later write");
+  assert.ok(span.recordedAt <= statusChange.recordedAt, "semantic history still moves forward");
+  const dated = history.filter(event => event.sequence >= span.sequence).map(event => event.recordedAt);
+  assert.deepEqual(dated, [...dated].sort((left, right) => left - right), "no later-dated point event precedes an older semantic action");
+  const rendered = renderToStaticMarkup(createElement(WorkflowHistory, {workflow: progressWorkflow(compacted, [])}));
+  assert.match(rendered, new RegExp(`Read coverage[^]*?${workflowMutationLimits.maxEvidence + 101} reads, first to latest <time dateTime="${new Date(9_200).toISOString()}"`));
+  assert.ok(rendered.indexOf("Read coverage") < rendered.indexOf("Status recorded · work"), "the span renders before the later status change");
 }), {timeout: 60_000});
 
 // H: the real store's return output, projected and rendered: the returned target is ready, not absent; earlier outcomes on an unselected

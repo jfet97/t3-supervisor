@@ -162,7 +162,10 @@ changed declaration or an applied return retires earlier receipts into history. 
 identical receipt (same actor, declaration, revision, attempt, kind and tool) updates
 its entry's time, item and `repeats` count in place, and an observation-only apply
 that changes no plan, status, node, branch or selection records no `plan_updated`
-event, so continuous observation never consumes the evidence history. A receipt is
+event, so continuous observation never consumes the evidence history. History shows a
+compacted receipt as one span at the position of its first read, dated by that first
+read with its latest read and count beside it, so a repeated read never appears as a
+newly dated event before an older status change or return. A receipt is
 evidence of a read at its time; whether the route is available now is not
 re-verified. Helpers cannot record
 receipts (`participant_observation_root_only`), a receipt for an unknown

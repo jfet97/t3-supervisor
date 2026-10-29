@@ -33,10 +33,16 @@ export const WorkflowHistoryEventSchema = Schema.Struct({
   statusFrom: Schema.NullOr(WorkflowExecutionStatus), statusTo: Schema.NullOr(WorkflowExecutionStatus),
   sourceThreadId: NullableText, sourceMessageId: NullableText, sourceItemId: NullableText, note: Schema.String,
   repair: Schema.optionalKey(Schema.Literal(true)),
+  /** A compacted read receipt: one span from its first read to its latest, counted, at the position of the first read. */
+  coverage: Schema.optionalKey(Schema.Struct({firstRecordedAt: Schema.Number, latestRecordedAt: Schema.Number, repeats: Schema.Number})),
 });
 export type WorkflowHistoryEvent = typeof WorkflowHistoryEventSchema.Type;
 
-/** Stored append order is authoritative even when several events share a timestamp. */
+/**
+ * Stored append order is authoritative even when several events share a timestamp. A compacted receipt keeps its row and sequence while
+ * its stored time and write move to the latest read, so History dates it by its first read and shows the latest read and the count as a
+ * span: semantic records after it keep moving forward, and a repeated read never becomes a newly dated event before an older action.
+ */
 export const progressHistory = (document: WorkflowStateDocument): WorkflowHistoryEvent[] => {
   const attempts = new Map<string, number>();
   return document.evidence.map((item, index) => {
@@ -44,10 +50,15 @@ export const progressHistory = (document: WorkflowStateDocument): WorkflowHistor
       const returned = document.returns.find(returned => returned.returnId === item.return!.returnId && returned.state === "applied");
       for (const id of returned?.regionNodeIds ?? []) attempts.set(id, (attempts.get(id) ?? 1) + 1);
     }
-    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: item.recordedAt, operationId: item.operationId, targetNodeId: item.targetNodeId,
+    const receipt = item.kind === "observation" && item.participant ? item.participant : null;
+    const coverage = receipt ? {firstRecordedAt: receipt.firstRecordedAt ?? item.recordedAt, latestRecordedAt: item.recordedAt, repeats: receipt.repeats ?? 1} : null;
+    const compacted = coverage !== null && coverage.repeats > 1;
+    return {id: item.id, sequence: index + 1, kind: item.kind, recordedAt: coverage ? coverage.firstRecordedAt : item.recordedAt,
+      // a span's stored write is its latest read's; it stays its own entry rather than joining that later write's records
+      ...(compacted || item.operationId === undefined ? {} : {operationId: item.operationId}), targetNodeId: item.targetNodeId,
       targetNodeName: item.targetNodeName, attempt: item.targetNodeId ? attempts.get(item.targetNodeId) ?? 1 : null,
       statusFrom: item.statusFrom, statusTo: item.statusTo, sourceThreadId: item.sourceThreadId, sourceMessageId: item.sourceMessageId,
-      sourceItemId: item.sourceItemId ?? null, note: item.note, ...(item.repair === true ? {repair: true as const} : {})};
+      sourceItemId: item.sourceItemId ?? null, note: item.note, ...(item.repair === true ? {repair: true as const} : {}), ...(coverage ? {coverage} : {})};
   });
 };
 

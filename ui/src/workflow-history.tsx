@@ -9,7 +9,13 @@ const labels: Readonly<Record<string, string>> = {
   return_requested: "Return requested", return_applied: "Returned to an earlier step", return_dismissed: "Return no longer applies", return_budget_exhausted: "Return budget used up",
 };
 const status = {planned: "planned", underway: "in progress", completed: "completed", needs_attention: "needs attention"} as const;
-const eventLabel = (event: WorkflowHistoryEvent) => `${event.repair ? "Status corrected" : labels[event.kind] ?? "Workflow record"}${event.targetNodeName ? ` · ${event.targetNodeName}` : ""}`;
+const eventLabel = (event: WorkflowHistoryEvent) => `${event.repair ? "Status corrected" : event.coverage ? "Read coverage" : labels[event.kind] ?? "Workflow record"}${event.targetNodeName ? ` · ${event.targetNodeName}` : ""}`;
+// a compacted receipt is a span: its first read dates it, its latest read and count are said beside it
+const coverageSpan = (event: WorkflowHistoryEvent) => event.coverage
+  ? event.coverage.repeats > 1
+    ? <> · {event.coverage.repeats} reads, first to latest <time dateTime={new Date(event.coverage.latestRecordedAt).toISOString()}>{new Date(event.coverage.latestRecordedAt).toLocaleString()}</time></>
+    : <> · 1 read</>
+  : null;
 // a status event that actually moved an occurrence or the task; a same-status record is kept, never a headline
 const moved = (event: WorkflowHistoryEvent) => event.statusTo !== null && event.statusFrom !== event.statusTo;
 
@@ -61,10 +67,11 @@ export function WorkflowHistory({workflow}: {workflow: WorkflowProgressWorkflow 
       return <li key={first.id} className={grouped ? "history-operation" : undefined}>
         <div className="text-group"><h3>{operationHeadline(operation)}</h3>
           <p className="small muted"><time dateTime={new Date(first.recordedAt).toISOString()}>{new Date(first.recordedAt).toLocaleString()}</time>
+            {!grouped && coverageSpan(first)}
             {!grouped && first.attempt !== null && <> · Attempt {first.attempt}</>}{grouped && <> · {operation.length} records of one write</>}</p></div>
         {grouped
           ? <ol className="history-operation-records" role="list">{operation.map(event => <li key={event.id}>
-            <p><strong>{eventLabel(event)}</strong>{event.attempt !== null && <span className="small muted"> · Attempt {event.attempt}</span>}
+            <p><strong>{eventLabel(event)}</strong>{event.attempt !== null && <span className="small muted"> · Attempt {event.attempt}</span>}{event.coverage && <span className="small muted">{coverageSpan(event)}</span>}
               {event.statusTo && <span className={`small${moved(event) ? "" : " muted"}`}> · {event.statusFrom ? `${status[event.statusFrom]} → ` : ""}{status[event.statusTo]}{moved(event) ? "" : " (unchanged)"}</span>}</p>
             <p>{event.note}</p>
             <HistorySource event={event}/>
