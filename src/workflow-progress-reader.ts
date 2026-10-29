@@ -74,8 +74,12 @@ export const readWorkflowProgressPage = Effect.fn("readWorkflowProgressPage")(fu
   const scopeRows = new Map(scope.threads.map(thread => [thread.threadId, thread]));
   const owners = new Map<string, ParticipantCoverageOwner>(coverage.map(item => [item.threadId, item.state]));
   const linkedChildren = (threadId: string) => read.workflows.filter(item => item.document.parentThreadId === threadId).map(item => item.document.threadId);
-  // the binding's recorded settlements of the completed task's participants, by thread and environment
-  const settlements = new Map<string, ParticipantSettlementView>((scope.participantSettlements ?? []).map(item => [settlementKey(item.threadId, item.environmentId), {state: item.state, reason: item.reason}]));
+  // the binding's recorded settlements of the participants of the main's current task and revision, by thread and environment; the rows
+  // of earlier tasks are history and prove nothing here
+  const mainBinding = read.workflows.find(item => item.document.threadId === query.mainThreadId)?.document.sourceBinding ?? null;
+  const settlements = new Map<string, ParticipantSettlementView>((scope.participantSettlements ?? [])
+    .filter(item => mainBinding !== null && item.taskId === mainBinding.taskId && item.taskRevision === mainBinding.sourceHash)
+    .map(item => [settlementKey(item.threadId, item.environmentId), {state: item.state, reason: item.reason}]));
   return bounded({
     status: "ok",
     message: scope.complete ? null : "Native scope observation is incomplete. Review the issues below before relying on this snapshot.",

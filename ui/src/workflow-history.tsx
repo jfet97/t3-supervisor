@@ -51,9 +51,10 @@ export function WorkflowHistory({workflow}: {workflow: WorkflowProgressWorkflow 
   return <section className="stack workflow-history" aria-labelledby="workflow-history-title">
     <div className="text-group"><h2 id="workflow-history-title">History</h2><p className="muted">Recorded work moves forward here, one record per event in the order it was stored. Returning in the Plan starts a new attempt and keeps the earlier records.</p></div>
     {!workflow?.historyComplete && <p className="notice">Complete history is not available in this read. Refresh to check the current source.</p>}
+    {/* each applied return is dated, not numbered: a return's own count is not the target occurrence's attempt, which the Plan states */}
     {workflow?.returns?.some(item => item.state === "applied" && item.retiredRuns.length) && <EntityDetails title="Earlier review attempts"><div className="stack">
       {workflow.returns.filter(item => item.state === "applied" && item.retiredRuns.length).map(item => <div className="text-group" key={item.returnId}>
-        <h3>Attempt {item.attempt} · returned to {item.targetName ?? "an earlier step"}</h3>
+        <h3>Returned to {item.targetName ?? "an earlier step"} · <time dateTime={new Date(item.resolvedAt ?? item.requestedAt).toISOString()}>{new Date(item.resolvedAt ?? item.requestedAt).toLocaleString()}</time></h3>
         <ul>{item.retiredRuns.map((retired, index) => <li key={`${retired.threadId}:${index}`}>
           <a href={`t3-thread://v1/${retired.threadId}`}>Review conversation</a>: {retired.kind === "run" ? "earlier run kept in history"
             : retired.kind === "provider_turns" ? `${retired.providerTurnIds.length} earlier review ${retired.providerTurnIds.length === 1 ? "turn" : "turns"} kept in history; this reviewer can continue in the same conversation`

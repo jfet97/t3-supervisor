@@ -109,10 +109,10 @@ it("settlement states join the rows by thread and environment: T3 conversations 
     ],
     evidence: [],
   } as unknown as WorkflowStateDocument;
-  const settlements = new Map([[":reviewer-a", {state: "settled" as const, reason: null}], ["lab-vm:reviewer-a", {state: "unresolved" as const, reason: "settle_rejected_for_environment"}]]);
+  const settlements = new Map([[":reviewer-a", {state: "settled" as const, reason: null}], ["lab-vm:reviewer-a", {state: "unresolved" as const, reason: "environment_settle_unsupported"}]]);
   const byId = new Map(workflowParticipants(document, [], new Map(), new Map(), settlements).map(item => [item.id, item]));
   assert.deepEqual([byId.get("reviewer-a")!.settlement, byId.get("contribution:c-local")!.settlement], ["settled", "settled"], "a local declaration shares the local thread's settlement");
-  assert.deepEqual([byId.get("contribution:c-vm")!.settlement, byId.get("contribution:c-vm")!.settlementReason], ["unresolved", "settle_rejected_for_environment"],
+  assert.deepEqual([byId.get("contribution:c-vm")!.settlement, byId.get("contribution:c-vm")!.settlementReason], ["unresolved", "environment_settle_unsupported"],
     "the same thread id in another environment has its own settlement");
   assert.deepEqual([byId.get("contribution:c-ext")!.settlement, byId.get("contribution:c-none")!.settlement], ["not_applicable", "not_applicable"]);
   assert.equal(workflowParticipants(document, [], new Map(), new Map()).find(item => item.id === "reviewer-a")!.settlement, "not_evaluated", "nothing recorded reads as not evaluated");

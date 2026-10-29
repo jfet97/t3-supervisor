@@ -1256,6 +1256,35 @@ it.effect("verified relay and delayed operative Stop use the original main human
   }
 }));
 
+it.effect("a human Stop answered to a runtime input request of the root is genuine by its native name; a pending request's answer or an unnamed server message is not", () => Effect.gen(function* () {
+  const ask = (fixture: Fixture, status: "resolved" | "pending") => {
+    const wake = appendRun({projection: fixture.supervisor, id: "asking-wake", ordinal: 40, status: "completed", messageId: "asking-wake-message", text: "Review pending activity.",
+      createdBy: "system", creationSource: "server", now: baseTime + 1});
+    fixture.supervisor.runtimeRequests = [{id: "stop-question", nodeId: wake.rootNodeId, status, resolvedAt: status === "resolved" ? iso(baseTime + 3) : null,
+      answers: status === "resolved" ? {text: "Stop Supervisor for this chat."} : null, feedback: null}];
+    return wake;
+  };
+  const fixture = yield* makeFixture({now: baseTime});const service = fixture.makeProjectSupervisor();
+  const answer = appendMessageToRun(fixture.supervisor, ask(fixture, "resolved"), {id: "async-answer:stop-question", role: "user", text: "Stop Supervisor for this chat.",
+    createdBy: "user", creationSource: "server", now: baseTime + 3});
+  const args = {callerThreadId: fixture.binding.threadId, targetThreadId: operativeThreadId, userMessageId: answer.id, operationId: "answered-stop-op"};
+  const controller = yield* nativeStopController(fixture, fixture.supervisor, answer, args, "answered-stop-call", service);
+  assert.deepEqual(yield* controller.stop(args), {status: "stopped", targetThreadId: operativeThreadId, route: "direct", alreadyStopped: false});
+  assert.equal((yield* fixture.projectStore.chatStop(operativeThreadId))!.stoppedAt, Date.parse(answer.createdAt));
+  const pending = yield* makeFixture({now: baseTime});const pendingService = pending.makeProjectSupervisor();
+  const early = appendMessageToRun(pending.supervisor, ask(pending, "pending"), {id: "async-answer:stop-question", role: "user", text: "Stop Supervisor for this chat.",
+    createdBy: "user", creationSource: "server", now: baseTime + 3});
+  const earlyArgs = {...args, callerThreadId: pending.binding.threadId, userMessageId: early.id, operationId: "pending-stop-op"};
+  const earlyController = yield* nativeStopController(pending, pending.supervisor, early, earlyArgs, "pending-stop-call", pendingService);
+  assert.deepEqual(yield* earlyController.stop(earlyArgs), {status: "denied", reason: "user_message_not_genuine"}, "a pending request answers nothing");
+  const unnamed = yield* makeFixture({now: baseTime});const unnamedService = unnamed.makeProjectSupervisor();
+  const server = appendMessageToRun(unnamed.supervisor, ask(unnamed, "resolved"), {id: "server-stop", role: "user", text: "Stop Supervisor for this chat.",
+    createdBy: "user", creationSource: "server", now: baseTime + 3});
+  const serverArgs = {...args, callerThreadId: unnamed.binding.threadId, userMessageId: server.id, operationId: "unnamed-stop-op"};
+  const serverController = yield* nativeStopController(unnamed, unnamed.supervisor, server, serverArgs, "unnamed-stop-call", unnamedService);
+  assert.deepEqual(yield* serverController.stop(serverArgs), {status: "denied", reason: "user_message_not_genuine"}, "a server message no request names, whatever it says");
+}));
+
 it.effect("an unanswered root human turn holds service contact before any check-in or introduction receipt", () => Effect.gen(function* () {
   const fixture = yield* makeFixture({now: baseTime});
   const human = appendActualUserMessage(fixture.supervisor, "priority-stop", "Stop Supervisor now.", baseTime + 1);
@@ -4955,6 +4984,16 @@ it.effect("a check-in records an explicit wait naming who acts next, and never t
   assert.equal((yield* requesterWait("wait-requester-human", "the-humans-own")).status, "recorded");
   const cited = (yield* fixture.conversation.requests.requests(projectId, fixture.binding.threadId)).find(item => item.id === request.id);
   assert.deepEqual(cited?.reviewOutcome?.wait, {waitingOn: "requester", resumesWhen: "The requester confirms the budget.", messageId: "the-humans-own"});
+  // the human's answer to a runtime input request of the root is the server-created message T3 names after the resolved request;
+  // a server-created message no request names, or the answer to a request still pending, is no human source
+  const question = {id: "budget-question", nodeId: run.rootNodeId, status: "resolved", resolvedAt: iso(clock.now), answers: {text: "Hold until I confirm the budget."}, feedback: null};
+  fixture.supervisor.runtimeRequests = [question];
+  appendMessageToRun(fixture.supervisor, run, {id: "async-answer:budget-question", role: "user", text: "Hold until I confirm the budget.", createdBy: "user", creationSource: "server", now: clock.now});
+  appendMessageToRun(fixture.supervisor, run, {id: "server-not-an-answer", role: "user", text: "Hold.", createdBy: "user", creationSource: "server", now: clock.now});
+  assert.equal((yield* requesterWait("wait-requester-answer", "async-answer:budget-question")).status, "recorded", "the human's answer to the root's runtime request");
+  assert.deepEqual(yield* requesterWait("wait-requester-server", "server-not-an-answer"), {status: "denied", operationId: "wait-requester-server", reason: "wait_source_not_human"});
+  question.status = "pending";
+  assert.deepEqual(yield* requesterWait("wait-requester-pending", "async-answer:budget-question"), {status: "denied", operationId: "wait-requester-pending", reason: "wait_source_not_human"});
 }));
 
 it.effect("the instructions version covers the full reference, so a reference-only change is not silently stale", () => Effect.gen(function* () {

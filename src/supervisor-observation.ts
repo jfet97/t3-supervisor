@@ -49,7 +49,7 @@ export type ProjectSupervisorScopeThread = typeof ProjectSupervisorScopeThreadSc
 /** How the settlement of one T3-managed participant stands after task completion; unresolved and skipped carry a reason. */
 export const participantSettlementStates = ["pending", "uncertain", "settled", "superseded", "unresolved", "skipped"] as const;
 export type ParticipantSettlementState = typeof participantSettlementStates[number];
-export const ParticipantSettlementSchema = Schema.Struct({threadId: Schema.String, environmentId: Schema.NullOr(Schema.String),
+export const ParticipantSettlementSchema = Schema.Struct({taskId: Schema.String, taskRevision: Schema.String, threadId: Schema.String, environmentId: Schema.NullOr(Schema.String),
   state: Schema.Literals(participantSettlementStates), reason: Schema.NullOr(Schema.String), observedAt: Schema.Number});
 export type ParticipantSettlementInfo = typeof ParticipantSettlementSchema.Type;
 
@@ -65,7 +65,7 @@ export const ProjectSupervisorScopeSnapshotSchema = Schema.Struct({
   complete: Schema.Boolean,
   issues: Schema.Array(SupervisorObservationIssueSchema),
   threads: Schema.Array(ProjectSupervisorScopeThreadSchema),
-  /** The binding's recorded participant settlements for the completed task; absent while nothing was evaluated. */
+  /** The binding's recorded participant settlements, each for the task and revision it was evaluated on; absent while nothing was evaluated. */
   participantSettlements: Schema.optionalKey(Schema.Array(ParticipantSettlementSchema)),
 });
 export type ProjectSupervisorScopeSnapshot = typeof ProjectSupervisorScopeSnapshotSchema.Type;

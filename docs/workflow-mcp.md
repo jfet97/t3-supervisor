@@ -178,9 +178,11 @@ handle, roles (occurrence, attempt, replaced by an applied return), owner,
 lifecycle, reported state, completion, coverage (`native`, `supervisor_observed`,
 `lifecycle_only`, `reported`, `unsupported`, `unknown`), the current receipt and the
 count of earlier receipts, and `settlement`: `not_evaluated` until the task completed,
-`not_applicable` for external or unknown participants, else the recorded state
-(`pending`, `uncertain`, `settled`, `superseded`, `unresolved`, `skipped`) with
-`settlementReason` for unresolved and skipped ones.
+`not_applicable` for external or unknown participants, else the state recorded for the
+main's current task and revision (`pending`, `uncertain`, `settled`, `superseded`,
+`unresolved`, `skipped`) with `settlementReason` for unresolved and skipped ones
+(`unavailable`, `not_quiet`, `snapshot_unavailable`, `settle_rejected`,
+`environment_settle_unsupported`, `keep_active`).
 `native` requires the service's own projection read of a live local thread in that
 snapshot (`projectionRead` on the scope row; lifecycle metadata of an unread,
 archived or deleted thread is `unknown`), and a conversation declared with an
@@ -613,7 +615,9 @@ at their first and their final authority check.
   or `external` must act (never the operative's own unfinished action) and `resumesWhen`
   names what continues the work. A wait on the requester cites, in `messageId`, the
   human's own message in the root or the main (a web or mobile message, or the human's
-  answer to a runtime input request); without one, or citing an agent's send, a service
+  answer to a runtime input request, the server-created message T3 names
+  `async-answer:<requestId>` or `approval-feedback:<requestId>` for a resolved request);
+  without one, or citing an agent's send, a service
   notice, a Supervisor command or the root's own message, it is refused
   (`wait_source_not_human`; `wait_source_read_unavailable` while neither conversation can
   be read).

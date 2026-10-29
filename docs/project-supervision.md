@@ -381,9 +381,9 @@ Participants section shows every participant's role and attempt, conversation
 lifecycle, completion and coverage as distinct facts, and states when nothing was
 observed or no route exists; a conversation in another environment is shown with
 its environment and no local link; after task completion each T3 conversation's
-settlement is shown as recorded (settled, settling, uncertain, unresolved with its
-reason, or skipped for its user's choice), and a participant that is not a T3
-conversation is shown as not applicable.
+settlement for the current task is shown as recorded (settled, settling, uncertain,
+unresolved with its reason, or skipped for its user's choice), and a participant that is
+not a T3 conversation is shown as not applicable.
 
 Scope is the main workflow only. A local child that used external help reports
 the outcome to the main, which relays it with its own record; no child or external
@@ -595,7 +595,10 @@ notice also requires a stopped service result before confirming Stop and gives t
 dashboard fallback when that call is unavailable or denied.
 A genuine human message, wherever the service requires one, is the human's own web or
 mobile message or the human's answer to a runtime input request of that chat, which T3
-records as a server-created message. A message an agent sent from another chat, a
+records as a server-created user message named after the resolved request
+(`async-answer:<requestId>` for the dispatched answer, `approval-feedback:<requestId>`
+for approval feedback); no other link between a message and a request is read, and a
+pending or unknown request answers nothing. A message an agent sent from another chat, a
 scheduled or imported one, a system or Supervisor command, a service notice or a Stop the
 Supervisor itself authored is never human, and the absence of a sender thread alone
 proves nothing. Supervisor guidance is never a human limit: the Supervisor cites human
@@ -667,15 +670,24 @@ interrupted because supervision stopped, and other chats keep their supervision.
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. When the task completed (every applicable member settled, no
 pending return), the complete participant set settles with the main, each by its own
-command and once: the main's lineage descendants (not forks) and the T3 conversations
-the main's contributions declared, locally when a fresh read shows the conversation quiet
-and not kept active by its user, or in a linked environment when the Supervisor observed
-it and its result was accepted. What cannot settle is recorded with its reason (unreadable,
-still working, never observed, result not accepted, or the settle command rejected for
-it or its environment), an uncertain command is retried after the quiet window, and a
-conversation kept active by its user is skipped. Intermediate review rounds never settle
-a reviewer, so a reused reviewer stays available. Participants that are not T3
-conversations have no settlement: their completion is the result the main reported. An idle main whose agreed main workflow is unfinished parks only
+automatic-settle command and once per task: the main's lineage descendants (not forks)
+and the local T3 conversations the main's contributions declared, when a fresh read
+shows the conversation quiet and not kept active by its user. The command names the
+update time that read showed, so T3 rejects it atomically when the conversation changed
+or its user chose in between; the service never settles a pinned or reactivated
+conversation. A conversation in a linked environment has no supported route from here
+and is listed unsupported without a command. What cannot settle is recorded with its
+reason (unreadable, still working, no update time, the command rejected, or no route) and
+read afresh on each pass; the record keeps its command and attempt count through
+unreadable or busy passes, a lost reply is retried after the quiet window, one command is
+sent at most three times, and a conversation kept active by its user is skipped. Each
+command is admitted only while the same task is still complete and the participant still
+a member, so a correction or return that reopens the document while an earlier command
+waits settles nothing further. Settlement records belong to the task and revision they
+were evaluated on: the next task on the same main evaluates every participant anew, and
+the earlier rows stay as history. Intermediate review rounds never settle a reviewer, so
+a reused reviewer stays available. Participants that are not T3 conversations have no
+settlement: their completion is the result the main reported. An idle main whose agreed main workflow is unfinished parks only
 on an explicit current wait: the latest check-in's confirmed outcome carries a wait naming
 whether the requester or an external party must act and what resumes the work, recorded
 for the current task after the main's last completed run. Ordinary attention, a stale or

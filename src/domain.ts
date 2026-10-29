@@ -144,21 +144,21 @@ export const nativeUserMessageVisible = (projection: Projection, run: RunInfo, m
     root.runId === run.id && (root.parentNodeId === null || root.parentNodeId === undefined) && root.status !== "rolled_back";
 };
 
-// the message a resolved runtime input request of this thread names as its answer: the request's own message link, read from the keys
-// T3 may use for it, or the message's reference to the request; a pending or unknown request answers nothing
-const answersRuntimeRequest = (projection: Projection, message: MessageInfo): boolean => Array.isArray(projection.runtimeRequests) &&
-  projection.runtimeRequests.some(value => {
-    if (!isRecord(value)) return false;
-    const identity = runtimeRequestIdentity(value);
-    if (freshRuntimeRequestStatus(projection, identity) !== "resolved") return false;
-    const links = [value.responseMessageId, value.answerMessageId, value.resolvedMessageId, value.messageId,
-      isRecord(value.response) ? value.response.messageId : undefined, isRecord(value.resolution) ? value.resolution.messageId : undefined];
-    return links.includes(message.id) || typeof message.runtimeRequestId === "string" && message.runtimeRequestId === identity.requestId;
-  });
+// the human's answer to a runtime input request of this thread, as T3 names it: the dispatched answer is the message
+// `async-answer:<requestId>`, the human's approval feedback the message `approval-feedback:<requestId>`, and the request itself,
+// by its own id on a node of this thread, is resolved; no other link is read, so a pending or unknown request answers nothing
+const runtimeAnswerPrefixes = ["async-answer:", "approval-feedback:"];
+const answersRuntimeRequest = (projection: Projection, message: MessageInfo): boolean => {
+  const prefix = runtimeAnswerPrefixes.find(value => message.id.startsWith(value));
+  const requestId = prefix === undefined ? "" : message.id.slice(prefix.length);
+  return requestId !== "" && Array.isArray(projection.runtimeRequests) && projection.runtimeRequests.some(value => isRecord(value) &&
+    value.id === requestId && typeof value.nodeId === "string" && freshRuntimeRequestStatus(projection, {requestId, nodeId: value.nodeId}) === "resolved");
+};
 
 /**
  * Native human provenance, independent of whether this chat is eligible for task supervision: the human's own web or mobile message, or
- * the human's answer to a runtime input request of this thread, which T3 records as a server-created message. Never a message an agent
+ * the human's answer to a runtime input request of this thread, which T3 records as a server-created user message named after the
+ * resolved request (`async-answer:<requestId>`, `approval-feedback:<requestId>`). Never a message an agent
  * sent (senderThreadId), a scheduled or imported one, a system or Supervisor command (`supervisor-*` ids), a service notice, or a Stop
  * the Supervisor itself authored: the absence of senderThreadId alone never makes a message human.
  */

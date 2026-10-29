@@ -519,13 +519,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   const settleCompletedMain = (input: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[]) => Effect.gen(function* () {
     let binding = (yield* store.binding(input.projectId, input.mainThreadId))!;
     const task = yield* store.task(binding.mainThreadId);
-    if (!task || task.status !== "inferred") return;
-    if (!(task.supervision === "not_needed" && conversationMayObserve(task))) {
-      if (!workflows || task.agreement?.status !== "agreed") return;
-      const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
-      if (!document || document.sourceBinding?.taskId !== task.id || document.sourceBinding.sourceHash !== taskScopeRevision(task) || document.status !== "completed" || document.returns.some(item => item.state === "pending") || unsettledOccurrences(document.plan, documentBranchSelections(document),
-        notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null)).length !== 0) return;
-    }
+    if (!task || !(yield* taskCompleted(binding, task))) return;
     const read = yield* attempt(readMain(binding));
     if (!read.ok || !read.value || read.value.thread.archivedAt || read.value.thread.deletedAt) return;
     const main = read.value;
@@ -540,7 +534,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
     if (main.thread.settledAt || main.thread.settledOverride === "settled") {
       if (binding.mainSettlement && binding.mainSettlement.state !== "settled") yield* store.setBinding({...binding, mainSettlement: {...binding.mainSettlement, state: "settled"}});
       // the main is settled; the task's other T3 participants settle, or retry, on the same completed task
-      if (authorised) yield* settleParticipants((yield* store.binding(binding.projectId, binding.mainThreadId)) ?? binding, main, threads, now);
+      if (authorised) yield* settleParticipants((yield* store.binding(binding.projectId, binding.mainThreadId)) ?? binding, task, main, threads, now);
       return;
     }
     if (userKeepsSupervisorActive(main.thread)) {yield* held("keep_active");return;}
@@ -569,7 +563,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
     const freshChildren = yield* attempt(relatedChildren(binding, freshMain, threads, scopeFor(binding, freshMain, threads)));
     if (!freshChildren.ok || freshChildren.value.blocked) {yield* held("children_active_or_unavailable");return;}
     // the complete participant set settles with the main: its lineage descendants and the declared T3 conversations the root observed
-    yield* settleParticipants(binding, freshMain, threads, now);
+    yield* settleParticipants(binding, task, freshMain, threads, now);
     binding = (yield* store.binding(binding.projectId, binding.mainThreadId)) ?? binding;
     yield* sendSettlement(binding, version, now, guard => Effect.gen(function* () {
       const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
@@ -577,7 +571,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
         (yield* guard.supervisionStopped(binding.mainThreadId)) || !(yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId)) ||
         userKeepsSupervisorActive(freshMain.thread) || freshMain.thread.archivedAt || freshMain.thread.deletedAt) return null;
       const currentTask = yield* store.task(binding.mainThreadId);
-      if (!currentTask || currentTask.id !== task.id || taskScopeRevision(currentTask) !== taskScopeRevision(task)) return null;
+      if (!currentTask || currentTask.id !== task.id || taskScopeRevision(currentTask) !== taskScopeRevision(task) || !(yield* taskCompleted(latest, currentTask))) return null;
       const attention = yield* mainAttention(latest, ownerRead.value, freshMain, false, source, yield* teamWorkOf(latest), false);
       if (attention) return null;
       const freshPending = yield* monitor.hasPendingReviewableActivity(binding.projectId, threadIds);
@@ -636,110 +630,130 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
       reconcile: Effect.void,
     });
   });
-  // the T3-managed participants of a completed task: the main's lineage descendants (not forks) and the declared t3 conversations of
-  // the main workflow's contributions; an external or unknown participant has nothing to settle
-  type ParticipantTarget = {threadId: string; environmentId: string | null; observed: boolean; accepted: boolean};
-  const participantTargets = (binding: BindingRecord, scope: SupervisorScopeResolution) => Effect.gen(function* () {
+  // the task's completion as every settlement path reads it: a not-needed observable request, or an agreed task whose bound main
+  // workflow document is completed with every applicable member settled and no pending return
+  const taskCompleted = (binding: BindingRecord, task: TaskRecord): Effect.Effect<boolean, SupervisionStoreError> => Effect.gen(function* () {
+    if (task.status !== "inferred") return false;
+    if (task.supervision === "not_needed" && conversationMayObserve(task)) return true;
+    if (!workflows || task.agreement?.status !== "agreed") return false;
+    const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
+    return Boolean(document) && document!.sourceBinding?.taskId === task.id && document!.sourceBinding.sourceHash === taskScopeRevision(task) &&
+      document!.status === "completed" && !document!.returns.some(item => item.state === "pending") && unsettledOccurrences(document!.plan, documentBranchSelections(document!),
+        notApplicableNodeIds(document!.evidence, document!.sourceBinding?.sourceHash ?? null)).length === 0;
+  });
+  // the T3-managed participants of a completed task: the main's lineage descendants (not forks) and the T3 conversations the main
+  // workflow's contributions declared; an external or unknown participant has nothing to settle
+  type ParticipantTarget = {threadId: string; environmentId: string | null};
+  const participantTargets = (binding: BindingRecord, scope: SupervisorScopeResolution): Effect.Effect<ParticipantTarget[], SupervisionStoreError> => Effect.gen(function* () {
     const targets = new Map<string, ParticipantTarget>();
     for (const child of scope.descendants) if (scope.allowedIds.has(child.id) && child.lineage.relationshipToParent !== "fork" && !child.deletedAt && !child.archivedAt)
-      targets.set(settlementKey(child.id, null), {threadId: child.id, environmentId: null, observed: true, accepted: true});
+      targets.set(settlementKey(child.id, null), {threadId: child.id, environmentId: null});
     const document = workflows ? yield* workflows.get(binding.projectId, binding.mainThreadId) : null;
     if (document) for (const participant of workflowParticipants(document, [], new Map(), new Map())) {
       if (participant.source !== "declared" || participant.kind !== "t3_conversation" || !participant.threadId) continue;
       const key = settlementKey(participant.threadId, participant.environmentId);
-      if (!targets.has(key)) targets.set(key, {threadId: participant.threadId, environmentId: participant.environmentId,
-        observed: participant.coverage === "native" || participant.coverage === "supervisor_observed" || participant.coverage === "lifecycle_only",
-        accepted: participant.completion === "accepted"});
+      if (!targets.has(key)) targets.set(key, {threadId: participant.threadId, environmentId: participant.environmentId});
     }
     return [...targets.values()];
   });
+  // one task's row for one participant: the rows of earlier tasks and revisions stay as history and prove nothing for the current task
+  type ParticipantStamp = {taskId: string; taskRevision: string};
+  const sameParticipantRow = (row: ParticipantSettlement, stamp: ParticipantStamp, target: ParticipantTarget) => row.taskId === stamp.taskId &&
+    row.taskRevision === stamp.taskRevision && settlementKey(row.threadId, row.environmentId) === settlementKey(target.threadId, target.environmentId);
+  const participantRow = (binding: BindingRecord, stamp: ParticipantStamp, target: ParticipantTarget) =>
+    (binding.participantSettlements ?? []).find(row => sameParticipantRow(row, stamp, target));
+  const withParticipantRow = (binding: BindingRecord, entry: ParticipantSettlement): BindingRecord =>
+    ({...binding, participantSettlements: [...(binding.participantSettlements ?? []).filter(row => !sameParticipantRow(row, entry, entry)), entry]});
+  const PARTICIPANT_SETTLE_ATTEMPTS = 3;
+  // a row the current task never evaluates again: settled, reactivated after the settle, without a supported route, or its one command
+  // sent the bounded number of times
+  const participantTerminal = (row: ParticipantSettlement) => row.state === "settled" || row.state === "superseded" ||
+    row.reason === "environment_settle_unsupported" || (row.commandId !== null && (row.attempts ?? 0) >= PARTICIPANT_SETTLE_ATTEMPTS);
   const recordParticipant = (owner: BindingRecord, entry: ParticipantSettlement) => transaction(Effect.gen(function* () {
     const latest = yield* store.binding(owner.projectId, owner.mainThreadId);
-    if (!latest || latest.threadId !== owner.threadId) return;
-    const key = settlementKey(entry.threadId, entry.environmentId);
-    yield* store.setBinding({...latest, participantSettlements: [...(latest.participantSettlements ?? []).filter(item => settlementKey(item.threadId, item.environmentId) !== key), entry]});
+    if (!latest || latest.threadId !== owner.threadId || latest.generation !== owner.generation) return;
+    yield* store.setBinding(withParticipantRow(latest, entry));
   }));
   /**
-   * Settles the participants of a completed task once each, by their own commands, after the main's lineage read found every child quiet:
-   * a local conversation settles when its fresh read shows it quiet and not kept active by its user, a declared conversation in a linked
-   * environment when the root observed it and its result was accepted; what cannot settle is recorded as unresolved with its reason, an
-   * uncertain command is retried up to three times after the quiet window, and a settled or skipped participant is never commanded again.
+   * Settles the participants of the completed task once each, by their own automatic-settle commands, after the main's lineage read found
+   * every child quiet: a local conversation settles on the snapshot its fresh read showed when it is quiet and not kept active by its
+   * user; a conversation in a linked environment has no supported route from here and is listed unsupported. What cannot settle is
+   * recorded with its reason and read afresh on each pass, keeping its command and attempt count through unreadable or busy states; a
+   * lost reply is retried after the quiet window; one command is sent at most three times; a settled or reactivated participant is never
+   * commanded again on this task, and the next task evaluates every participant anew.
    */
-  const settleParticipants = (binding: BindingRecord, main: Projection, threads: readonly ThreadInfo[], now: number) => Effect.gen(function* () {
+  const settleParticipants = (binding: BindingRecord, task: TaskRecord, main: Projection, threads: readonly ThreadInfo[], now: number) => Effect.gen(function* () {
     const scope = scopeFor(binding, main, threads);
     if (!scope?.complete || !scope.main) return;
     const children = yield* attempt(relatedChildren(binding, main, threads, scope));
     if (!children.ok || children.value.blocked) return;
     const version = children.value.version;
+    const stamp = {taskId: task.id, taskRevision: taskScopeRevision(task)};
     for (const target of yield* participantTargets(binding, scope)) {
-      const key = settlementKey(target.threadId, target.environmentId);
-      const current = (binding.participantSettlements ?? []).find(item => settlementKey(item.threadId, item.environmentId) === key);
-      if (current && (current.state === "settled" || current.state === "skipped" || current.state === "superseded")) continue;
-      // a definite rejection stays listed for this completed task: it is not commanded again blindly, while an unreadable or busy
-      // participant is read afresh each pass
-      if (current?.state === "unresolved" && current.reason?.startsWith("settle_rejected")) continue;
-      if (current?.state === "uncertain" && ((current.attempts ?? 0) >= 3 || now - current.observedAt < SUPERVISOR_SETTLE_QUIET_MS)) continue;
-      if (current?.state === "pending" && now - current.observedAt < SUPERVISOR_SETTLE_QUIET_MS) continue;
-      const base = {threadId: target.threadId, environmentId: target.environmentId, commandId: current?.commandId ?? null, observedAt: now, activityVersion: version, attempts: current?.attempts ?? 0};
-      if (target.environmentId !== null) {
-        // a linked environment's conversation cannot be read here: the root's observation and the accepted result are the evidence
-        if (!target.observed) {yield* recordParticipant(binding, {...base, state: "unresolved", reason: "not_observed"}); continue;}
-        if (!target.accepted) {yield* recordParticipant(binding, {...base, state: "unresolved", reason: "result_not_accepted"}); continue;}
-        yield* sendParticipantSettlement(binding, target, version, now);
-        continue;
-      }
+      const current = participantRow(binding, stamp, target);
+      if (current && participantTerminal(current)) continue;
+      if (current && (current.state === "pending" || current.state === "uncertain") && now - current.observedAt < SUPERVISOR_SETTLE_QUIET_MS) continue;
+      const base = {...stamp, threadId: target.threadId, environmentId: target.environmentId, commandId: current?.commandId ?? null, observedAt: now,
+        activityVersion: version, attempts: current?.attempts ?? 0, snapshotAt: current?.snapshotAt ?? null};
+      const note = (state: ParticipantSettlement["state"], reason: string | null) => recordParticipant(binding, {...base, state, reason});
+      // the local command handler settles local threads only: no supported route settles a linked environment's conversation from here
+      if (target.environmentId !== null) {yield* note("unresolved", "environment_settle_unsupported"); continue;}
       const info = threads.find(thread => thread.id === target.threadId);
       if (info?.deletedAt || info?.archivedAt) continue;
       const read = yield* attempt(projection(target.threadId));
-      if (!read.ok || read.value.thread.id !== target.threadId) {yield* recordParticipant(binding, {...base, state: "unresolved", reason: "unavailable"}); continue;}
+      if (!read.ok || read.value.thread.id !== target.threadId) {yield* note("unresolved", "unavailable"); continue;}
       const thread = read.value.thread;
-      if (thread.settledAt || thread.settledOverride === "settled") {yield* recordParticipant(binding, {...base, state: "settled", reason: null}); continue;}
-      if (userKeepsSupervisorActive(thread)) {yield* recordParticipant(binding, {...base, state: "skipped", reason: "keep_active"}); continue;}
-      if (projectionNeedsAttention(read.value, info ?? thread)) {yield* recordParticipant(binding, {...base, state: "unresolved", reason: "not_quiet"}); continue;}
-      yield* sendParticipantSettlement(binding, target, version, now);
+      if (thread.settledAt || thread.settledOverride === "settled") {yield* note("settled", null); continue;}
+      if (userKeepsSupervisorActive(thread)) {yield* note("skipped", "keep_active"); continue;}
+      if (projectionNeedsAttention(read.value, info ?? thread)) {yield* note("unresolved", "not_quiet"); continue;}
+      if (typeof thread.updatedAt !== "string") {yield* note("unresolved", "snapshot_unavailable"); continue;}
+      yield* sendParticipantSettlement(binding, stamp, scope, target, thread.updatedAt, version, now);
     }
   });
-  // one participant's settle command, admitted like the main's: the record moves pending → settled (a local fresh read confirms it; an
-  // accepted command is the record for a linked environment), uncertain on a lost reply, unresolved on a definite rejection
-  const sendParticipantSettlement = (owner: BindingRecord, target: {threadId: string; environmentId: string | null}, version: string, now: number):
-    Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
+  // one participant's automatic settle on its fresh snapshot, admitted like the main's: the command goes out only while the same task is
+  // still complete and the participant still a member, keeps its command through retries, and the record moves pending → settled (a fresh
+  // read confirms it), superseded when its user reactivated it, uncertain on a lost reply, unresolved on a definite rejection, which a
+  // changed snapshot or a user's override produces; every callback write is fenced to the owner root, its generation and this command
+  const sendParticipantSettlement = (owner: BindingRecord, stamp: ParticipantStamp, scope: SupervisorScopeResolution, target: ParticipantTarget, snapshotAt: string,
+    version: string, now: number): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
     if (!rpc) return;
     const operate = rpc;
     const fresh = `supervisor-settle:${yield* ids.uuid}`;
-    const key = settlementKey(target.threadId, target.environmentId);
-    const find = (binding: BindingRecord) => (binding.participantSettlements ?? []).find(item => settlementKey(item.threadId, item.environmentId) === key);
-    const write = (binding: BindingRecord, entry: ParticipantSettlement): BindingRecord =>
-      ({...binding, participantSettlements: [...(binding.participantSettlements ?? []).filter(item => settlementKey(item.threadId, item.environmentId) !== key), entry]});
     yield* admitSend(gate, {
-      identity: `participant:${key}`,
+      identity: `participant:${settlementKey(target.threadId, target.environmentId)}`,
       inFlight: settlements,
       prepare: (guard) => transaction(Effect.gen(function* (): Effect.fn.Return<SendPreparation<void>, SupervisionStoreError> {
         const binding = yield* store.binding(owner.projectId, owner.mainThreadId);
         if (!binding || binding.threadId !== owner.threadId || binding.generation !== owner.generation ||
           (yield* guard.supervisionStopped(owner.mainThreadId)) || !(yield* guard.scopeEnabled(owner.projectId, owner.mainThreadId))) return {_tag: "Answer", value: undefined};
-        const existing = find(binding);
-        if (existing && !["pending", "uncertain", "unresolved"].includes(existing.state)) return {_tag: "Answer", value: undefined};
-        const settlement: ParticipantSettlement = existing?.commandId && ["pending", "uncertain"].includes(existing.state) ? existing
-          : {threadId: target.threadId, environmentId: target.environmentId, commandId: fresh, state: "pending", observedAt: now, activityVersion: version, attempts: 0};
-        const sending: ParticipantSettlement = {...settlement, state: "pending", attempts: (settlement.attempts ?? 0) + 1, observedAt: now, reason: null};
-        yield* store.setBinding(write(binding, sending));
+        // the completion this command rests on is read again in the section: a correction or return that reopened the document while an
+        // earlier participant's command waited leaves nothing to settle
+        const task = yield* store.task(owner.mainThreadId);
+        if (!task || task.id !== stamp.taskId || taskScopeRevision(task) !== stamp.taskRevision || !(yield* taskCompleted(binding, task))) return {_tag: "Answer", value: undefined};
+        if (!(yield* participantTargets(binding, scope)).some(item => settlementKey(item.threadId, item.environmentId) === settlementKey(target.threadId, target.environmentId)))
+          return {_tag: "Answer", value: undefined};
+        const existing = participantRow(binding, stamp, target);
+        if (existing && participantTerminal(existing)) return {_tag: "Answer", value: undefined};
+        const sending: ParticipantSettlement = {...stamp, threadId: target.threadId, environmentId: target.environmentId, commandId: existing?.commandId ?? fresh,
+          state: "pending", observedAt: now, activityVersion: version, attempts: (existing?.attempts ?? 0) + 1, reason: null, snapshotAt};
+        yield* store.setBinding(withParticipantRow(binding, sending));
         const mark = (state: ParticipantSettlement["state"], reason: string | null) => transaction(Effect.gen(function* () {
           const latest = yield* store.binding(owner.projectId, owner.mainThreadId);
-          if (latest && find(latest)?.state !== "settled") yield* store.setBinding(write(latest, {...sending, state, reason}));
+          const row = latest ? participantRow(latest, stamp, target) : undefined;
+          if (latest && latest.threadId === owner.threadId && latest.generation === owner.generation && row?.commandId === sending.commandId && row.state !== "settled")
+            yield* store.setBinding(withParticipantRow(latest, {...sending, state, reason}));
         })).pipe(Effect.orDie);
-        const payload = {type: "thread.settle", commandId: sending.commandId, threadId: target.threadId, ...(target.environmentId === null ? {} : {environmentId: target.environmentId})};
+        const payload = {type: "thread.auto-settle", commandId: sending.commandId, threadId: target.threadId, snapshotAt};
         return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", payload), (flight) => ({
           result: Effect.gen(function* () {
             const outcome = yield* attempt(Effect.gen(function* () {
               const receipt = yield* flight.result;
               if (!record(receipt) || !Number.isSafeInteger(receipt.sequence)) return yield* new SupervisorRpcError("uncertain");
-              if (target.environmentId !== null) {yield* mark("settled", null); return;}
               const current = yield* projection(target.threadId);
               yield* mark(current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : current.thread.settledOverride === "active" ? "superseded" : "uncertain", null);
             }));
             if (outcome.ok) return;
-            if (outcome.cause instanceof SupervisorRpcError && outcome.cause.definiteRejection)
-              yield* mark("unresolved", target.environmentId === null ? "settle_rejected" : "settle_rejected_for_environment");
+            if (outcome.cause instanceof SupervisorRpcError && outcome.cause.definiteRejection) yield* mark("unresolved", "settle_rejected");
             else yield* mark("uncertain", null);
           }).pipe(Effect.onInterrupt(() => mark("uncertain", null))),
           release: flight.release,

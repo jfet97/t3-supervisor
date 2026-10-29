@@ -203,13 +203,13 @@ it("the participants section shows role, attempt, lifecycle, completion, coverag
     {...base, id: "done", handle: "done", threadId: "done", settlement: "settled"},
     {...base, id: "held", handle: "held", threadId: "held", settlement: "skipped", settlementReason: "keep_active"},
     {...base, id: "contribution:vm", source: "declared", kind: "t3_conversation", handle: "reviewer-vm", threadId: "reviewer-vm", environmentId: "lab-vm", contributionId: "vm", revision: 1,
-      lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed", settlement: "unresolved", settlementReason: "settle_rejected_for_environment"},
+      lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed", settlement: "unresolved", settlementReason: "environment_settle_unsupported"},
     {...base, id: "contribution:ext", source: "declared", kind: "external", handle: "github:pr-7", threadId: null, contributionId: "ext", revision: 1, lifecycle: "reported", reportedState: "result",
       completion: "accepted", coverage: "reported", settlement: "not_applicable"},
   ])]);
   assert.match(settled, /Settlement:<\/strong> Settled/);
   assert.match(settled, /Settlement:<\/strong> Not settled \(its user keeps it active\)/);
-  assert.match(settled, /Settlement:<\/strong> Unresolved \(T3 rejected the settle command for its environment\)/);
+  assert.match(settled, /Settlement:<\/strong> Unresolved \(no supported route settles a conversation in another environment\)/);
   assert.match(settled, /Settlement:<\/strong> Not applicable \(not a T3 conversation; its completion is the reported result\)/);
   assert.match(html, /mcp__github__get_pull_request/);
   assert.match(html, /1 earlier receipt belong/);
@@ -242,6 +242,12 @@ it("native reviewer turns remain in history while the same reviewer can start a 
   assert.match(renderConnected([page]), /latest observed review turn belongs to a closed attempt/);
   assert.match(renderConnected([page]), /Attempt 2/);
   assert.match(renderWorkspace([page], undefined, "history"), /this reviewer can continue in the same conversation/);
+  // the disclosure dates each applied return and numbers none: a return's own count is not the target occurrence's attempt
+  const overlapping = {...page, workflows: page.workflows.map(workflow => workflow.threadId === "task-thread" ? {...workflow, returns: [returned,
+    {...returned, returnId: "return-2", backToNodeId: "back-outer", regionNodeIds: ["step-inspect", "step-verify"], attempt: 1, requestedAt: 30, resolvedAt: 40}]} : workflow)};
+  const history = renderWorkspace([overlapping], undefined, "history");
+  assert.equal(history.split("Returned to Review · <time").length - 1, 2, "both returns are headed by their target and time");
+  assert.doesNotMatch(history, /Attempt 1 · returned to/);
   const fresh = {...page, scope: {...page.scope!, threads: page.scope!.threads.map(thread => thread.threadId === "child-one" ? {...thread, observedProviderTurnId: "fresh-turn"} : thread)}};
   assert.doesNotMatch(renderConnected([fresh]), /latest observed review turn belongs to a closed attempt/);
   const replaced = {...page, workflows: page.workflows.map(workflow => workflow.threadId === "task-thread" ? {...workflow, returns: [{...returned,
