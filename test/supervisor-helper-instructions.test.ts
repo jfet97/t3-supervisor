@@ -29,7 +29,7 @@ it("root and helper share one loop, pacing and ending rules, and only the root c
   const shared = [
     "Catch up on the frozen scope, then keep one loop:",
     "pace with one bounded local t3_thread_wait of five to ten seconds on the active target, never thirty (it waits for run completion, not activity); assess; act with one delta when needed.",
-    "when a wait result names your next action or tells you to end the turn (a timed-out wait while the target still runs is neither: read forward and wait again), on context rotation, on a genuine human Stop, for genuine external waiting that a native watcher reports to you (never the operative's own running turn), or, when your own queue is not drainable, at the end of each read-forward pass so queued messages start as normal turns",
+    "when a wait result names your next action or tells you to end the turn (a timed-out wait while the target still runs is neither: read forward and wait again), when the host reports a context handoff or limit for this turn, on a genuine human Stop, for genuine external waiting that a native watcher reports to you (never the operative's own running turn), or, when your own queue is not drainable, at the end of each read-forward pass so queued messages start as normal turns",
     "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.",
   ];
   for (const sentence of shared) {
@@ -40,6 +40,10 @@ it("root and helper share one loop, pacing and ending rules, and only the root c
   // lab finding (a root run ended after seven timed-out waits with the main still running): a timed-out wait and a running main are never endings
   assert.match(activeWatchInstructions, /a main whose run is still running with agreed work unfinished is never an ending, however many waits timed out/u);
   for (const text of [activeWatchInstructions, helperWatchInstructions]) {
+    // the live root claimed context handoff at 17.5% and 28.2% usage without a host event
+    assert.match(text, /A context ending requires a host handoff\/compaction event or a tool result reporting the limit/u);
+    assert.match(text, /Your own context estimate, elapsed time, repeated timeouts or quiet activity never justify a handoff or ending/u);
+    assert.doesNotMatch(text, /on context rotation/u);
     assert.match(text, /a timed-out wait while the target still runs is neither: read forward and wait again/u);
     assert.match(text, /never the operative's own running turn/u);
     assert.match(text, /Keep a cursor per thread and the itemIds of pending delegations/u);

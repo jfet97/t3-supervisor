@@ -35,9 +35,11 @@ export const ownInboxInstructions = "Own inbox: after each t3_thread_wait return
   "read-forward pass so queued messages start as normal turns. The wait between boundaries is bounded; the latency of a long thought or tool call in progress is not.";
 // the endings of a watch, read by a model after many bounded waits: a timed-out wait while the target still runs is not one of them
 const watchEndings = "when a wait result names your next action or tells you to end the turn (a timed-out wait while the target still runs is neither: " +
-  "read forward and wait again), on context rotation, on a genuine human Stop, for genuine external waiting that a native watcher reports to you " +
+  "read forward and wait again), when the host reports a context handoff or limit for this turn, on a genuine human Stop, for genuine external waiting that a native watcher reports to you " +
   "(never the operative's own running turn), or, when your own queue is not drainable, at the end of each read-forward pass so queued messages start as normal turns";
-const watchConduct = "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.";
+const watchConduct = "A context ending requires a host handoff/compaction event or a tool result reporting the limit. " +
+  "Your own context estimate, elapsed time, repeated timeouts or quiet activity never justify a handoff or ending. " +
+  "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.";
 
 /** The root's watch: the whole task, its inbox rules in section contact, the service's liveness fallback behind it. */
 export const activeWatchInstructions = "This check-in is the watch of the whole task, not a finite report. " +
