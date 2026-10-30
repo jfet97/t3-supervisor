@@ -466,9 +466,13 @@ Owned roots have a scoped native thread subscription for compaction recovery. Wh
 the current root run compacts, the service can send one short native steering reminder
 per run, including cascaded compactions. It requires explicit active-steering capability,
 no active root tool or pending input, and fresh binding, enabled-scope and Stop checks.
-The reminder points to the role and current state; it copies no plan or activity index.
+Providers whose steering can interrupt foreground tools use the ordinary-wake backup,
+even when no tool was running at the last read. The reminder points to the role and
+current state; it copies no plan or activity index.
 A late message remains harmless on its own. Unknown delivery keeps its original
-message identity and is never retried as a queued task. Native steering is advisory:
+message identity and is never retried as a queued task. An unresolved earlier delivery
+also defers later immediate reminders, with a classified service log; completed
+compaction still refreshes the normal-wake role notice. Native steering is advisory:
 the service cannot guarantee delivery before the model's next tool in every race.
 
 Each successful root compaction also changes the existing role-delivery confirmation

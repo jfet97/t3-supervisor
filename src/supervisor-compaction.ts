@@ -17,6 +17,8 @@ const NativeCompaction = Schema.Struct({id: NonBlank, threadId: NonBlank, runId:
   ordinal: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), type: Schema.Literal("compaction"), status: Schema.String});
 const isCompaction = Schema.is(NativeCompaction);
 const isSequence = Schema.is(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)));
+const safeSteeringCapabilities = Schema.is(Schema.Struct({turns: Schema.Struct({supportsActiveSteering: Schema.Literal(true),
+  activeSteeringInterruptsTools: Schema.optionalKey(Schema.Literal(false))})}));
 const busyToolTypes = new Set(["dynamic_tool", "command_execution", "file_change", "file_search", "web_search",
   "approval_request", "user_input_request", "secret_request"]);
 const liveStatuses = new Set(["pending", "running", "waiting"]);
@@ -31,12 +33,12 @@ const rootItem = (binding: BindingRecord, projection: Projection, item: unknown)
   return run && isSequence(run.ordinal) ? {item, run} : null;
 };
 
-// native capability evidence prevents T3's interrupt/restart fallback from being selected for this reminder
+// native capability evidence excludes interrupt/restart fallback and steering that can cancel foreground tools
 const supportsNativeSteering = (projection: Projection, run: RunInfo): boolean => {
   const thread = projection.providerThreads?.find(thread => thread.id === run.providerThreadId);
   if (!thread || !Array.isArray(projection.providerSessions)) return false;
   const session: unknown = projection.providerSessions.find((value: unknown) => record(value) && value.id === thread.providerSessionId);
-  return record(session) && record(session.capabilities) && record(session.capabilities.turns) && session.capabilities.turns.supportsActiveSteering === true;
+  return record(session) && safeSteeringCapabilities(session.capabilities);
 };
 const hasLiveRootTool = (projection: Projection, run: RunInfo): boolean => (projection.turnItems ?? []).some(item =>
   item.threadId === projection.thread.id && item.runId === run.id && busyToolTypes.has(String(item.type)) && liveStatuses.has(String(item.status)));
@@ -102,8 +104,11 @@ const make = Effect.gen(function* () {
           return {_tag: "Answer", value: undefined};
         const previous = owner.compactionReminder;
         // a run gets one attempt; an older uncertain attempt keeps its identity until native visibility resolves it
-        if (previous && (previous.runId === run.id || previous.state === "sending" || previous.state === "uncertain"))
+        if (previous?.runId === run.id) return {_tag: "Answer", value: undefined};
+        if (previous && (previous.state === "sending" || previous.state === "uncertain")) {
+          yield* logEvent("supervisor_compaction_recovery_deferred", {reason: "prior_delivery_unresolved", state: previous.state});
           return {_tag: "Answer", value: undefined};
+        }
         if (!(yield* store.setCompactionReminder(binding, previous?.messageId ?? null, receipt))) return {_tag: "Answer", value: undefined};
         return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {
           type: "message.dispatch", commandId, messageId, threadId: binding.threadId, text: receipt.text,

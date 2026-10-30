@@ -150,10 +150,12 @@ it.effect("no-compaction traffic and foreign, child, failed or stale compactions
   assert.equal((yield* f.store.binding("project-a", "main"))?.roleCompaction, undefined);
 }));
 
-it.effect("unsupported native steering, live tools and pending approvals defer recovery to the ordinary-wake backup", () => Effect.gen(function* () {
-  for (const obstacle of ["capability", "tool", "approval"] as const) {
+it.effect("unsupported or tool-interrupting native steering, live tools and pending approvals use the ordinary-wake backup", () => Effect.gen(function* () {
+  for (const obstacle of ["capability", "tool-interrupting", "invalid-tool-interruption", "tool", "approval"] as const) {
     const f = yield* fixture();
     if (obstacle === "capability") f.projection.providerSessions = [{id: "provider-session", capabilities: {turns: {supportsActiveSteering: false}}}];
+    if (obstacle === "tool-interrupting") f.projection.providerSessions = [{id: "provider-session", capabilities: {turns: {supportsActiveSteering: true, activeSteeringInterruptsTools: true}}}];
+    if (obstacle === "invalid-tool-interruption") f.projection.providerSessions = [{id: "provider-session", capabilities: {turns: {supportsActiveSteering: true, activeSteeringInterruptsTools: "false"}}}];
     if (obstacle === "approval") f.projection.runtimeRequests = [{nodeId: "root-node", status: "pending"}];
     const compaction = f.item();
     f.projection.turnItems = [compaction];
@@ -203,6 +205,18 @@ it.effect("lost replies retain one immutable attempt, and only its exact root me
   const reopened = yield* openStores(f.directory, f.directory);
   assert.deepEqual((yield* reopened.supervisors.binding("project-a", "main"))?.compactionReminder, receipt, "the uncertain identity survives reopening stores");
   yield* f.event(compaction);
+  f.projection.runs[0]!.status = "completed";
+  const nextRun = {...f.projection.runs[0]!, id: "next-run", ordinal: 2, status: "running", rootNodeId: "next-root", activeAttemptId: "next-attempt"};
+  f.projection.runs.push(nextRun);
+  f.projection.thread.activeRunId = nextRun.id;
+  f.projection.providerTurns = [{id: "next-provider-turn", runAttemptId: "next-attempt", nodeId: "next-root", status: "running"}];
+  const laterCompaction = f.item("running", {id: "next-compaction", runId: nextRun.id, nodeId: "next-root"});
+  f.projection.turnItems!.push(laterCompaction);
+  yield* f.event(laterCompaction);
+  assert.equal(f.calls.length, 1, "a later run does not overwrite an unresolved delivery identity");
+  laterCompaction.status = "completed";
+  yield* f.event(laterCompaction);
+  assert.equal((yield* f.store.binding("project-a", "main"))?.roleCompaction?.runId, nextRun.id, "the ordinary-wake backup still refreshes");
   const message = {id: receipt.messageId, threadId: "foreign-thread", runId: "root-run", nodeId: "root-node", role: "user",
     text: receipt.text, streaming: false, createdAt: baseTime, updatedAt: baseTime};
   f.projection.messages.push(message);
