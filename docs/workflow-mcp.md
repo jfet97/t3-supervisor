@@ -441,8 +441,9 @@ coordinates. Its explicit document view includes bounded workflow state and nati
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
 `workflow_read` defaults to compact `status`. Use `view: "documents"` only when complete
-records, history, evidence or accepted snapshots are needed; document and lineage pagination
-remain available in that view. Other `view` values return bounded context for the verified binding instead of
+records, history, evidence or accepted snapshots are needed. Fresh lineage and
+coverage also appear in compact status; lineageOffset and limit page it independently
+of workflowOffset, including children created since the previous read. Other `view` values return bounded context for the verified binding instead of
 workflow documents:
 
 - `context`: compact by default: the task's identity, revision pins, objective, status,

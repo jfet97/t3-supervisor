@@ -84,21 +84,21 @@ provenance. Scheduled/imported/MCP-originated requests remain outside automatic
 initial interpretation. User/tool quotations, private reasoning and arbitrary
 agent-selected excerpts do not establish task authority.
 
-Project settings has one exception, **Supervise conversations created by agents**,
-off by default and saved per project. When on, an ordinary main that T3 created
-through its MCP server (native `creationSource: mcp`, an independent root, not a
-delegated child or fork) is supervised for requests from the agent that launched
-it: the sender of its opening request (`createdBy: agent`, `creationSource: mcp`,
-`senderThreadId`). That sender must still be an active T3 conversation outside every
-Supervisor's lineage. Only such requests written after the setting was turned on
-count, so enabling it never sweeps up earlier launches; turning it off again makes
-an agent-sourced task no longer current. Other agents, Supervisor roots and helpers,
-anything they delegated, scheduled or service prompts and imported messages never
-become tasks. The interpretation context names the launching conversation
-(`requestedBy`), and the request is never presented as a human's. Human-created conversations are unchanged. While off, the chat origin remains excluded even after genuine human follow-ups.
-While on, the exact launcher and genuine humans can request work in an eligible
-ordinary main. The setting governs conversation eligibility: Start, Stop and definition approval still require a
-genuine human message, and No Project modes and exclusions still apply.
+Project settings includes **Supervise conversations created by agents**, off by
+default. When enabled, an ordinary main created through T3's MCP server is eligible:
+its actual native agent opening supplies the task, even if its sender ID is missing
+or its launcher is not in this machine's catalog. Such a source stays explicitly
+agent-attributed, never human. Later unattributed agent messages do not grant scope
+expansion; genuine human requests are evaluated independently. Known launchers in
+Supervisor lineage remain excluded. Native children belong to their parent's scope,
+not another independent Supervisor.
+
+Only eligible agent requests after the setting was enabled count. While off, the
+agent-created chat origin remains excluded even after human follow-ups; enabling
+does not adopt old launches. Scheduled, imported, system/service and owned
+Supervisor/helper sources remain excluded. Creation route establishes no human
+authority: Start, Stop and definition approval retain their genuine-human checks,
+and the project/master controls, No Project modes and exclusions still apply.
 
 The Supervisor interprets the latest genuine request together with earlier unresolved
 requests in the same main, such as an issue link that did not yet establish an
