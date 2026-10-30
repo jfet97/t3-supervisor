@@ -90,8 +90,8 @@ it.live("the production startup recovers once from an unread-source interpretati
   assert.ok(match?.[1]);
   const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
   const instructions = (yield* gateway.call("workflow_read", {...reader, view: "instructions"})) as InstructionView;
-  assert.match(instructions.core ?? "", /check the host's exposed tools and try that native operation once/u);
-  assert.match(instructions.core ?? "", /Gateway discovery inventories only that gateway, not the host's native tools/u);
+  assert.match(instructions.core ?? "", /Try the native operation once before declaring it unavailable/u);
+  assert.match(instructions.core ?? "", /a connector search covers only that connector/u);
   const initial = yield* waitFor(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map(contextView)),
     () => "initial submission pins missing");
   const empty = {...initial.submission!.arguments, objective: null, reason: "The source was not read.", sourceMessageIds: [], supervision: "needed", workflow: null,
