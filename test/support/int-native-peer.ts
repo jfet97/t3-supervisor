@@ -29,8 +29,8 @@ export type PeerEntry = PeerHttpEntry | PeerRpcEntry;
 // a reply to an HTTP request: a JSON body with its status, or a raw write on the native response (a lost, stalled, cut or
 // redirected reply)
 export type HttpAnswer = {readonly status: number; readonly value: unknown} | {readonly raw: (request: IncomingMessage, response: ServerResponse) => void};
-// a reply to an rpc frame: a success exit, a failure exit, or the socket terminated after the frame arrived without a reply
-export type RpcAnswer = {readonly value: unknown} | {readonly fail: true} | {readonly drop: true};
+// a reply to an rpc frame: a unary exit, an open subscription chunk, or a lost reply after arrival
+export type RpcAnswer = {readonly value: unknown} | {readonly stream: ReadonlyArray<unknown>} | {readonly fail: true} | {readonly drop: true};
 // a route's reply, undefined when it does not handle the request, or an effect of either
 export type RouteAnswer<A> = A | undefined | Effect.Effect<A | undefined, unknown>;
 
@@ -131,6 +131,7 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
     connections.push(authorization);
     socket.on("message", (data) => {
       const frame = JSON.parse(String(data)) as {_tag?: unknown; id?: unknown; tag?: unknown; payload?: unknown};
+      if (frame._tag === "Ping") {socket.send(JSON.stringify({_tag: "Pong"}));return;}
       if (frame._tag !== "Request" || typeof frame.tag !== "string") return;
       const entry: PeerRpcEntry = {kind: "rpc", tag: frame.tag, authorization,
         payload: typeof frame.payload === "object" && frame.payload !== null ? frame.payload as Record<string, unknown> : {}};
@@ -145,6 +146,10 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
         Effect.flatMap((answer) => Effect.sync(() => {
           if ("drop" in answer) {
             socket.terminate();
+            return;
+          }
+          if ("stream" in answer) {
+            socket.send(JSON.stringify({_tag: "Chunk", requestId: frame.id, values: answer.stream}));
             return;
           }
           socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: "value" in answer ? {_tag: "Success", value: answer.value} : failure}));
@@ -217,6 +222,10 @@ export const nativeReadRoutes = (state: NativeReadState): PeerRoutes => ({
     return undefined;
   },
   rpc: (entry) => {
+    if (entry.tag === "orchestration.subscribeThread") {
+      const projection = state.projections.get(String(entry.payload.threadId));
+      return projection ? {stream: [{kind: "snapshot", snapshotSequence: state.snapshotSequence, projection: structuredClone(projection)}]} : {fail: true};
+    }
     if (entry.tag === "orchestration.getArchivedShellSnapshot")
       return {value: {schemaVersion: 2, snapshotSequence: state.archivedSequence(), threads: []}};
     if (entry.tag === "orchestration.getTurnItem")

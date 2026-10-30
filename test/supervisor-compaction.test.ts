@@ -12,6 +12,7 @@ import type { JsonRecord } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { conversationUnit, dataDirectory, nativeClient, openStores, t3Projections, workflowStore } from "./support/g1a-conversation.js";
 import { baseTime, emptySupervisorProjection, makeSourceProjection } from "./support/ps-fixture.js";
+import { nativeWrites, rpcRequests, startLinFixture } from "./support/lin-fixture.js";
 
 // the real scoped controller, stores, policy and admission gate; only native I/O is synthetic
 const fixture = Effect.fnUntraced(function* () {
@@ -281,3 +282,41 @@ it.effect("completed compaction invalidates the ordinary role acknowledgment; la
   yield* f.store.acknowledgeRole(f.binding, backup.roleVersion);
   assert.equal((yield* f.store.binding("project-a", "main"))?.deliveredRoleVersion, undefined);
 }));
+
+it.live("the production graph receives a native subscription snapshot and sends one guarded steer through the operate transport", () => Effect.gen(function* () {
+  const f = yield* startLinFixture();
+  const binding = yield* f.bindSupervisor;
+  const root = yield* f.supervisor;
+  root.thread.activeRunId = "compacting-run";
+  root.runs.push({id: "compacting-run", threadId: binding.threadId, ordinal: 1, status: "running", requestedAt: baseTime,
+    startedAt: baseTime, completedAt: null, rootNodeId: "root-node", activeAttemptId: "attempt", providerThreadId: "provider-thread"});
+  root.providerThreads = [{id: "provider-thread", providerSessionId: "session"}];
+  root.providerSessions = [{id: "session", capabilities: {turns: {supportsActiveSteering: true}}}];
+  root.providerTurns = [{id: "provider-turn", runAttemptId: "attempt", nodeId: "root-node", status: "running"}];
+  root.turnItems!.push({id: "native-compaction", threadId: binding.threadId, runId: "compacting-run", nodeId: "root-node", ordinal: 1,
+    type: "compaction", status: "running"});
+  const arrived = yield* Deferred.make<void>();
+  f.peer.onRpc = entry => {
+    if (entry.tag !== "orchestration.dispatchCommand" || entry.payload.type !== "message.dispatch") return Effect.succeed(undefined);
+    const payload = entry.payload;
+    root.messages.push({id: String(payload.messageId), threadId: binding.threadId, runId: "compacting-run", nodeId: "root-node", role: "user",
+      text: String(payload.text), streaming: false, createdAt: baseTime, updatedAt: baseTime});
+    return Deferred.succeed(arrived, undefined).pipe(Effect.as(undefined));
+  };
+  yield* f.runOnce;
+  yield* Deferred.await(arrived);
+  yield* f.runOnce;
+  const subscriptions = rpcRequests(f.peer, "orchestration.subscribeThread");
+  assert.equal(subscriptions.length, 1, "the peer keeps the stream open across cycles");
+  assert.equal(subscriptions[0]?.authorization, "Bearer int-read-token");
+  assert.deepEqual(subscriptions[0]?.payload, {requestCompletionMarker: true, threadId: binding.threadId, acceptBoundedSnapshot: true});
+  const writes = nativeWrites(f.peer);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0]?.kind, "rpc");
+  const sent = rpcRequests(f.peer, "orchestration.dispatchCommand")[0]!;
+  assert.equal(sent.authorization, "Bearer int-operate-token");
+  assert.deepEqual(sent.payload.dispatchMode, {type: "steer_active", targetRunId: "compacting-run"});
+  assert.equal(sent.payload.threadId, binding.threadId);
+  assert.equal((yield* f.binding).compactionReminder?.state, "visible");
+  assert.deepEqual(f.peer.unexpected, []);
+}), {timeout: 10_000});
