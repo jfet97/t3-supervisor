@@ -59,7 +59,7 @@ import {
   type WorkflowEvidenceTool,
   type WorkflowEvidenceMatch,
 } from "./workflow-write-evidence.js";
-import {interpretationLimits, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
+import {interpretationLimits, proposalContextFromDefinitions, proposalContextMatches, redact, stepEntryGuidance, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 import { commitInterpretationSubmission, interpretationChecks, interpretationReceiptOwner, rawInterpretationArguments, readInterpretationReceipt, taskPendingStart,
   workflowWriteReceiptsTable, type InterpretationIntake } from "./interpretation-intake.js";
 import {
@@ -373,7 +373,7 @@ export const scopedWorkflowText = (document: WorkflowStateDocument): string => {
   const pointers = [...entities.values()].some(entity => entity.references?.length || entity.skills?.length);
   const pendingReturns = document.returns.filter(item => item.state === "pending");
   const text = redact([`Your scoped workflow ${document.workflowId}, revision ${document.revision}, status ${document.status}, inside parent workflow ${document.parentWorkflowId}.`,
-    `Objective: ${document.objective ?? "(none recorded)"}`,
+    `Objective: ${document.objective ?? "(none recorded)"}`, stepEntryGuidance,
     ...document.plan ? ["Plan:", ...rows.flatMap(row => [line(row), ...duty(row)])] : ["No plan is recorded for you yet."],
     ...pointers && document.sourceBinding ? [`References and skill paths are relative to the checkout root ${document.sourceBinding.workspaceRoot}; read those that apply, progressively. They grant no authority.`] : [],
     ...pendingReturns.map(item => `Return pending since attempt ${item.attempt}: back to [${item.targetNodeId}]; your Supervisor starts the next attempt.`),

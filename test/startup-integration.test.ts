@@ -5,6 +5,7 @@ import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { toolRouteReminder } from "../src/supervisor-workflow.js";
 import { startStartupSession, type StartupDispatch } from "./support/startup-gateway.js";
+import { workflowFields } from "./support/interpretation-submit.js";
 
 // one production startup: real launch, gateway reads, submitted then finalized interpretation.
 // an initial notice that lacks the discovery hint before workflow_read fails this test.
@@ -79,4 +80,47 @@ it.live("the production app launches a root and finalizes a gateway interpretati
   }), () => `interpretation did not finalize: ${JSON.stringify(observe.taskDocument())} ${JSON.stringify(observe.debug())}`);
   assert.equal(finalized.workflow ?? null, null);
   assert.equal(observe.mainDispatches().length, 0, "a not_needed interpretation does not contact the main");
+}).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), {timeout: 90_000});
+
+it.live("a needed-work startup delivers a short notice and the operative reads its own step contracts through the gateway", () => Effect.gen(function* () {
+  const {gateway, observe} = yield* startStartupSession;
+  const objective = yield* waitFor(Effect.sync(() => observe.objectiveDispatches()[0] ?? null),
+    () => "the fresh root did not receive its interpretation request");
+  assert.ok(hintBeforeRead(objective));
+  assert.ok((yield* gateway.discover()).includes("supervision_plan"));
+  const match = /with (\{"supervisorThreadId":"[^"]+","bindingGeneration":\d+\})/u.exec(objective.text);
+  assert.ok(match?.[1]);
+  const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
+  const context = yield* waitFor(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map(contextView)),
+    () => "the fresh context did not expose interpretation pins");
+  const pins = context.submission!.arguments!;
+  const source = pins.sourcePin as {messageId: string};
+  const fields = workflowFields("Inspect the checkout and explain its status.", "Two bounded evidence and reporting duties.", {
+    sourceMessageIds: [source.messageId],
+    workflow: {requirements: [], plan: {kind: "sequence", nodes: [
+      {kind: "step", definitionId: null, localId: "inspect", name: "Inspect checkout", description: "Read the current checkout and its remote state.", reason: "Establish the facts."},
+      {kind: "step", definitionId: null, localId: "explain", name: "Explain status", description: "Explain the observed status and any gaps.", reason: "Answer from the evidence.",
+        references: [".t3-supervisor/project.yaml"], skills: ["catalog-reading"]},
+    ]}},
+    conversation: {draft: {objective: "Inspect the checkout and explain its status.", constraints: [], questions: [], findings: [], duties: []},
+      intent: "authorize", outcome: "Inspect the checkout and explain its status.", limits: [], sourceMessageIds: [source.messageId], antecedentMessageIds: [], scope: "changed"},
+  });
+  assert.equal(((yield* gateway.call("supervision_interpretation_submit", {...pins, ...fields})) as {status: string}).status, "submitted");
+  observe.completeRequestRun();
+  const notice = yield* waitFor(Effect.sync(() => observe.mainDispatches().find(item => item.text.includes("supervision_plan")) ?? null),
+    () => `the needed interpretation never delivered its proposal: ${JSON.stringify(observe.debug())}`);
+  assert.doesNotMatch(notice.text, /Step entry:|Inspect checkout|Explain status/u, "the native notice remains a pointer");
+  const args = /supervision_plan (\{"callerThreadId":"[^"]+","taskId":"[^"]+","proposalId":"[^"]+"\})/u.exec(notice.text);
+  assert.ok(args?.[1], "the notice names the actual operative reader arguments");
+  const proposal = (yield* gateway.call("supervision_plan", JSON.parse(args[1]))) as {status: string; proposal?: string};
+  assert.equal(proposal.status, "ok", JSON.stringify(proposal));
+  const text = proposal.proposal!;
+  assert.equal(text.split("Step entry:").length, 2);
+  assert.match(text, /Before substantive work there, read or refresh its contract and applicable references and skills/u);
+  assert.match(text, /Continue without waiting for routine confirmation/u);
+  assert.match(text, /Inspect checkout/u);
+  assert.match(text, /Explain status/u);
+  assert.match(text, /\.t3-supervisor\/project\.yaml/u);
+  assert.match(text, /catalog-reading/u);
+  assert.equal(observe.taskDocument()?.status, "inferred");
 }).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), {timeout: 90_000});

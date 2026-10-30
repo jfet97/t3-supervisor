@@ -4602,6 +4602,9 @@ it.effect("the operative introduction points to the contribution record and the 
   const editing = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions", section: "workflow_edit"});
   assert.match(String(editing.instructions), /reconcile unread native-child results and external contributions awaiting a result/u);
   assert.match(String(editing.instructions), /an explicit current wait remains a wait, not completed work/u);
+  assert.match(String(editing.instructions), /an announcement alone proves no completion/u);
+  assert.match(String(editing.instructions), /Lack of a visible read alone is uncertainty/u);
+  assert.match(String(editing.instructions), /without a routine approval reply or technical review/u);
   const role = yield* fixture.conversation.roleFor(fixture.binding);
   assert.match(role, /exact fence named external-contribution/u);
   assert.match(role, /Reporting a result never completes a step, and no progress reports are needed/u);
