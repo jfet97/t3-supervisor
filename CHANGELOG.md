@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.18
+
+### Patch Changes
+
+- f2a8b78: Give operators shared participant and completion guidance when they read their plan, and clarify which rules belong in project workflow definitions.
+
 ## 0.0.17
 
 ### Patch Changes
