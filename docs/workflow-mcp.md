@@ -443,7 +443,9 @@ actor-authenticated to a particular T3 conversation and grant no edit authority.
 `workflow_read` defaults to compact `status`. Use `view: "documents"` only when complete
 records, history, evidence or accepted snapshots are needed. Fresh lineage and
 coverage also appear in compact status; lineageOffset and limit page it independently
-of workflowOffset, including children created since the previous read. Other `view` values return bounded context for the verified binding instead of
+of workflowOffset, including children created since the previous read. The shared
+limit bounds both pages; each has its own hasMore flag, so one complete page does
+not establish that the other list is complete. Other `view` values return bounded context for the verified binding instead of
 workflow documents:
 
 - `context`: compact by default: the task's identity, revision pins, objective, status,
