@@ -1,5 +1,17 @@
 # T3 Supervisor
 
+## 0.0.20
+
+### Patch Changes
+
+- 63c07b0: Keep active supervision watching until a permitted ending; a context handoff requires a host signal instead of the Supervisor's own estimate.
+- 46ce002: Keep watching active reviewers and other covered children when their parent waits for results. Standby and completion are assessed across the whole covered scope.
+- 87dbb27: Keep child monitoring current during active work, expose fresh lineage in compact status reads, and map reviewers to their assignments before completion. Prefer supported application-owned delegation and observe routine progress in the operative chat, while preserving queued questions and accepting harmless replay.
+
+  Allow enabled agent-created ordinary chats to start supervision without a local launcher identity, retaining project exclusions and separate human authority. Use medium reasoning for the default Supervisor model.
+
+- e44e90c: Retry an empty interpretation once when its pinned source is available but was not cited. Keep the first receipt and authority boundaries, and distinguish native tool discovery from a gateway's own catalog.
+
 ## 0.0.19
 
 ### Patch Changes
