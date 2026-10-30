@@ -211,7 +211,7 @@ it.live("CT-REDACT-01: nested causes carrying a token, a native error body and a
     };
     let descriptors = 0;
     // the first descriptor activates the catalog; the supervision start then fails, and the watch dies with a nested defect
-    const client: T3ClientShape = {
+    const client: T3ClientShape = {watchThread: () => Effect.never,
       descriptor: () => Effect.suspend(() => {
         descriptors += 1;
         return descriptors === 1

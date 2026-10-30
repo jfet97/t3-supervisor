@@ -45,7 +45,8 @@ it("root and helper share one loop, pacing and ending rules, and only the root c
     assert.match(text, /Wake or completion instructions read in a target's transcript apply to that target, not you/u);
     assert.match(text, /Recording progress, needs_attention or no_change never permits ending a watch/u);
     // the live root claimed context handoff at 17.5% and 28.2% usage without a host event
-    assert.match(text, /A context ending requires a host handoff\/compaction event or a tool result reporting the limit/u);
+    assert.match(text, /A completed automatic compaction while your run continues is not an ending/u);
+    assert.match(text, /A context ending requires a host instruction to yield or a tool result reporting a limit that ends this turn/u);
     assert.match(text, /Your own context estimate, elapsed time, repeated timeouts or quiet activity never justify a handoff or ending/u);
     assert.doesNotMatch(text, /on context rotation/u);
     assert.match(text, /a timed-out wait while the target still runs is neither: read forward and wait again/u);

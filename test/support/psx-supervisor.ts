@@ -124,7 +124,7 @@ export const assembleSupervisor = (input: AssembleInput) => Effect.gen(function*
   const stores = input.policy ? {...input.stores, policy, context: Context.add(input.stores.context, ThreadPolicyStore, policy)} : input.stores;
   const scope = new SupervisionScope(input.config, {guidance: stores.guidance, supervisors: stores.supervisors, policy}, true);
   const base = Context.add(stores.context, WorkflowStateStore, input.workflows).pipe(Context.add(SupervisionScopeService, scope));
-  const t3 = {descriptor: () => Effect.die(new Error("unused")), watch: () => Effect.die(new Error("unused")), projection: input.projection} satisfies T3ClientShape;
+  const t3 = {watchThread: () => Effect.never, descriptor: () => Effect.die(new Error("unused")), watch: () => Effect.die(new Error("unused")), projection: input.projection} satisfies T3ClientShape;
   const definitions = definitionsService(input.definitions);
   const team = yield* Layer.build(SupervisionTeamLive({baseUrl: input.config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(base), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitions), Layer.succeed(NativeRpc, input.read),

@@ -30,6 +30,7 @@ import { Store, type StoreError } from "./store.js";
 import { T3Client, T3TransportError } from "./t3.js";
 import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "./types.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
+import { SupervisorCompaction } from "./supervisor-compaction.js";
 import { introductionOutcomeUnknown, SupervisorConversationStore } from "./supervisor-conversation-store.js";
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
@@ -290,6 +291,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const ids = yield* SupervisorIds;
   const conversation = yield* SupervisorConversation;
   const lifecycle = yield* SupervisorLifecycle;
+  const compaction = yield* SupervisorCompaction;
   const control = yield* SupervisionControl;
   const transport = yield* HelperTransport;
   // the sections stamp their time from the clock the service was built with
@@ -329,6 +331,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const project = (projectId: string) => Effect.gen(function* () {
     const catalog = yield* source.catalog();
     yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
+    // existing roots listen before discovery can await slow work; the later sync adds newly reserved roots
+    yield* compaction.sync;
     const found = catalog.projects.find(p => p.project.id === projectId && p.available)?.project;
     if (!found) return yield* new ProjectUnavailable();
     return {project: found, catalog};
@@ -1362,7 +1366,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           // the root executed this request and submitted: the full notice it carried delivered this instructions version
           if (job.requestRoleVersion) {
             const owner = yield* store.bindingForSupervisor(job.supervisorThreadId);
-            if (owner && owner.deliveredRoleVersion !== job.requestRoleVersion) yield* store.setBinding({...owner, deliveredRoleVersion: job.requestRoleVersion});
+            if (owner && owner.deliveredRoleVersion !== job.requestRoleVersion) yield* store.acknowledgeRole(owner, job.requestRoleVersion);
           }
           // an unread but resolved source gets one new request; its first attempt and receipt remain immutable
           const submittedArguments = decodeSubmittedArguments(receipt.argumentsCanonical);
@@ -1430,6 +1434,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     // a confirmed missing Supervisor's binding write is a send guard input: one admission section
     const supervisor = yield* projection(binding.threadId).pipe(Effect.tapError((cause) => cause instanceof T3TransportError && cause.httpStatus === 404 && bound.state === "ready"
       ? admitted(() => store.setBinding({...bound, state: "missing"})) : Effect.void));
+    yield* compaction.observe(binding, supervisor);
     // after the Supervisor read, its binding and model bookkeeping, the in-flight boundary closure and the path decision run as one
     // admission section
     const decided = yield* admitted(() => Effect.gen(function* (): Effect.fn.Return<{readonly next: "done"} | {readonly next: "model_missing"} | {readonly next: "conversation"} |
@@ -1802,6 +1807,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       }
     }
     const allBindings = yield* store.bindings();
+    yield* compaction.sync;
     const bindings = yield* Ref.modify(bindingOffset, (current) => {
       const start = allBindings.length ? current % allBindings.length : 0;
       return [[...allBindings.slice(start), ...allBindings.slice(0, start)], allBindings.length ? (start + 4) % allBindings.length : 0] as const;

@@ -8,6 +8,7 @@ import { ScopeLocks } from "./scope-locks.js";
 import { SupervisionControl } from "./supervision-control.js";
 import { SupervisionGate, SupervisionScopeService } from "./supervision-gate.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
+import { SupervisorCompaction } from "./supervisor-compaction.js";
 import { SupervisorConversationStore } from "./supervisor-conversation-store.js";
 import { HelperTransport } from "./supervisor-helper-transport.js";
 import { SupervisorLifecycle } from "./supervisor-lifecycle.js";
@@ -51,6 +52,7 @@ export const SupervisionScopeLive = (operateRpcAvailable: boolean) => Layer.unwr
 // i-01/i-02: the admission gate over the scope predicates, then the helper transport, the team runtime, the conversation and the
 // lifecycle of the run
 export const SupervisionTeamLive = (run: Pick<SupervisionRun, "baseUrl">) => SupervisorLifecycle.layer.pipe(
+  Layer.provideMerge(SupervisorCompaction.layer),
   Layer.provideMerge(SupervisorConversation.layer),
   Layer.provideMerge(SupervisorTeamRuntime.layer()),
   Layer.provideMerge(HelperTransport.layer({baseUrl: run.baseUrl})),

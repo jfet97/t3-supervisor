@@ -58,6 +58,11 @@ export interface T3ClientShape {
     cursor: number | undefined,
     onItem: (item: SourceItem) => Effect.Effect<void, E, R>
   ): Effect.Effect<never, T3TransportError | E, R>;
+  watchThread<E = never, R = never>(
+    threadId: string,
+    cursor: number | undefined,
+    onItem: (item: JsonRecord) => Effect.Effect<void, E, R>
+  ): Effect.Effect<never, T3TransportError | E, R>;
 }
 
 export interface T3ClientOptions {
@@ -107,6 +112,12 @@ const isProjectionSnapshot = Schema.is(Schema.Struct({
   hasMoreHistory: Schema.optional(Schema.Unknown.check(Schema.makeFilter((value: unknown) => value !== true))),
   historyCursor: Schema.optional(Schema.Null),
 }));
+const isThreadStreamItem = Schema.is(Schema.Union([
+  Schema.Struct({kind: Schema.Literal("synchronized")}),
+  Schema.Struct({kind: Schema.Literal("snapshot"), snapshotSequence: Sequence, projection: ProjectionShape}),
+  Schema.Struct({kind: Schema.Literal("event"), sequence: Sequence, event: Schema.Struct({type: NonBlank, payload: Schema.Unknown})}),
+  Schema.Struct({kind: Schema.Literal("unknown-event"), sequence: Sequence, eventType: NonBlank}),
+]));
 
 const Location = Schema.optional(Schema.Literals(["active", "archive"]));
 const ThreadUpdated = Schema.Struct({kind: Schema.Literal("thread.updated"), sequence: Sequence, thread: Schema.Struct({id: NonBlank}), location: Location});
@@ -345,21 +356,22 @@ const make = (options: T3ClientOptions): Effect.Effect<T3ClientShape, never, Htt
       }),
     );
 
-    const watch = <E = never, R = never>(cursor: number | undefined, onItem: (item: SourceItem) => Effect.Effect<void, E, R>):
+    const watch = <E = never, R = never>(cursor: number | undefined, onItem: (item: SourceItem) => Effect.Effect<void, E, R>,
+      thread?: {id: string; onItem: (item: JsonRecord) => Effect.Effect<void, E, R>}):
       Effect.Effect<never, T3TransportError | E, R> => {
       if (cursor !== undefined && !isSequence(cursor)) {
         return Effect.fail(new T3TransportError("T3 orchestration cursor must be a non-negative integer"));
       }
+      if (thread && !isNonBlank(thread.id)) return Effect.fail(new T3TransportError("T3 thread id must not be empty"));
       return Effect.scoped(Effect.gen(function*() {
         // one live subscription; reading pauses while a message is handled, and the archive unary uses its own socket
         const connection = yield* envelope.open({
           endpoint,
           requests: [{
             id: "1",
-            tag: "orchestration.subscribeShell",
-            payload: cursor === undefined
-              ? {requestCompletionMarker: true}
-              : {requestCompletionMarker: true, afterSequence: cursor},
+            tag: thread ? "orchestration.subscribeThread" : "orchestration.subscribeShell",
+            payload: {requestCompletionMarker: true, ...(cursor === undefined ? {} : {afterSequence: cursor}),
+              ...(thread ? {threadId: thread.id, acceptBoundedSnapshot: true} : {})},
           }],
           maxPayload: nativeMaxPayload.t3,
           handshakeTimeout: Duration.millis(settings.webSocketHandshakeTimeoutMs),
@@ -385,6 +397,12 @@ const make = (options: T3ClientOptions): Effect.Effect<T3ClientShape, never, Htt
         const ingest = (requestId: string, values: ReadonlyArray<unknown>) =>
           Effect.gen(function*() {
             for (const item of values) {
+              if (thread) {
+                if (!isThreadStreamItem(item) || item.kind === "snapshot" && item.projection.thread.id !== thread.id)
+                  return yield* Effect.fail(new T3TransportError("T3 thread subscription item has an unsupported schema or shape"));
+                yield* thread.onItem(item as JsonRecord);
+                continue;
+              }
               if (!isActiveShellItem(item)) {
                 return yield* Effect.fail(new T3TransportError("T3 subscription item has an unsupported schema or shape"));
               }
@@ -454,6 +472,7 @@ const make = (options: T3ClientOptions): Effect.Effect<T3ClientShape, never, Htt
         return value as unknown as T3ProjectionSnapshot;
       }),
       watch,
+      watchThread: (threadId, cursor, onItem) => watch(cursor, () => Effect.void, {id: threadId, onItem}),
     });
   });
 

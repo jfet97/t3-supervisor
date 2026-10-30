@@ -17,7 +17,7 @@ const forbidden = (client: string) => Effect.die(new Error(`a read-only case mus
 
 const forbiddenRpc = (client: string): NativeRpcShape => ({ call: () => forbidden(client), initiate: () => forbidden(client) });
 
-const forbiddenT3: T3ClientShape = { descriptor: () => forbidden("T3 descriptor"), projection: () => forbidden("T3 projection"), watch: () => forbidden("T3 watch") };
+const forbiddenT3: T3ClientShape = {watchThread: () => Effect.never,  descriptor: () => forbidden("T3 descriptor"), projection: () => forbidden("T3 projection"), watch: () => forbidden("T3 watch") };
 
 // the webhook POST of a helper delivery
 const forbiddenFetch: typeof globalThis.fetch = () => Promise.reject(new Error("a read-only case must not post a webhook"));

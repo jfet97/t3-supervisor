@@ -208,7 +208,7 @@ export const makeFakeT3 = (options: FakeT3Options): Effect.Effect<FakeT3, never,
     const projection = projections.get(threadId);
     return projection ? Effect.succeed(projection) : Effect.die(new Error(`missing test projection ${threadId}`));
   });
-  const client = (read: (threadId: string) => Effect.Effect<Projection, T3TransportError>, hook: () => ReadHook | null, snapshotSequence: number): T3ClientShape => ({
+  const client = (read: (threadId: string) => Effect.Effect<Projection, T3TransportError>, hook: () => ReadHook | null, snapshotSequence: number): T3ClientShape => ({watchThread: () => Effect.never,
     descriptor: unused("T3 descriptor"),
     watch: unused("T3 watch"),
     projection: (threadId) => Effect.map(Effect.suspend(() => {
