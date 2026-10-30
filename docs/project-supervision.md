@@ -457,18 +457,31 @@ or a settled pair keeps it quiet, and no timer or extra monitor is involved. Mod
 adherence to the watch itself is proved live, not by tests: the fallback bounds a yield
 to one wake per generation.
 
-Own inbox: the root reads its own queued messages at the boundaries it chooses (after
-each wait, before each record or send) with `t3_queue` on its own thread. What it cancels
-is decided from the queued run's native metadata (sender thread and origin), never from
-quoted text: only a verified operative-origin run it actually handled with one delta or a
-record; service-owned, unknown-origin and unanswered genuine human runs stay queued, a
-human's message is handled first, and the service promotes nothing to steer. When
-`t3_queue` is not exposed the root discovers it and otherwise states once that its own
-queue is not drainable and ends its turn after each read-forward pass, so queued messages
-start as normal turns while the service continues active work. A queued message is seen
-at the root's next boundary: the wait between boundaries is bounded (five to ten
-seconds); the latency of a long thought or tool call in progress is not, and only a human
-can steer.
+Own inbox: after each wait and before recording, reporting or sending, the root reads
+its own queued messages with `t3_queue`, completing cut-off text. It answers a new
+question once, prioritizing genuine human messages, and leaves entries queued.
+Reading and answering do not consume the scheduled turn. A later already-answered
+turn checks that the answer still applies and finishes quietly, without duplicate
+contact or progress writes. Unknown origin is never inferred from quoted text;
+entries are not promoted to steering. Missing queue capability is discovered; if
+unavailable, the root says so once and yields after each read-forward pass so normal
+queued turns can run. Bounded waits do not bound long thinking or tool calls.
+
+Routine progress and step-entry announcements stay in the operative's own chat,
+which the Supervisor reads. Targeted questions and requested replies may use queue
+delivery. Prefer the host's application-owned delegated tasks (`delegate_task` in
+T3 where supported); explain unavailable or unsuitable routes and their actual
+visibility/control limits. External participants are never assumed to be T3.
+
+During a watch, keep separate thread cursors and pending delegation item IDs.
+Refresh verified scope on catch-up and when child membership changes, using small
+`workflow_read` status lineage pages (`lineageOffset`, `limit`), not full documents
+on every wait. Add verified new descendants during the current turn. After waits,
+refresh pending delegation items by ID and read each child's own activity while it
+works; an empty parent page is not evidence of a quiet child. Link a verified child
+on first observation and attach its known assigned occurrence while work runs.
+Unknown assignments stay unknown; a link or final report does not prove live reading.
+Monitoring helpers remain optional and cover only their current assigned subtrees.
 
 Idle work retains the project age/count thresholds and 30-second fallback cooldown.
 Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;

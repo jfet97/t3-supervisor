@@ -10,7 +10,7 @@ every child is not required.
 
 The root coordinates the operational main, team membership, shared policy and
 unassigned work. A helper assesses and guides the operational subtrees assigned to
-it, including verified descendants added later. Helpers may update child workflows
+it, including verified descendants added later. Refresh compact status lineage when membership changes, read each child forward by its own cursor, and re-read pending delegation items by ID for in-place updates. Link newly observed children while they work; report their actual parent occurrence to the root for assignment, never inventing a role or editing an unassigned parent. Helpers may update child workflows
 inside their current scope. They cannot change the main workflow or agreements,
 edit shared policy, recruit helpers or grant authority.
 

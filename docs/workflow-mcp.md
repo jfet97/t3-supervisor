@@ -18,6 +18,12 @@ historical accepted snapshot; current task-source and definition validity remain
 part of the existing agreement/recovery system. Neither acceptance nor an
 observation note proves execution.
 
+Compact `workflow_read` status also returns fresh verified native lineage and its
+`lineageOffset`/`lineageHasMore` pagination, with current team coverage when available.
+Use small `limit` pages to discover children created during a running watch without
+requesting complete plans or history. Discovery, assignment, actual reading and
+assessment remain separate facts.
+
 ## Native workflow proposal and acceptance records
 
 Native chat negotiation uses compact top-level fenced records; they are separate from
