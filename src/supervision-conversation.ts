@@ -14,7 +14,7 @@ export const requesterSources = (main: Projection, policy: TaskRequesterPolicy, 
     const who = run && taskRequester(main, run, message, policy);
     return run && who && run.ordinal > floor && (enabledAt === null || (timestampMs(message.createdAt) ?? 0) > enabledAt)
       ? [{messageId: message.id, runId: run.id, ordinal: run.ordinal, hash: fingerprint(message.text),
-        requester: who.kind === "human" ? "human" as const : "launching_agent" as const}] : [];
+        requester: who.kind === "human" ? "human" as const : who.kind === "agent" ? "launching_agent" as const : "unattributed_agent" as const}] : [];
   }).sort((a, b) => a.ordinal - b.ordinal);
 
 export const conversationAuthorityCurrent = (task: ConversationTask, main: Projection, policy: TaskRequesterPolicy): boolean => {
@@ -63,14 +63,14 @@ export const resolveConversationDecision = (input: {
   let scopeChanged = false;
   if (decision.intent === "authorize" || decision.intent === "resume") {
     if (!sourceIds.has(watermark.messageId) || !decision.outcome?.trim() || scopeSources.length === 0) return {ok: false, reason: "authorization_source_required"};
-    if (authorization?.state === "paused" && authorization.stateSource.requester === "human" && watermark.requester === "launching_agent")
+    if (authorization?.state === "paused" && authorization.stateSource.requester === "human" && watermark.requester !== "human")
       return {ok: false, reason: "human_pause_retained"};
     const same = authorization !== null && decision.scope === "same" && decision.outcome === authorization.outcome && fingerprint(decision.limits) === fingerprint(authorization.limits);
     if (decision.scope === "same" && !same) return {ok: false, reason: "scope_changed"};
     scopeChanged = !same;
     authorization = {...(same ? authorization! : {scopeRevision: prior.authorization ? fingerprint({outcome: decision.outcome, limits: decision.limits, scopeSources}) : input.initialRevision,
       outcome: decision.outcome, limits: [...decision.limits], scopeSources}), state: "authorized", stateSource: watermark, attemptId: input.attemptId};
-  } else if (decision.intent === "pause" && authorization && !(authorization.state === "paused" && authorization.stateSource.requester === "human" && watermark.requester === "launching_agent")) {
+  } else if (decision.intent === "pause" && authorization && !(authorization.state === "paused" && authorization.stateSource.requester === "human" && watermark.requester !== "human")) {
     // returning to discussion pauses participation without disabling Supervisor or discarding the accepted scope.
     authorization = {...authorization, state: "paused", stateSource: watermark, attemptId: input.attemptId};
   } else if (authorization?.state === "authorized" && !authorization.scopeSources.every(pin => sources.some(source => source.messageId === pin.messageId && source.hash === pin.hash))) {

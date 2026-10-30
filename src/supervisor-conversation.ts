@@ -1704,7 +1704,7 @@ Turns without a service request: do pending context/planning work, then keep the
     messageIds.length > 0 && messageIds.every(id => {
       const message = agent.messages.find(item => item.id === id && item.threadId === task.threadId);
       const run = message?.runId ? agent.runs.find(item => item.id === message.runId) : undefined;
-      return Boolean(message && (genuineUserMessage(agent, task.threadId, message) || run && taskRequester(agent, run, message, requesters)?.kind === "agent"));
+      return Boolean(message && (genuineUserMessage(agent, task.threadId, message) || run && taskRequester(agent, run, message, requesters) !== null));
     });
   // whether a human wrote in the main after a time and after the activation boundary of a re-enabled project; an unreadable
   // main keeps the pair asleep

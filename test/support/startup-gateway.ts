@@ -18,7 +18,7 @@ import { intPeer, json, nativeReadRoutes, nativeReadState, type NativeReadState,
 const projectYaml = "workflows: []\nsteps: []\n";
 const modelConfig = {providers: [{enabled: true, instanceId: "codex", displayName: "Codex", installed: true, status: "ready",
   models: ["gpt-6-luna", "gpt-6.1-sol"].map((slug) => ({slug, name: slug, capabilities: {optionDescriptors: [{id: "reasoningEffort", label: "Reasoning effort", type: "select",
-    currentValue: "high", options: [{id: "low", label: "Low"}, {id: "high", label: "High"}, {id: "max", label: "Max"}]}]}}))}]};
+    currentValue: "high", options: [{id: "low", label: "Low"}, {id: "medium", label: "Medium"}, {id: "high", label: "High"}, {id: "max", label: "Max"}]}]}}))}]};
 
 export const startupProjectId = "startup-project";
 export const startupMainThreadId = "startup-main";

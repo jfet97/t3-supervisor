@@ -628,7 +628,7 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
           label: "Reasoning effort",
           type: "select",
           currentValue,
-          options: [{ id: "low", label: "Low" }, { id: "high", label: "High" }, { id: "max", label: "Max" }],
+          options: [{ id: "low", label: "Low" }, { id: "medium", label: "Medium" }, { id: "high", label: "High" }, { id: "max", label: "Max" }],
         }] },
       })),
     }],

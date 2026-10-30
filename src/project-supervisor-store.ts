@@ -22,10 +22,10 @@ import type { ProposalContext } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { TaskInterpretationFields } from "./interpretation-evidence.js";
 
-// the model of a project without saved settings (D-28, Andrea 2026-10-23): GPT-6.1 Sol LOW; saved settings and existing bindings keep theirs
-export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "low"}]};
+// the default for new roots is GPT-6.1 Sol medium; saved settings and existing bindings keep their own selection
+export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "medium"}]};
 export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
-// superviseAgentCreatedThreads: whether the launching agent's requests in an ordinary agent-created main are supervised, off unless
+// superviseAgentCreatedThreads: whether ordinary agent-created mains are supervised, off unless
 // saved; agentCreatedThreadsEnabledAt: when it was last turned on, so only agent requests written afterwards count
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; planningTimeoutMs?: number; teamSettings?: {maxHelpersPerRoot: number}; superviseAgentCreatedThreads: boolean; agentCreatedThreadsEnabledAt: number | null; applyAttempts?: number; applicationMessage?: string | null};
 export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;
@@ -72,8 +72,8 @@ export type InterpretationSourceMessage = {readonly messageId: string; readonly 
  * its root reads on demand.
  */
 export type InterpretationSources = {
-  readonly requestedBy: {readonly kind: "human"} | {readonly kind: "launching_agent"; readonly threadId: string};
-  readonly requesterMessages: ReadonlyArray<InterpretationSourceMessage & {readonly requester: "human" | "launching_agent"}>;
+  readonly requestedBy: {readonly kind: "human"} | {readonly kind: "launching_agent"; readonly threadId: string} | {readonly kind: "unattributed_agent"};
+  readonly requesterMessages: ReadonlyArray<InterpretationSourceMessage & {readonly requester: "human" | "launching_agent" | "unattributed_agent"}>;
   readonly operativeMessages: ReadonlyArray<InterpretationSourceMessage>;
 };
 

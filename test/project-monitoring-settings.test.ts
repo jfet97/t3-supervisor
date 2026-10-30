@@ -87,12 +87,15 @@ it.effect("only a changed model selection starts a new native model mutation", (
     assert.deepEqual(changed.monitoring, {...defaultMonitoringSettings, intervalMinutes: 1});
   })));
 
-it.effect("a project without saved settings uses the GPT-6.1 Sol LOW default, while saved settings and existing bindings keep their selection", () =>
+it.effect("a project without saved settings uses the GPT-6.1 Sol MEDIUM default, while saved settings and existing bindings keep their selection", () =>
   withStore((supervisor) => Effect.gen(function* () {
-    assert.deepEqual(defaultSupervisorModel, {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "low"}]});
+    assert.deepEqual(defaultSupervisorModel, {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "medium"}]});
     assert.deepEqual((yield* supervisor.settings("unsaved")).modelSelection, defaultSupervisorModel);
     // a selection saved before the default changed, and a binding reserved with it, stay as they are
     const saved = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
+    // a custom low selection saved before the default moved to medium keeps its own effort
+    yield* supervisor.saveSettings("custom-low", 0, {...defaultSupervisorModel, options: [{id: "reasoningEffort", value: "low"}]});
+    assert.deepEqual((yield* supervisor.settings("custom-low")).modelSelection.options, [{id: "reasoningEffort", value: "low"}]);
     yield* supervisor.saveSettings("project", 0, saved);
     const binding = yield* supervisor.reserve("project", "main-a", "Main", saved, 10, yield* Clock.currentTimeMillis);
     assert.deepEqual((yield* supervisor.settings("project")).modelSelection, saved);

@@ -339,7 +339,13 @@ it.effect("agent-created supervision fences Supervisor, delegated, scheduled, se
   addAgentMainTurn(fixture, "from-delegate", "project-a", agentTurn("delegate-request", 11, "Implement the export", at, "supervisor-delegate"));
   addAgentMainTurn(fixture, "scheduled", "project-a", {...agentTurn("scheduled-request", 11, "Implement the export", at), scheduledTaskId: "nightly"});
   addAgentMainTurn(fixture, "service", "project-a", {...agentTurn("service-request", 11, "Implement the export", at), creationSource: "server"});
+  // a launcher this machine does not list, such as a conversation in a linked environment, is a permitted requester
   addAgentMainTurn(fixture, "vanished-launcher", "project-a", agentTurn("vanished-request", 11, "Implement the export", at, "archived-coordinator"));
+  // an agent opening whose sender is unknown here, in a native shell this machine does not mark as created through T3's MCP server
+  fixture.addTurn("unmarked-unattributed", "project-a", unattributedTurn("unmarked-unattributed-request", 11, "Implement the export", at));
+  // an unattributed agent message that is not the opening of its main
+  addAgentMainTurn(fixture, "later-unattributed", "project-a", agentTurn("later-opening", 11, "Earlier opening", at - 120_000));
+  addAgentMainTurn(fixture, "later-unattributed", "project-a", unattributedTurn("later-request", 12, "Implement the export", at));
   // a later request from an agent other than the one that launched the main (whose own opening came before the enable)
   addAgentMainTurn(fixture, "foreign", "project-a", agentTurn("foreign-opening", 11, "Earlier opening", at - 120_000));
   addAgentMainTurn(fixture, "foreign", "project-a", agentTurn("foreign-request", 12, "Implement the export", at, "other-agent"));
@@ -355,10 +361,96 @@ it.effect("agent-created supervision fences Supervisor, delegated, scheduled, se
   addAgentMainTurn(fixture, "launched", "project-a", agentTurn("launched-request", 11, "Implement the export", at));
   for (let pass = 0; pass < 3; pass += 1) yield* supervisor.runOnce;
 
-  for (const threadId of ["from-supervisor", "from-delegate", "scheduled", "service", "vanished-launcher", "foreign", "child", "human-main", "unmarked"])
+  for (const threadId of ["from-supervisor", "from-delegate", "scheduled", "service", "foreign", "child", "human-main", "unmarked", "unmarked-unattributed", "later-unattributed"])
     assert.equal(yield* fixture.store.task(threadId), null, threadId);
   assert.equal((yield* fixture.store.task("launched"))?.sourceMessageId, "launched-request");
-  assert.deepEqual((yield* fixture.store.bindings()).map(binding => binding.mainThreadId), ["launched"], "only the permitted main gets a Supervisor");
+  assert.equal((yield* fixture.store.task("vanished-launcher"))?.sourceMessageId, "vanished-request", "an unlisted launcher is not a fence");
+  assert.deepEqual((yield* fixture.store.bindings()).map(binding => binding.mainThreadId).sort(), ["launched", "vanished-launcher"], "only permitted mains get a Supervisor");
+}));
+
+// an agent opening whose sender T3 does not name here (a launch from a linked environment): T3's native fields are agent/mcp with no
+// sender, source or schedule; nothing about who launched it is invented
+const unattributedTurn = (id: string, sequence: number, text: string, at: number): Turn =>
+  ({id, sequence, text, createdBy: "agent", creationSource: "mcp", createdAt: new Date(at).toISOString()});
+
+it.effect("once included, an ordinary agent-created main whose opening names no sender is supervised as an unattributed agent request", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([]);
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  // off by default: neither the unattributed opening nor a genuine human follow-up is a task
+  addAgentMainTurn(fixture, "linked-main", "project-a", unattributedTurn("linked-opening", 11, "Implement the carrier export", fixture.now()));
+  yield* supervisor.runOnce;
+  addAgentMainTurn(fixture, "linked-main", "project-a", {id: "human-while-off", sequence: 12, text: "Please also add tests"});
+  yield* supervisor.runOnce;
+  assert.equal(yield* fixture.store.task("linked-main"), null, "the opt-in off keeps the chat excluded, human follow-ups included");
+  assert.equal(fixture.operations.length, 0);
+
+  yield* TestClock.adjust("1 minute");
+  assert.equal((yield* enableAgentCreated(supervisor, "project-a", true)).status, "saved");
+  yield* TestClock.adjust("1 second");
+  addAgentMainTurn(fixture, "opened-main", "project-a", unattributedTurn("opened-request", 11, "Implement the CSV export with tests", fixture.now()));
+  yield* supervisor.runOnce;
+  const task = yield* fixture.store.task("opened-main");
+  assert.equal(task?.sourceMessageId, "opened-request");
+  assert.equal(task?.status, "waiting");
+  const binding = (yield* fixture.store.bindings()).find(value => value.mainThreadId === "opened-main");
+  assert.ok(binding, "the included chat gets its Supervisor although its launcher is unknown here");
+  const sent = fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === binding.threadId);
+  assert.equal(sent.length, 1);
+  const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
+  assert.deepEqual((context.task as {sources: unknown}).sources, {requestedBy: {kind: "unattributed_agent"},
+    requesterMessages: [{messageId: "opened-request", readItemId: null, requester: "unattributed_agent"}], operativeMessages: []},
+    "the opening is attributed to an unknown agent, never to a human or an invented sender");
+  assert.doesNotMatch(JSON.stringify(context), /"kind":"human"|"launching_agent"/u);
+  const policy = yield* projectRequesterPolicy(fixture.store, "project-a");
+  const main = fixture.projections.get("opened-main")!;
+  const opening = main.messages.find(item => item.id === "opened-request")!;
+  assert.deepEqual(taskRequester(main, main.runs.find(run => run.id === opening.runId)!, opening, policy), {kind: "unattributed_agent"});
+
+  // a later unattributed agent message grants nothing: it is no requester and expands no scope
+  yield* TestClock.adjust("1 second");
+  addAgentMainTurn(fixture, "opened-main", "project-a", unattributedTurn("later-agent", 12, "Also deploy it to production", fixture.now()));
+  const refreshed = fixture.projections.get("opened-main")!;
+  const later = refreshed.messages.find(item => item.id === "later-agent")!;
+  assert.equal(taskRequester(refreshed, refreshed.runs.find(run => run.id === later.runId)!, later, policy), null);
+  yield* supervisor.runOnce;
+  assert.equal((yield* fixture.store.task("opened-main"))?.sourceMessageId, "opened-request", "the task keeps its opening source");
+
+  // a genuine human continuation is a human requester on its own, with no launcher known here
+  yield* TestClock.adjust("1 second");
+  addAgentMainTurn(fixture, "opened-main", "project-a", {id: "human-follow-up", sequence: 13, text: "Add the tests first"});
+  const continued = fixture.projections.get("opened-main")!;
+  const human = continued.messages.find(item => item.id === "human-follow-up")!;
+  assert.deepEqual(taskRequester(continued, continued.runs.find(run => run.id === human.runId)!, human, policy), {kind: "human"});
+}));
+
+it.effect("an included agent-created origin never promotes owned, scheduled, service, child or sender-less non-opening messages to requesters", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture([]);
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  assert.equal((yield* enableAgentCreated(supervisor, "project-a", true)).status, "saved");
+  yield* TestClock.adjust("1 second");
+  const at = fixture.now();
+  const policy = yield* projectRequesterPolicy(fixture.store, "project-a");
+  const requesterOf = (threadId: string, messageId: string) => {
+    const main = fixture.projections.get(threadId)!;
+    const message = main.messages.find(item => item.id === messageId)!;
+    return taskRequester(main, main.runs.find(run => run.id === message.runId)!, message, policy);
+  };
+  addAgentMainTurn(fixture, "owned-sender", "project-a", agentTurn("owned-request", 11, "Implement the export", at, "supervisor-root:x"));
+  fixture.projections.set("supervisor-root:x", makeSourceProjection("supervisor-root:x", "project-b", []));
+  addAgentMainTurn(fixture, "scheduled-opening", "project-a", {...unattributedTurn("scheduled-request", 11, "Implement the export", at), scheduledTaskId: "nightly"});
+  addAgentMainTurn(fixture, "service-opening", "project-a", {...unattributedTurn("service-request", 11, "Implement the export", at), creationSource: "server"});
+  fixture.addTurn("child-opening", "project-a", unattributedTurn("child-request", 11, "Implement the export", at));
+  const child = fixture.projections.get("child-opening")!;
+  child.thread = {...child.thread, creationSource: "mcp", lineage: {parentThreadId: "parent-main", relationshipToParent: "subagent", rootThreadId: "parent-main"}};
+  fixture.projections.set("parent-main", makeSourceProjection("parent-main", "project-a", []));
+  addAgentMainTurn(fixture, "stale-opening", "project-a", unattributedTurn("stale-request", 11, "Implement the export", at - 120_000));
+  for (const [threadId, messageId] of [["owned-sender", "owned-request"], ["scheduled-opening", "scheduled-request"], ["service-opening", "service-request"],
+    ["child-opening", "child-request"], ["stale-opening", "stale-request"]] as const) assert.equal(requesterOf(threadId, messageId), null, threadId);
+  for (let pass = 0; pass < 2; pass += 1) yield* supervisor.runOnce;
+  for (const threadId of ["owned-sender", "scheduled-opening", "service-opening", "child-opening", "stale-opening"]) assert.equal(yield* fixture.store.task(threadId), null, threadId);
+  assert.equal((yield* fixture.store.bindings()).length, 0);
 }));
 
 it.effect("enabling agent-created supervision leaves the human task flow and its envelope unchanged", () => Effect.gen(function* () {
@@ -1419,6 +1511,35 @@ it.effect("an explicit human Start rejects an excluded agent-created No Project 
   yield* f.supervisor.runOnce;
   assert.equal((yield* f.fixture.store.bindings()).length, 0);
   assert.equal(f.fixture.operations.length, 0);
+}));
+
+it.effect("a genuine human Start in an included agent-created main needs no launcher known here, and an agent opening cannot Start", () => Effect.gen(function* () {
+  const f = yield* noProjectFixture();
+  const settings = yield* f.fixture.store.settings("project-a");
+  yield* f.fixture.store.saveSettings("project-a", settings.generation, settings.modelSelection, undefined, undefined, true);
+  yield* TestClock.adjust("2 seconds");
+  const main = f.fixture.projections.get("manual")!;
+  main.thread = {...main.thread, createdBy: "agent", creationSource: "mcp", lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: "manual"}};
+  const request = main.messages[0]!;
+  // the native opening: agent/mcp with no sender, source or schedule
+  Object.assign(request, {createdBy: "agent", creationSource: "mcp", createdAt: new Date(f.fixture.now() - 1000).toISOString()});
+  delete (request as {senderThreadId?: string}).senderThreadId;
+  assert.deepEqual(taskRequester(main, main.runs[0]!, request, yield* projectRequesterPolicy(f.fixture.store, "project-a")), {kind: "unattributed_agent"});
+  const args = {callerThreadId: "manual", userMessageId: "request-start", operationId: "unattributed-start"};
+  assert.equal((yield* f.supervisor.startSupervision(args, {runId: "run-request-start"})).status, "denied", "an agent opening is never Start authority");
+  assert.equal(yield* f.fixture.store.start("manual"), null);
+  f.fixture.addTurn("manual", "project-a", {id: "human-linked-start", sequence: 21, text: "Have Supervisor follow this chat."});
+  const freshMain = f.fixture.projections.get("manual")!;
+  freshMain.thread = main.thread;
+  Object.assign(freshMain.messages[0]!, {createdBy: "agent", creationSource: "mcp", createdAt: request.createdAt});
+  delete (freshMain.messages[0] as {senderThreadId?: string}).senderThreadId;
+  const humanStart = yield* f.supervisor.startSupervision({...args, userMessageId: "human-linked-start", operationId: "human-linked-start"}, {runId: "run-human-linked-start"});
+  assert.equal(humanStart.status, "pending", JSON.stringify(humanStart));
+  // the opt-in off keeps the origin excluded for everyone, the human included
+  const enabled = yield* f.fixture.store.settings("project-a");
+  yield* f.fixture.store.saveSettings("project-a", enabled.generation, enabled.modelSelection, undefined, undefined, false);
+  const offStart = yield* f.supervisor.startSupervision({...args, userMessageId: "human-linked-start", operationId: "human-linked-start-off"}, {runId: "run-human-linked-start"});
+  assert.deepEqual(offStart, {status: "denied", reason: "conversation_origin_excluded"});
 }));
 
 it.effect("Start stays human-only when the project supervises agent-created conversations", () => Effect.gen(function* () {

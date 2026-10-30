@@ -1520,7 +1520,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const ordinalOf = (runId: string | null | undefined) => source.runs.find(run => run.id === runId)?.ordinal;
         const sourceMessage = (messageId: string): InterpretationSourceMessage => ({messageId, readItemId: messageReadItemId(source, preparing.threadId, messageId)});
         const interpretationSources: InterpretationSources = {
-          requestedBy: requester?.kind === "agent" ? {kind: "launching_agent", threadId: requester.threadId} : {kind: "human"},
+          requestedBy: requester?.kind === "agent" ? {kind: "launching_agent", threadId: requester.threadId}
+            : requester?.kind === "unattributed_agent" ? {kind: "unattributed_agent"} : {kind: "human"},
           requesterMessages: requesterSources(source, requesters, contextFloor ?? Infinity, contextEnabledAt).filter(item => item.ordinal <= preparing.sourceOrdinal)
             .slice(-12).map(item => ({...sourceMessage(item.messageId), requester: item.requester})),
           operativeMessages: source.messages.filter(item => item.role === "assistant" && item.streaming === false &&
@@ -1673,11 +1674,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       latest.ordinal === previous?.sourceOrdinal && (latest.hash !== previous.sourceHash || latest.messageId !== previous.sourceMessageId))
       ? {run: main.runs.find(item => item.id === latest.runId)!, message: main.messages.find(item => item.id === latest.messageId)!,
         requester: taskRequester(main, main.runs.find(item => item.id === latest.runId)!, main.messages.find(item => item.id === latest.messageId)!, policy)!} : null;
-    // an agent request needs its launching conversation active in T3 and outside every Supervisor's lineage, so no Supervisor or
-    // helper, nor anything they delegated, can open supervised work
+    // a launching conversation listed here must be outside every Supervisor's lineage, so no Supervisor or helper, nor anything they
+    // delegated, can open supervised work; a launcher this machine does not list (for example in a linked environment) is not rejected
     const requester = task?.requester;
     const launcher = requester?.kind === "agent" ? catalog.threads.find(item => item.id === requester.threadId) : undefined;
-    if (!task || requester?.kind === "agent" && (!launcher || isSupervisorThread(scope.owned, launcher))) {
+    if (!task || launcher && isSupervisorThread(scope.owned, launcher)) {
       if (!active(main) && typeof thread.latestRunId === "string") yield* examine(thread.latestRunId);
       return;
     }
