@@ -241,27 +241,15 @@ const definitionsAccessOf = (loader: PsDefinitions): SupervisorDefinitionsAccess
   ...(loader.presence ? {presence: (projectId: string) => Effect.mapError(Effect.suspend(() => loader.presence!(projectId)), (error) => new DefinitionSourceFailure({error}))} : {}),
 });
 
-const yieldToEventLoop = Effect.callback<void>((resume) => {
-  const handle = setImmediate(() => resume(Effect.void));
-  return Effect.sync(() => clearImmediate(handle));
-});
-
-// one raw cycle. a hung supervisor read does not interrupt its batch: the node loop drains until sibling progress is quiet, then the cycle fiber is interrupted.
-export const interruptHungPass = <A, E>(cycle: Effect.Effect<A, E>, hung: Deferred.Deferred<void>, progressed: () => number) => Effect.gen(function* () {
+// one raw cycle: wait for the known sibling reads before interrupting a hung batch; node-loop quiet does not prove worker completion
+export const interruptHungPass = <A, E>(cycle: Effect.Effect<A, E>, hung: Deferred.Deferred<void>, siblingsEntered: Deferred.Deferred<void>) => Effect.gen(function* () {
   const fiber = yield* Effect.forkChild(cycle);
   const winner = yield* Effect.raceFirst(
     Effect.map(Fiber.await(fiber), (exit) => ({kind: "done" as const, exit})),
     Effect.map(Deferred.await(hung), () => ({kind: "hung" as const})),
   );
   if (winner.kind === "hung") {
-    let previous = progressed();
-    let stable = 0;
-    for (let turn = 0; turn < 80 && stable < 5; turn++) {
-      yield* yieldToEventLoop;
-      const current = progressed();
-      if (current === previous) stable += 1;
-      else { previous = current; stable = 0; }
-    }
+    yield* Deferred.await(siblingsEntered);
     yield* Fiber.interrupt(fiber);
     return;
   }

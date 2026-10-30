@@ -13,8 +13,8 @@ owns this server-side protection; local hooks are not the enforcement boundary.
 ## Full validation
 
 Ordinary PRs and manual **Check Supervisor** dispatches run lint, both type checks,
-build, package/container smoke checks, all four main-suite shards and the runner
-harness. Each test file runs in its native shard, with one worker per runner.
+build, package/container smoke checks, all four main-suite shards, the runner
+harness and the production startup integration. Each test file runs in its native shard, with one worker per runner.
 The watchdog, test deadlines, leak gate, privacy guards and cleanup stay intact.
 Each container build reads and writes its own GitHub Actions layer-cache scope. The
 cache only speeds up builds, so a failed cache export is logged without failing the
@@ -33,6 +33,7 @@ main and harness suites to GitHub rather than repeating them locally.
 The `changeset-release/main` version PR may reuse full validation of its parent
 commit. Static checks, both type checks, build, package smoke and container smoke
 still run on the new version. Only the four main shards and harness skip.
+The production startup integration runs in full, reuse and release modes.
 The required aggregate `check` always runs and requires that exact combination.
 
 Eligibility is deliberately narrow. The head must have one parent already on main,
@@ -88,17 +89,19 @@ After merging, main first tries to reuse GitHub's full PR verdict. Reuse require
   commit IDs may differ; any difference in the actual files prevents reuse.
 - The latest matching **Check Supervisor** run is completed and successful.
   It must be a PR run, or a dispatch on that PR's branch, at its exact final head.
-- Static checks, each of the four main shards, the harness and aggregate `check`
-  all succeeded in that run's latest attempt. Skipped jobs do not qualify.
+- Static checks, each of the four main shards, the harness, the startup
+  integration and aggregate `check` all succeeded in that run's latest attempt.
+  Skipped jobs do not qualify.
 
 For a merged fast-tracked version PR, main instead requires the exact same tree,
-a successful latest release run with `plan`, `static` and `check` passed and the
-suites skipped, and independently rederives the release diff and full baseline
-proof above. A successful release summary alone is insufficient.
+a successful latest release run with `plan`, `static`, `startup` and `check`
+passed and the suites skipped, and independently rederives the release diff and
+full baseline proof above. A successful release summary alone is insufficient.
 
-Only with one of these proofs do all main validation jobs skip. Its aggregate
-check requires the planner to succeed and the expected jobs to be skipped, and
-links the source run and any release baseline in the job summary. No test results,
+Only with one of these proofs do the main shards and harness skip. The startup
+integration still runs. The aggregate check requires the planner to succeed and
+the jobs selected for that mode to have their expected results, and links the
+source run and any release baseline in the job summary. No test results,
 build outputs or assertions are cached.
 
 Missing or ambiguous PR metadata, API errors, malformed/truncated responses, a

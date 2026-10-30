@@ -129,20 +129,16 @@ export const startFakeT3 = async (options: FakeT3Options): Promise<FakeT3> => {
       if (tag !== "Request") return;
       const id = String(frame.id);
       const failure = { _tag: "Exit", requestId: id, exit: { _tag: "Failure", cause: [{ _tag: "Fail", error: options.failure ?? { _tag: "FakeT3UnsupportedRequest" } }] } };
-      const subscription = frame.tag === "orchestration.subscribeShell" || frame.tag === "orchestration.subscribeArchivedShell";
-      if (subscription && options.failSubscriptions === true) return reply(socket, failure);
+      if (frame.tag === "orchestration.subscribeShell" && options.failSubscriptions === true) return reply(socket, failure);
       if (frame.tag === "orchestration.subscribeShell") {
         if (options.sendActiveSnapshot === false) return;
         return reply(socket, { _tag: "Chunk", requestId: id, values: [{ kind: "snapshot", snapshot: {
           schemaVersion: 2, snapshotSequence: 1, projects: [], threads: activeThreads, archivedThreads: [] } }] });
       }
-      if (frame.tag === "orchestration.subscribeArchivedShell") {
-        if (options.sendArchiveSnapshot === false) return;
-        return reply(socket, { _tag: "Chunk", requestId: id, values: [{ kind: "snapshot", snapshot: {
-          schemaVersion: 2, snapshotSequence: 1, projects: [], threads: archiveThreads } }] });
-      }
       if (frame.tag === "orchestration.getArchivedShellSnapshot" && options.failure === undefined) {
-        return reply(socket, { _tag: "Exit", requestId: id, exit: { _tag: "Success", value: { schemaVersion: 2, snapshotSequence: 1, threads: archiveThreads } } });
+        if (options.sendArchiveSnapshot === false) return;
+        return reply(socket, { _tag: "Exit", requestId: id, exit: { _tag: "Success", value: {
+          schemaVersion: 2, snapshotSequence: 1, projects: [], threads: archiveThreads } } });
       }
       reply(socket, failure);
     });

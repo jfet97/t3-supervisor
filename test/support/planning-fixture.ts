@@ -1,3 +1,4 @@
+import { T3TransportError } from "../../src/t3.js";
 import { Context, Effect, Layer } from "effect";
 import { fingerprint } from "../../src/guidance-store.js";
 import { defaultSupervisorModel, type TaskRecord } from "../../src/project-supervisor-store.js";
@@ -18,9 +19,18 @@ import { teamControllers } from "./g11-team.js";
  * The planning controller over the g11 production layers and the real conversation service (its read-only context views): a bound
  * root of main "main", an engaged task from a genuine human source and fake native reads whose projections a suite edits in place.
  */
+export type PlanningReadFailures = {
+  /** Thread ids whose projection read fails with a transport error while listed. */
+  readonly projections: Set<string>;
+  /** While true the lineage list itself fails. */
+  listThreads: boolean;
+};
+
 export const planningFixture = (rpc?: NativeRpcShape, options: {
   /** Each native projection read returns its own point-in-time copy and is reported, so a suite can change native state between reads. */
   readonly onRead?: (threadId: string) => void;
+  /** Native reads a suite can make fail and recover, as a transport outage would. */
+  readonly readFailures?: PlanningReadFailures;
 } = {}) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("planning-controller-");
   const stores = yield* supervisionStores(directory);
@@ -50,16 +60,22 @@ export const planningFixture = (rpc?: NativeRpcShape, options: {
   // a definition-checked workflow_write reads the main task's own definition snapshot
   const definitions = definitionsService({load: () => Effect.flatMap(stores.supervisors.task("main"), current => current?.definitionSnapshot
     ? Effect.succeed(current.definitionSnapshot) : Effect.die(new Error("the main task has no definition snapshot")))});
-  const built = yield* teamControllers(stores, policy, {listThreads: () => Effect.succeed(threads), projection: id => Effect.sync(() => {
+  const failures = options.readFailures;
+  const listThreads = () => failures?.listThreads ? Effect.die(new Error("lineage list unavailable")) : Effect.succeed(threads);
+  const projection = (id: string) => failures?.projections.has(id) ? Effect.fail(new T3TransportError("projection unavailable", 503)) : Effect.sync(() => {
     if (!options.onRead) return projections.get(id)!;
     const read = structuredClone(projections.get(id)!);
     options.onRead(id);
     return read;
-  }),
-    turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions});
-  const views = Context.add(built.context, SupervisorConversation, Context.get(yield* Layer.build(SupervisorConversation.layer.pipe(
-    Layer.provide(Layer.succeedContext(built.context)))), SupervisorConversation));
+  });
+  const built = yield* teamControllers(stores, policy, {listThreads, projection, turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions});
+  const conversation = Context.get(yield* Layer.build(SupervisorConversation.layer.pipe(Layer.provide(Layer.succeedContext(built.context)))), SupervisorConversation);
+  const views = Context.add(built.context, SupervisorConversation, conversation);
   const context = yield* Layer.build(SupervisorPlanningController.layer.pipe(Layer.provide(Layer.succeedContext(views))));
+  // the same controllers once more with the conversation's views wired in: the workflow_read of a root or helper that serves context,
+  // instructions and the frozen request envelopes, as the production reader does
+  const withViews = yield* teamControllers(stores, policy, {listThreads, projection: id => Effect.sync(() => projections.get(id)!),
+    turnItem: id => Effect.succeed(details.get(id))}, {rpc, definitions, conversation});
   const controller = Context.get(context, SupervisorPlanningController);
   /** One executed supervision_planning call of `threadId` with exactly `input`, in a completed run of that thread's own. */
   const callAs = (threadId: string, input: Record<string, unknown>) => {
@@ -81,7 +97,7 @@ export const planningFixture = (rpc?: NativeRpcShape, options: {
   const proof = (input: Record<string, unknown>) => callAs(binding.threadId, input);
   const args = {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation, taskId: task.id, taskRevision: task.sourceHash,
     action: "pause", operationId: "pause-a", targetThreadIds: ["main"], reason: "Prepare the requested plan"};
-  return {stores, policy, binding, task, threads, projections, details, controller, args, proof, callAs, workflows: built.workflows,
+  return {stores, policy, binding, task, threads, projections, details, controller, args, proof, callAs, workflows: built.workflows, reader: withViews.workflows,
     gate: Context.get(built.context, SupervisionGate),
     states: Context.get(built.context, WorkflowStateStore), conversation: Context.get(views, SupervisorConversation)};
 });

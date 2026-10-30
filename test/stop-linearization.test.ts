@@ -30,6 +30,16 @@ const dispatches = (f: LinFixture) => rpcRequests(f.peer, "orchestration.dispatc
 const dispatched = (payload: Record<string, unknown>) => ({type: payload.type, commandId: payload.commandId, messageId: payload.messageId,
   threadId: payload.threadId, text: payload.text});
 
+// the Stop notice is a separate authorized effect; it must never hide replay of the operation under test
+const assertStopNotice = Effect.fnUntraced(function* (f: LinFixture) {
+  const notice = (yield* f.binding).stopNotice;
+  assert.ok(notice, "the explicit Stop reserves one main notice even before first contact");
+  const notices = dispatches(f).filter(payload => payload.commandId === notice.commandId);
+  assert.deepEqual(notices.map(dispatched), [{type: "message.dispatch", commandId: notice.commandId, messageId: notice.messageId,
+    threadId: mainThreadId, text: notice.text}], "exactly one notice uses its persisted identity and body");
+  return {type: "message.dispatch", commandId: notice.commandId};
+});
+
 // commits a Stop when the first native command frame arrives, before the peer replies; records whether the commit was visible
 const stopOnArrival = (f: LinFixture, tag = "orchestration.dispatchCommand") => {
   const seen = {stoppedAtArrival: null as boolean | null};
@@ -431,6 +441,7 @@ it.live("CT-LIN-06: interpretation: a Stop committed when the frame arrives keep
   assert.equal(closed.reason, "Supervision was stopped for this chat; the interpretation result was not applied.");
   assert.deepEqual(dispatches(f).map(payload => ({type: payload.type, commandId: payload.commandId})), [
     {type: "message.dispatch", commandId: `supervisor-objective:${sent.attempt!.attemptId}`},
+    yield* assertStopNotice(f),
     {type: "thread.settle", commandId: (yield* f.binding).settlement!.commandId},
   ], "no replay and no new identity; the stopped Supervisor settles once the outcome is known");
   assert.deepEqual(f.peer.unexpected, []);
@@ -450,7 +461,8 @@ it.live("CT-LIN-06: interpretation: a Stop committed when the frame arrives and 
   f.peer.onRpc = null;
   yield* f.runOnce;
   assert.deepEqual(yield* task(f), sent);
-  assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch"]);
+  yield* assertStopNotice(f);
+  assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch", "orchestration.dispatchCommand:message.dispatch"]);
   assert.equal((yield* f.binding).settlementBlockedBy, "stopped_interpretation_unresolved");
 }), {timeout: 10_000});
 
@@ -565,7 +577,8 @@ it.live("CT-LIN-06: guide: a Stop committed when the steer frame arrives keeps t
   f.peer.onRpc = null;
   yield* f.runOnce;
   assert.deepEqual(yield* receipts, accepted);
-  assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch"]);
+  yield* assertStopNotice(f);
+  assert.deepEqual(writes(f), ["orchestration.dispatchCommand:message.dispatch", "orchestration.dispatchCommand:message.dispatch"]);
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 10_000});
 
@@ -591,7 +604,8 @@ it.live("CT-LIN-06: settlement: a Stop committed when the settle frame arrives k
   f.peer.onRpc = null;
   yield* f.runOnce;
   assert.deepEqual((yield* f.binding).settlement, settlement);
-  assert.deepEqual(writes(f), ["orchestration.dispatchCommand:thread.settle"]);
+  yield* assertStopNotice(f);
+  assert.deepEqual(writes(f), ["orchestration.dispatchCommand:thread.settle", "orchestration.dispatchCommand:message.dispatch"]);
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 10_000});
 
@@ -624,6 +638,7 @@ it.live("CT-LIN-06: helper: a Stop committed when the webhook POST arrives keeps
   assert.deepEqual({...observed, renderedText: undefined}, {...receipt, renderedText: undefined}, "the stopped cycle binds the rendering only");
   assert.equal(observed.renderedText, publishedWrapper(request.text));
   assert.equal((yield* requests(f, "helper")).find(value => value.id === request.id)?.messageId, request.messageId);
-  assert.deepEqual(writes(f), ["scheduledTasks.upsert", "POST /api/hooks/fixture/fixture-only-token"]);
+  yield* assertStopNotice(f);
+  assert.deepEqual(writes(f), ["scheduledTasks.upsert", "POST /api/hooks/fixture/fixture-only-token", "orchestration.dispatchCommand:message.dispatch"]);
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 10_000});

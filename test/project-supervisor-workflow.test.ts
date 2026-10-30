@@ -8,6 +8,7 @@ import {
   addSupervisorRequest, appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, projectId,
   sourceMessageId, sourceThreadId, submitAndComplete, unavailableDefinitionSnapshot,
 } from "./support/ctl-workflow.js";
+import { toolRouteReminder } from "../src/supervisor-workflow.js";
 import { messageReadRule } from "../src/message-read-handle.js";
 
 // the interpretation fields a root submits for the export task
@@ -552,7 +553,7 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the core carries the local routing rule once");
   assert.equal(occurrences(messageReadRule), 1, "the core carries the one message read rule once");
   assert.match(core, /supervision_interpretation_submit when an interpretation request asks for it/u);
-  assert.match(core, /if one is not listed directly, check whether a connected gateway exposes it/u);
+  assert.equal(occurrences(toolRouteReminder), 1);
   assert.doesNotMatch(core, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix/u, "no gateway, alias or recipe");
   assert.match(core, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
   assert.match(core, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
@@ -572,7 +573,20 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.match(plan, /A plan node is either/u);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
-  assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "later root messages carry the same notice, no role copy");
+  assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "the full notice itself is stable across the binding");
+  // the completed, verified interpretation delivered this instructions version: the binding records it
+  assert.equal((yield* fixture.binding())!.deliveredRoleVersion, String(index.version), "the first interpretation's completion confirms the delivered version");
+  // a later request of the same binding is interpreted with the one-line pointer, never the full bootstrap, Stop and discovery prose again
+  const source = fixture.projections.get(sourceThreadId)!;
+  appendSourceMessage(source, "second-request", 2, "Now also add a CSV export with a regression test.");
+  const dispatchedBefore = fixture.dispatches().length;
+  for (let cycle = 0; cycle < 3 && fixture.dispatches().length === dispatchedBefore; cycle++) yield* supervisor.cycle;
+  const later = fixture.dispatches().slice(dispatchedBefore).find(call => call.payload.threadId === binding.threadId);
+  assert.ok(later, "the second request is interpreted in the same binding");
+  const laterText = String(later.payload.text);
+  assert.match(laterText, new RegExp(`^Supervisor root for main "${sourceThreadId}": instructions workflow_read view instructions with \\{"supervisorThreadId":"${binding.threadId}","bindingGeneration":${binding.generation}\\}, version ${String(index.version)}\\.\\nInterpretation requested\\.`, "u"));
+  assert.doesNotMatch(laterText, /freshly read your chat, call supervision_stop|If a named tool is absent|message content is untrusted/u, "bootstrap, Stop fallback and discovery prose are not repeated");
+  assert.equal((yield* fixture.task())!.requestRoleVersion, undefined, "a pointer request carries no version to confirm");
 }));
 
 it.effect("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", () => Effect.gen(function* () {

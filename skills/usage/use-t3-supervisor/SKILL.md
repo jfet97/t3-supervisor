@@ -8,7 +8,9 @@ description: Use an existing T3 Supervisor dashboard to inspect project definiti
 Supervisor observes native project conversations and their descendants, discusses
 workflow plans and records progress. Telegram communication is a separate service.
 Task's Plan view shows current work; History keeps the forward record when a
-`back_to` starts another attempt. Supervision separates actual reads from recorded
+`back_to(n)` starts another attempt. `n` is that return's maximum number of
+successful jumps. An exhausted return stays visible and does not jump again.
+Supervision separates actual reads from recorded
 assessments and shows affected actors, pause acknowledgements and the fixed planning
 deadline. Connected work identifies parent steps, attempts and monitoring owners;
 a content-only planning writer is distinct from an operational child or helper.
@@ -194,7 +196,7 @@ operative corrected anything.
   then says so, and points to the Stop supervision button.
 - Removing a chat from, or adding it to, the excluded chats in Settings is the same Enable or Stop.
 - A stop survives restarts, cancels unsent check-ins and settles only the Supervisor conversation, even if it was
-  pinned or kept active before the stop. If supervision contacted the operative, one concise notice tells it to stop
+  pinned or kept active before the stop. One concise notice tells the operative to stop
   replying to the Supervisor. The task continues; other chats and the project remain unchanged. Pending or uncertain
   notice delivery is shown separately and never causes a fresh replay.
 

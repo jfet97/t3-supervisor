@@ -4,6 +4,8 @@ import { Effect, Schema } from "effect";
 export const workflowDefinitionExpansionLimits = {maxNodes: 500, maxDepth: 32} as const;
 /** A branch condition is one short line; finer conditions belong in step and workflow descriptions. */
 export const branchConditionMaxLength = 300;
+/** The most successful backward jumps one authored return may name. Zero and unbounded returns are not authored. */
+export const returnBudgetMaximum = 99;
 /** A branch condition after trimming, or null unless it is one nonempty line of at most branchConditionMaxLength characters. */
 export const branchConditionText = (value: unknown): string | null => {
   if (typeof value !== "string") return null;
@@ -17,7 +19,7 @@ export const DefinitionNode = Schema.suspend((): Schema.Codec<DefinitionNode> =>
   Schema.Struct({sequence: Schema.Array(DefinitionNode)}),
   Schema.Struct({parallel: Schema.Array(DefinitionNode)}),
   Schema.Struct({branch: Schema.Struct({if: Schema.String, then: Schema.Array(DefinitionNode), else: Schema.optionalKey(Schema.Array(DefinitionNode))})}),
-  Schema.Struct({back_to: Schema.String}),
+  Schema.Struct({back_to: Schema.String, maximum: Schema.Int}),
 ]));
 /** A coarse semantic branch: a condition, the then path and an optional else path; the next member of the enclosing group follows the whole branch. */
 export type DefinitionBranch = {readonly if: string; readonly then: readonly DefinitionNode[]; readonly else?: readonly DefinitionNode[]};
@@ -28,7 +30,7 @@ export type DefinitionNode =
   | {readonly parallel: readonly DefinitionNode[]}
   | {readonly branch: DefinitionBranch}
   /** A return to the earlier step or workflow member with this ID in the same sequential lane of the composed plan; it ends its path. */
-  | {readonly back_to: string};
+  | {readonly back_to: string; readonly maximum: number};
 
 export const DefinitionReference = Schema.Union([
   Schema.Struct({step: Schema.String}),

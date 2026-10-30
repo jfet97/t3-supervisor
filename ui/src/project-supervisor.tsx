@@ -1,4 +1,5 @@
 import { WorkflowHistory } from "./workflow-history.js";
+import { WorkflowParticipants } from "./workflow-participants.js";
 import { defaultPlanningTimeoutMs, planningTimeoutBounds } from "../../src/supervisor-planning-contract.js";
 import { ActivityAwareness, PlanningStatus } from "./supervision-awareness.js";
 import {RefreshAction} from "./refresh-action.js";
@@ -6,11 +7,10 @@ import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import {GuideLink} from "./guide-link.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
-import {alignmentLabel, completionTimes, currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
+import {alignmentLabel, completionTimes, currentBranchPaths, currentWork, liveProgress, PlanChanges, PlanJourney, planSteps, reachedDecisionIds, readyAfterReturn, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
 import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
-import { reachedPendingBranchDecisions } from "../../src/workflow-plan-tree.js";
 import { planStatusAttention, protocolDiagnosticAttention, staleAgreementAttention, workAttention } from "../../src/dashboard-overview.js";
 import React, { useContext, useEffect, useState, type FormEvent } from "react";
 import { Cause, Clock, Effect, Exit, Option, Result } from "effect";
@@ -520,14 +520,15 @@ function SupportingActivity({thread}: {thread: WorkflowProgressThreadView}) {
 const unfinishedWorkStandby = "The main chat is idle, but its agreed workflow is unfinished and no current wait for the requester or another party is recorded. The Supervisor stays out of standby without new check-ins; new activity or a message in the main chat resumes its reviews, or you can stop supervision.";
 const settlementText = {pending: "Parking this idle Supervisor is pending.", uncertain: "It is not confirmed whether this idle Supervisor was parked.", settled: "This idle Supervisor is parked.", superseded: "The earlier parking request no longer applies."} as const;
 
-export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata, awareness}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
-  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode; awareness?: SupervisorMonitoringStatus["awareness"]}) {
+export function ConnectedWork({threads, mainThreadId, workflows, coverage, task, complete, metadata, awareness, localEnvironmentId}: {threads: readonly WorkflowProgressThreadView[]; mainThreadId: string;
+  workflows: ReadonlyMap<string, WorkflowProgressWorkflow>; coverage: ReadonlyMap<string, WorkflowProgressCoverage>; task: TaskInterpretationInfo | undefined; complete: boolean; metadata?: React.ReactNode; awareness?: SupervisorMonitoringStatus["awareness"]; localEnvironmentId?: string | null | undefined}) {
   const children = threads.filter(thread => thread.threadId !== mainThreadId);
   const mainCoverage = coverage.get(mainThreadId);
 
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
     <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><HelpDisclosure title="About child conversations and contributions"><p><GuideLink topic="connected-child">Native and delegated children</GuideLink> are different ways of connecting conversations. A contribution links work to a parent step; a <GuideLink topic="helper">Supervisor assignment</GuideLink> identifies who follows it. Neither a finished conversation nor an assignment proves that a parent step is complete. <GuideLink topic="children">How child tasks contribute</GuideLink>.</p></HelpDisclosure><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
+    <WorkflowParticipants workflow={workflows.get(mainThreadId)} localEnvironmentId={localEnvironmentId}/>
     <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
       const workflow = workflows.get(thread.threadId);
@@ -554,7 +555,7 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
         <EntityDetails title={<>{workflow ? "Child workflow and records" : "Conversation details"}</>} ><div className="stack">
           {workflow?.objective && <p>{workflow.objective}</p>}
           {workflow?.parentNodeReferences.length ? <p className="small">Contributes to parent steps: {workflow.parentNodeReferences.map(reference => reference.nodeName).join(", ")}</p> : null}
-          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))}/>}
+          {workflow?.plan && notes && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{...notes, agreed: null, proposed: null, changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))} returns={workflow.returns} ready={readyAfterReturn(workflow.plan, workflow.returns)} reached={reachedDecisionIds(workflow)}/>}
           {workflow && <BranchDecisionHistory workflow={workflow}/>}
           {workflow && <SupervisorRecords workflow={workflow}/>}
           <p className="small">Lifecycle: {lifecycle.label}{thread.lifecycleDetail ? ` · T3 detail: ${thread.lifecycleDetail}` : ""}</p>
@@ -594,9 +595,12 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const notApplicable = record.kind === "live" ? new Set(record.workflow.notApplicable ?? []) : undefined;
   const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow), notApplicable) : null;
   const steps = live?.steps ?? (record.kind === "none" ? [] : planSteps(record.plan));
-  const reachedDecisions = record.kind === "live" ? reachedPendingBranchDecisions(record.plan, currentBranchPaths(record.workflow), notApplicable ?? new Set()) : [];
-  const current = live ? [...steps.filter(step => step.status === "underway" || step.status === "needs_attention").map(step => step.name),
-    ...reachedDecisions.map(branch => `Decide: ${branch.condition}`)].join(" · ") : "";
+  const reached = record.kind === "live" ? reachedDecisionIds(record.workflow) : undefined;
+  // right after an applied return every repeated member is planned: the return's target (a step or a workflow) is ready work, named here
+  // until it starts, beside any unrelated lane that is already active
+  const readyIds = record.kind === "live" ? readyAfterReturn(record.plan, record.workflow.returns) : new Set<string>();
+  const work = record.kind === "live" ? currentWork(record.workflow) : null;
+  const current = work ? [...work.active, ...work.ready.map(name => `${name} · ready to start`), ...work.decisions.map(condition => `Decide: ${condition}`)].join(" · ") : "";
   const latestObservation = record.kind === "live" ? [...record.workflow.observations].sort((a, b) => b.recordedAt - a.recordedAt)[0] : undefined;
   const retained = mainWorkflow && record.kind !== "live" ? [mainWorkflow] : [];
   const staleAgreement = task?.agreement?.status === "stale" ? task.agreement : null;
@@ -635,6 +639,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     {view.latest?.scope && !view.latest.scope.complete && <p className="notice" role="status">Connected child observation is incomplete. Some lifecycle or activity details may be missing.{view.latest.scope.issues.length > 0 && <> {view.latest.scope.issues.map(issue => issue.message).join(" ")}</>}</p>}
     {record.kind === "live" && (record.workflow.returns ?? []).filter(item => item.state === "pending").map(item =>
       <p className="notice" key={item.returnId}>Return to {item.targetName ?? "an earlier step"} requested. The Supervisor must confirm affected work is paused or quiet before starting attempt {item.attempt + 1}.</p>)}
+    {record.kind === "live" && (record.workflow.returns ?? []).filter(item => item.state === "exhausted" && item.resolvedAt === null).map(item =>
+      <p className="notice" key={item.returnId}>Return to {item.targetName ?? "an earlier step"} has used every successful jump its maximum allows. The failure stays unresolved, and another jump does not start.</p>)}
     <div className="row task-view-switch" role="group" aria-label="Task view">
       <button type="button" aria-pressed={!historyVisible} onClick={() => setSelectedView({threadId, view: "plan"})}>Plan</button>
       <button type="button" aria-pressed={historyVisible} onClick={() => setSelectedView({threadId, view: "history"})}>History</button>
@@ -652,7 +658,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           ? <p className="muted">{task?.supervision === "not_needed" && !task.agreement ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
             : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
-            completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt]))} : {})}/>}
+            completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt])),
+            returns: record.workflow.returns, ready: readyIds, reached} : {})}/>}
       </section>
       <aside className="workflow-context">
         <TaskAlignment task={task} changedSinceAcceptance={changedSinceAcceptance} {...(snapshot.binding ? {supervisorThreadId: snapshot.binding.threadId} : {})}/>
@@ -673,7 +680,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
       {retained.map(workflow => <EntityDetails title={<>Earlier workflow: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
         <p className="notice">Retained workflow record. It is not linked to the current task.</p>
-        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))}/>}
+        {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))} returns={workflow.returns} ready={readyAfterReturn(workflow.plan, workflow.returns)} reached={reachedDecisionIds(workflow)}/>}
         <SupervisorRecords workflow={workflow}/></EntityDetails>)}
       {(view.latest?.incompatibleWorkflows.length ?? 0) > 0 && <p className="notice" role="status">Some retained workflow records use an incompatible format and remain read-only: {view.latest!.incompatibleWorkflows.map(item => item.workflowId).join(", ")}.</p>}
     </div></EntityDetails>}
@@ -733,8 +740,11 @@ export function ProjectSupervisorView({
   chatSupervisionLocked = false,
   chatSupervisionMessage = null,
   onChatSupervision = () => {},
+  localEnvironmentId,
 }: {
   attentionEnabled?: boolean;
+  /** The T3 environment this dashboard reads; a participant declared in another environment is never linked locally. */
+  localEnvironmentId?: string | null | undefined;
   chatSupervisionBusy?: boolean;
   chatSupervisionLocked?: boolean;
   chatSupervisionMessage?: string | null;
@@ -803,7 +813,7 @@ export function ProjectSupervisorView({
       onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}/>}
     {section === "connected" && threadId && (() => {
       const view = progressView(workflowProgress?.pages ?? []);
-      return <div className="stack"><ConnectedWork awareness={snapshot.monitoringStatus?.awareness} metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
+      return <div className="stack"><ConnectedWork localEnvironmentId={localEnvironmentId} awareness={snapshot.monitoringStatus?.awareness} metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
     })()}
     {(section === "supervision" || section === "connected") && <ConversationStatus engagement={selectedTask?.engagement} fresh={connected && snapshot.available && currentRead} explicitlyStopped={Boolean(snapshot.chatSupervision?.stopped)}/>}
     {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
@@ -1435,6 +1445,7 @@ export function ProjectSupervisorPanel({projectId, threadId, section = "all", at
     {projectId && connected && loadError && <p className="panel" role="alert">{activeSnapshot ? "Could not refresh Supervisor state. The previous snapshot remains visible." : "Could not load Supervisor state. No snapshot is available."} <button type="button" onClick={refresh}>Retry Supervisor read</button></p>}
     {projectId && activeSnapshot && activeDraft && <ProjectSupervisorView
       section={section}
+      localEnvironmentId={environmentId}
       attentionEnabled={attentionEnabled}
       snapshot={activeSnapshot}
       currentRead={!loadError && !AsyncResult.isFailure(refreshed)}

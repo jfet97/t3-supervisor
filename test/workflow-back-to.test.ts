@@ -27,10 +27,10 @@ import {execute, openWorkflowStores, temporaryDirectory} from "./support/g12-sto
 // back_to end to end below the native boundary: authored YAML, composed-plan validation, stable occurrence identity across revisions,
 // and the returns, attempts and late-output fences of the workflow store
 
-const fixAndReturn = "name: Fix and return\ndescription: Fix the findings, then review again.\nsequence:\n  - step: fix\n  - back_to: review\n";
+const fixAndReturn = "name: Fix and return\ndescription: Fix the findings, then review again.\nsequence:\n  - step: fix\n  - back_to(5): review\n";
 const deliveryFlow = "name: Delivery flow\ndescription: Implement, review and deliver.\nsequence:\n  - step: implement\n  - step: review\n  - step: deliver\n";
 const reviewLoop = "name: Review loop\ndescription: Review until no findings remain.\nsequence:\n  - step: implement\n  - step: review\n" +
-  "  - branch:\n      if: Findings remain.\n      then:\n        - step: fix\n        - back_to: review\n";
+  "  - branch:\n      if: Findings remain.\n      then:\n        - step: fix\n        - back_to(5): review\n";
 const stepIds = ["implement", "review", "fix", "deliver", "verify"];
 const snapshot = (): ProjectDefinitionSnapshot => {
   const steps = stepIds.map(id => ({id, name: id, description: `Complete ${id}.`, summary: testSummary(id), origin: "project" as const, path: `.t3-supervisor/steps/${id}.md`, sourceId: id}));
@@ -46,7 +46,7 @@ const context = proposalContextFromDefinitions(snapshot());
 
 const local = (id: string) => ({kind: "step", definitionId: null, localId: id, name: id, description: `Complete ${id}.`, reason: `The task needs ${id}.`});
 const step = (id: string) => ({kind: "step", definitionId: id, reason: `The task needs ${id}.`});
-const backTo = (target: string) => ({kind: "back_to", target, reason: `Repeat from ${target} while findings remain.`});
+const backTo = (target: string, maximum = 5) => ({kind: "back_to", target, maximum, reason: `Repeat from ${target} while findings remain.`});
 const branch = (condition: string, then: unknown[], otherwise?: unknown[]) => ({kind: "branch", condition, reason: "The findings decide.",
   then: {kind: "sequence", nodes: then}, ...(otherwise ? {else: {kind: "sequence", nodes: otherwise}} : {})});
 const draft = (...nodes: unknown[]) => ({requirements: [], plan: {kind: "sequence", nodes}});
@@ -88,20 +88,27 @@ const renameIds = (plan: WorkflowPlanGroupInfo, rename: (id: string) => string):
 
 it("definitions parse a return in a sequence or branch path and reject one that is not last or sits directly in a parallel group", () => {
   const loop = parseDefinitionWorkflow("review-loop", "name: Review loop\ndescription: Review until no findings remain.\nsequence:\n  - step: implement\n  - step: review\n" +
-    "  - branch:\n      if: Findings remain.\n      then:\n        - step: fix\n        - back_to: review\n  - step: deliver\n");
-  assert.deepEqual(loop.sequence, [{step: "implement"}, {step: "review"}, {branch: {if: "Findings remain.", then: [{step: "fix"}, {back_to: "review"}]}}, {step: "deliver"}]);
-  assert.deepEqual(manifestMembers(loop.sequence!), ["step:implement", "step:review", "if \"Findings remain.\" then: step:fix", "if \"Findings remain.\" then: back_to:review",
+    "  - branch:\n      if: Findings remain.\n      then:\n        - step: fix\n        - back_to(5): review\n  - step: deliver\n");
+  assert.deepEqual(loop.sequence, [{step: "implement"}, {step: "review"}, {branch: {if: "Findings remain.", then: [{step: "fix"}, {back_to: "review", maximum: 5}]}}, {step: "deliver"}]);
+  assert.deepEqual(manifestMembers(loop.sequence!), ["step:implement", "step:review", "if \"Findings remain.\" then: step:fix", "if \"Findings remain.\" then: back_to(5):review",
     "if \"Findings remain.\" else: (nothing)", "step:deliver"]);
   const reason = (body: string) => {
     try {parseDefinitionWorkflow("broken", `name: Broken\ndescription: Broken workflow.\n${body}`);return null;} catch (error) {return (error as Error).message;}
   };
-  assert.match(reason("sequence:\n  - step: a\n  - back_to: a\n  - step: b\n") ?? "accepted", /back_to must be the last member of its sequence or branch path/u);
-  assert.match(reason("sequence:\n  - step: a\n  - branch:\n      if: Again.\n      then:\n        - back_to: a\n        - step: b\n") ?? "accepted", /back_to must be the last member/u);
-  assert.match(reason("parallel:\n  - step: a\n  - back_to: a\n") ?? "accepted", /back_to cannot be a direct parallel member/u);
-  assert.match(reason("sequence:\n  - step: a\n  - back_to: Not an id\n") ?? "accepted", /back_to must name the step, local step or workflow ID/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(1): a\n  - step: b\n") ?? "accepted", /back_to must be the last member of its sequence or branch path/u);
+  assert.match(reason("sequence:\n  - step: a\n  - branch:\n      if: Again.\n      then:\n        - back_to(1): a\n        - step: b\n") ?? "accepted", /back_to must be the last member/u);
+  assert.match(reason("parallel:\n  - step: a\n  - back_to(1): a\n") ?? "accepted", /back_to cannot be a direct parallel member/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(1): Not an id\n") ?? "accepted", /back_to must name the step, local step or workflow ID/u);
   assert.match(reason("sequence:\n  - step: a\n  - back_to: a\n    step: b\n") ?? "accepted", /exactly one step, workflow, sequence, parallel, branch or back_to key/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to: a\n") ?? "accepted", /back_to requires a maximum as back_to\(n\)/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(0): a\n") ?? "accepted", /no sign, fraction, or leading zero/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(01): a\n") ?? "accepted", /no sign, fraction, or leading zero/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(-1): a\n") ?? "accepted", /no sign, fraction, or leading zero/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(1.5): a\n") ?? "accepted", /no sign, fraction, or leading zero/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(1e2): a\n") ?? "accepted", /no sign, fraction, or leading zero/u);
+  assert.match(reason("sequence:\n  - step: a\n  - back_to(100): a\n") ?? "accepted", /integer from 1 to 99/u);
   // a return that is last and outside any branch parses: whether the composed plan can still complete is decided there
-  assert.equal(reason("sequence:\n  - step: a\n  - back_to: a\n"), null);
+  assert.equal(reason("sequence:\n  - step: a\n  - back_to(1): a\n"), null);
 });
 
 const loadShared = (global: Record<string, string>) => Effect.gen(function* () {
@@ -118,13 +125,13 @@ const loadShared = (global: Record<string, string>) => Effect.gen(function* () {
 it.effect("shared definitions namespace a return to a reusable member and keep a return to a local step", () => Effect.gen(function* () {
   const shared = yield* loadShared({"steps/review.md": stepSource("review", "Review the change."), "steps/fix.md": stepSource("fix", "Fix the findings."),
     "workflows/loop.yaml": "name: Loop\ndescription: Review until clean.\nsequence:\n  - step: review\n  - step: {id: tidy, name: Tidy, description: Tidy the change.}\n" +
-      "  - branch:\n      if: Findings remain.\n      then:\n        - step: fix\n        - back_to: review\n  - branch:\n      if: The change is untidy.\n      then:\n        - back_to: tidy\n"});
+      "  - branch:\n      if: Findings remain.\n      then:\n        - step: fix\n        - back_to(5): review\n  - branch:\n      if: The change is untidy.\n      then:\n        - back_to(5): tidy\n"});
   assert.equal(shared.status, "ready", JSON.stringify(shared.issues));
   const loop = shared.workflows.find(workflow => workflow.sourceId === "loop")!;
   const review = shared.steps.find(item => item.sourceId === "review")!;
   assert.match(review.id, /^g[0-9a-f]{63}$/u);
   const branches = loop.sequence!.filter((node): node is Extract<DefinitionNode, {branch: unknown}> => "branch" in node);
-  assert.deepEqual(branches.map(node => node.branch.then.at(-1)), [{back_to: review.id}, {back_to: "tidy"}]);
+  assert.deepEqual(branches.map(node => node.branch.then.at(-1)), [{back_to: review.id, maximum: 5}, {back_to: "tidy", maximum: 5}]);
   const plan = canonicalizeProposalDraft(draft({kind: "workflow", definitionId: loop.id, reason: "Review until clean."}), proposalContextFromDefinitions(shared), "seed-shared");
   assert.ok(plan.ok, JSON.stringify(plan));
   const [toReview, toTidy] = planBackTos(plan.workflow.plan);
@@ -160,10 +167,16 @@ it("a composed plan resolves each return to the one earlier member of its sequen
   assert.deepEqual(failure(local("review"), lane(local("check"), branch("Checks fail.", [backTo("review")]))), ["back_to_target_not_found", "/draft/plan/nodes/1/nodes/1/nodes/1/then/nodes/0"]);
   assert.equal(failure(local("review"), lane(local("check"), branch("Checks fail.", [backTo("check")]))), null, "a return within its own lane");
   assert.deepEqual(failure(local("review"), {kind: "parallel", nodes: [local("other"), backTo("review")]}), ["back_to_target_not_found", "/draft/plan/nodes/1/nodes/1"]);
-  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "Review step", reason: "Again."}])),
+  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "Review step", maximum: 5, reason: "Again."}])),
     ["back_to_target_invalid", "/draft/plan/nodes/1/then/nodes/0/target"]);
-  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "review", reason: "Again.", goto: "review"}])),
+  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "review", maximum: 5, reason: "Again.", goto: "review"}])),
     ["invalid_back_to_node_fields", "/draft/plan/nodes/1/then/nodes/0"]);
+  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "review", reason: "Again."}])),
+    ["invalid_back_to_node_fields", "/draft/plan/nodes/1/then/nodes/0"]);
+  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "review", maximum: 0, reason: "Again."}])),
+    ["invalid_back_to_maximum", "/draft/plan/nodes/1/then/nodes/0"]);
+  assert.deepEqual(failure(local("review"), branch("Findings remain.", [{kind: "back_to", target: "review", maximum: 1.5, reason: "Again."}])),
+    ["invalid_back_to_maximum", "/draft/plan/nodes/1/then/nodes/0"]);
 
   // a reusable workflow may return to its caller's earlier member; without an exit around it the composed plan cannot complete
   const reference = {kind: "workflow", definitionId: "fix-and-return", reason: "Fix, then review again."};
@@ -426,7 +439,7 @@ it("a child's scoped workflow text names each occurrence with its status, attemp
   const document = {workflowId: "child-workflow", revision: 4, status: "underway", parentWorkflowId: "main-workflow", objective: "Build the client.", plan: progressed.plan,
     branchSelections: [], evidence: [], sourceBinding: null, returns: [returnEntry("applied", 1), returnEntry("pending", 2)]} as unknown as WorkflowStateDocument;
   const text = scopedWorkflowText(document);
-  assert.ok(text.startsWith("Your scoped workflow child-workflow, revision 4, status underway, inside parent workflow main-workflow.\nObjective: Build the client.\nPlan:\n"), text);
+  assert.ok(text.startsWith("Your scoped workflow child-workflow, revision 4, status underway, inside parent workflow main-workflow.\nObjective: Build the client.\nStep entry:"), text);
   assert.ok(text.includes(`- implement [local:implement; ${ids.implement}] completed`), text);
   assert.ok(text.includes(`- review [local:review; ${ids.review}] planned, attempt 2`), text);
   assert.ok(text.includes(`- branch [${loop.nodeId}] if: Findings remain. — decision pending\n`), text);

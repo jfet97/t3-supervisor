@@ -1,5 +1,6 @@
 import { emptyConversation } from "./supervision-conversation-contract.js";
-import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision } from "./supervision-conversation.js";
+import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision, taskScopeRevision } from "./supervision-conversation.js";
+import { completionRecordId } from "./workflow-progress.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
 import { posix, resolve } from "node:path";
 import { assessmentForTask, workflowAssessment } from "./workflow-assessment.js";
@@ -45,6 +46,7 @@ import { SupervisorTeamRuntime } from "./supervisor-team-runtime.js";
 import { SupervisorTeamController } from "./supervisor-team-controller.js";
 import { monitorActivityReference, observeScopeThread, SUPERVISOR_SCOPE_SNAPSHOT_MAX_ACTIVITY_REFS, SUPERVISOR_SCOPE_SNAPSHOT_MAX_THREADS, type ProjectSupervisorScopeSnapshot } from "./supervisor-observation.js";
 import { messageReadItemId } from "./message-read-handle.js";
+import { freshThreads, rotationFill, runLifecycleKey } from "./supervisor-discovery.js";
 
 type SetupCheckoutTarget = DefinitionCheckoutTarget;
 type DefinitionsFailure = DefinitionSourceFailure | DefinitionCheckoutUnavailable;
@@ -139,6 +141,9 @@ export const taskSource = (projection: Projection, afterOrdinal: number, written
 
 const attemptFields = (job: TaskRecord): {readonly attempt?: string} => job.attempt ? {attempt: job.attempt.attemptId} : {};
 const inFlight = (status: TaskRecord["status"]) => ["dispatching", "waiting", "uncertain"].includes(status);
+// discovery slots per cycle, and how many fresh chats a cycle may consider for them before leaving the rest to the next cycle
+const discoveryLimit = 20;
+const freshScanFactor = 10;
 // the retained raw arguments of a recorded submission, for its re-verification against the native item
 const decodeSubmittedArguments = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)));
 const noSubmissionReason = "The Supervisor did not submit a valid, source-linked interpretation.";
@@ -300,6 +305,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     Context.add(SupervisorTeamStore, team), Context.add(ThreadPolicyStore, policy), Context.add(SupervisionScopeService, scope), Context.add(SupervisorConversation, conversation));
   // in-memory cursors, classification memory, presence timestamps and the single-flight folder and boundary checks of this process
   const examinedNonTasks = yield* Ref.make(HashMap.empty<string, string>());
+  // the run lifecycle key of each main when this process last considered it for discovery
+  const consideredRuns = yield* Ref.make(HashMap.empty<string, string>());
   const folderPresenceCheckedAt = yield* Ref.make(HashMap.empty<string, number>());
   const folderPresenceInFlight = yield* Ref.make(HashMap.empty<string, Deferred.Deferred<SupervisionFolderPresence, SharedCheckEnded>>());
   const activationBoundaryInFlight = yield* Ref.make<Deferred.Deferred<SupervisorBaseline, SharedCheckEnded> | null>(null);
@@ -523,9 +530,17 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     }
     if (issues.length > 100) issues.splice(100);
     if (!resolved) complete = false;
+    // the main's current execution, so a reader on any workflow page tells the current settlement rows from history
+    const task = yield* store.task(mainThreadId);
+    const document = task && workflows ? yield* attempt(workflows.get(projectId, mainThreadId)) : null;
+    const currentExecution = task ? {taskId: task.id, taskRevision: taskScopeRevision(task), completionId: document?.ok && document.value ? completionRecordId(document.value) : null} : null;
     return {projectId, mainThreadId, supervisorThreadId: binding?.threadId ?? null, bindingGeneration: binding?.generation ?? null,
       observedAt, lineageTotal, lineageOffset, lineageHasMore,
-      complete: complete && Boolean(resolved?.complete), issues, threads: observedRows} satisfies ProjectSupervisorScopeSnapshot;
+      complete: complete && Boolean(resolved?.complete), issues, threads: observedRows, currentExecution,
+      // the participant settlements as the lifecycle recorded them, every execution; nothing here is evaluated anew
+      ...(binding?.participantSettlements?.length ? {participantSettlements: binding.participantSettlements.map(item => ({taskId: item.taskId, taskRevision: item.taskRevision,
+        completionId: item.completionId, threadId: item.threadId, environmentId: item.environmentId, state: item.state, reason: item.reason ?? null,
+        observedAt: item.observedAt}))} : {})} satisfies ProjectSupervisorScopeSnapshot;
   });
   // the shared activation boundary read of concurrent folder checks: its first caller runs it under the 30 s deadline, and when
   // that caller ends without a result its joined callers see a failed read
@@ -1344,6 +1359,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
               proposalId: retained.workflowProposalId ?? retained.agreement?.proposalId ?? retained.id});
           }
           const status = conversation?.authorization || next.objective !== null ? "inferred" as const : "needs_context" as const;
+          // the root executed this request and submitted: the full notice it carried delivered this instructions version
+          if (job.requestRoleVersion) {
+            const owner = yield* store.bindingForSupervisor(job.supervisorThreadId);
+            if (owner && owner.deliveredRoleVersion !== job.requestRoleVersion) yield* store.setBinding({...owner, deliveredRoleVersion: job.requestRoleVersion});
+          }
           yield* complete(next, status, next.objective, payload.reason);return status;
         }));
       }));
@@ -1487,8 +1507,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const requesters = yield* requesterPolicy(preparing.projectId);
         // an agent request is introduced to the Supervisor as the launching agent's, never as the human's
         const requester = sourceRun ? taskRequester(source, sourceRun, message, requesters) : null;
-        // the request carries the root notice: the binding fences and the instructions handle, never the rules themselves
-        const notice = conversation.rootNotice(owner);
+        // the request carries the root notice: the binding fences and the instructions handle, never the rules themselves; in full until a
+        // completed turn confirmed this instructions version, then the one-line pointer, as every other root wake of the binding
+        const wake = yield* conversation.rootWake(owner);
+        const notice = wake?.text ?? null;
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
         // the genuine requester messages and operative replies since the activation floor, each with the exact native turn item T3 reads it
@@ -1519,6 +1541,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const attempt: InterpretationAttempt = retained ?? {attemptId: interpretationAttemptId(mintedUuid), key: built.key};
         const next: TaskRecord = {...preparing, requestText: built.requestText, definitionContext: built.request.context,
           definitionSnapshot: built.request.context ? loadedDefinitions : null, attempt, interpretationSources};
+        delete next.requestRoleVersion;
+        if (wake?.roleVersion) next.requestRoleVersion = wake.roleVersion;
         yield* store.saveTask(next);
         return next;
       }));
@@ -1610,10 +1634,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       return yield* processed;
     }));
   }).pipe(Effect.timeout("30 seconds"));
-  // one discovery step for a candidate main: a new genuine human request becomes a queued interpretation task of its binding
+  // one discovery step for a candidate main: a new genuine human request becomes a queued interpretation task of its binding; a main
+  // whose workspace is still preparing is reported as deferred, so the cycle spends no productive slot on it
   const discover = (thread: ThreadInfo, registered: {id: string}, previous: TaskRecord | null, catalog: CatalogValue) => Effect.gen(function* () {
     const main = yield* projection(thread.id);
-    if (workspacePreparationPending(main)) return;
+    if (workspacePreparationPending(main)) return "preparation_pending" as const;
     if (!(yield* scope.eligible(main.thread, catalog.threads)) || main.thread.projectId !== registered.id) return;
     const baseline = yield* sourceFloor(thread.id, main);if (baseline === null) return;
     // an explicit Enable or a new activation boundary supervises the chat's next request afresh, even after an agreed task
@@ -1682,13 +1707,14 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         return Boolean(message && run && run.ordinal > baseline && (enabledAt === null || (timestampMs(message.createdAt) ?? 0) > enabledAt));
       }).slice(-5) : [];
       const oversized = task.message.text.length > 24_000;
+      const requestObservedAt = timestampMs(task.run.requestedAt);
       yield* store.saveTask({...(previous?.id === id ? previous : {}), id, threadId: thread.id, projectId: registered.id, sourceRunId: task.run.id, sourceMessageId: task.message.id,
         sourceOrdinal: task.run.ordinal, sourceHash: fingerprint(task.message.text), status: oversized ? "needs_context" : "queued", objective: previous?.id === id ? previous.objective : null,
         conversation: {...(previous?.id === id ? previous.conversation ?? emptyConversation(now()) : emptyConversation(now())), observed: latest ?? null},
         reason: oversized ? "The task message exceeds the interpretation limit; provide a shorter task." : "Waiting for the project Supervisor.",
         updatedAt: now(), requestText: "", supervisorThreadId: binding.threadId,
         messageId: `supervisor-objective:${id}:${task.run.ordinal}:${fingerprint(task.message.text).slice(0, 20)}`, supervisorRunId: null, dispatchedAt: null, replayCount: 0,
-        definitionContext: null,
+        definitionContext: null, discoveredAt: now(), ...(requestObservedAt === null ? {} : {requestObservedAt}),
         // only an unresolved request carries forward; an answered not-needed request is complete and never merges into the next task
         ...(carried.length ? {contextMessageIds: carried} : {})});
     }));
@@ -1709,25 +1735,53 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (masterEnabled) yield* prepareStarts(catalog);
     const threads = yield* Effect.filter(catalog.threads, t => scope.eligible(t, catalog.threads));
     if (masterEnabled) {
-      const candidatesNow = yield* Ref.modify(offset, (current) => [[...threads.slice(current), ...threads.slice(0, current)].slice(0, 20), threads.length ? (current + 20) % threads.length : 0] as const);
+      // the mains whose run lifecycle changed come first, oldest request first, then the rotation fills the cycle: the activation
+      // anchors, every stored task's source run and this process's examined and considered memories say what changed
+      const anchors = new Map(((yield* store.baseline())?.threads ?? []).map((anchor) => [anchor.id, anchor.latestRunId] as const));
+      const sourceRuns = new Map<string, string>();
+      for (const item of catalog.projects) {
+        if (!item.available) continue;
+        for (const task of yield* store.tasks(item.project.id)) sourceRuns.set(task.threadId, task.sourceRunId);
+      }
+      const examinedRuns = new Map(HashMap.toEntries(yield* Ref.get(examinedNonTasks)));
+      const fresh = freshThreads({threads, anchors, sourceRuns, examined: examinedRuns, considered: new Map(HashMap.toEntries(yield* Ref.get(consideredRuns)))});
       const projectsToResolve = yield* Effect.filter(catalog.projects, item => Effect.gen(function* () {
         return item.available && !(yield* store.isManual(item.project.id)) && !(yield* store.autoControlInitialized(item.project.id));
       }));
       yield* Effect.forEach(projectsToResolve, item => Effect.exit(resolveControl(item.project.id)), {concurrency: "unbounded", discard: true});
-      for (const thread of candidatesNow) {
-        const registered = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!registered || !(yield* projectEnabled(registered.id, thread.id))) continue;
-        if ((yield* store.start(thread.id))?.status === "pending") continue;
+      const discoveryStartedAt = yield* Clock.monotonicTimeNanos;
+      const considered = new Set<string>();
+      let discovered = 0;
+      // one candidate: its run lifecycle is memorized first, whatever this cycle makes of it, so a skipped or deferred chat is offered
+      // again exactly when T3 reports that lifecycle changed; then the skip checks, then one discovery attempt
+      const consider = (thread: ThreadInfo) => Effect.gen(function* () {
+        considered.add(thread.id);
+        const key = runLifecycleKey(thread);
+        if (key !== null) yield* Ref.update(consideredRuns, (map) => HashMap.set(HashMap.size(map) >= 10_000 ? HashMap.empty() : map, thread.id, key));
+        const registered = catalog.projects.find(p => p.available && p.project.id === thread.projectId)?.project;if (!registered || !(yield* projectEnabled(registered.id, thread.id))) return;
+        if ((yield* store.start(thread.id))?.status === "pending") return;
         const previous = yield* store.task(thread.id);
         // an unresolved request or a temporary not-needed decision is reconsidered when the next genuine human request arrives; an
         // interpreted task is reconsidered only when the latest Enable or activation boundary came after it (checked below); queued
         // or in-flight work is never replaced
-
-        const examined = Option.getOrUndefined(HashMap.get(yield* Ref.get(examinedNonTasks), thread.id));
         if (!previous?.conversation && typeof thread.latestRunId === "string" && (thread.latestRunId === previous?.sourceRunId ||
-          thread.latestRunId === (yield* store.baseline())?.threads.find(anchor => anchor.id === thread.id)?.latestRunId ||
-          thread.latestRunId === examined)) continue;
-        // discovery failures are retried without producing model work
-        yield* attempt(discover(thread, registered, previous, catalog));
+          thread.latestRunId === anchors.get(thread.id) || thread.latestRunId === examinedRuns.get(thread.id))) return;
+        // discovery failures are retried without producing model work; a pending workspace is memorized but takes no productive slot
+        const result = yield* attempt(discover(thread, registered, previous, catalog));
+        if (!(result.ok && result.value === "preparation_pending")) discovered += 1;
+      });
+      // a fresh chat takes a discovery slot only when it is actually discovered: a skipped or still-preparing one costs its memory (and
+      // one read) and nothing else; the scan is bounded, and whatever it does not reach stays fresh for the next cycle
+      for (const thread of fresh.slice(0, discoveryLimit * freshScanFactor)) {
+        if (discovered >= discoveryLimit) break;
+        yield* consider(thread);
+      }
+      const fill = rotationFill({threads, exclude: considered, cursor: yield* Ref.get(offset), limit: discoveryLimit - discovered});
+      yield* Ref.set(offset, fill.nextCursor);
+      for (const thread of fill.rotated) yield* consider(thread);
+      if (fresh.length > 0 || discovered > 0) {
+        const cycleMs = Math.round(Number((yield* Clock.monotonicTimeNanos) - discoveryStartedAt) / 1_000_000);
+        yield* logEvent("supervisor_discovery", {eligible: threads.length, fresh: fresh.length, discovered, cycleMs});
       }
     }
     const allBindings = yield* store.bindings();

@@ -1,4 +1,5 @@
 import { engagedTask } from "./support/engaged-task.js";
+import {exchangeTable, measureExchange, recordExchangeSamples, type ExchangeSample} from "./support/exchange-audit.js";
 import { makeSourceProjection } from "./support/psx-submission.js";
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
@@ -138,7 +139,11 @@ const messageLine = (text: string, label: "authority" | "targets" | "notificatio
 };
 type CheckinTarget = {threadId: string; assignmentRootThreadId: string; assignmentEpoch: number; pending: number; priority?: string[];
   refs?: Array<Record<string, string>>; writable?: false; reason?: string};
-const checkinTargets = (text: string): CheckinTarget[] => messageLine(text, "targets") as CheckinTarget[];
+// the rows of a check-in are its frozen envelope; its text names the target ids only
+const checkinTargets = (request: {envelope?: Record<string, unknown> | undefined}): CheckinTarget[] => {
+  assert.ok(request.envelope, "a check-in stores its frozen rows");
+  return (request.envelope as {targets: CheckinTarget[]}).targets;
+};
 
 const assertAdvertisedInput = (definition: {inputSchema: unknown}, input: Record<string, unknown>, complete = true): void => {
   const schema = definition.inputSchema as {
@@ -323,9 +328,8 @@ it.effect("root observes fenced coverage explicitly and does not acknowledge its
   const request = yield* conversation.requests.pending(projectId, f.binding.threadId);
   assert.ok(request?.batch);
   assert.ok(request?.text.includes("Rows marked teamCoverageState=transferring or unavailable are observe-only"));
-  const envelopeText = request?.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)?.[1];
-  const envelope = JSON.parse(envelopeText ?? "null") as {threads?: Array<{threadId: string; teamCoverageState?: string}>};
-  assert.equal(envelope.threads?.find(item => item.threadId === "branch")?.teamCoverageState, "unavailable");
+  const envelope = (request?.envelope ?? null) as {threads?: Array<{threadId: string; teamCoverageState?: string}>} | null;
+  assert.equal(envelope?.threads?.find(item => item.threadId === "branch")?.teamCoverageState, "unavailable");
   assert.equal((yield* f.monitor.pending(projectId, "branch")).length, 1);
 
   const run = {id: "root-observe-run", threadId: f.binding.threadId, ordinal: 1, status: "completed", requestedAt: iso(time + 10),
@@ -364,9 +368,8 @@ it.effect("root observes fenced coverage explicitly and does not acknowledge its
   yield* conversation.run(f.binding as BindingRecord, rootProjection, f.threadList);
   const eventRequest = yield* conversation.requests.pending(projectId, f.binding.threadId);
   assert.ok(eventRequest, "the new attention event should wake the root");
-  const followupEnvelopeText = eventRequest.text.match(/UNTRUSTED_MONITOR_ENVELOPE\n([\s\S]*?)\nEND_UNTRUSTED_MONITOR_ENVELOPE/u)?.[1];
-  const followupEnvelope = JSON.parse(followupEnvelopeText ?? "null") as {threads?: Array<{threadId: string; teamCoverageState?: string}>};
-  assert.equal(followupEnvelope.threads?.find(item => item.threadId === "branch")?.teamCoverageState, "unavailable");
+  const followupEnvelope = (eventRequest.envelope ?? null) as {threads?: Array<{threadId: string; teamCoverageState?: string}>} | null;
+  assert.equal(followupEnvelope?.threads?.find(item => item.threadId === "branch")?.teamCoverageState, "unavailable");
   assert.ok(eventRequest?.text.includes("A new root event accompanies the still-fenced branch activity."));
 
   yield* f.teamStore.settleRequest(f.binding, "guide:observe-only-unknown");
@@ -495,7 +498,7 @@ it.effect("runtime completes a transfer only after both helpers finish their exa
       assertAdvertisedInput(supervisionTeamToolDefinition, read);
       assert.equal(delivery.text.includes(notice!.message), false, "the notice's record is read on demand, never pushed");
       assert.doesNotMatch(delivery.text, /UNTRUSTED|toolInputs|locatorBases|assignmentRootThreadId|"view"/u, "handover notifications carry no envelope or write locators");
-      assert.doesNotMatch(delivery.text, /gateway|mcpx|t3-supervisor-workflows/iu);
+      assert.doesNotMatch(delivery.text, /mcpx|t3-supervisor-workflows/iu);
     }
     for (const [logicalId, delivery] of transport.sent) {
       if (!logicalId.startsWith("supervisor-team-notice:") || completed.has(logicalId)) continue;
@@ -595,16 +598,17 @@ it.effect("registration readiness uses a finite native check-in and exact member
   assert.equal(request.completionMarker, `Supervisor team readiness ${request.id} completed`);
   assert.equal(request.text, `${helperCore}\nReadiness: read them with workflow_read ${JSON.stringify(read)}, then call supervision_team ${JSON.stringify(ready)}.\n` +
     `End with: ${request.completionMarker}`);
-  assert.match(helperCore, /^Supervisor helper rules: workflow_read view instructions, version [0-9a-f]{16}; /u);
+  assert.ok(helperCore.indexOf(toolRouteReminder) < helperCore.indexOf("workflow_read"), "helpers can discover the reader before reading their rules");
+  assert.match(helperCore, /workflow_read view instructions, version [0-9a-f]{16}; /u);
   assertAdvertisedInput(workflowReadToolDefinition, read);
   assertAdvertisedInput(supervisionTeamToolDefinition, ready);
   assert.ok(ready.operationId.length <= 128);
   // the rules, including that readiness grants no assignment, are read once from the instructions
   assert.doesNotMatch(request.text, /link_child is needed|New steps start planned|grants no/u);
   assert.match(helperInstructions, /a readiness turn grants no operational assignment/u);
-  assert.ok(request.text.length < 600, `readiness ${request.text.length}`);
-  // the helper calls the tools available to it by name: no gateway, alias, discovery recipe or code is suggested
-  assert.doesNotMatch(request.text, /\b(mcpx\w*|wrappers?|code-mode|gateway|functions\.exec|harness(es)?)\b|t3-supervisor-workflows/iu);
+  assert.ok(request.text.length < 750, `readiness ${request.text.length}`);
+  // helpers receive portable discovery before the reader, without a vendor, alias, recipe or code
+  assert.doesNotMatch(request.text, /\b(mcpx\w*|wrappers?|code-mode|functions\.exec|harness(es)?)\b|t3-supervisor-workflows/iu);
   // the rules name operations by tool name, with the one neutral routing reminder and no gateway recipe
   assert.equal(helperInstructions.split(toolRouteReminder).length - 1, 1);
   assert.equal(helperInstructions.match(/gateway/giu)?.length, 1);
@@ -825,7 +829,7 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   // the check-in names the helper's authority once and, per target, its pins, counts and exact handles
   const authority = messageLine(request.text, "authority") as Record<string, unknown>;
   assert.deepEqual(authority, {supervisorThreadId: first.threadId, bindingGeneration: f.binding.generation, memberEpoch: first.epoch});
-  const targets = checkinTargets(request.text);
+  const targets = checkinTargets(request);
   assert.equal(targets.length, 2);
   const target = targets.find(item => item.threadId === "branch")!;
   const archived = targets.find(item => item.threadId === archivedTarget.id)!;
@@ -865,7 +869,7 @@ it.effect("a stale completed helper check-in settles its request without acknowl
   assert.match(helperInstructions, /workflow_read takes the pins alone, without targetThreadId/u);
   assert.match(helperInstructions, /link_child adding operationId, childThreadId \(the target's threadId\) and note/u, "link_child names its child, never targetThreadId");
   assert.match(helperInstructions, /Retry an uncertain outcome only with the complete identical arguments/u);
-  assert.doesNotMatch(request.text, /toolInputs|locatorBases|locator base|UNTRUSTED|Use link_child only when|gateway|mcpx|t3-supervisor-workflows/iu);
+  assert.doesNotMatch(request.text, /toolInputs|locatorBases|locator base|UNTRUSTED|Use link_child only when|mcpx|t3-supervisor-workflows/iu);
   // an archived target is named read-only by its exact eligibility reason
   assert.deepEqual({writable: archived.writable, reason: archived.reason}, {writable: false, reason: "target_archived_or_deleted"});
   assert.match(helperInstructions, /A target with writable false \(target_archived_or_deleted or target_thread_unavailable\) is read-only/u);
@@ -903,7 +907,7 @@ const assertDeliverableCheckin = (request: {messageId: string; text: string}, la
   const bodyBytes = new TextEncoder().encode(JSON.stringify({batchId: request.messageId, text: request.text})).length;
   assert.ok(bodyBytes <= 65_536, `${label}: body ${bodyBytes} bytes`);
 };
-const checkinTargetIds = (text: string): string[] => checkinTargets(text).map(target => target.threadId);
+const checkinTargetIds = (text: string): string[] => messageLine(text, "targets") as string[];
 
 // one helper assigned a root with long-ID operational children, each with three completed runs and its tool items; the test
 // clock starts at the baseline's mocked Date.now and the cases step it
@@ -992,7 +996,7 @@ it.effect("twenty-five realistic targets fit one compact check-in that names eac
   assertDeliverableCheckin(request, "realistic check-in");
   assert.deepEqual(checkinTargetIds(request.text), team.targetThreadIds, "every realistic target fits one check-in");
   assert.equal(request.batch.threads.length, team.targetThreadIds.length);
-  for (const target of checkinTargets(request.text)) {
+  for (const target of checkinTargets(request)) {
     assert.equal(request.text.split(target.threadId).length - 1, 1, "a target's threadId appears once, not again in each ref");
     assert.deepEqual(target.refs, team.exactItemIds.get(target.threadId)!.map(sourceItemId => ({sourceItemId})));
   }
@@ -1031,7 +1035,7 @@ it.effect("an oversized helper batch is split into bounded check-ins that acknow
     const expectedThreads = batch.threads.slice(0, ids.length);
     assert.deepEqual(request.batch.threads, expectedThreads, "the stored frozen batch covers exactly the included targets");
     assert.equal(request.batch.pendingItemCount, expectedThreads.reduce((count, thread) => count + thread.pendingItemCount, 0));
-    for (const target of checkinTargets(request.text))
+    for (const target of checkinTargets(request))
       assert.deepEqual(target.refs, exactItemIds.get(target.threadId)!.map(sourceItemId => ({sourceItemId})));
     assert.equal((yield* f.teamStore.snapshot(f.binding)).events.some(item => item.kind === "service_attention"), false,
       "a fitting tail deferred by the size bound is normal pagination, not a root attention event");
@@ -1066,7 +1070,7 @@ it.effect("mentions T3 neutralizes count against the rendered check-in bound", (
   assert.ok(request);
   assertDeliverableCheckin(request, "check-in with mention-heavy handles");
   const ids = checkinTargetIds(request.text);
-  for (const target of checkinTargets(request.text))
+  for (const target of checkinTargets(request))
     assert.deepEqual(target.refs, team.exactItemIds.get(target.threadId)!.map(sourceItemId => ({sourceItemId})), "the handles are delivered unchanged");
   // by logical length all twenty-five would fit; the neutralized rendering leaves room for fewer
   assert.ok(request.text.length / ids.length * team.targetThreadIds.length < 40_000, `logical length ${request.text.length}`);
@@ -1187,7 +1191,7 @@ it.effect("each target's composed apply, guide and report arguments carry that t
   const authority = messageLine(request.text, "authority") as Record<string, unknown>;
   assert.deepEqual(authority, {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch},
     "the helper's authority is named once for every target");
-  const targets = checkinTargets(request.text);
+  const targets = checkinTargets(request);
   assert.deepEqual(targets.map(target => target.threadId), ["branch", "leaf", "other"]);
   const epochs = new Set<number>();
   for (const target of targets) {
@@ -2077,4 +2081,48 @@ it.effect("a stop saved while a helper is read posts no fresh team notice and cl
   assert.equal(finalAllowed, false, "the final delivery authorization sees the stop saved during the read");
   assert.equal(transport.attempts.length, 0, "no fresh notice is posted for a stopped parent");
   assert.ok((yield* f.teamStore.snapshot(binding)).notifications.every(item => !['pending', 'sending', 'uncertain'].includes(item.state)), "the never-posted notice is closed");
+}));
+
+// slice F exchange audit over the helper paths as dispatched: a readiness request (N12), two bounded check-ins of one helper (N13) with the
+// frozen rows each stores, and two team notifications (N14); each is measured against the helper reference and its previous sample
+it.effect("exchange audit: helper readiness, check-ins and notifications carry authority, ids, read routes and markers; the rows are frozen", () => Effect.gen(function* () {
+  const samples: ExchangeSample[] = [];
+  // N12: a registering helper's readiness request, as the readiness case builds it
+  const ready = yield* fixture();
+  const registered = yield* ready.teamStore.registerMember(ready.binding, {threadId: "audit-helper", taskId: "audit-task", bootstrapRunId: "audit-bootstrap", now: time});
+  ready.projections.set(registered.threadId, helperProjection(registered, ready.binding.threadId));
+  const readyRuntime = yield* ready.runtime(webhookTransport().transport);
+  yield* readyRuntime.startCycle(ready.binding);
+  yield* readyRuntime.reconcile(ready.binding, ready.threadList);
+  const readiness = yield* ready.requests.pending(projectId, registered.threadId);
+  assert.ok(readiness?.id.startsWith("team-ready:"), "the registering helper gets its readiness request");
+  samples.push({path: "N12", label: "helper readiness request (dispatched)", text: readiness!.text, rules: [helperInstructions], retrievable: ["instructions"], read: "workflow_read view instructions"});
+  const team = yield* largeHelperTeam(25, escapedItemIds);
+  const {f, member} = team;
+  const checkins: Array<{text: string; envelope: Record<string, unknown> | undefined}> = [];
+  for (let checkin = 0; checkins.length < 2; checkin++) {
+    assert.ok(checkin < 4, "two check-ins are built within four attempts");
+    if (checkin) yield* TestClock.adjust(SUPERVISOR_MONITOR_COOLDOWN_MS + 1);
+    const delivered = yield* team.deliverNextCheckin(time + 12 + checkin);
+    assert.ok(delivered?.request?.batch, `check-in ${checkin} is built`);
+    const request = delivered.request;
+    checkins.push({text: request.text, envelope: request.envelope});
+    team.completeHelperTurn(request, `audit-helper-${checkin}`, (yield* Clock.currentTimeMillis) + 1);
+    yield* TestClock.adjust(2);
+    yield* team.runtime.startCycle(f.binding);
+    yield* team.runtime.reconcile(f.binding, f.threadList);
+  }
+  samples.push({path: "N13", label: "helper check-in, dispatched, first", text: checkins[0]!.text, rules: [helperInstructions], retrievable: ["rows"], read: "workflow_read view request"});
+  samples.push({path: "N13", label: "helper check-in, dispatched, second", text: checkins[1]!.text, previous: checkins[0]!.text, rules: [helperInstructions], retrievable: ["rows"], read: "workflow_read view request"});
+  if (checkins[0]!.envelope) samples.push({path: "R2", label: "helper check-in frozen rows (view request envelope), first", text: JSON.stringify(checkins[0]!.envelope),
+    args: {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch, view: "request", requestId: "<requestId>"}});
+  const notices = [0, 1].map(attempt => teamNotificationText(f.binding, {id: `notification-${attempt}`, kind: "note", recipientThreadId: member.threadId, memberEpoch: member.epoch, deliveryAttempt: attempt} as never).text);
+  samples.push({path: "N14", label: "team notification, first", text: notices[0]!, rules: [helperInstructions], retrievable: ["notification"], read: "supervision_team read"});
+  samples.push({path: "N14", label: "team notification, second", text: notices[1]!, previous: notices[0]!, rules: [helperInstructions], retrievable: ["notification"], read: "supervision_team read"});
+  recordExchangeSamples("helper-paths", samples);
+  console.log(`EXCHANGE AUDIT (helper paths)\n${exchangeTable(samples.map(measureExchange))}`);
+  for (const sample of samples) {
+    assert.doesNotMatch(sample.text, /mcpx|t3-supervisor-workflows|code-mode|functions\.exec/iu, sample.label);
+    if (sample.path === "N13") assert.doesNotMatch(sample.text, /"refs"|"pending"|"assignmentEpoch"|sourceItemId/u, `${sample.label} pushes rows`);
+  }
 }));

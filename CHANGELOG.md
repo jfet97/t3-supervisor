@@ -1,5 +1,72 @@
 # T3 Supervisor
 
+## 0.0.19
+
+### Patch Changes
+
+- bb6dde5: Remind operators and their children to announce workflow transitions and refresh the applicable step, references and skills before starting work, without waiting for routine approval.
+
+## 0.0.18
+
+### Patch Changes
+
+- f2a8b78: Give operators shared participant and completion guidance when they read their plan, and clarify which rules belong in project workflow definitions.
+
+## 0.0.17
+
+### Patch Changes
+
+- b852f6b: New requests in large instances are discovered in the first discovery cycle instead of after several rotation cycles: chats whose latest run changed are handled first, oldest request first, and unchanged chats cost nothing. Each cycle that finds fresh requests logs one `supervisor_discovery` timing event with counts only.
+- b852f6b: Every task participant is now explicit. An external-contribution record may declare its participant generically (a T3 conversation with an optional environment, an external handle, or unknown); the root can record its own observation of a participant as evidence backed by its own completed native tool call, with wait, list and search calls counting as lifecycle only; the progress snapshot and the task page list each participant's role and attempt, lifecycle, completion, coverage and receipt as distinct facts, and a linked child with no attached step is shown as having no role. A planning pause of a main now also holds its live native descendants with ongoing work, including children that appear later, within the existing 100-target limit; anything it cannot hold is listed explicitly and blocks adoption, and a parent's acknowledgement never counts for its child.
+
+  A declared conversation in another environment is shown with its full identity and gets no local link. A receipt cites the root's own completed native tool call as the configured routes read it: a configured gateway call stands for the target it names, any other wrapper for itself, and a call a harness nests under a parent item counts through its ancestors in the same run; a read made before an applied return cannot be recorded after it, and an identical repeated receipt updates its entry instead of consuming the evidence history. A descendant that cannot be read, or whose lineage cannot be listed, blocks adoption until a fresh read establishes membership again; a held child whose work finished is released as a dispatch hold only, without any instruction to continue, while a child whose work resumes under `continue` must have its own linked, planned workflow (`planning_target_unscoped` otherwise). History shows a compacted receipt as one counted span dated by its first read, so repeated reads never reorder the recorded work.
+
+- b852f6b: Routine Supervisor wakes carry only identities, counts, the instructions version, their read route and their turn-end marker: a check-in's rows, counts, handles, contact routes, team policy and open indexes are frozen with the request and read on demand with `workflow_read` view `request` (only by the Supervisor that owns the request, during the turn and after its acknowledgement; another Supervisor's request is denied). A liveness check-in names its run, revision and repeat and exposes the unsettled occurrences the same way. The root notice with its fences, discovery route and Stop fallback is delivered once per instructions version and confirmed by a completed turn, the first interpretation request of a binding included; later wakes and later interpretation requests of the same binding carry a one-line pointer with the version. A protocol repair wake names the proposal, task, code and attempt and the diagnostics read instead of embedding the rejection data. The core's rule for turns without a service request now continues the watch instead of framing a finite wake.
+- b852f6b: Negotiation release and the proposal notice now agree with the recorded agreement: a planning pause released as resolved or superseded while the main's current proposal is unagreed grants no implementation permission and names the proposal and the only acceptance route (the exact record in the operative's own completed reply; a record sent to the Supervisor or relayed by another chat records nothing); a genuine timeout or no-plan release still continues the task. The proposal notice is a non-blocking suggestion only after a timeout, a no-plan release or a deadline that passed while the pause is open; after planning resolved or superseded it asks for agreement first. The root's rules record implementation proceeding without recorded agreement as needs_attention with one concise delta, and treat privately relayed acceptances as nothing.
+- b852f6b: After a task completes, the service makes one best-effort automatic settle attempt per T3 participant besides the main and its Supervisor: the main's lineage descendants and the local T3 conversations its contributions declared are each evaluated once per completed execution, and one that is readable, quiet and not kept active by its user gets a single automatic-settle command on the update time its fresh read showed, which T3 rejects atomically when the conversation changed or its user chose in between. The outcome is recorded from native evidence (settled, superseded by its user, unknown after a lost reply, or rejected); anything else is recorded once with its reason, including conversations in a linked environment that have no supported route, and left to manual settlement, with nothing retried. The command is admitted only while the same execution is still complete and the participant still a member. An execution is the task, its scope revision and the main document's latest completion record, so the next task, or the same task completed again after a return, evaluates every participant anew while the earlier rows stay as history; the progress page shows the current execution's rows on any workflow page. Intermediate review rounds never settle a reviewer, and participants that are not T3 conversations are shown as not applicable. In History, each earlier review attempt is headed by its target and time instead of a return count that is not the occurrence's attempt.
+- b852f6b: A status-only workflow write no longer fails with `pinned_definition_context_mismatch` after a new task agreed the same fixed workflow whose return kept its retained budget: the stored plan is rechecked against the pinned definitions with its own occurrences as the baseline, so a budget the service deliberately retained on a return is treated as that occurrence's identity rather than a candidate edit. Occurrence ids, the retained budget and its used count stay unchanged; a stale binding is still refused, and a budget id edited on a retained return is not adopted (the plan is normalized to the retained identity).
+- b852f6b: A workflow status inside a reached return region can no longer be moved backward by an ordinary apply: the Supervisor settles the assessing member, the service requests the return, and applying it is the only way a new attempt starts and a jump is spent. Off the selected path a misrecorded status is corrected with an explicit repair flag that starts no attempt. Applied receipts state the document's own status.
+- b852f6b: After a return is applied the task page names the returned target as ready to start instead of showing no current work, outcomes recorded on a path that is no longer selected or awaits a decision again are shown as earlier history without a live tone, and each repeated occurrence keeps a collapsed "Previous attempt n" with the status, contributors and decision (revision, reason, source) its closed attempt ended with, retained after a fresh decision. History groups the records of one write under a derived headline in stored order without merging them, never headlines a record that changed no status, and every occurrence inside a return's region shows its attempt, starting at 1.
+
+  Overlapping returns name only the later return's frontier as ready while independent lanes keep their own ready targets, a ready lane stays named in Now beside an unrelated active lane, a return to a workflow occurrence names that workflow, previous attempts are numbered per occurrence like History and keep their decision reason and source after many later branch events, and a pending decision is shown amber only once its earlier work is settled.
+
+- b852f6b: Role and authority provenance: the Supervisor's review duty now says a failing check or finding keeps the duty unfinished, that it requires the agreed check and the operative's own correction without prescribing an implementation, locator, type or sanitization strategy, that it adds no hold that is not a genuine human limit or the agreed plan, and that a Stop it imposes is its own; the operative is told that Supervisor guidance is never a human limit and that human limits are cited by their message. A genuine human message now includes the human's answer to a runtime input request of the chat, the server-created user message T3 names after the resolved request (`async-answer:<requestId>` or `approval-feedback:<requestId>`; no other link is read), while agent sends, scheduled or imported messages, system and Supervisor commands, service notices and Supervisor-authored stops are never human. A review wait on the requester must cite the human's own message in the root or the main (`messageId`); otherwise it is refused as `wait_source_not_human`.
+- b852f6b: Check-in and liveness wakes no longer frame the watch outcome as something recorded "at the end of the turn"; they point at the watch's own endings, and the shared root and helper watch rules now say that a timed-out wait while the target still runs is not an ending (read forward and wait again), that external waiting counts only when a native watcher reports it (never the operative's own running turn), and that a main still running with agreed work unfinished never ends the root's turn, however many waits timed out. This closes the observed case of a Supervisor ending its turn after several timed-out waits while the operative was still working.
+- b852f6b: A Supervisor check-in is now one continuous watch of the task: it reads covered work forward, drains its own queued messages at the boundaries it chooses and paces with bounded waits, ending only on completion, an explicit standby, a yield, a human Stop or context rotation. When a turn still ends with the operative's run completed and agreed work unfinished, the service sends one liveness check-in per run and workflow revision, queued behind any active turn and never steered into it. The operative is told its queued questions are read at those boundaries.
+
+## 0.0.16
+
+### Patch Changes
+
+- d3c2330: New Supervisors receive tool discovery guidance before their first instruction read. Stop confirmation requires a recorded service result, and explicit chat Stops notify the operative even before first contact.
+
+## 0.0.15
+
+### Patch Changes
+
+- 25adc24: A reconnect that already stored the archive snapshot becomes connected when the shell reports it is caught up, even when no later thread update arrives.
+- 25adc24: The live shell follows the installed T3 subscription. Archive membership comes from `getArchivedShellSnapshot` at the same sequence as the shell snapshot, including when that snapshot's `archivedThreads` list is empty. A reconnect resumes from the live cursor only after that archive snapshot has been stored.
+
+## 0.0.14
+
+### Patch Changes
+
+- fd0bbdf: Workflow returns require `back_to(n)`, a maximum of successful backward jumps. An exhausted return stays visible instead of starting another attempt, and an enclosing return resets only strictly nested replay budgets.
+
+## 0.0.13
+
+### Patch Changes
+
+- 8e2fafc: The fixes from the whole-project audit:
+
+  - **Definition changes:** the service owns delivery of the revised proposal. Definition reviews no longer also instruct the Supervisor to send a second copy.
+  - **Health endpoint:** a Supervisor started as a plain process now serves `/health` and `/live` on loopback only (`HEALTH_HOST`, default `127.0.0.1`), as the installation guide always said. The container image opens it inside its own network, so a published port, such as the template's loopback mapping, still reaches it.
+  - **Applying a return:** check the workflow owner's activity after its contributors, and repeat those checks after waiting for another operation. If the service stays busy, the call writes nothing and asks to be repeated unchanged. Work can still start after the final native observation.
+  - **Planning traffic:** an open planning pause no longer re-reads every acknowledged chat each second.
+  - **Other server aliases and gateways:** a deployment that registers the workflow server under another name can list it exactly in `WORKFLOW_MCP_SERVER_ALIASES`. A deployment whose agents reach tools through a gateway other than MCPX can list that gateway's exact call tool names in `WORKFLOW_MCP_GATEWAY_TOOLS`, for example `mcp__other_gateway__call_tool`. The Supervisor's workflow calls through a listed gateway are then recognised, and so are its and its helpers' reads of chats. Unlisted names stay unrecognised, and MCPX remains the default.
+  - **Retired reminder rules:** the dashboard snapshot no longer carries the retired reminder rules, their settings, mutes or token budget. Stored history is kept.
+  - **Documentation:** the docs now explain when the service settles a finished main chat and how to keep it active, and two outdated, installation-specific documents were removed.
+
 ## 0.0.12
 
 ### Patch Changes

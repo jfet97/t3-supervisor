@@ -158,7 +158,7 @@ sequence:
 
 `account-for-findings` follows the whole branch on either path. A reviewer pass
 describes one reviewer and one artifact. `paired-review` composes two such passes
-with `parallel`; the caller coordinates findings and any conditional `back_to`
+with `parallel`; the caller coordinates findings and any conditional `back_to(n)`
 after they join. Reviewer count and repetition belong to that caller. Leave out `else`
 when a false condition simply skips the extra work. Each path needs at least one
 member, the condition is one line of at most 300 characters, and a path can hold
@@ -196,13 +196,14 @@ sequence:
   - branch:
       if: The review left material findings.
       then:
-        - back_to: implement
+        - back_to(5): implement
   - step: deliver
 ```
 
-`back_to` names the ID of an earlier step, local step or workflow in the same sequential
-lane and ends its path. Put it in a branch path so the work can also continue; a return
-with no way out is rejected. When the operative reaches it, the region from `implement`
+`back_to(n)` names the ID of an earlier step, local step or workflow in the same sequential
+lane and ends its path. `n` is a required integer from 1 to 99, the maximum successful
+jumps of that return; the first pass consumes none. Put it in a branch path so the work can also continue; a return
+with no way out is rejected. When the operative reaches it and jumps remain, the region from `implement`
 through verification, Review and the branch waits. The Supervisor applies the return at
 a safe point, and the next attempt repeats that region with the same reviewer conversations; the
 branch decision is recorded again for each attempt. A reusable workflow may return to a
@@ -231,17 +232,13 @@ requester's explicit decision on the remaining findings.
 
 For repeated rounds, strongly prefer the same exact persistent reviewer chats per
 main-owned cycle. Record IDs, actual models and reasoning, artifact and base, rounds,
-findings and responses privately. Different mains own different reviewer chats. Use
+findings and responses privately. These notes supplement the supported participant
+declaration, not replace it. Different mains own different reviewer chats. Use
 supported conversation or session APIs; copied context in a new task is not conversation
-persistence. Respect orchestrator lifecycle rules, including any requirement to create
-new delegated tasks instead of resuming completed backing threads. Choose a supported
-persistent route when the project requires identity.
-
-Native children whose provider publishes separate review-turn identities can continue
-in the same conversation after a return. If no per-execution identity is available,
-replace only that reviewer slot with a managed task, carry its findings forward and
-record the reason and old/new identities. Earlier results remain history and cannot
-satisfy the repeated review. Do not invent a child run from its parent's run.
+persistence. The host and Supervisor guidance own supported conversation lifecycle,
+participant identity and return mechanics; reference them instead of encoding a native
+tool recipe in project definitions. Earlier reports remain history and cannot satisfy
+a repeated review of changed work.
 
 Define intentional new-cycle boundaries for substantial intervening work or a material
 scope change, carrying forward unresolved findings. Recover temporary interruptions in
@@ -252,7 +249,7 @@ Delays or unfavorable findings do not justify replacement. An unavailable compli
 route is an explicit gap, not a waiver.
 
 Keep drafting, adoption and external edits separate. Follow the target-folder boundary
-in SKILL.md: keep execution guidance in the definitions and explain rationale in the
+in SKILL.md: keep project duties in the definitions and explain rationale in the
 response. Existing external files can be read or referenced. Propose external changes to the user and wait for
 explicit approval of those specific edits. Conditional wording, catalog adoption or
 Supervisor activation does not replace that approval.

@@ -4,13 +4,14 @@ import { Deferred, Effect, Exit, Fiber, Layer, Queue, Schema } from "effect";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { defaultMonitoringSettings, defaultSupervisorTeamSettings, ProjectSupervisorSave, ProjectSupervisorSnapshot, type DefinitionReviewInfo, type ProjectSupervisorInfo, type ProjectSupervisorRetryInput, type ProjectSupervisorSaveInput, type ProjectSupervisorTeamInfo, type SupervisorModelSelection, type WorkflowAgreementInfo, type WorkflowPlanGroupInfo, type WorkflowProposalInfo } from "../src/project-supervisor-contract.js";
-import type { WorkflowProgressSnapshot } from "../src/workflow-progress.js";
+import type { WorkflowProgressParticipant, WorkflowProgressSnapshot } from "../src/workflow-progress.js";
 import { SessionAccess } from "../ui/src/access.js";
 import { confirmChatSupervisionChange, mergeLoadedDraft, ConnectedWork, progressView, ProjectSupervisorView, TaskWorkspace, shouldOfferNativeRetry } from "../ui/src/project-supervisor.js";
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
 import { fixtureJourney } from "./ui-fixture/journey.js";
 import { PlanJourney } from "../ui/src/workflow-journey.js";
+import { historyOperations, operationHeadline, WorkflowHistory as WorkflowHistoryView } from "../ui/src/workflow-history.js";
 
 // the client helpers are Effects on the page runtime of each test; they resolve request paths against the page location.
 // they run over a stubbed browser fetch without time, so these tests are it.effect
@@ -168,6 +169,68 @@ const renderConnected = (pages: WorkflowProgressSnapshot[]) => {
   return renderToStaticMarkup(createElement(ConnectedWork, {threads: [...view.threadById.values()], mainThreadId: "task-thread", workflows: view.workflowByThreadId, coverage: view.coverageByThreadId, task: undefined, complete: view.complete}));
 };
 
+it("the participants section shows role, attempt, lifecycle, completion, coverage and receipt as distinct facts, with explicit empty and unknown states", () => {
+  const base: WorkflowProgressParticipant = {id: "x", source: "native", kind: "native_child", handle: "x", environmentId: null, threadId: "x", contributionId: null, revision: null,
+    roles: [], owner: "root", lifecycle: "unknown", reportedState: null, completion: "none", coverage: "unknown", currentReceipt: null, priorReceipts: 0, settlement: "not_evaluated", settlementReason: null};
+  const participants: WorkflowProgressParticipant[] = [
+    {...base, id: "child-one", handle: "child-one", threadId: "child-one", roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 2, retired: true}], owner: "helper",
+      lifecycle: "completed", completion: "native_completed", coverage: "native"},
+    {...base, id: "linked", handle: "linked", threadId: "linked", lifecycle: "running"},
+    {...base, id: "contribution:review:ext", source: "declared", kind: "external", handle: "github:pr-42", threadId: null, contributionId: "review:ext", revision: 2,
+      roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 1, retired: false}], lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed",
+      currentReceipt: {kind: "read", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "read-pr", toolName: "mcp__github__get_pull_request", evidenceId: "e1", repeats: 3, firstRecordedAt: 1_799_999_000_000}, priorReceipts: 1},
+    {...base, id: "contribution:review:t3", source: "declared", kind: "t3_conversation", handle: "reviewer-x", threadId: "reviewer-x", environmentId: "lab", contributionId: "review:t3", revision: 1,
+      roles: [{nodeId: "step-inspect", nodeName: "Review", attempt: 1, retired: false}], lifecycle: "reported", reportedState: "awaiting_result", coverage: "lifecycle_only",
+      currentReceipt: {kind: "lifecycle", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: "wait-1", toolName: "mcp__t3-code__t3_thread_wait", evidenceId: "e2", repeats: 1, firstRecordedAt: 1_800_000_000_000}},
+    {...base, id: "contribution:review:none", source: "declared", kind: "unknown", handle: null, threadId: null, contributionId: "review:none", revision: 1, lifecycle: "reported", reportedState: "awaiting_result", coverage: "unsupported",
+      currentReceipt: {kind: "unsupported", recordedAt: 1_800_000_000_000, actorSupervisorThreadId: "supervisor-thread", sourceItemId: null, toolName: null, evidenceId: "e3", repeats: 1, firstRecordedAt: 1_800_000_000_000}},
+    {...base, id: "contribution:review:reported", source: "declared", kind: "external", handle: "agent:9", threadId: null, contributionId: "review:reported", revision: 1, lifecycle: "reported", reportedState: "awaiting_result", coverage: "reported"},
+  ];
+  const withParticipants = (rows: WorkflowProgressParticipant[]) => ({...progressSnapshot, workflows: progressSnapshot.workflows.map(workflow =>
+    workflow.threadId === "task-thread" ? {...workflow, participants: rows} : workflow)});
+  const html = renderConnected([withParticipants(participants)]);
+  assert.match(html, /Participants<\/h3>/);
+  for (const label of ["Coverage: Observed by the service", "Coverage: Read by the Supervisor", "Coverage: Lifecycle only", "Coverage: No route stated", "Coverage: Reported by the main only", "Coverage: Unknown"])
+    assert.match(html, new RegExp(label), label);
+  assert.match(html, /Review · Attempt 2 · replaced for this attempt/);
+  assert.match(html, /No attached occurrence: this linked child has no recorded role in the plan/);
+  assert.match(html, /Conversation:<\/strong> Completed · <strong>Completion:<\/strong> Conversation completed \(not step completion\)/);
+  assert.match(html, /Result accepted by the Supervisor/);
+  assert.match(html, /Followed by:<\/strong> A helper/);
+  assert.match(html, /Settlement:<\/strong> Not evaluated</);
+  // settlement states are shown as recorded: a T3 conversation's state with its reason, and not applicable for anything else
+  const settled = renderConnected([withParticipants([
+    {...base, id: "done", handle: "done", threadId: "done", settlement: "settled"},
+    {...base, id: "held", handle: "held", threadId: "held", settlement: "skipped", settlementReason: "keep_active"},
+    {...base, id: "contribution:vm", source: "declared", kind: "t3_conversation", handle: "reviewer-vm", threadId: "reviewer-vm", environmentId: "lab-vm", contributionId: "vm", revision: 1,
+      lifecycle: "reported", reportedState: "result", completion: "accepted", coverage: "supervisor_observed", settlement: "unresolved", settlementReason: "environment_settle_unsupported"},
+    {...base, id: "contribution:ext", source: "declared", kind: "external", handle: "github:pr-7", threadId: null, contributionId: "ext", revision: 1, lifecycle: "reported", reportedState: "result",
+      completion: "accepted", coverage: "reported", settlement: "not_applicable"},
+  ])]);
+  assert.match(settled, /Settlement:<\/strong> Settled/);
+  assert.match(settled, /Settlement:<\/strong> Not settled \(its user keeps it active\)/);
+  assert.match(settled, /Settlement:<\/strong> Not settled automatically; settle by hand \(no supported route settles a conversation in another environment\)/);
+  assert.match(settled, /Settlement:<\/strong> Not applicable \(not a T3 conversation; its completion is the reported result\)/);
+  assert.match(html, /mcp__github__get_pull_request/);
+  assert.match(html, /1 earlier receipt belong/);
+  assert.match(html, /No receipt for the current declaration, revision and attempt/);
+  assert.match(html, /environment <code>lab<\/code>/);
+  assert.match(html, /No handle reported/);
+  assert.match(html, /href="[^"]*participants[^"]*"/, "the help links to the participants guide topic");
+  assert.doesNotMatch(html, /settled|parked/i);
+  assert.match(renderConnected([withParticipants([])]), /No participants are recorded for this workflow/);
+  // a conversation declared in another environment keeps its identity and gets no local link; a local one is linked; repeats and the route note show
+  assert.doesNotMatch(html, /href="t3-thread:\/\/v1\/reviewer-x"/, "no local link for a foreign conversation");
+  assert.match(html, /<span class="participant-identity">reviewer-x<\/span>/);
+  assert.match(html, /environment <code>lab<\/code> \(another environment; open it there, no local link\)/);
+  assert.match(html, /href="t3-thread:\/\/v1\/child-one"/, "a local native child stays linked");
+  assert.match(html, /repeated 3 times since/);
+  assert.match(html, /Whether the same route is available now is not verified/);
+  const local = renderToStaticMarkup(createElement(ConnectedWork, {threads: [], mainThreadId: "task-thread", workflows: new Map([["task-thread", {...progressSnapshot.workflows[0]!, participants: participants.filter(item => item.id === "contribution:review:t3")}]]),
+    coverage: new Map(), task: undefined, complete: true, localEnvironmentId: "lab"}));
+  assert.match(local, /href="t3-thread:\/\/v1\/reviewer-x"/, "a declaration naming this dashboard's own environment is local and linked");
+});
+
 it("native reviewer turns remain in history while the same reviewer can start a fresh attempt", () => {
   const returned = {returnId: "return-1", backToNodeId: "back-review", targetNodeId: "step-inspect", targetName: "Review", regionNodeIds: ["step-inspect"],
     attempt: 1, state: "applied" as const, reason: "Material findings require another pass.", sourceThreadId: "task-thread", sourceMessageId: "decision-1",
@@ -179,6 +242,12 @@ it("native reviewer turns remain in history while the same reviewer can start a 
   assert.match(renderConnected([page]), /latest observed review turn belongs to a closed attempt/);
   assert.match(renderConnected([page]), /Attempt 2/);
   assert.match(renderWorkspace([page], undefined, "history"), /this reviewer can continue in the same conversation/);
+  // the disclosure dates each applied return and numbers none: a return's own count is not the target occurrence's attempt
+  const overlapping = {...page, workflows: page.workflows.map(workflow => workflow.threadId === "task-thread" ? {...workflow, returns: [returned,
+    {...returned, returnId: "return-2", backToNodeId: "back-outer", regionNodeIds: ["step-inspect", "step-verify"], attempt: 1, requestedAt: 30, resolvedAt: 40}]} : workflow)};
+  const history = renderWorkspace([overlapping], undefined, "history");
+  assert.equal(history.split("Returned to Review · <time").length - 1, 2, "both returns are headed by their target and time");
+  assert.doesNotMatch(history, /Attempt 1 · returned to/);
   const fresh = {...page, scope: {...page.scope!, threads: page.scope!.threads.map(thread => thread.threadId === "child-one" ? {...thread, observedProviderTurnId: "fresh-turn"} : thread)}};
   assert.doesNotMatch(renderConnected([fresh]), /latest observed review turn belongs to a closed attempt/);
   const replaced = {...page, workflows: page.workflows.map(workflow => workflow.threadId === "task-thread" ? {...workflow, returns: [{...returned,
@@ -1295,6 +1364,50 @@ it("a returned task shows reopened implementation as current work, keeping futur
   assert.doesNotMatch(html, /Now: [^<]*Decide:/);
   assert.match(html, /1 branch decision pending/);
   assert.match(html, /Attempt 2/);
+});
+
+it("right after a real return every repeated member is planned, so Now names the returned target as ready to start instead of vanishing", () => {
+  const journey = fixtureJourney("returned", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const main = journey.progress.workflows[0]!;
+  const planned = (plan: typeof main.plan): typeof main.plan => plan && {...plan, nodes: plan.nodes.map(node => node.kind === "sequence" || node.kind === "parallel" ? planned(node)!
+    : node.kind === "workflow" ? {...node, plan: planned(node.plan)} : node.kind === "step" && node.nodeId === "packing-implement" ? {...node, status: "planned" as const} : node)};
+  const justReturned = {...journey.progress, workflows: [{...main, plan: planned(main.plan)}, ...journey.progress.workflows.slice(1)]};
+  const html = renderWorkspace([justReturned], journey.task);
+  assert.match(html, /Now: Implement within scope · ready to start<\/p>/);
+  assert.match(html, /class="journey-stop state-ready"/);
+  assert.match(html, /Ready to start · attempt 2/);
+  assert.doesNotMatch(html, /Now: <\/p>/);
+  // once the target starts, Now names the active step and ready disappears
+  assert.match(renderWorkspace([journey.progress], journey.task), /Now: Implement within scope<\/p>/);
+  assert.doesNotMatch(renderWorkspace([journey.progress], journey.task), /ready to start/);
+});
+
+it("history groups the records of one write under a derived headline without merging equal timestamps, and same-status arrows never head a group", () => {
+  const event = (id: string, sequence: number, operationId: string, kind: string, extra: Record<string, unknown> = {}) => ({id, sequence, kind, recordedAt: 1_800_000_000_000, operationId,
+    targetNodeId: null, targetNodeName: null, attempt: null, statusFrom: null, statusTo: null, sourceThreadId: null, sourceMessageId: null, sourceItemId: null, note: `${id} note`, ...extra}) as never;
+  const events = [
+    event("r", 1, "op-return", "return_applied", {targetNodeId: "implement", targetNodeName: "Implement", attempt: 2, statusFrom: "completed", statusTo: "planned"}),
+    event("t", 2, "op-return", "status_changed", {statusFrom: "underway", statusTo: "underway"}),
+    event("a", 3, "op-progress", "status_changed", {targetNodeId: "verify", targetNodeName: "Verify", attempt: 2, statusFrom: "planned", statusTo: "completed"}),
+    event("b", 4, "op-progress", "status_changed", {targetNodeId: "review", targetNodeName: "Review", attempt: 2, statusFrom: "planned", statusTo: "underway"}),
+    event("c", 5, "op-progress", "status_changed", {targetNodeId: "deliver", targetNodeName: "Deliver", attempt: 1, statusFrom: "planned", statusTo: "planned"}),
+    event("d", 6, "op-later", "observation", {targetNodeId: "review", targetNodeName: "Review", attempt: 2}),
+    event("e", 7, "op-progress", "note", {targetNodeId: "review", targetNodeName: "Review", attempt: 2}),
+  ];
+  const operations = historyOperations(events);
+  assert.deepEqual(operations.map(operation => operation.map(item => (item as {id: string}).id)), [["r", "t"], ["a", "b", "c"], ["d"], ["e"]], "only consecutive records of one write group; a later record of an earlier write is its own entry");
+  assert.equal(operationHeadline(operations[0]!), "Returned to Implement: attempt 2 starts");
+  assert.equal(operationHeadline(operations[1]!), "Verify completed, Review in progress", "a same-status arrow is not part of the headline");
+  assert.equal(operationHeadline(operations[2]!), "Work observed · Review");
+  const workflow = {...progressSnapshot.workflows[0]!, history: events, historyComplete: true};
+  const html = renderToStaticMarkup(createElement(WorkflowHistoryView, {workflow}));
+  assert.match(html, /<h3>Verify completed, Review in progress<\/h3>/);
+  assert.match(html, /3 records of one write/);
+  assert.match(html, /planned → planned \(unchanged\)/, "the same-status record stays visible as a detail");
+  assert.match(html, /<h3>Returned to Implement: attempt 2 starts<\/h3>/);
+  assert.match(html, /in progress → in progress \(unchanged\)/);
+  const grouped = operations.filter(operation => operation.length > 1).reduce((count, operation) => count + operation.length, 0);
+  assert.equal((html.match(/<li/g) ?? []).length, operations.length + grouped, "every record of a grouped write is listed; none is merged");
 });
 
 it("the task workspace treats a pending branch decision as current work, counts only applicable steps and lists branch decisions", () => {

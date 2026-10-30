@@ -11,7 +11,7 @@ import {canonicalStoredJson} from "./canonical-json.js";
 import {SupervisorIds} from "./ids.js";
 import {ProjectSupervisorStore, type ProjectSupervisorStoreError} from "./project-supervisor-store.js";
 import {validateWorkflowApplyAgainstPinnedContext} from "./supervisor-workflow.js";
-import {backToContext, branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceAttempts, occurrenceFacts, pendingDecisionsOutside, planBranches, planEntities, planReach, planStatusPointer as planNodeStatusPointer, reachedBackTos, resolveBackTo, unsettledOccurrences, wholeOccurrencePlanned, withOccurrenceStatuses, type PlanEntityInfo} from "./workflow-plan-tree.js";
+import {backToContext, branchIdentityKeys, branchPathGroups, effectiveBranchSelections, isPlanEntity, occurrenceAttempts, occurrenceFacts, pendingDecisionsOutside, planBackTos, planBranches, planEntities, planReach, planStatusPointer as planNodeStatusPointer, reachedBackTos, resolveBackTo, retainReturnBudgetIds, returnBudgetAddress, returnBudgetUsed, strictlyNestedReplayReturns, unsettledOccurrences, wholeOccurrencePlanned, withOccurrenceStatuses, type PlanEntityInfo} from "./workflow-plan-tree.js";
 import {
   branchSelectionLimits,
   branchSelectionPaths,
@@ -19,6 +19,7 @@ import {
   externalContributionLimits,
   externalContributionReferenceKinds,
   externalContributionStates,
+  participantReceiptKinds,
   workflowEvidenceKinds,
   workflowExecutionStatuses,
   storedPlanJsonDepth,
@@ -35,8 +36,12 @@ import {
   type ExternalContributionDiagnosticCode,
   type ExternalContributionImport,
   type ExternalContributionImportResult,
+  type ExternalContributionParticipant,
   type ExternalContributionRecord,
   type WorkflowContributionAssessmentInput,
+  type WorkflowEvidenceParticipant,
+  type ReturnBudget,
+  type ReturnBudgetEvent,
   type WorkflowAgreementImport,
   type WorkflowApplyInput,
   type WorkflowControllerLineage,
@@ -58,7 +63,7 @@ import {
   type WorkflowStateSourceBinding,
 } from "./workflow-state-contract.js";
 import {AgreementEvidence, type WorkflowAgreementInfo, type WorkflowPlanBranchInfo, type WorkflowPlanGroupInfo, type WorkflowPlanNodeInfo, type WorkflowPlanWorkflowInfo, type WorkflowProposalInfo, type WorkflowSourceBindingInfo} from "./project-supervisor-contract.js";
-import {branchConditionText} from "./project-definitions-contract.js";
+import {branchConditionText, returnBudgetMaximum} from "./project-definitions-contract.js";
 import type {ProposalContext, WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 
 export type WorkflowApplyValidationContext = {
@@ -188,6 +193,23 @@ const contributionReferenceKinds = new Set<string>(externalContributionReference
 const contributionRecordKeys = ["taskId", "contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef"] as const;
 const exactRecordKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
+// the exact key set, with one named key that may be absent
+const exactRecordKeysWithOptional = (value: Record<string, unknown>, keys: readonly string[], optional: string): boolean =>
+  exactRecordKeys(value, keys) || exactRecordKeys(value, [...keys, optional]);
+const participantHandle = (value: unknown): value is string => typeof value === "string" && value.length > 0 &&
+  value.length <= externalContributionLimits.maxParticipantHandleLength;
+// the main's generic participant declaration: a T3 conversation (environment optional), an opaque external handle, or unknown
+const validParticipant = (value: unknown): boolean => value === null || isRecord(value) && (
+  value.kind === "t3_conversation" && exactRecordKeysWithOptional(value, ["kind", "threadId"], "environmentId") && participantHandle(value.threadId) &&
+    (value.environmentId === undefined || value.environmentId === null || participantHandle(value.environmentId)) ||
+  value.kind === "external" && exactRecordKeys(value, ["kind", "ref"]) && participantHandle(value.ref) ||
+  value.kind === "unknown" && exactRecordKeys(value, ["kind"]));
+const normalizeParticipant = (value: unknown): ExternalContributionParticipant | null => {
+  if (!isRecord(value)) return null;
+  if (value.kind === "t3_conversation") return {kind: "t3_conversation", threadId: value.threadId as string, environmentId: (value.environmentId as string | undefined) ?? null};
+  if (value.kind === "external") return {kind: "external", ref: value.ref as string};
+  return {kind: "unknown"};
+};
 const validContributionId = (value: unknown): value is string => typeof value === "string" && contributionIdPattern.test(value);
 const validContributionRevision = (value: unknown): value is number =>
   Number.isSafeInteger(value) && Number(value) >= 1 && Number(value) <= externalContributionLimits.maxRevision;
@@ -201,20 +223,21 @@ const validContributionContent = (value: Record<string, unknown>): boolean =>
   typeof value.state === "string" && contributionStates.has(value.state) &&
   typeof value.summary === "string" && value.summary.length <= externalContributionLimits.maxSummaryLength &&
   validContributionReferences(value.references) && (value.externalRef === null || typeof value.externalRef === "string" &&
-    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength);
+    value.externalRef.length > 0 && value.externalRef.length <= externalContributionLimits.maxExternalRefLength) &&
+  (value.participant === undefined || validParticipant(value.participant));
 
-/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text. */
+/** Parses one external-contribution chat record exactly: every field present, no extras, bounded text; participant optional. */
 export const parseExternalContributionRecord = (value: unknown): ExternalContributionRecord | null =>
-  isRecord(value) && exactRecordKeys(value, contributionRecordKeys) && typeof value.taskId === "string" && value.taskId.length > 0 &&
+  isRecord(value) && exactRecordKeysWithOptional(value, contributionRecordKeys, "participant") && typeof value.taskId === "string" && value.taskId.length > 0 &&
   value.taskId.length <= externalContributionLimits.maxTaskIdLength && validContributionContent(value)
     ? {taskId: value.taskId as string, contributionId: value.contributionId as string, nodeId: value.nodeId as string,
       revision: value.revision as number, state: value.state as ExternalContributionRecord["state"], summary: value.summary as string,
       references: (value.references as ExternalContributionRecord["references"]).map(item => ({kind: item.kind, value: item.value})),
-      externalRef: value.externalRef as string | null}
+      externalRef: value.externalRef as string | null, ...(Object.hasOwn(value, "participant") ? {participant: normalizeParticipant(value.participant)} : {})}
     : null;
 
-const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef">): string =>
-  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef]);
+const contributionContentKey = (value: Pick<ExternalContribution, "nodeId" | "state" | "summary" | "references" | "externalRef" | "participant">): string =>
+  JSON.stringify([value.nodeId, value.state, value.summary, value.references.map(item => [item.kind, item.value]), value.externalRef, normalizeParticipant(value.participant)]);
 
 const validContributionAssessment = (value: unknown): boolean => value === null || isRecord(value) &&
   typeof value.decision === "string" && contributionDecisions.has(value.decision) && validContributionRevision(value.resultRevision) &&
@@ -230,9 +253,17 @@ const validEvidenceContribution = (value: unknown): boolean => value === undefin
   validContributionId(value.contributionId) && validContributionRevision(value.revision) &&
   (value.state === null || typeof value.state === "string" && contributionStates.has(value.state)) &&
   (value.decision === null || typeof value.decision === "string" && contributionDecisions.has(value.decision));
+const validEvidenceParticipant = (value: unknown): boolean => value === undefined || isRecord(value) &&
+  validContributionId(value.contributionId) && validContributionRevision(value.revision) && Number.isSafeInteger(value.attempt) && Number(value.attempt) >= 1 &&
+  validParticipant(value.participant) && isRecord(value.receipt) && typeof value.receipt.kind === "string" && (participantReceiptKinds as readonly string[]).includes(value.receipt.kind) &&
+  (value.receipt.toolName === null || validText(value.receipt.toolName)) && (value.receipt.inputDigest === null || validText(value.receipt.inputDigest)) &&
+  (value.repeats === undefined || Number.isSafeInteger(value.repeats) && Number(value.repeats) >= 1) && (value.firstRecordedAt === undefined || Number.isFinite(value.firstRecordedAt));
+// the identity of one receipt fact: the same actor observing the same declaration, revision and attempt the same way
+const receiptKey = (actor: string, value: WorkflowEvidenceParticipant): string =>
+  JSON.stringify([actor, value.contributionId, value.revision, value.attempt, normalizeParticipant(value.participant), value.receipt.kind, value.receipt.toolName]);
 
 const validContributionImport = (value: unknown): value is ExternalContributionImport => isRecord(value) &&
-  exactRecordKeys(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"]) &&
+  exactRecordKeysWithOptional(value, ["contributionId", "nodeId", "revision", "state", "summary", "references", "externalRef", "sourceThreadId", "sourceRunId", "sourceMessageId"], "participant") &&
   validContributionContent(value) && validNativeReference(value.sourceThreadId) && validNativeReference(value.sourceRunId) && validNativeReference(value.sourceMessageId);
 
 const validContributionAssessmentInput = (value: unknown): value is WorkflowContributionAssessmentInput => isRecord(value) &&
@@ -267,9 +298,55 @@ const identityKey = (node: PlanEntity | WorkflowPlanBranchInfo): string => node.
   : JSON.stringify({kind: node.kind, templatePath: node.templatePath,
     definitionId: node.definitionId, local: node.templatePath === null && node.kind === "step" ? "root-local" : null});
 
+const validReturnMaximum = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1 && value <= returnBudgetMaximum;
+const validBudgetId = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+const backToBudgetIds = (plan: unknown, into: string[] = []): string[] => {
+  const visit = (node: unknown): void => {
+    if (!isRecord(node)) return;
+    if (node.kind === "back_to") {
+      if (typeof node.budgetId === "string") into.push(node.budgetId);
+      return;
+    }
+    if (node.kind === "sequence" || node.kind === "parallel") {
+      if (Array.isArray(node.nodes)) for (const child of node.nodes) visit(child);
+      return;
+    }
+    if (node.kind === "branch") {
+      visit(node.then);
+      visit(node.else);
+      return;
+    }
+    if (node.kind === "workflow") visit(node.plan);
+  };
+  visit(plan);
+  return into;
+};
+const validReturnBudgets = (value: unknown): value is ReturnBudget[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxReturns &&
+  new Set(value.map(item => isRecord(item) ? item.budgetId : null)).size === value.length &&
+  value.reduce((count, item) => count + (isRecord(item) && Array.isArray(item.events) ? item.events.length : 0), 0) <= workflowMutationLimits.maxEvidence &&
+  value.every(item => isRecord(item) && validBudgetId(item.budgetId) && validText(item.address) && Array.isArray(item.events) &&
+    item.events.every(event => isRecord(event) && (event.kind === "consumed" || event.kind === "reset") && validId(event.returnId) && Number.isFinite(event.at)));
+const appliedReturnsCovered = (rows: readonly ReturnBudget[], returns: unknown): boolean => {
+  const consumed = new Set(rows.flatMap(item => item.events.filter(event => event.kind === "consumed").map(event => event.returnId)));
+  return !Array.isArray(returns) || returns.every(entry => !isRecord(entry) || entry.state !== "applied" ||
+    typeof entry.returnId === "string" && consumed.has(entry.returnId));
+};
+// the executable plan's budgets need rows, and every applied jump keeps its consumed event even after that return leaves the plan. an omitted ledger does not waive the jump. a historical acceptance does not mint a budget. an empty list is not an unused budget
+const returnBudgetCoverage = (value: Record<string, unknown>): boolean => {
+  const needed = backToBudgetIds(value.plan);
+  if (value.returnBudgets === undefined) return needed.length === 0 && appliedReturnsCovered([], value.returns);
+  if (!validReturnBudgets(value.returnBudgets)) return false;
+  const rows = value.returnBudgets;
+  const covered = new Set(rows.map(item => item.budgetId));
+  if (needed.some(id => !covered.has(id))) return false;
+  return appliedReturnsCovered(rows, value.returns);
+};
+
 const validPlan = (value: unknown): value is WorkflowStatePlan => {
   if (value === null) return true;
   const budget: PlanBudget = {nodes: 0, nodeIds: new Set()};
+  const budgetIds = new Set<string>();
   const visit = (group: unknown, depth: number): boolean => {
     if (!isRecord(group) || (group.kind !== "sequence" && group.kind !== "parallel") ||
       !validPlanText(group.templatePath, true) && group.templatePath !== null || !Array.isArray(group.nodes) || group.nodes.length === 0 ||
@@ -294,8 +371,10 @@ const validPlan = (value: unknown): value is WorkflowStatePlan => {
         budget.nodes++;
         if (budget.nodes > workflowMutationLimits.maxPlanNodes || !validNodeId(node.nodeId) || budget.nodeIds.has(node.nodeId) ||
           !validPlanText(node.templatePath, true) && node.templatePath !== null || !validId(node.target) ||
-          !(node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason)) return false;
+          !(node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason) ||
+          !validReturnMaximum(node.maximum) || !validBudgetId(node.budgetId) || budgetIds.has(node.budgetId)) return false;
         budget.nodeIds.add(node.nodeId);
+        budgetIds.add(node.budgetId);
         continue;
       }
       budget.nodes++;
@@ -351,7 +430,8 @@ const validApplyPlan = (value: unknown): boolean => {
         if (budget.nodes > workflowMutationLimits.maxPlanNodes ||
           !(node.nodeId === undefined || validNodeId(node.nodeId) && !budget.nodeIds.has(node.nodeId)) ||
           !(node.templatePath === undefined || node.templatePath === null || validPlanText(node.templatePath, true)) || !validId(node.target) ||
-          !(node.targetNodeId === undefined || node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason)) return false;
+          !(node.targetNodeId === undefined || node.targetNodeId === null || validNodeId(node.targetNodeId)) || !validPlanReason(node.reason) ||
+          !validReturnMaximum(node.maximum) || node.budgetId !== undefined && !validBudgetId(node.budgetId)) return false;
         if (validNodeId(node.nodeId)) budget.nodeIds.add(node.nodeId);
         continue;
       }
@@ -614,24 +694,50 @@ const pendingDecisionProblem = (current: WorkflowStateDocument, input: WorkflowA
 
 const returnPendingExpected = "wait until the Supervisor applies the pending return, which starts the new attempt; record findings meanwhile as observations, " +
   "or have the operative select another path so the return is no longer reached.";
+const returnBudgetExhaustedExpected = "this return has used every successful jump its maximum allows. The failure stays unresolved: do not start another jump, do not complete the workflow, and do not enter work after it. The operative can select another path, which leaves this return unreached without spending another jump.";
 const retiredRunExpected = "cite work of the current attempt: an AppRun or native turn a return retired, or a native child it retired whole, stays with the " +
   "closed attempt; a retired child's fresh turn counts only once it started after the return was applied.";
-type ReturnEvent = {kind: "return_requested" | "return_dismissed"; entry: WorkflowReturn};
+type ReturnEvent = {kind: "return_requested" | "return_dismissed" | "return_budget_exhausted"; entry: WorkflowReturn};
 const unconditionalReturnReason = "Reached on every path once the members before it were settled.";
+const budgetAddressFor = (plan: WorkflowPlanGroupInfo, node: {templatePath: string | null; nodeId: string; budgetId: string}): string =>
+  node.templatePath ?? returnBudgetAddress(plan, node.nodeId) ?? node.budgetId;
+const ledgerEvents = (ledger: readonly ReturnBudget[], budgetId: string): readonly ReturnBudgetEvent[] =>
+  ledger.find(item => item.budgetId === budgetId)?.events ?? [];
+const withBudgetEvent = (ledger: readonly ReturnBudget[], budgetId: string, address: string, event: ReturnBudgetEvent): ReturnBudget[] | "capacity" => {
+  const existing = ledger.find(item => item.budgetId === budgetId);
+  const events = [...(existing?.events ?? []), event];
+  const total = ledger.reduce((count, item) => count + item.events.length, 0) + 1;
+  if (total > workflowMutationLimits.maxEvidence || !existing && ledger.length >= workflowMutationLimits.maxReturns) return "capacity";
+  return existing ? ledger.map(item => item.budgetId === budgetId ? {...item, address, events} : item) : [...ledger, {budgetId, address, events}];
+};
+const ledgerForPlan = (ledger: readonly ReturnBudget[], plan: WorkflowPlanGroupInfo | null): ReturnBudget[] => {
+  if (!plan) return ledger.map(item => ({...item, events: item.events.map(event => ({...event}))}));
+  const addresses = new Map(planBackTos(plan).map(node => [node.budgetId, budgetAddressFor(plan, node)] as const));
+  const next = ledger.map(item => {
+    const address = addresses.get(item.budgetId);
+    return {...item, ...(address ? {address} : {}), events: item.events.map(event => ({...event}))};
+  });
+  // empty events start a return this valid document has not recorded; they do not repair a stored row whose returns lack a ledger
+  for (const [budgetId, address] of addresses) if (!next.some(item => item.budgetId === budgetId)) next.push({budgetId, address, events: []});
+  return next;
+};
 
 /**
  * The returns as the document now stands: a back_to newly reached on the active path requests one pending return of its current
- * attempt, citing the selection that led there; a pending return follows its back_to's current target and region, and is dismissed
- * once its back_to is no longer reached or left the plan. Applied and dismissed returns never change.
+ * attempt, citing the selection that led there, unless that occurrence has used its maximum. A pending return follows its back_to's
+ * current target and region, and is dismissed once its back_to is no longer reached or left the plan. An exhausted reach stays
+ * unresolved and requests nothing. Applied and dismissed returns never change.
  */
-const syncedReturns = (document: Pick<WorkflowStateDocument, "workflowId" | "plan" | "branchSelections" | "returns" | "evidence" | "sourceBinding">,
+const syncedReturns = (document: Pick<WorkflowStateDocument, "workflowId" | "plan" | "branchSelections" | "returns" | "evidence" | "sourceBinding" | "returnBudgets">,
   at: number): {returns: WorkflowReturn[]; events: ReturnEvent[]} => {
   const selected = effectiveBranchSelections(document.plan, document.branchSelections);
   const notApplicable = notApplicableNodeIds(document.evidence, document.sourceBinding?.sourceHash ?? null);
   const reached = new Set(reachedBackTos(document.plan, selected, notApplicable).map(node => node.nodeId));
   const attempts = occurrenceAttempts(document.returns);
+  const ledger = document.returnBudgets ?? [];
   const events: ReturnEvent[] = [];
   const returns = document.returns.map(entry => {
+    if (entry.state === "exhausted" && entry.resolvedAt === null && !reached.has(entry.backToNodeId)) return {...entry, resolvedAt: at};
     if (entry.state !== "pending") return entry;
     const resolved = document.plan && reached.has(entry.backToNodeId) ? resolveBackTo(document.plan, entry.backToNodeId) : null;
     if (resolved?.ok) return {...entry, targetNodeId: resolved.targetNodeId, regionNodeIds: resolved.regionNodeIds};
@@ -639,21 +745,48 @@ const syncedReturns = (document: Pick<WorkflowStateDocument, "workflowId" | "pla
     events.push({kind: "return_dismissed", entry: dismissed});
     return dismissed;
   });
+  const openReturn = (backToNodeId: string, state: WorkflowReturn["state"]): WorkflowReturn | undefined =>
+    returns.find(entry => entry.backToNodeId === backToNodeId && entry.state === state && (state !== "exhausted" || entry.resolvedAt === null));
   for (const backToNodeId of reached) {
-    if (!document.plan || returns.some(entry => entry.state === "pending" && entry.backToNodeId === backToNodeId)) continue;
+    if (!document.plan) continue;
+    const node = planBackTos(document.plan).find(item => item.nodeId === backToNodeId);
     const resolved = resolveBackTo(document.plan, backToNodeId);
-    if (!resolved.ok) continue;
-    const attempt = attempts.get(backToNodeId) ?? 1;
-    const leading = backToContext(document.plan, backToNodeId).branches.at(-1);
-    const selection = leading ? document.branchSelections.find(item => item.nodeId === leading.nodeId && item.state === "current") : undefined;
-    const entry: WorkflowReturn = {returnId: fingerprint(["return", document.workflowId, backToNodeId, attempt, returns.filter(item => item.backToNodeId === backToNodeId).length]),
-      backToNodeId, targetNodeId: resolved.targetNodeId, regionNodeIds: resolved.regionNodeIds, attempt, state: "pending",
-      reason: selection?.reason ?? unconditionalReturnReason, sourceThreadId: selection?.sourceThreadId ?? null, sourceRunId: selection?.sourceRunId ?? null,
-      sourceMessageId: selection?.sourceMessageId ?? null, requestedAt: at, resolvedAt: null, closed: null, closedSelections: null, retiredRuns: [], resolution: null};
+    if (!node || !resolved.ok) continue;
+    const used = returnBudgetUsed(ledgerEvents(ledger, node.budgetId));
+    if (used >= node.maximum) {
+      const pending = openReturn(backToNodeId, "pending");
+      if (pending) {
+        const exhausted: WorkflowReturn = {...pending, state: "exhausted", resolvedAt: null};
+        returns.splice(returns.indexOf(pending), 1, exhausted);
+        events.push({kind: "return_budget_exhausted", entry: exhausted});
+      } else if (!openReturn(backToNodeId, "exhausted")) {
+        const entry = returnRequest(document, backToNodeId, resolved, attempts, returns, at, "exhausted");
+        returns.push(entry);
+        events.push({kind: "return_budget_exhausted", entry});
+      }
+      continue;
+    }
+    for (let index = 0; index < returns.length; index++) {
+      const entry = returns[index]!;
+      if (entry.backToNodeId === backToNodeId && entry.state === "exhausted" && entry.resolvedAt === null) returns[index] = {...entry, resolvedAt: at};
+    }
+    if (openReturn(backToNodeId, "pending")) continue;
+    const entry = returnRequest(document, backToNodeId, resolved, attempts, returns, at, "pending");
     returns.push(entry);
     events.push({kind: "return_requested", entry});
   }
   return {returns, events};
+};
+const returnRequest = (document: Pick<WorkflowStateDocument, "workflowId" | "plan" | "branchSelections">, backToNodeId: string,
+  resolved: {targetNodeId: string; regionNodeIds: string[]}, attempts: ReadonlyMap<string, number>, returns: readonly WorkflowReturn[],
+  at: number, state: "pending" | "exhausted"): WorkflowReturn => {
+  const attempt = attempts.get(backToNodeId) ?? 1;
+  const leading = document.plan ? backToContext(document.plan, backToNodeId).branches.at(-1) : undefined;
+  const selection = leading ? document.branchSelections.find(item => item.nodeId === leading.nodeId && item.state === "current") : undefined;
+  return {returnId: fingerprint(["return", document.workflowId, backToNodeId, attempt, state, returns.filter(item => item.backToNodeId === backToNodeId).length]),
+    backToNodeId, targetNodeId: resolved.targetNodeId, regionNodeIds: resolved.regionNodeIds, attempt, state,
+    reason: selection?.reason ?? unconditionalReturnReason, sourceThreadId: selection?.sourceThreadId ?? null, sourceRunId: selection?.sourceRunId ?? null,
+    sourceMessageId: selection?.sourceMessageId ?? null, requestedAt: at, resolvedAt: null, closed: null, closedSelections: null, retiredRuns: [], resolution: null};
 };
 
 /**
@@ -667,19 +800,69 @@ const pendingReturnProblem = (current: WorkflowStateDocument, input: Pick<Workfl
   if (!nextPlan) return null;
   const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
   const changed = collectPlanEntities(nextPlan).filter(node => previous.has(node.nodeId) && previous.get(node.nodeId) !== node.status);
-  const problem = (node: PlanEntity | null): WorkflowApplyDiagnostic =>
-    ({code: "return_pending", path: node ? planStatusPointer(nextPlan, node) ?? "/plan" : "/status", expected: returnPendingExpected});
+  const problem = (entry: WorkflowReturn, node: PlanEntity | null): WorkflowApplyDiagnostic =>
+    ({code: entry.state === "exhausted" ? "return_budget_exhausted" : "return_pending", path: node ? planStatusPointer(nextPlan, node) ?? "/plan" : "/status",
+      expected: entry.state === "exhausted" ? returnBudgetExhaustedExpected : returnPendingExpected});
   const waitingRegions = new Set(current.returns.flatMap(entry => entry.state === "pending" ? entry.regionNodeIds : []));
   const reopened = changed.find(node => waitingRegions.has(node.nodeId));
-  if (reopened) return problem(reopened);
+  if (reopened) return problem(current.returns.find(entry => entry.state === "pending")!, reopened);
   for (const entry of returns) {
-    if (entry.state !== "pending") continue;
+    if (entry.state !== "pending" && !(entry.state === "exhausted" && entry.resolvedAt === null)) continue;
     const held = backToContext(nextPlan, entry.backToNodeId);
     const blocked = changed.find(node => held.downstream.has(node.nodeId) || held.enclosing.has(node.nodeId) && node.status === "completed");
-    if (blocked) return problem(blocked);
-    if (input.status === "completed" && current.status !== "completed") return problem(null);
+    if (blocked) return problem(entry, blocked);
+    if (input.status === "completed" && current.status !== "completed") return problem(entry, null);
   }
   return null;
+};
+
+const returnRequiredExpected = "the selected path returns through this back_to: settle the assessing member only, let the service request the return, then start the " +
+  "next attempt with supervision_planning action apply_return; no status inside the return's region moves backward by hand.";
+const statusRepairRequiredExpected = "a status inside a return region moves backward, off the selected path, only as the correction of a misrecorded status: resend this " +
+  "apply with repair: true and status_changed evidence whose note says what was misrecorded; a repair starts no attempt and spends no jump.";
+const repairNotApplicableExpected = "send repair: true only with an apply that moves a status backward inside a return region whose failure path is not selected; " +
+  "this apply moves none.";
+/**
+ * The one return boundary. Inside the region of a back_to the current selections reach, its failure path selected or the return lying on
+ * every path, no status moves backward by hand: the assessing member settles, the service requests the return and the Supervisor applies
+ * it, which alone starts an attempt and spends a jump; with that return's budget spent the failure stays unresolved. Off the selected
+ * path a backward move inside a region is a misrecorded status, corrected only as an explicit repair, which starts no attempt. A region
+ * whose return already waits keeps the pending-return rule. Backward moves outside every region, and the reassessment a changed scope
+ * requires, are unaffected.
+ */
+const returnBoundaryProblem = (current: WorkflowStateDocument, input: Pick<WorkflowApplyInput, "repair">, nextPlan: WorkflowStatePlan,
+  selections: readonly BranchSelection[], returnBudgets: readonly ReturnBudget[], scopeReassessment: boolean):
+  {problem: WorkflowApplyDiagnostic} | {repaired: ReadonlySet<string>} => {
+  const repaired = new Set<string>();
+  const notApplicable = (): {problem: WorkflowApplyDiagnostic} => ({problem: {code: "repair_not_applicable", path: "/repair", expected: repairNotApplicableExpected}});
+  if (!nextPlan || scopeReassessment) return input.repair === true ? notApplicable() : {repaired};
+  const previous = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node.status] as const));
+  const backward = collectPlanEntities(nextPlan).filter(node => {
+    const before = previous.get(node.nodeId);
+    return before !== undefined && (node.status === "planned" && (before === "completed" || before === "underway") || node.status === "underway" && before === "completed");
+  });
+  const selected = effectiveBranchSelections(nextPlan, selections);
+  const reach = new Map(planReach(nextPlan, selected).map(({node, reach}) => [node, reach] as const));
+  // a region whose return already waits is the pending-return rule's to refuse, flag or not
+  const waiting = new Set(current.returns.flatMap(entry => entry.state === "pending" ? [entry.backToNodeId] : []));
+  const waitingRegions = new Set(current.returns.flatMap(entry => entry.state === "pending" ? entry.regionNodeIds : []));
+  const held = backward.some(node => waitingRegions.has(node.nodeId));
+  for (const backTo of planBackTos(nextPlan)) {
+    if (waiting.has(backTo.nodeId)) continue;
+    const resolved = resolveBackTo(nextPlan, backTo.nodeId);
+    if (!resolved.ok) continue;
+    const region = new Set(resolved.regionNodeIds);
+    const moved = backward.find(node => region.has(node.nodeId));
+    if (!moved) continue;
+    const path = planStatusPointer(nextPlan, moved) ?? "/plan";
+    if (applicableReach(reach.get(backTo) ?? "unconditional")) {
+      const exhausted = returnBudgetUsed(ledgerEvents(returnBudgets, backTo.budgetId)) >= backTo.maximum;
+      return {problem: exhausted ? {code: "return_budget_exhausted", path, expected: returnBudgetExhaustedExpected} : {code: "return_required", path, expected: returnRequiredExpected}};
+    }
+    if (input.repair !== true) return {problem: {code: "status_repair_required", path, expected: statusRepairRequiredExpected}};
+    for (const node of backward) if (region.has(node.nodeId)) repaired.add(node.nodeId);
+  }
+  return input.repair === true && repaired.size === 0 && !held ? notApplicable() : {repaired};
 };
 
 // a status or applicability assertion never rests on an execution a return retired; a reference without a thread cites the workflow's own
@@ -714,13 +897,15 @@ const validReturnApplyInput = (value: unknown): value is WorkflowReturnApplyInpu
   (value.retiredRuns === undefined || validRetiredRuns(value.retiredRuns));
 const validReturns = (value: unknown): value is WorkflowReturn[] => Array.isArray(value) && value.length <= workflowMutationLimits.maxReturns &&
   new Set(value.map(item => isRecord(item) ? item.returnId : null)).size === value.length &&
-  new Set(value.flatMap(item => isRecord(item) && item.state === "pending" ? [item.backToNodeId] : [])).size === value.filter(item => isRecord(item) && item.state === "pending").length &&
+  new Set(value.flatMap(item => isRecord(item) && (item.state === "pending" || item.state === "exhausted" && item.resolvedAt === null) ? [item.backToNodeId] : [])).size ===
+    value.filter(item => isRecord(item) && (item.state === "pending" || item.state === "exhausted" && item.resolvedAt === null)).length &&
   value.every(item => isRecord(item) && validId(item.returnId) && validNodeId(item.backToNodeId) && validNodeId(item.targetNodeId) &&
     Array.isArray(item.regionNodeIds) && item.regionNodeIds.length >= 1 && item.regionNodeIds.length <= workflowMutationLimits.maxPlanNodes && item.regionNodeIds.every(validNodeId) &&
     Number.isSafeInteger(item.attempt) && Number(item.attempt) >= 1 && validPlanReason(item.reason) &&
     (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) && (item.sourceRunId === null || validNativeReference(item.sourceRunId)) &&
     (item.sourceMessageId === null || validNativeReference(item.sourceMessageId)) && Number.isFinite(item.requestedAt) && validRetiredRuns(item.retiredRuns) &&
-    (item.state === "pending" ? item.resolvedAt === null && item.closed === null && item.closedSelections === null && item.resolution === null && item.retiredRuns.length === 0
+    (item.state === "pending" || item.state === "exhausted" ? (item.state === "pending" ? item.resolvedAt === null : item.resolvedAt === null || Number.isFinite(item.resolvedAt)) &&
+      item.closed === null && item.closedSelections === null && item.resolution === null && item.retiredRuns.length === 0
       : item.state === "dismissed" ? Number.isFinite(item.resolvedAt) && item.closed === null && item.closedSelections === null && item.resolution === null && item.retiredRuns.length === 0
       : item.state === "applied" && Number.isFinite(item.resolvedAt) && Array.isArray(item.closed) && item.closed.length <= workflowMutationLimits.maxPlanNodes &&
         item.closed.every(closed => isRecord(closed) && validNodeId(closed.nodeId) && isStatus(closed.status) && validContributorIds(closed.contributorThreadIds)) &&
@@ -855,7 +1040,8 @@ const recordedProgressProblem = (current: WorkflowStateDocument, input: Workflow
 const validApplyInput = (value: unknown): boolean => isRecord(value) &&
   validId(value.operationId) && validId(value.workflowId) && Number.isSafeInteger(value.expectedRevision) && Number(value.expectedRevision) >= 1 &&
   validText(value.note) && isStatus(value.status) && (value.objective === null || validText(value.objective)) &&
-  validSourceBinding(value.sourceBinding) && validRequirements(value.requirements) && validIssues(value.issues) && validApplyPlan(value.plan) && validEvidenceInput(value.evidence);
+  validSourceBinding(value.sourceBinding) && validRequirements(value.requirements) && validIssues(value.issues) && validApplyPlan(value.plan) && validEvidenceInput(value.evidence) &&
+  (value.repair === undefined || typeof value.repair === "boolean");
 
 const validDocument = (value: Record<string, unknown>): boolean => value.formatVersion === 2 && validId(value.workflowId) &&
   validId(value.projectId) && validId(value.mainThreadId) && validId(value.threadId) &&
@@ -873,9 +1059,10 @@ const validDocument = (value: Record<string, unknown>): boolean => value.formatV
   (value.contributions === undefined || validContributions(value.contributions)) &&
   (value.branchSelections === undefined || validBranchSelections(value.branchSelections)) &&
   (value.returns === undefined || validReturns(value.returns)) &&
+  returnBudgetCoverage(value) &&
   Array.isArray(value.evidence) && value.evidence.length <= workflowMutationLimits.maxEvidence && value.evidence.every(item => isRecord(item) &&
     validId(item.id) && validId(item.operationId) && (workflowEvidenceKinds as readonly string[]).includes(String(item.kind)) &&
-    validEvidenceContribution(item.contribution) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) &&
+    validEvidenceContribution(item.contribution) && validEvidenceParticipant(item.participant) && validEvidenceBranch(item.branch) && validEvidenceReturn(item.return) && (item.repair === undefined || item.repair === true) &&
     Number.isFinite(item.recordedAt) && validId(item.actorSupervisorThreadId) && (item.targetNodeId === null || validNodeId(item.targetNodeId)) &&
     (item.targetNodeName === null || validPlanText(item.targetNodeName)) && (item.statusFrom === null || isStatus(item.statusFrom)) &&
     (item.statusTo === null || isStatus(item.statusTo)) && (item.sourceThreadId === null || validNativeReference(item.sourceThreadId)) &&
@@ -927,6 +1114,11 @@ const decodeOperationRow = Schema.decodeUnknownEffect(Schema.Struct({request_has
 const decodeWorkflowJson = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeStoredDocument = Schema.decodeUnknownExit(WorkflowStateDocumentSchema);
 const decodeStoredReceipt = Schema.decodeUnknownExit(WorkflowMutationReceiptSchema);
+const documentTextAccepted = (serialized: string): boolean => {
+  const parsed = decodeWorkflowJson(serialized);
+  if (Exit.isFailure(parsed) || !isRecord(parsed.value) || parsed.value.formatVersion !== 2) return false;
+  return Exit.isSuccess(decodeStoredDocument(parsed.value)) && validDocument(parsed.value);
+};
 
 // a stored document must decode with the stored-shape schema and pass the store's own limits and row identity; it is
 // returned as stored (key order included), since its fingerprint is the receipt's stateHash
@@ -954,7 +1146,7 @@ const classifyReceipt = (operationId: string, text: string): WorkflowMutationRes
 };
 
 const workflowReceipt = (status: "applied" | "created", operationId: string, document: WorkflowStateDocument): WorkflowMutationReceipt =>
-  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2});
+  ({status, operationId, workflowId: document.workflowId, revision: document.revision, stateHash: fingerprint(document), formatVersion: 2, documentStatus: document.status});
 
 // the plan and evidence checks, as pure functions
 const normalizeWorkflowPlan = (input: WorkflowStatePlan, existing: WorkflowStatePlan, submittedNodeIds: ReadonlySet<string>):
@@ -1084,7 +1276,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
   const emptyDocument = Effect.fnUntraced(function* (owner: WorkflowOwner, threadId: string, parentWorkflowId: string | null, parentThreadId: string | null, revision: number, now: number) {
     return {formatVersion: 2, workflowId: yield* ids.uuid, projectId: owner.projectId, mainThreadId: owner.mainThreadId, threadId,
       parentWorkflowId, parentThreadId, revision, status: "planned", objective: null, sourceBinding: null, requirements: [], issues: [], plan: null,
-      currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], returns: [], evidence: [], createdAt: now, updatedAt: now} satisfies WorkflowStateDocument as WorkflowStateDocument;
+      currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], returns: [], returnBudgets: [], evidence: [], createdAt: now, updatedAt: now} satisfies WorkflowStateDocument as WorkflowStateDocument;
   });
   const makeEvidence = Effect.fnUntraced(function* (input: Omit<WorkflowStateEvidence, "id" | "recordedAt" | "actorSupervisorThreadId"> & {owner: WorkflowOwner; now: number}) {
     const {owner, now, ...rest} = input;
@@ -1097,6 +1289,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const name = target?.name ?? "its target";
     const note = event.kind === "return_applied" ? event.note : event.kind === "return_requested"
       ? `Attempt ${event.entry.attempt} reached its return to ${name}; the Supervisor applies it at a safe point to start attempt ${event.entry.attempt + 1}.`
+      : event.kind === "return_budget_exhausted"
+        ? `The return to ${name} has used every successful jump its maximum allows. The failure stays unresolved and does not start another attempt.`
       : `The return to ${name} is no longer reached; attempt ${event.entry.attempt} continues without it.`;
     return makeEvidence({operationId, owner, kind: event.kind, now, targetNodeId: event.entry.targetNodeId, targetNodeName: target?.name ?? null,
       statusFrom: event.kind === "return_applied" ? target?.status ?? null : null, statusTo: event.kind === "return_applied" ? "planned" : null,
@@ -1203,7 +1397,11 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceBinding: input.sourceBinding as WorkflowSourceBindingInfo}, validation.pinnedContext, validation.originalProposal,
       validation.expectedTaskId, validation.expectedProposalId, validation.expectedSourceHash,
       {targetThreadId: current.threadId, mainThreadId: owner.mainThreadId}, acceptedPlans, currentPlan);
-    } catch {canonical = null;}
+    } catch (error) {
+      if (error instanceof Error && error.message === "duplicate_return_budget")
+        return {status: "invalid", operationId: input.operationId, reason: "return_budget_duplicate"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+      canonical = null;
+    }
     if (!canonical) return {status: "invalid", operationId: input.operationId, reason: "pinned_definition_context_mismatch"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const validatedInput: WorkflowApplyInput = {...input, plan: canonical.plan, requirements: canonical.requirements, issues: canonical.issues};
 
@@ -1211,13 +1409,22 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     if (!normalized.ok) return {status: "invalid", operationId: input.operationId,
       reason: normalized.diagnostic?.code ?? "invalid_plan_or_missing_status_evidence",
       ...(normalized.diagnostic ? {diagnostic: normalized.diagnostic} : {})} satisfies WorkflowApplyResult as WorkflowApplyResult;
-    const evidenceProblem = workflowStatusEvidenceProblem(current, validatedInput, normalized.plan);
+    const normalizedBudgetIds = normalized.plan ? planBackTos(normalized.plan).map(node => node.budgetId) : [];
+    if (new Set(normalizedBudgetIds).size !== normalizedBudgetIds.length)
+      return {status: "invalid", operationId: input.operationId, reason: "return_budget_duplicate"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const retainedBudgets = normalized.plan === null
+      ? {plan: null, ambiguous: false}
+      : retainReturnBudgetIds(current.plan, normalized.plan, current.returnBudgets ?? []);
+    if (retainedBudgets.ambiguous) return {status: "invalid", operationId: input.operationId, reason: "return_budget_identity_ambiguous"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const nextPlan = retainedBudgets.plan;
+    const returnBudgets = ledgerForPlan(current.returnBudgets ?? [], nextPlan);
+    if (returnBudgets.length > workflowMutationLimits.maxReturns) return {status: "invalid", operationId: input.operationId, reason: "return_budget_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
+    const evidenceProblem = workflowStatusEvidenceProblem(current, validatedInput, nextPlan);
     if (evidenceProblem) return {status: "invalid", operationId: input.operationId,
       reason: evidenceProblem === "generic" ? "invalid_plan_or_missing_status_evidence" : evidenceProblem.code,
       ...(evidenceProblem === "generic" ? {} : {diagnostic: evidenceProblem})} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const retiredProblem = retiredRunProblem(current, validatedInput.evidence ?? []);
     if (retiredProblem) return {status: "invalid", operationId: input.operationId, reason: retiredProblem.code, diagnostic: retiredProblem} satisfies WorkflowApplyResult as WorkflowApplyResult;
-    const nextPlan = normalized.plan;
     const branchState = invalidatedSelections(current.branchSelections, nextPlan, at);
     const notApplicable = notApplicableNodeIds(current.evidence, validatedInput.sourceBinding?.sourceHash ?? null, validatedInput.evidence ?? []);
     const decisionProblem = pendingDecisionProblem(current, validatedInput, nextPlan, branchState.selections, notApplicable);
@@ -1235,6 +1442,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
           (item.sourceMessageId || item.sourceItemId)))
         return {status: "invalid", operationId: input.operationId, reason: "scope_assessment_required"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     }
+    const boundary = returnBoundaryProblem(current, validatedInput, nextPlan, branchState.selections, returnBudgets, scopeReassessment);
+    if ("problem" in boundary) return {status: "invalid", operationId: input.operationId, reason: boundary.problem.code, diagnostic: boundary.problem} satisfies WorkflowApplyResult as WorkflowApplyResult;
     const previousNodes = new Map(collectPlanEntities(current.plan).map(node => [node.nodeId, node]));
     const nextNodes = new Map(collectPlanEntities(nextPlan).map(node => [node.nodeId, node]));
     const evidence = [...current.evidence];
@@ -1242,6 +1451,21 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       const nodeId = item.targetNodeId ?? null;
       const previous = nodeId ? previousNodes.get(nodeId) : null;
       const next = nodeId ? nextNodes.get(nodeId) : null;
+      // a repeated identical receipt is one continuing fact: its entry keeps its place and first time, and records the latest read and
+      // the count, so continuous observation never consumes the evidence history
+      if (item.kind === "observation" && item.participantReceipt) {
+        const key = receiptKey(owner.supervisorThreadId, item.participantReceipt);
+        const index = evidence.findIndex(entry => entry.kind === "observation" && entry.participant && entry.actorSupervisorThreadId === owner.supervisorThreadId &&
+          receiptKey(entry.actorSupervisorThreadId, entry.participant) === key);
+        if (index >= 0) {
+          const existing = evidence[index]!;
+          evidence[index] = {...existing, operationId: input.operationId, recordedAt: at, note: item.note,
+            sourceThreadId: item.sourceThreadId ?? existing.sourceThreadId, sourceRunId: item.sourceRunId ?? null, sourceMessageId: item.sourceMessageId ?? null,
+            sourceItemId: item.sourceItemId ?? null,
+            participant: {...item.participantReceipt, repeats: (existing.participant!.repeats ?? 1) + 1, firstRecordedAt: existing.participant!.firstRecordedAt ?? existing.recordedAt}};
+          continue;
+        }
+      }
       evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: item.kind, now: at,
         targetNodeId: nodeId, targetNodeName: next?.name ?? previous?.name ?? null,
         statusFrom: previous?.status ?? (nodeId === null ? current.status : null),
@@ -1251,6 +1475,8 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceMessageId: item.sourceMessageId ?? null, sourceItemId: item.sourceItemId ?? null, agreementKey: null, note: item.note,
         ...(typeof item.sourceProviderTurnId === "string"
           ? {sourceProviderTurnId: item.sourceProviderTurnId, sourceProviderTurnStartedAt: item.sourceProviderTurnStartedAt ?? null} : {}),
+        ...(item.kind === "status_changed" && nodeId !== null && boundary.repaired.has(nodeId) ? {repair: true as const} : {}),
+        ...(item.kind === "observation" && item.participantReceipt ? {participant: {...item.participantReceipt, repeats: 1, firstRecordedAt: at}} : {}),
         ...(item.kind === "not_applicable" && validatedInput.sourceBinding ? {scopeRevision: validatedInput.sourceBinding.sourceHash} : {})}));
     }
     for (const node of previousNodes.values()) {
@@ -1273,11 +1499,15 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
 
     const oldPlanHash = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan);
     const newPlanHash = workflowPlanSignature(validatedInput.objective, validatedInput.sourceBinding, validatedInput.requirements, validatedInput.issues, nextPlan);
-    evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
+    // an observation-only apply that changes no plan, status, node, branch or selection records its observations alone
+    const observationOnly = evidenceInputs.length > 0 && evidenceInputs.every(item => item.kind === "observation") && oldPlanHash === newPlanHash &&
+      current.status === validatedInput.status && branchState.invalidated.length === 0 && changedBranches(current.plan, nextPlan).length === 0 &&
+      [...previousNodes.values()].every(node => nextNodes.has(node.nodeId)) && [...nextNodes.values()].every(node => previousNodes.get(node.nodeId)?.status === node.status);
+    if (!observationOnly) evidence.push(yield* makeEvidence({operationId: input.operationId, owner, kind: "plan_updated", now: at,
       targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: validatedInput.status,
       sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null, note: input.note}));
     const synced = syncedReturns({workflowId: current.workflowId, plan: nextPlan, branchSelections: branchState.selections, returns: current.returns, evidence,
-      sourceBinding: validatedInput.sourceBinding}, at);
+      sourceBinding: validatedInput.sourceBinding, returnBudgets}, at);
     const returnProblem = pendingReturnProblem(current, validatedInput, nextPlan, synced.returns);
     if (returnProblem) return {status: "invalid", operationId: input.operationId, reason: returnProblem.code, diagnostic: returnProblem} satisfies WorkflowApplyResult as WorkflowApplyResult;
     for (const event of synced.events) evidence.push(yield* returnEvidence(owner, input.operationId, event, nextPlan, at));
@@ -1287,7 +1517,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const next: WorkflowStateDocument = {...current, revision: current.revision + 1, status: validatedInput.status, objective: validatedInput.objective,
       sourceBinding: copyBinding(validatedInput.sourceBinding), requirements: copyRequirements(validatedInput.requirements), issues: copyIssues(validatedInput.issues),
       plan: nextPlan, currentAgreementKey: oldPlanHash === newPlanHash ? current.currentAgreementKey : null,
-      branchSelections: branchState.selections, returns: synced.returns, evidence, updatedAt: at};
+      branchSelections: branchState.selections, returns: synced.returns, returnBudgets, evidence, updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId: input.operationId, reason: "document_capacity"} satisfies WorkflowApplyResult as WorkflowApplyResult;
     if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision))) {
@@ -1313,7 +1543,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     if (existing) {
       const decoded = classifyWorkflowRow(existing);
       if (decoded.status === "incompatible") return {...decoded, operationId};
-      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision,
+      return {status: "exists", operationId, workflowId: decoded.document.workflowId, revision: decoded.document.revision, documentStatus: decoded.document.status,
         stateHash: fingerprint(decoded.document), formatVersion: 2} satisfies WorkflowEnsureResult as WorkflowEnsureResult;
     }
     const document = yield* emptyDocument(owner, owner.mainThreadId, null, null, 1, at);
@@ -1403,9 +1633,15 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const currentMatches = workflowPlanSignature(current.objective, current.sourceBinding, current.requirements, current.issues, current.plan) ===
       workflowPlanSignature(source.objective, binding, acceptedRequirements, acceptedIssues, acceptedPlan);
     const shouldSeed = emptyPlan;
+    const seeded = shouldSeed && acceptedPlan ? retainReturnBudgetIds(current.plan, acceptedPlan, current.returnBudgets ?? []) : null;
+    if (seeded?.ambiguous) return {status: "invalid", operationId, reason: "return_budget_identity_ambiguous"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const seededPlan = seeded?.plan ?? acceptedPlan;
+    const seededBudgets = shouldSeed ? ledgerForPlan(current.returnBudgets ?? [], seededPlan) : current.returnBudgets;
+    if (seededBudgets && seededBudgets.length > workflowMutationLimits.maxReturns)
+      return {status: "invalid", operationId, reason: "return_budget_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
       ...(shouldSeed ? {objective: source.objective, sourceBinding: copyBinding(binding), requirements: acceptedRequirements,
-        issues: acceptedIssues, plan: acceptedPlan} : {}),
+        issues: acceptedIssues, plan: seededPlan, returnBudgets: seededBudgets ?? []} : {}),
       currentAgreementKey: shouldSeed || currentMatches ? key : current.currentAgreementKey,
       acceptedAgreements: [...current.acceptedAgreements, accepted],
       evidence: [...current.evidence, yield* makeEvidence({operationId, owner, kind: "agreement_imported", now: at,
@@ -1415,6 +1651,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (!documentTextAccepted(serialized)) return {status: "invalid", operationId, reason: "invalid_workflow_document"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (creatingMain) yield* insertWorkflow(next, serialized);
     else if (row?.revision === 0) yield* replaceWorkflow(next, serialized, 0);
     else if (!(yield* casUpdate(owner, next.workflowId, next.revision, serialized, at, row!.revision)))
@@ -1445,6 +1682,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
 
     const entry: ExternalContribution = {contributionId: input.contributionId, nodeId: input.nodeId, state: input.state, revision: input.revision,
       summary: input.summary, references: input.references.map(item => ({kind: item.kind, value: item.value})), externalRef: input.externalRef,
+      participant: normalizeParticipant(input.participant),
       sourceThreadId: input.sourceThreadId, sourceRunId: input.sourceRunId, sourceMessageId: input.sourceMessageId, recordedAt: at, assessment: null};
     const evidence = yield* makeEvidence({operationId: `contribution:${fingerprint([input.contributionId, input.revision])}`, owner, kind: "contribution_recorded", now: at,
       targetNodeId: validNodeId(input.nodeId) ? input.nodeId : null, targetNodeName: node?.name ?? null, statusFrom: null, statusTo: null,
@@ -1576,6 +1814,17 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       .some(node => node.nodeId === entry.backToNodeId);
     const resolved = plan && reached ? resolveBackTo(plan, entry.backToNodeId) : null;
     if (!plan || !resolved?.ok) return {status: "invalid", operationId, reason: "return_not_reached"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const budgetNode = planBackTos(plan).find(item => item.nodeId === entry.backToNodeId);
+    if (!budgetNode) return {status: "invalid", operationId, reason: "return_not_reached"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    if (returnBudgetUsed(ledgerEvents(current.returnBudgets ?? [], budgetNode.budgetId)) >= budgetNode.maximum)
+      return {status: "invalid", operationId, reason: "return_budget_exhausted"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    let returnBudgets = withBudgetEvent(current.returnBudgets ?? [], budgetNode.budgetId, budgetAddressFor(plan, budgetNode), {kind: "consumed", returnId: entry.returnId, at});
+    if (returnBudgets === "capacity") return {status: "invalid", operationId, reason: "return_budget_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    for (const nested of strictlyNestedReplayReturns(plan, budgetNode.nodeId)) {
+      const reset = withBudgetEvent(returnBudgets, nested.budgetId, budgetAddressFor(plan, nested), {kind: "reset", returnId: entry.returnId, at});
+      if (reset === "capacity") return {status: "invalid", operationId, reason: "return_budget_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
+      returnBudgets = reset;
+    }
     const region = new Set(resolved.regionNodeIds);
     const reopened = collectPlanEntities(plan).filter(node => region.has(node.nodeId));
     const replanned = withOccurrenceStatuses(plan, reopened.map(node => ({nodeId: node.nodeId, status: "planned" as const})));
@@ -1593,12 +1842,12 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
       statusFrom: current.status, statusTo: "underway", sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null,
       agreementKey: null, note: `Attempt ${entry.attempt + 1} starts after returning to earlier work. ${input.note}`.slice(0, workflowMutationLimits.maxTextLength)}));
     // the reopened region holds nothing back: a return pending inside it is no longer reached
-    const synced = syncedReturns({...current, plan: replanned.plan, branchSelections, evidence,
+    const synced = syncedReturns({...current, plan: replanned.plan, branchSelections, evidence, returnBudgets,
       returns: current.returns.map(item => item.returnId === applied.returnId ? applied : item)}, at);
     for (const event of synced.events) evidence.push(yield* returnEvidence(owner, operationId, event, replanned.plan, at));
     if (evidence.length > workflowMutationLimits.maxEvidence) return {status: "invalid", operationId, reason: "evidence_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (synced.returns.length > workflowMutationLimits.maxReturns) return {status: "invalid", operationId, reason: "return_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
-    const next: WorkflowStateDocument = {...current, status: "underway", revision: current.revision + 1, plan: replanned.plan, branchSelections, returns: synced.returns, evidence, updatedAt: at};
+    const next: WorkflowStateDocument = {...current, status: "underway", revision: current.revision + 1, plan: replanned.plan, branchSelections, returns: synced.returns, returnBudgets, evidence, updatedAt: at};
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (!(yield* casUpdate(owner, current.workflowId, next.revision, serialized, at, input.expectedRevision)))

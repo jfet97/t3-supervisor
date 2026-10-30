@@ -13,6 +13,7 @@ import type {Projection, ThreadInfo} from "../src/types.js";
 import {cancelAfter} from "./support/g11-http.js";
 import {execute, policyLayer, row, rows, supervisionStores, temporaryDirectory} from "./support/g11-stores.js";
 import {stopMain, teamControllers, type TeamNative} from "./support/g11-team.js";
+import {exchangeTable, measureExchange, recordExchangeSamples, type ExchangeSample} from "./support/exchange-audit.js";
 
 // the team controller over its production layers on the supervision stores of a temporary guidance file, with fake native
 // reads and no operate client. it.live: the stores are real database files, times the stores leave out are the wall clock
@@ -332,4 +333,28 @@ it.live("a handover message created by a user is not review evidence", () => Eff
   f.proof(f.args);
   assert.equal((yield* f.call()).reason, "supervisor_team_review_native_changed");
   assert.equal((yield* f.team.snapshot(f.binding)).notifications.some(value => value.kind === "handover_review"), false);
+}));
+
+// slice F exchange audit: the team answers (R12) a helper and the root read, the guidance answer (R13) and what a guidance relay (N15)
+// dispatches; the relayed text itself is the root's or helper's own delta, so only the service's envelope around it is measurable
+it.live("exchange audit: team answers and the guidance answer carry records and identities; a relay's text is the sender's own", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const samples: ExchangeSample[] = [];
+  const helperRead = {supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch, action: "read"};
+  const rootRead = {supervisorThreadId: f.binding.threadId, bindingGeneration: f.binding.generation, action: "read"};
+  const helperAnswer = JSON.stringify(yield* f.call(helperRead));
+  samples.push({path: "R12", label: "supervision_team read answer, helper", text: helperAnswer, args: helperRead});
+  samples.push({path: "R12", label: "supervision_team read answer, helper, read again (pull read)", text: JSON.stringify(yield* f.call(helperRead)), previous: helperAnswer, args: helperRead});
+  samples.push({path: "R12", label: "supervision_team read answer, root", text: JSON.stringify(yield* f.call(rootRead)), args: rootRead});
+  f.proof(f.args);
+  samples.push({path: "R12", label: "supervision_team review_handover answer", text: JSON.stringify(yield* f.call()), args: f.args});
+  const guideArgs = {supervisorThreadId: f.member.threadId, bindingGeneration: f.binding.generation, memberEpoch: f.member.epoch,
+    operationId: "audit-guide", targetThreadId: "branch", text: "Continue with the agreed step."};
+  f.proof(guideArgs, f.member.threadId);
+  const guide = yield* deadline((cancel) => f.controller.guide(guideArgs, cancel));
+  samples.push({path: "R13", label: "supervision_guide answer (this fixture has no operate client, so the answer is the no-dispatch outcome)", text: JSON.stringify(guide), args: guideArgs});
+  samples.push({path: "N15", label: "guidance relay: the dispatched text is the sender's own delta (message.dispatch with steer_active; unmeasured here, no operate client)", text: ""});
+  recordExchangeSamples("team-answers", samples);
+  console.log(`EXCHANGE AUDIT (team answers)\n${exchangeTable(samples.map(measureExchange))}`);
+  for (const sample of samples) assert.doesNotMatch(sample.text, /mcpx|t3-supervisor-workflows|code-mode|functions\.exec/iu, sample.label);
 }));

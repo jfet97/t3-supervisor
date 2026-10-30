@@ -4,8 +4,8 @@ import { Store, makeStore } from "../src/store.js";
 import { T3Client, makeT3Client } from "../src/t3.js";
 import type { SourceItem } from "../src/types.js";
 
-// a read-only check that the T3 read token reaches both shell snapshots: it reads the descriptor and ingests the active
-// and archived shells into a private catalog, and never dispatches, writes to T3 or sends notifications
+// a read-only check that the T3 read token reaches a live shell snapshot and the paired archive snapshot: it reads the
+// descriptor and ingests both into a private catalog, and never dispatches, writes to T3 or sends notifications
 
 // the token file is unset, unreadable or blank; the message never carries the token
 class ProbeTokenMissing extends Data.TaggedError("ProbeTokenMissing")<{ readonly message: string }> {}
@@ -47,9 +47,14 @@ const watchSnapshots = (seen: Ref.Ref<Seen>) => Effect.gen(function* () {
   return yield* source.watch(undefined, (item) => Effect.gen(function* () {
     yield* store.ingest(item);
     if (item.item.kind === "snapshot" && item.item.resolvedRepositoryIdentityRoots === undefined) {
-      const snapshot = item.item.snapshot as { threads: unknown[] };
-      const count = snapshot.threads.length;
-      yield* Ref.update(seen, ({ snapshots, threads }) => ({ snapshots: new Set([...snapshots, item.stream]), threads: threads + count }));
+      const snapshot = item.item.snapshot as { threads?: unknown[] };
+      const activeCount = Array.isArray(snapshot.threads) ? snapshot.threads.length : 0;
+      // archivedThreads on the live snapshot is not archive membership; the unary cut is
+      const archiveCount = item.archiveCut?.threads.length ?? 0;
+      yield* Ref.update(seen, ({ snapshots, threads }) => ({
+        snapshots: new Set([...snapshots, "active" as const, ...(item.archiveCut === undefined ? [] : ["archive" as const])]),
+        threads: threads + activeCount + archiveCount,
+      }));
     }
     const { snapshots } = yield* Ref.get(seen);
     if (snapshots.has("active") && snapshots.has("archive")) return yield* new ProbeVerified();

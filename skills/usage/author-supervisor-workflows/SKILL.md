@@ -13,7 +13,7 @@ pattern. Dashboard work belongs to [use-t3-supervisor](../use-t3-supervisor/SKIL
 ## Target project boundary
 
 Write only the needed `project.yaml`, `steps/*.md` and `workflows/*.yaml` inside the
-target project's `.t3-supervisor/` folder by default. Keep execution rules in their
+target project's `.t3-supervisor/` folder by default. Keep project duties in their
 descriptions and explain rationale in the response. Additional documentation needs
 an explicit request or approval.
 
@@ -108,7 +108,9 @@ condition selects between substantially different pieces of work, such as a cont
 change getting one reviewer instead of two independent complete reviewers. Keep finer
 conditions and completion rules in descriptions; there is no `elif`, jump or `goto`.
 To repeat earlier members as a visible new attempt, end a branch path with
-`back_to: <id>` naming an earlier member of the same sequential lane; the reference
+`back_to(n): <id>` naming an earlier member of the same sequential lane. `n` is a
+required integer from 1 to 99, the maximum successful jumps of that return; the
+first pass consumes none. There is no bare `back_to:` form. The reference
 shows the review-round pattern. Branches belong in workflow files, never in step frontmatter. The next
 member after a branch follows whichever path applies. The operative working on the
 workflow selects the path from actual context with its own `branch-selection` record;
@@ -139,6 +141,15 @@ State a rule where its decision belongs. Keep essential conditions and exception
 visible; put shared rules in the owning step or workflow description and refer to it. Do not duplicate a workflow's completion contract in every member, hide
 important conditions behind vague links, or move the same wall of text unchanged
 elsewhere.
+
+Definitions own project outcomes, applicability, roles, authority, evidence and
+acceptance policy, including reviewer choice, continuity and model diversity.
+Supervisor and the host own tool discovery, transports, gateways, participant
+registration, session/delegation lifecycle, settlement and return/identity internals.
+Reference their supported guidance instead of copying tool recipes into definitions;
+outside work uses the supported external-contribution protocol. Repository engineering
+procedures stay in their canonical project docs or skills: being reusable does not
+make them Supervisor policy.
 
 When shortening, map every original obligation to retained wording or its actual
 canonical source. Check actors, triggers, authority, named cases, evidence limits and
@@ -171,14 +182,15 @@ required list.
 
 Keep each reviewer workflow to one pass by one reviewer. Its caller owns reviewer
 count and assignments, using `parallel` for independent complete passes. If earlier
-work must repeat, the caller uses a conditional `back_to`, for example after material
+work must repeat, the caller uses a conditional `back_to(n)`, for example after material
 findings or a verification/CI defect. Review preferences alone do not justify a return.
 Fine-grained work within an entered step can remain in its description; do not hide
 repetition across declared steps there. A findings step owns the main's accounting,
 not a wrapper whose only purpose is invoking Review. Distinguish a completed review
 report from acceptance of the work, and reviewer assessment from author fixes. Reuse
 the same ordinary reviewer conversations through supported APIs when repeating work.
-The reference explains reporting, acceptance and reviewer identity.
+The reference explains reporting, acceptance and reviewer continuity policy; host and
+Supervisor guidance supply the supported execution routes.
 
 Check the ledger and concrete cases: factual answers, consequential changes, report-only
 review, contested rebuttals, fixes, changed bases, interrupted chats and both paths of

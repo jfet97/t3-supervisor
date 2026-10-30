@@ -47,6 +47,19 @@ Settings shows relevant explicit exclusions and bounded search-to-add, retaining
 hidden/unavailable exclusions. Stop provenance appears in Home and the conversation;
 Home's Review and enable opens the exact scoped control.
 
+Discovery handles the chats whose latest run changed first, oldest request first,
+up to twenty per cycle; the remaining slots of the cycle come from the ordinary
+rotation over the catalog. A chat anchored in the activation baseline whose latest
+run has not changed costs nothing, however many such chats the instance has. A
+changed chat is offered once per run lifecycle T3 reports (the run, its activity
+status, its start and completion): a chat skipped because its project is off or its
+Start is pending, or deferred because its workspace is still preparing, takes no
+discovery slot and is offered again exactly when T3 reports that lifecycle moved on,
+so a preparing chat's ready transition keeps its priority and no set of skipped chats
+can starve the rest. The service logs one `supervisor_discovery` event per cycle that
+found fresh requests or attempted a discovery, with counts and the cycle's duration
+only.
+
 Disabling stops new service-originated interpretation, introductions, check-ins
 and recovery sends. It preserves chats, bindings, requests and agreements; a
 running native turn may finish. Re-enabling captures a discovery boundary instead
@@ -185,10 +198,28 @@ not selected; undecided and not-selected steps are not counted as outstanding.
 A selection never proves work, and a completion recorded before a changed decision
 is shown as needing reassessment. See [branch selections](workflow-mcp.md#branch-selections).
 
-A return (`back_to`) repeats earlier work as a new attempt. When the operative's work
-reaches it, the region from its target through the member that holds it waits for the
+A return (`back_to(n)`) repeats earlier work as a new attempt. `n` is that return's
+maximum number of successful jumps, an integer from 1 to 99. The first pass consumes
+none. Each occurrence has its own budget, including two uses of one workflow, and a
+preserved node keeps that budget when it is reordered or retitled. When the operative's work
+reaches it and jumps remain, the region from its target through the member that holds it waits for the
 Supervisor, which applies the return at a safe point once the closed attempt's work has
-stopped. The closed attempt keeps its statuses, contributors, decisions and retired
+stopped. Once `n` jumps have been applied, the unresolved failure stays visible and
+another jump does not start. An applied return resets only budgets whose replay region
+is strictly inside the region it reopens. Right after a return every repeated member
+is planned again, so the task page names the return's target (a step or a workflow)
+as ready to start until work in its own region begins, beside any unrelated lane that is
+already active; when a later return reopens an earlier return's target again, only the
+later frontier is ready. An outcome recorded on a path that is no longer selected or
+awaits a decision again is shown as earlier history without a live tone, and a pending
+decision whose earlier work is not yet settled is shown as not yet reached, in neutral
+tone, until it is. Each repeated occurrence and the branches inside the region keep a
+collapsed "Previous attempt n", numbered per occurrence like History, with the status,
+contributors and decision (revision, reason, source) the closed attempt ended with; the
+decision's reason and source travel with the return record itself, so they outlive the
+bounded recent branch events. History lists the records of one
+write under one headline, in stored order and never merged, and a record that changed
+no status is never the headline. The closed attempt keeps its statuses, contributors, decisions and retired
 child runs as history; the reopened occurrences keep their contributor conversations
 and show their attempt. Output of the closed attempt never counts for the new one.
 See [returns and attempts](workflow-mcp.md#returns-and-attempts).
@@ -340,6 +371,21 @@ remain separate decisions: "external task finished" alone never completes a step
 an accepted result does not complete it automatically, and step completion is a
 separate status edit that may cite the main's result message.
 
+A record may name its participant generically: a T3 conversation (local or in a
+linked environment), an opaque external handle, or unknown. The declaration is
+untrusted and grants nothing. The root may attribute its own observation of a
+participant by citing its own completed native tool call; a wait, list or search
+call establishes lifecycle only, never a transcript read, and a read is credited
+only to the declaration and attempt it was made in. The task page's
+Participants section shows every participant's role and attempt, conversation
+lifecycle, completion and coverage as distinct facts, and states when nothing was
+observed or no route exists; a conversation in another environment is shown with
+its environment and no local link; after task completion each T3 conversation's
+settlement for the current execution is shown as recorded (settled, the automatic
+attempt sent, its outcome unknown, superseded by its user, not settled automatically with
+its reason, or skipped for its user's choice; whatever did not settle is settled by hand),
+and a participant that is not a T3 conversation is shown as not applicable.
+
 Scope is the main workflow only. A local child that used external help reports
 the outcome to the main, which relays it with its own record; no child or external
 contributor appears as a native descendant. Result text and references are
@@ -382,12 +428,47 @@ IDs for the decision record to cite.
 ## Monitoring, recovery and lifecycle
 
 Active work is followed through native T3 reads across the main and its verified
-children. The owner reads forward from each target's cursor, completes cut-off
-text and fetches plans or details only as needed. Child lists are metadata, not
-transcript reads. A bounded `t3_thread_wait` waits for run completion, not new
-activity; when T3 requires a yield, the service promptly continues verified active
-work. Active following bypasses the idle age/count thresholds and cooldown, and
-never steers into a Supervisor's ongoing thinking. One model turn runs per owner.
+children. The check-in is the watch of the whole task, not a finite report: the owner
+catches up on the frozen scope, then keeps one loop that reads forward from each
+target's cursor, completes cut-off text, consumes its own inbox at each boundary, paces
+with one bounded `t3_thread_wait` of five to ten seconds on the active target (it waits
+for run completion, not new activity), assesses and acts with one delta when needed.
+The turn ends only when the agreed work is complete or in explicit standby (a recorded
+wait naming who acts next), when a wait result names the next action or tells the model to
+end the turn, on context rotation, on a genuine human Stop, or for genuine external waiting
+that a native watcher reports (never the operative's own running turn). A timed-out wait
+while the target still runs is not an ending, however many waits timed out: the Supervisor
+reads forward and waits again. An operative run that ended with agreed duties still
+planned is not an ending either. Check-in and liveness wakes point at the same endings:
+the watch outcome is recorded when the watch ends, not at a fixed per-wake point. Child
+lists are metadata, not transcript reads. When T3 requires a yield, the service promptly
+continues verified active work. Active following bypasses the idle age/count thresholds
+and cooldown, and never steers into a Supervisor's ongoing thinking. One model turn runs
+per owner.
+
+The service's fallback covers only a turn that ended anyway: when the main's latest run
+completed while the agreed workflow is unfinished and no current wait is recorded, the
+root receives one liveness check-in per main run, document revision and parent-reported
+native child lifecycle, queued behind any active root turn and never steered into it. A
+root turn that again ends without a recorded wait or progress is a new recovery
+generation: the check-in is re-armed once per such terminal root turn after the thirty
+second cooldown, never twice within one; a recorded wait, a new run, completion, a Stop
+or a settled pair keeps it quiet, and no timer or extra monitor is involved. Model
+adherence to the watch itself is proved live, not by tests: the fallback bounds a yield
+to one wake per generation.
+
+Own inbox: the root reads its own queued messages at the boundaries it chooses (after
+each wait, before each record or send) with `t3_queue` on its own thread. What it cancels
+is decided from the queued run's native metadata (sender thread and origin), never from
+quoted text: only a verified operative-origin run it actually handled with one delta or a
+record; service-owned, unknown-origin and unanswered genuine human runs stay queued, a
+human's message is handled first, and the service promotes nothing to steer. When
+`t3_queue` is not exposed the root discovers it and otherwise states once that its own
+queue is not drainable and ends its turn after each read-forward pass, so queued messages
+start as normal turns while the service continues active work. A queued message is seen
+at the root's next boundary: the wait between boundaries is bounded (five to ten
+seconds); the latency of a long thought or tool call in progress is not, and only a human
+can steer.
 
 Idle work retains the project age/count thresholds and 30-second fallback cooldown.
 Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;
@@ -403,7 +484,7 @@ explicit absence of one). The Supervisor assesses the evidence against the agree
 workflow, records verified status changes, and sends the operative concise corrective
 guidance when evidence demonstrates a concrete, actionable mistake or deviation; it
 stays silent on routine progress and never invents a correction from uncertainty.
-Before its marker it records exactly one outcome with `workflow_write` `record_review`
+At the end of its turn it records exactly one outcome with `workflow_write` `record_review`
 (progress updated, no change, needs attention or insufficient evidence), decided from a
 fresh read of the relevant finished messages, results and current workflow: the change
 index is navigation, not proof, and no change is never a default. No change never
@@ -426,7 +507,17 @@ guidance is the Supervisor's assessment, not evidence that the operative acted o
 When planning changes what affected actors do next, `supervision_planning pause`
 requests a bounded hold for those actors. Each actor must acknowledge its own pause
 or be verified quiet; a parent acknowledgement holds its dispatch only. Native or
-idle children use a verified parent relay. Unrelated siblings keep working.
+idle children use a verified parent relay. Unrelated siblings keep working. A
+descendant the pause could not hold (unreadable, covered by a helper or beyond the
+target limit) stays listed and blocks adoption until a fresh read finds it quiet or
+holds it; one that becomes readable while busy is held, never dropped. A held
+descendant whose work finished is verified quiet by the release's own fresh read,
+never by its earlier reading: a finished child read busy or unreadable again is
+awaited again. Its relayed hold is released as a dispatch hold only, with no
+instruction to continue; a finished child held directly gets no notice at all, since
+a message would start new work; and no workflow is fabricated for it. A child whose
+work resumes under `continue` needs its own linked, planned workflow
+(`planning_target_unscoped` otherwise); `no_plan` frees it without one.
 
 One project-configurable deadline (default five minutes, ten seconds to one hour)
 starts at the first delivery attempt and covers acknowledgement, drafting and
@@ -455,7 +546,7 @@ re-reads current work before adoption; adoption waits for the relevant actors.
 Ending the attempt cleans up its registered drafting task while retaining unknown
 native command outcomes. Late content never renews the pause or publishes itself.
 
-A reached `back_to` is applied through `supervision_planning apply_return` after
+A reached `back_to` that still has jumps left is applied through `supervision_planning apply_return` after
 current pause/quiescence checks. The checks use point-in-time native reads taken just
 before the commit, the owner's last. A read never waits for another admitted operation
 before it is used. While one is in progress, the return waits for it to end and reads
@@ -499,6 +590,23 @@ A human can stop supervision of one chat: from the dashboard's selected-chat Sto
 supervision control, by telling its Supervisor directly, by asking the operative to
 relay the request with the human's original message ID, or from another ordinary chat
 in the same environment whose genuine user message names the exact target chat ID.
+The initial Supervisor and helper notices include portable tool-discovery guidance before
+their first instruction read. No gateway implementation is assumed. The initial root
+notice also requires a stopped service result before confirming Stop and gives the
+dashboard fallback when that call is unavailable or denied.
+A genuine human message, wherever the service requires one, is the human's own web or
+mobile message or the human's answer to a runtime input request of that chat, which T3
+records as a server-created user message named after the resolved request
+(`async-answer:<requestId>` for the dispatched answer, `approval-feedback:<requestId>`
+for approval feedback); no other link between a message and a request is read, and a
+pending or unknown request answers nothing. A message an agent sent from another chat, a
+scheduled or imported one, a system or Supervisor command, a service notice or a Stop the
+Supervisor itself authored is never human, and the absence of a sender thread alone
+proves nothing. Supervisor guidance is never a human limit: the Supervisor cites human
+limits by their message, and a Stop it imposes is its own, said so. A failing check or
+finding keeps its review duty unfinished: it requires the agreed check or review and the
+operative's own correction, prescribes no implementation, locator, type or sanitization
+strategy, and adds no hold that is not a genuine human limit or the agreed plan.
 The assistant that calls `supervision_stop` judges that a genuine human asked to stop, in
 any language; the service does not interpret the words. It verifies deterministically that
 the cited message is that human's original native message, that the caller's own native
@@ -528,7 +636,7 @@ its pair held, across any Stop, Enable or activation boundary, until that outcom
 Supervisor conversation is replaced. A stop
 cancels never-sent check-ins, keeps sent and uncertain delivery identities, and sends no new
 check-in or introduction. An explicit Stop schedules one concise operative notice per
-Enable period, only if supervision previously contacted that main. The notice says to
+Enable period, even before supervision first contacted that main. The notice says to
 stop replying to the Supervisor while continuing the task; it never asks for a reply.
 Unsent notices are fenced by Enable; accepted or uncertain identities are only observed.
 Three visibility misses at least a minute apart park the notice as unconfirmed with
@@ -560,8 +668,47 @@ choices for that Supervisor (pin, disabled auto-settle, reactivation); only such
 choice made after the stop holds it. The operative main is never settled or
 interrupted because supervision stopped, and other chats keep their supervision.
 
+The operative's on-demand proposal read carries shared coordination duties: assign each
+participant its outcome and applicable contract, declare outside work with its actual kind,
+and account for every owned result or background job before reporting completion. Collected,
+withdrawn and explicitly running or waiting work are distinct outcomes. The root's editing
+guidance asks it to reconcile unread child results and awaiting contributions against that
+accounting before recording completion, sending one delta for an omission. An explicit
+current wait is not task completion. These instructions add no new runtime gate or authority.
+Reviewers stay available while another round may be needed; the service owns settlement,
+with the user handling leftovers unless they request otherwise. Participants are never
+assumed to be T3 conversations.
+
+The main and native operative children also receive the same step-entry guidance in their
+own plan reads. A brief transition announcement names prior evidence and the next definition
+path or local node; nested entries share one message. Before substantive work, refresh the
+assigned contract and applicable references/skills, reusing current context where valid and
+stating missing material as a gap. Continue without a routine approval reply or ending a turn
+just for the announcement. Resuming recovers the current step and outstanding obligations.
+The Supervisor checks declarations against actual work; a concrete skipped duty warrants one
+delta, while absent read traces alone remain uncertain. No new gate or structured record is
+introduced, and the continuous watch and bootstrap mechanisms are unchanged.
+
 Quiet completion/archive/deletion can settle the owned chat once children and
-pending work are quiet. An idle main whose agreed main workflow is unfinished parks only
+pending work are quiet. When the task completed (every applicable member settled, no
+pending return), the service makes one best-effort automatic attempt per T3 participant:
+the main's lineage descendants (not forks) and the local T3 conversations the main's
+contributions declared are each evaluated once per completed execution. A conversation
+that is readable, quiet, not kept active by its user and carries an update time gets one
+automatic-settle command on that snapshot, which T3 rejects atomically when the
+conversation changed or its user chose in between; the outcome is recorded from native
+evidence (settled, superseded by its user, unknown after a lost reply, or rejected).
+Anything else is recorded once with its reason (unreadable, still working, no update
+time, or no supported route for a linked environment) and left to manual settlement:
+nothing is re-read, re-sent or retried for that execution, and any chat can be settled
+by hand at any time. The command is admitted only while the same execution is still
+complete and the participant still a member, so a correction or return that reopens the
+document while an earlier command waits settles nothing further. An execution is the
+task, its scope revision and the main document's latest completion record: the next
+task, or the same task completed again after a return, evaluates every participant anew,
+while the earlier rows stay as history. Intermediate review rounds never settle a reviewer, so a reused reviewer stays
+available. Participants that are not T3 conversations have no settlement: their
+completion is the result the main reported. An idle main whose agreed main workflow is unfinished parks only
 on an explicit current wait: the latest check-in's confirmed outcome carries a wait naming
 whether the requester or an external party must act and what resumes the work, recorded
 for the current task after the main's last completed run. Ordinary attention, a stale or

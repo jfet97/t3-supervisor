@@ -69,6 +69,10 @@ The fence holds one single-line JSON object with exactly these fields, all prese
 - `references`: at most 8 `{kind, value}` objects, where `kind` is `file`, `url`,
   `source` or `text` and `value` has at most 500 characters; may be empty.
 - `externalRef`: an opaque display reference of at most 200 characters, or `null`.
+- `participant` (optional): who performs the work, declared generically as
+  `{kind: "t3_conversation", threadId, environmentId?}`, `{kind: "external", ref}` or
+  `{kind: "unknown"}`, each handle at most 200 characters, or `null`. It is untrusted
+  and derives no lineage, scope membership, authority or settlement.
 
 A message may hold up to 8 records, at most one revision per contribution: a
 further record for the same contribution in that message is not imported
@@ -122,9 +126,74 @@ an accepted result never completes a step automatically. The Supervisor records
 completion with an ordinary `apply` and `status_changed` evidence, which may cite
 the main's result message through `sourceThreadId` and `sourceMessageId`.
 
+### Participants and observation receipts
+
+A participant is any conversation or agent that works an occurrence: a native
+descendant attached to it through `contributorThreadIds` (the association source;
+a linked child with no attached occurrence has no role), or the participant a
+contribution declares. The root records its own observation of a declared
+participant as `apply` evidence of kind `observation` with
+`participantContributionId` and `observation` set to `read`, `lifecycle` or
+`unsupported`. For `read` and `lifecycle` the entry cites the root's own completed
+native tool item (`sourceItemId` on the root thread): the service verifies the
+caller and that item with the same provenance fences as its own write proof (a
+completed `dynamic_tool` item with strong and complete native identity, in a run of
+the root whose provider thread it names, with neither the run nor its root node
+rolled back, and its node completed inside that main run). An item a harness or gateway
+nests under a parent item is the root's own only through its ancestors: each must
+be an item of the same thread and run whose node lies in that main run and is not
+rolled back, within a bounded depth (`participant_item_chain_mismatch` otherwise;
+an unreadable ancestor is pending). The call is recorded as the configured native
+routes read it: a configured gateway call tool naming exactly `{name, arguments}`
+stands for that target, any other wrapper for itself, verbatim and with an input
+digest; no other inner target is inferred and no foreign semantics are
+interpreted. A T3 wait, list, search or queue call under any prefix, directly or
+through a configured gateway call, is accepted as `lifecycle` only and refused as
+`read` (`participant_item_lifecycle_only`).
+The item is credited to the window it belongs to: T3's own time for the item itself,
+never its run's end (`participant_item_undated` without one), must not precede the current revision's
+record or the latest applied return that reopened the contribution's occurrence
+(`participant_item_before_window`), so a read made before a return cannot be
+recorded after it even from the same Supervisor run, while a read from an earlier
+run inside the current attempt counts. `unsupported` cites no item and states that
+no route exists. Each receipt is stored on the evidence with the exact participant,
+contribution revision and occurrence attempt it concerns; a later revision, a
+changed declaration or an applied return retires earlier receipts into history. An
+identical receipt (same actor, declaration, revision, attempt, kind and tool) updates
+its entry's time, item and `repeats` count in place, and an observation-only apply
+that changes no plan, status, node, branch or selection records no `plan_updated`
+event, so continuous observation never consumes the evidence history. History shows a
+compacted receipt as one span at the position of its first read, dated by that first
+read with its latest read and count beside it, so a repeated read never appears as a
+newly dated event before an older status change or return. A receipt is
+evidence of a read at its time; whether the route is available now is not
+re-verified. Helpers cannot record
+receipts (`participant_observation_root_only`), a receipt for an unknown
+contribution is invalid (`participant_contribution_unknown`), and a cited item that
+is not the root's own completed tool call is refused. Receipts grant no write or
+settlement authority and never replace an assessment.
+
+The progress snapshot lists each workflow's `participants[]` with source, kind,
+handle, roles (occurrence, attempt, replaced by an applied return), owner,
+lifecycle, reported state, completion, coverage (`native`, `supervisor_observed`,
+`lifecycle_only`, `reported`, `unsupported`, `unknown`), the current receipt and the
+count of earlier receipts, and `settlement`: `not_evaluated` until the task completed,
+`not_applicable` for external or unknown participants, else the outcome of the one
+automatic attempt recorded for the main's current execution (its task, scope revision and
+latest completion record, which the scope names on every page): `pending`, `uncertain`,
+`settled`, `superseded`, `unresolved` or `skipped`, with `settlementReason` for unresolved
+and skipped ones (`unavailable`, `not_quiet`, `snapshot_unavailable`, `settle_rejected`,
+`environment_settle_unsupported`, `keep_active`). Nothing is retried; what did not settle
+is settled by hand.
+`native` requires the service's own projection read of a live local thread in that
+snapshot (`projectionRead` on the scope row; lifecycle metadata of an unread,
+archived or deleted thread is `unknown`), and a conversation declared with an
+`environmentId` is another environment's conversation: it never joins a local row
+by thread id and the dashboard shows its full identity without a local link.
+
 `workflow_read` returns the bounded contributions and current assessments; what
 they mean is stated once, in the root's instruction section `contributions`, not in
-each read. Root check-in envelopes add `externalContributions`, a
+each read. A root check-in's frozen envelope (`workflow_read` view `request`) adds `externalContributions`, a
 compact index of open entries (`contributionId`, `nodeId`, `inCurrentPlan`,
 `state`, `revision`, current decision and `sourceMessageId`) without their summary
 or references. Summaries, references and `externalRef` are untrusted evidence,
@@ -183,8 +252,8 @@ the agreement pointer, change the agreement digest or alter requirement accounti
 
 A reached branch without a current selection is a pending decision. `workflow_read`
 lists each workflow's `pendingBranchDecisions` (their meaning is in the root's
-instruction section `branches`), and root
-check-in envelopes add `branchDecisions`, holding pending decisions and current
+instruction section `branches`), and a root
+check-in's frozen envelope (view `request`) adds `branchDecisions`, holding pending decisions and current
 selections with their source message. An `apply` that assesses the workflow, or a
 workflow occurrence, as newly completed while a decision on its applicable path is
 pending is rejected with `branch_decision_pending` and a pointer to the branch. When
@@ -204,9 +273,11 @@ its branch node ID, condition and paths, the task ID and this record format.
 ## Returns and attempts
 
 A plan return is `{kind: "back_to", nodeId, templatePath, target, targetNodeId,
-reason}`; like a branch it has no status or contributors. `target` is the step, local
-step or workflow ID of an earlier member in the same sequential lane, and the service
-resolves `targetNodeId` in the composed plan, so drafts and applies omit it. A plan
+maximum, budgetId, reason}`; like a branch it has no status or contributors. `target`
+is the step, local step or workflow ID of an earlier member in the same sequential
+lane, and the service resolves `targetNodeId` in the composed plan, so drafts and
+applies omit it. `maximum` is an integer from 1 to 99, the most successful jumps of
+this return. `budgetId` identifies that return's own budget. A plan
 that cannot resolve a return is rejected with `back_to_target_not_found`,
 `back_to_target_ambiguous`, `back_to_unreachable_member` (a member follows it) or
 `back_to_no_exit_cycle`, and a pointer to the return.
@@ -222,6 +293,45 @@ the return, or completes the task or a workflow enclosing it. Observations remai
 possible. A pending entry whose return is no longer reached, or has left the plan, is
 dismissed with `return_dismissed` evidence. Entries are never removed, and a workflow
 holds at most 100.
+
+The region of a return the current selections reach, its failure path selected or the
+return lying on every path, is one real boundary. An `apply` that moves a status inside
+that region backward (completed or underway to planned, completed to underway) is
+rejected with `return_required` and a pointer to the reopened occurrence, whether it
+also settles the assessing member in the same write or reopens first and settles later.
+The assessing member settles alone, the service requests the return, and `apply_return`
+starts the next attempt; attempts and budgets change nowhere else. With that return's
+budget spent the same backward move is `return_budget_exhausted`. Off the selected
+path, no failure path selected yet or the `else` path taken, a backward move inside a
+region is a misrecorded status: the apply needs `repair: true` with the usual
+`status_changed` evidence and a note, is rejected with `status_repair_required` without
+the flag, records that evidence flagged `repair: true` (History shows "Status
+corrected"), consumes no budget and starts no attempt; `repair: true` on an apply that
+moves no such status is `repair_not_applicable`. Backward moves outside every return
+region, and the reassessment a changed task scope requires, are unaffected. A region
+whose return already waits keeps `return_pending`.
+
+When the successful jumps reach `maximum`, the document records an `exhausted`
+return and `return_budget_exhausted` evidence instead of another pending request.
+An `apply` that would complete the task or enter work after that return is rejected
+with `return_budget_exhausted`. `apply_return` on a pending row whose budget is
+already spent returns the same reason and writes nothing. Selecting another path
+sets `resolvedAt` and keeps the exhausted row. The document stores `returnBudgets`.
+Each entry is `{budgetId, address, events}`, and an event is
+`{kind: "consumed" | "reset", returnId, at}`. Current use is the consumed events
+after the latest reset. Applying a return appends one consumed event for itself and
+one reset event for each strictly nested replayed return, in the same transaction as
+the new attempt. Each return occurrence has its own budget, including each expansion
+of one reusable workflow. An edit that keeps a return's nodeId or budgetId keeps that
+budget when the return is reordered or retitled. The executable plan's returns need
+a `returnBudgets` row, and an applied return needs its consumed event. A later
+accepted agreement is history: it keeps its own budget ids and does not mint a ledger
+row. A missing executable row, or a missing consumed event, stays on disk and is
+classified incompatible. An empty ledger is not repaired into an unused budget. Omitting
+the field does not hide an applied jump after its return leaves the plan. A plan with no return and no applied jump may omit
+the field. Two returns that both move and keep no nodeId or budgetId are rejected with
+`return_budget_identity_ambiguous` and write nothing. Two returns that claim one
+`budgetId` are rejected with `return_budget_duplicate` and write nothing.
 
 The Supervisor applies a pending, still reached return at a safe point. Applying it
 records `return_applied` evidence and keeps the closed attempt on the entry: `closed`
@@ -241,7 +351,13 @@ operation ID and checks the expected revision.
 
 An occurrence's attempt is one more than the number of applied returns whose region
 holds it. View `status` adds `attempt` to reopened occurrences and lists each
-workflow's `pendingReturns`; the progress snapshot adds `returns` and `attempts`.
+workflow's `pendingReturns`; the progress snapshot adds `returns` (with `closed`,
+`closedSelections` and `retiredRuns` of each applied return) and `attempts`, which
+lists every occurrence inside a return's region, attempt 1 explicit, so attempts
+only ever grow and occurrences outside every region carry none. Each history event
+carries the `operationId` of the write that recorded it; the dashboard groups the
+consecutive events of one write and never merges records, including records that
+share a timestamp.
 Output of a closed attempt never counts for the next one. A branch-selection record
 from a message created before an applied return reopened its branch, or from a run
 that return retired, is `branch_record_outdated`. A `status_changed` or
@@ -373,14 +489,32 @@ workflow documents:
   reference, nesting, status, branch reach (stated only off the unconditional path) and
   visible omissions, plus pending decisions, without descriptions, accepted snapshots or
   history. Use it to reconcile statuses; the document read remains available for
-  descriptions and history.
+  descriptions and history. `membersSettled` is true when every applicable member is settled and no
+  decision is pending; with `status` still `underway` the completing apply is owed.
+- `request` (with `requestId`): the frozen envelope of one of the caller's own check-ins or
+  liveness wakes, exactly as prepared: the request's identity, kind, state, pins, marker and
+  recorded outcome, and its envelope (per-thread rows with identities, counts, read handles,
+  lifecycle and contact routes, task context, team policy, open contribution and branch
+  indexes; for a liveness wake its key, generation and the unsettled occurrences). Routine
+  wakes carry only identities, counts, this read and their marker. Another Supervisor's or
+  helper's request is denied (`request_not_owned`); an unknown id is unavailable
+  (`request_unknown`). The envelope stays readable after the turn ended and the outcome was
+  acknowledged, for as long as the request record is retained.
 
 `supervision_plan` is the operative main's read of its own current proposal. Its arguments
 are `callerThreadId`, `taskId` and `proposalId`, copied from the Supervisor notice. The
 service verifies the caller's own executed native tool call with exactly these arguments
 in its own main run, then returns the complete current proposal: objective and authorized
 scope, limits, required references, the plan with its omissions and branches, the branch
-protocol and the exact acceptance record. It answers only for the caller's own interpreted
+protocol and the exact acceptance record. It also supplies shared participant and completion
+guidance: announce declared transitions briefly and refresh the next contract and applicable
+references/skills before substantive work, continuing without routine confirmation. Resume
+refreshes lost step context. It also covers assigning outcomes, declaring work outside native
+lineage through the supported contribution protocol, accounting for owned results and jobs,
+and retaining reviewers while
+another round may be needed. Settlement remains the service's best-effort responsibility,
+with the user settling leftovers manually unless they request otherwise. Project definitions own their evidence and review policy;
+they need not repeat these host-neutral coordination duties. It answers only for the caller's own interpreted
 task under the ready Supervisor generation that interpreted it, while the task's request is
 unchanged and fully considered and supervision of that chat is enabled and not stopped, for
 exactly the current proposal whose acceptance record is still the one recorded with its
@@ -486,10 +620,17 @@ at their first and their final authority check.
   the run that created or changed a workflow (`review_no_change_after_edit`). A later call of the same run replaces the outcome
   until the check-in completes. It sends nothing: messaging the operative is a separate
   decision, and neither the record nor delivered guidance shows that the operative
-  corrected anything. An optional `wait: {waitingOn, resumesWhen}` records an explicit
-  current wait when the main has stopped with agreed work unfinished: `requester` or
-  `external` must act (never the operative's own unfinished action) and `resumesWhen`
-  names what continues the work.
+  corrected anything. An optional `wait: {waitingOn, resumesWhen, messageId?}` records an
+  explicit current wait when the main has stopped with agreed work unfinished: `requester`
+  or `external` must act (never the operative's own unfinished action) and `resumesWhen`
+  names what continues the work. A wait on the requester cites, in `messageId`, the
+  human's own message in the root or the main (a web or mobile message, or the human's
+  answer to a runtime input request, the server-created message T3 names
+  `async-answer:<requestId>` or `approval-feedback:<requestId>` for a resolved request);
+  without one, or citing an agent's send, a service
+  notice, a Supervisor command or the root's own message, it is refused
+  (`wait_source_not_human`; `wait_source_read_unavailable` while neither conversation can
+  be read).
 
 A valid unaccepted draft can be edited: formal agreement is not a write gate.
 During initialization the root publishes the supplied initial record unchanged and
@@ -505,7 +646,9 @@ matching valid definition snapshot; live edits cannot self-authorize their sourc
 binding or weaken fixed/required commitments. Invalid/incomplete source material
 supports provisional dialogue, while source-bound writes wait for a valid pin.
 
-Stored workflow documents and immutable receipts use `formatVersion: 2`. Plans
+Stored workflow documents and immutable receipts use `formatVersion: 2`. An applied,
+created or exists receipt also states `documentStatus`, the document's own status after
+the write, separate from the status of its root occurrence. Plans
 retain nested groups and per-occurrence `nodeId` values separately from reusable
 `definitionId` or task-local `localId` values. The service derives the task ID,
 task source hash and definition source binding from its current trusted proposal
@@ -519,7 +662,7 @@ Old prototype documents remain explicitly incompatible and are not migrated or
 silently reinterpreted; their historical rows and unrelated service state remain.
 
 Apply requires `operationId`, `workflowId`, `expectedRevision` and `note`. Status,
-objective, requirements, plan, statuses, omit and evidence are optional; omitted plan fields are preserved
+objective, requirements, plan, statuses, omit, evidence and repair are optional; omitted plan fields are preserved
 from the current document inside the revision-checked transaction. This permits a
 status or objective change without resending an entire plan. `statuses` lists up to
 100 `{nodeId, status}` edits of existing occurrences, merged into the current plan
@@ -529,7 +672,9 @@ unstarted members declared by flexible workflows; the main workflow accepts one 
 the operative has accepted the current proposal and it omits the same member of the same
 occurrence. Members with recorded progress, fixed members and an omission that would
 empty a workflow or branch path, directly or through a nested group, are refused.
-Neither may be combined with `plan` (`plan_edit_conflict`). Evidence of kind
+Neither may be combined with `plan` (`plan_edit_conflict`). `repair: true` declares the
+apply's backward status moves inside a return region off its selected path as the
+correction of a misrecorded status (see Returns and attempts). Evidence of kind
 `not_applicable` records that a planned member of a fixed workflow, with no recorded
 progress inside it, does not apply to the current task scope; it changes no status, is refused for any other target
 (`not_applicable_invalid`) and stops counting after a later status change or scope
@@ -598,8 +743,9 @@ Copy supplied activity references verbatim. For an item, use only
 `{sourceThreadId, sourceItemId}`; for a message without an item reference, use
 `{sourceThreadId, sourceMessageId}`. Add the evidence kind and note without copying
 an optional run ID. Opaque IDs must never be decoded, re-encoded, normalized or
-reconstructed. Helper envelopes supply ready references for eligible records in
-their bounded preview; omitted records require fresh bounded native reads.
+reconstructed. A helper check-in's frozen rows (its `workflow_read` view `request`
+envelope) supply ready references for eligible records in their bounded preview;
+omitted records require fresh bounded native reads.
 
 Each write includes `supervisorThreadId`, `bindingGeneration`, a stable unique
 `operationId`, and the complete action arguments. The first two fields locate the

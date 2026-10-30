@@ -45,8 +45,9 @@ export const helperDeliveryBody = (messageId: string, text: string): string => J
 export const renderedLengthBound = (text: string): number =>
   text.length + RENDER_FRAME_ALLOWANCE + (text.match(mentionTriggerSuperset)?.length ?? 0);
 // whether a delivery stays within the rendered bound and stays provable from T3's native delivery log, or why not
-export const helperDeliveryBudget = (messageId: string, text: string, maxRenderedLength: number): "fits" | "rendered_too_large" | "body_too_large" => {
-  const rendered = renderedLengthBound(text);
+export const helperDeliveryBudget = (messageId: string, text: string, maxRenderedLength: number, attachment = ""): "fits" | "rendered_too_large" | "body_too_large" => {
+  // the frozen rows a check-in's recipient reads with its request view count toward what it takes in, not toward the posted body
+  const rendered = renderedLengthBound(text) + attachment.length;
   if (rendered > maxRenderedLength || rendered >= NATIVE_RENDERED_PROMPT_LOG_LIMIT) return "rendered_too_large";
   return new TextEncoder().encode(helperDeliveryBody(messageId, text)).length > NATIVE_DELIVERY_BODY_LOG_LIMIT ? "body_too_large" : "fits";
 };

@@ -620,14 +620,14 @@ it.live("CT-WSS-03: receipts and incompatible rows survive reopen and an exact r
 const goldenDraft = {
   formatVersion: 2, workflowId: "golden-workflow", projectId: "project-a", mainThreadId: "main-a", threadId: "main-a",
   parentWorkflowId: null, parentThreadId: null, revision: 1, status: "planned", objective: null, sourceBinding: null, requirements: [], issues: [],
-  plan: null, currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], returns: [],
+  plan: null, currentAgreementKey: null, acceptedAgreements: [], contributions: [], branchSelections: [], returns: [], returnBudgets: [],
   evidence: [{operationId: "golden-ensure", kind: "draft_created", targetNodeId: null, targetNodeName: null, statusFrom: null, statusTo: "planned",
     sourceThreadId: null, sourceRunId: null, sourceMessageId: null, agreementKey: null, note: "Start a golden draft.", sourceItemId: null,
     id: "00000000-0000-4000-8000-0000000000e1", recordedAt: 1000, actorSupervisorThreadId: "golden-supervisor"}],
   createdAt: 1000, updatedAt: 1000,
 };
-const goldenDraftStateHash = "f33e399aa57839f28ca22c4229898c34e47a0e626d0d8f1bc4228fed08ded318";
-const goldenDraftWithoutContributionsStateHash = "d561873ac2c87501b4c2e9f433582e3871af972edb9bc49ca804ffba26af065a";
+const goldenDraftStateHash = "5b584d078d5627f5de98fd1d6b399d1ba697744344984e8fd64b4c33d00c2bd7";
+const goldenDraftWithoutContributionsStateHash = "3082f2db9c5763add860634e761a2fb66befca0483c7c8d9927cd20960584035";
 
 const keyShape = (value: unknown): unknown => Array.isArray(value) ? value.map(keyShape) :
   value !== null && typeof value === "object" ? Object.entries(value).map(([key, item]) => [key, keyShape(item)]) : typeof value;
@@ -649,7 +649,8 @@ it.live("CT-WSS-04: golden stateHash and receipt for a fixture document", () => 
   assert.equal(sha256(text), goldenDraftStateHash);
   const exists = yield* fixture.workflows.ensureMain(fixture.owner, "golden-exists", "Start a golden draft.", 2000);
   assert.equal(JSON.stringify(exists),
-    `{"status":"exists","operationId":"golden-exists","workflowId":"golden-workflow","revision":1,"stateHash":"${goldenDraftStateHash}","formatVersion":2}`);
+    `{"status":"exists","operationId":"golden-exists","workflowId":"golden-workflow","revision":1,"documentStatus":"planned","stateHash":"${goldenDraftStateHash}","formatVersion":2}`);
+  assert.equal(exists.status === "exists" ? exists.documentStatus : null, "planned", "the receipt states the draft's own status, planned");
 
   // the hash covers the decoded document: a stored draft without contributions hashes with an empty list appended last
   const withoutContributions: Record<string, unknown> = {...goldenDraft};
@@ -668,7 +669,8 @@ it.live("CT-WSS-04: golden stateHash and receipt for a fixture document", () => 
   const storedDocument = yield* rawDocument(fixture.sql, goldenDraft.workflowId);
   const storedReceipt = String((yield* query(fixture.sql, "SELECT result FROM supervisor_workflow_operations WHERE operation_id=?", "golden-apply"))[0]?.result);
   assert.equal(storedReceipt,
-    `{"status":"applied","operationId":"golden-apply","workflowId":"golden-workflow","revision":2,"stateHash":"${sha256(storedDocument)}","formatVersion":2}`);
+    `{"status":"applied","operationId":"golden-apply","workflowId":"golden-workflow","revision":2,"stateHash":"${sha256(storedDocument)}","formatVersion":2,"documentStatus":"planned"}`);
   assert.equal(JSON.stringify(applied), storedReceipt);
+  assert.equal((JSON.parse(storedDocument) as {status: string}).status, "planned", "the applied receipt's documentStatus is the stored document's status");
   assert.equal(fingerprint(yield* fixture.workflows.get("project-a", "main-a")), sha256(storedDocument));
 }), {timeout: 10_000});

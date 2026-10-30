@@ -39,23 +39,24 @@ it.live("probe token: a missing token file exits 1 with one line naming node's e
   assert.deepEqual(harness.fake.traffic.http, []);
 }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-it.live("BC-PROBE-02: SIGINT or SIGTERM during the watch writes nothing to T3 after the active snapshot ack and removes its temp directory",
+it.live("BC-PROBE-02: SIGINT or SIGTERM while the archive snapshot is outstanding writes no Ack and removes its temp directory",
   () => Effect.gen(function* () {
     for (const signal of ["SIGINT", "SIGTERM"] as const) {
       const harness = yield* probeHarness({ activeThreads: 1, sendArchiveSnapshot: false });
       const child = yield* harness.start();
-      yield* harness.fake.until((traffic) => traffic.acks.includes("1"), exitTimeoutMs, "the active snapshot ack");
+      yield* harness.fake.until((traffic) => traffic.requests.includes("orchestration.getArchivedShellSnapshot") && traffic.acks.length === 0,
+        exitTimeoutMs, "the archive snapshot request");
       process.kill(child.pid, signal);
       const interrupted = yield* child.closed(exitTimeoutMs);
       privately(`probe stopped by ${signal}`, [harness.token], () =>
         assert.deepEqual(interrupted, { code: 130, signal: null, stdout: "", stderr: "" }));
       assert.deepEqual(harness.fake.traffic, {
         http: ["GET /.well-known/t3/environment"],
-        requests: ["orchestration.subscribeShell", "orchestration.subscribeArchivedShell"],
-        acks: ["1"],
-        frames: ["Request", "Request", "Ack"],
+        requests: ["orchestration.subscribeShell", "orchestration.getArchivedShellSnapshot"],
+        acks: [],
+        frames: ["Request", "Request"],
         unauthorized: 0,
-        upgrades: 1,
+        upgrades: 2,
       }, signal);
       assert.deepEqual(yield* harness.probeDirectories, [], signal);
     }

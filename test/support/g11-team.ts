@@ -6,6 +6,7 @@ import { ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
 import { SupervisionGate, SupervisionScope, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { HelperTransport } from "../../src/supervisor-helper-transport.js";
 import { NativeOperateRpc, NativeRpc, NativeShell, type NativeRpcShape } from "../../src/supervisor-native.js";
+import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { T3Client, type T3TransportError } from "../../src/t3.js";
@@ -60,6 +61,8 @@ export type TeamControllerOptions = {
   readonly freshTeam?: boolean | undefined;
   // the project definitions a workflow_write validates against; without them a definition-checked write is unavailable
   readonly definitions?: ProjectDefinitions["Service"] | undefined;
+  // the conversation whose context views workflow_read serves; without it the context, instructions and request views are unavailable
+  readonly conversation?: SupervisorConversation["Service"] | undefined;
 };
 
 /** The controllers over `stores` and `policy`, built in the current scope. */
@@ -79,6 +82,7 @@ export const teamControllers = (stores: SupervisionStores, policy: ThreadPolicyS
       Layer.provideMerge(options.freshTeam ? Layer.fresh(SupervisorTeamStore.layer) : Layer.empty),
       Layer.provideMerge(Layer.mergeAll(readClients(native), options.rpc ? Layer.succeed(NativeOperateRpc, options.rpc) : Layer.empty,
         options.definitions ? Layer.succeed(ProjectDefinitions, options.definitions) : Layer.empty,
+        options.conversation ? Layer.succeed(SupervisorConversation, options.conversation) : Layer.empty,
         Layer.succeed(ThreadPolicyStore, policy), Layer.succeedContext(stores.context))));
     const context = yield* Layer.build(controllers).pipe(Effect.orDie);
     return {

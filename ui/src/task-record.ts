@@ -86,7 +86,7 @@ function keptInOrder(before: readonly string[], after: readonly string[]): Reado
   return kept;
 }
 
-export type PlanChangeField = "name" | "description" | "note" | "definition" | "references" | "skills" | "fixed" | "omissions" | "condition" | "paths" | "target" | "grouping" | "order";
+export type PlanChangeField = "name" | "description" | "note" | "definition" | "references" | "skills" | "fixed" | "omissions" | "condition" | "paths" | "target" | "maximum" | "grouping" | "order";
 export type PlanChange =
   | {kind: "added"; nodeId: string; name: string; note: string}
   | {kind: "removed"; nodeId: string; name: string}
@@ -117,7 +117,10 @@ export function planChanges(accepted: WorkflowPlanGroupInfo | null | undefined, 
       else if (was.kind === "branch" && node.kind === "branch") {
         if (was.condition !== node.condition) fields.push("condition");
         if ((was.else === null) !== (node.else === null)) fields.push("paths");
-      } else if (was.kind === "back_to" && node.kind === "back_to" && was.targetNodeId !== node.targetNodeId) fields.push("target");
+      } else if (was.kind === "back_to" && node.kind === "back_to") {
+        if (was.targetNodeId !== node.targetNodeId) fields.push("target");
+        if (was.maximum !== node.maximum) fields.push("maximum");
+      }
       if (was.reason !== node.reason) fields.push("note");
       if (regrouped(nodeId)) fields.push("grouping");
       else if (!kept.has(nodeId)) fields.push("order");
