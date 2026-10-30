@@ -82,6 +82,44 @@ it.live("the production app launches a root and finalizes a gateway interpretati
   assert.equal(observe.mainDispatches().length, 0, "a not_needed interpretation does not contact the main");
 }).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), {timeout: 90_000});
 
+it.live("the production startup recovers once from an unread-source interpretation with a fresh attempt", () => Effect.gen(function* () {
+  const {gateway, observe} = yield* startStartupSession;
+  const first = yield* waitFor(Effect.sync(() => observe.objectiveDispatches()[0] ?? null), () => "initial interpretation was not dispatched");
+  yield* gateway.discover();
+  const match = /with (\{"supervisorThreadId":"[^"]+","bindingGeneration":\d+\})/u.exec(first.text);
+  assert.ok(match?.[1]);
+  const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
+  const instructions = (yield* gateway.call("workflow_read", {...reader, view: "instructions"})) as InstructionView;
+  assert.match(instructions.core ?? "", /Try the native operation once before declaring it unavailable/u);
+  assert.match(instructions.core ?? "", /a connector search covers only that connector/u);
+  const initial = yield* waitFor(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map(contextView)),
+    () => "initial submission pins missing");
+  const empty = {...initial.submission!.arguments, objective: null, reason: "The source was not read.", sourceMessageIds: [], supervision: "needed", workflow: null,
+    conversation: {draft: {objective: null, constraints: [], questions: [], findings: [], duties: []}, intent: "following", outcome: null,
+      limits: [], sourceMessageIds: [], antecedentMessageIds: [], scope: "same"}};
+  assert.equal(((yield* gateway.call("supervision_interpretation_submit", empty)) as {status: string}).status, "submitted");
+  observe.completeRequestRun();
+  const second = yield* waitFor(Effect.sync(() => observe.objectiveDispatches()[1] ?? null),
+    () => `the empty interpretation did not retry: ${JSON.stringify(observe.debug())}`);
+  assert.equal(second.threadId, first.threadId);
+  assert.notEqual(second.commandId, first.commandId);
+  const retried = yield* waitFor(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map(contextView)),
+    () => "retry submission pins missing");
+  assert.notEqual(retried.submission!.arguments!.attemptId, initial.submission!.arguments!.attemptId);
+  assert.deepEqual(retried.submission!.arguments!.sourcePin, initial.submission!.arguments!.sourcePin);
+  const source = retried.task!.sourceMessageId!;
+  const objective = "Confirm whether the checkout is current.";
+  const fields = {...retried.submission!.arguments, objective, reason: "The source was read.", sourceMessageIds: [source], supervision: "not_needed", workflow: null,
+    conversation: {draft: {objective, constraints: [], questions: [], findings: [], duties: []}, intent: "following", outcome: objective,
+      limits: [], sourceMessageIds: [source], antecedentMessageIds: [], scope: "changed"}};
+  assert.equal(((yield* gateway.call("supervision_interpretation_submit", fields)) as {status: string}).status, "submitted");
+  observe.completeRequestRun();
+  yield* waitFor(Effect.sync(() => observe.taskDocument()?.status === "inferred" ? true : null), () => "the retry did not finalize");
+  assert.equal(observe.interpretationReceipts(), 2);
+  assert.equal(observe.objectiveDispatches().length, 2);
+  assert.equal(observe.mainDispatches().length, 0);
+}).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), {timeout: 90_000});
+
 it.live("a needed-work startup delivers a short notice and the operative reads its own step contracts through the gateway", () => Effect.gen(function* () {
   const {gateway, observe} = yield* startStartupSession;
   const objective = yield* waitFor(Effect.sync(() => observe.objectiveDispatches()[0] ?? null),

@@ -113,7 +113,14 @@ yet), and the classification rules with view `interpretation`; only when a plan
 is needed does it read the plan rules (section `plan`), the `project.yaml` index (each
 entry's id, name, summary, required flag and members by ID) and the complete
 definitions it selects with `definitionIds`, each once. No body, rule or catalog is
-pushed into the request. A summary
+pushed into the request. Native host tools and connected gateways have separate catalogs;
+an unsuccessful gateway lookup does not establish that a native reader is unavailable.
+If a newly submitted interpretation has no objective, authority or source citations
+despite a published handle for its pinned source, the service queues one fresh attempt
+for that source. The first receipt remains immutable; the retry retains the source and
+binding and passes the ordinary Stop, enablement and activation checks. A second empty
+result rests as needing context. Historical incomplete tasks are not replayed.
+A summary
 is navigation, not policy. The operative's proposal read says that
 `.t3-supervisor/project.yaml` is the index and to read the listed full files
 it needs. The index is not a whitelist of task plans; negotiated local steps
