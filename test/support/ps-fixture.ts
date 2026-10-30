@@ -346,7 +346,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     projects: registeredProjects.map((project) => ({ project, available: true })),
     threads: [...projections.values()].map((projection) => projection.thread),
   }));
-  const t3: T3ClientShape = {
+  const t3: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Effect.die(new Error("unused T3 descriptor")),
     watch: () => Effect.die(new Error("unused T3 watch")),
     projection: (threadId) => Effect.suspend(() => {

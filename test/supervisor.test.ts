@@ -42,7 +42,7 @@ it.live("native T3 events persist into the generic catalog and mark the service 
   const settings = config(directory);
   const statusRef = yield* SubscriptionRef.make(createStatus(settings, yield* Clock.currentTimeMillis));
   const project: ProjectInfo = {id: "project", title: "Project", workspaceRoot: "/work/project"};
-  const fake: T3ClientShape = {
+  const fake: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Effect.succeed({environmentId: "environment", serverVersion: "test", orchestrationProtocolVersion: 2}),
     projection: () => Effect.fail(new T3TransportError("No projection is expected")),
     watch: (_cursor, onItem) => onItem({
@@ -73,7 +73,7 @@ it.live("an active cursor without a stored archive snapshot resumes from a full 
     })).pipe(Effect.provide(makeStore(directory)));
   const resume = (directory: string) => Effect.gen(function* () {
     const seen = yield* Deferred.make<number | undefined>();
-    const client: T3ClientShape = {
+    const client: T3ClientShape = {watchThread: () => Effect.never,
       descriptor: () => Effect.succeed(descriptor),
       projection: () => Effect.fail(new T3TransportError("No projection is expected")),
       watch: (cursor) => Deferred.succeed(seen, cursor).pipe(Effect.andThen(Effect.never)),

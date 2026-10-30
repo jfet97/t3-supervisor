@@ -75,7 +75,7 @@ const teamDefinitions = (ops: CtlDefinitionOps): ProjectDefinitions["Service"] =
   });
 };
 
-const t3Client = (read: ProjectionRead, snapshotSequence: number): T3ClientShape => ({
+const t3Client = (read: ProjectionRead, snapshotSequence: number): T3ClientShape => ({watchThread: () => Effect.never,
   descriptor: () => Effect.die(new Error("unused T3 descriptor")),
   watch: () => Effect.die(new Error("unused T3 watch")),
   projection: (threadId) => Effect.map(Effect.suspend(() => read(threadId)), (projection) => ({snapshotSequence, projection})),

@@ -8,7 +8,7 @@ import { Clock, Effect, Pull, Schema, Stream } from "effect";
 
 /** Projection arrays no Supervisor code reads; they are validated while streaming and never retained. */
 export const UNREAD_PROJECTION_KEYS: ReadonlySet<string> = new Set(["visibleTurnItems", "plans", "checkpointScopes",
-  "checkpoints", "contextHandoffs", "contextTransfers", "providerSessions"]);
+  "checkpoints", "contextHandoffs", "contextTransfers"]);
 
 export const ProjectionStreamFailure = Schema.Literals(["retained_too_large", "transfer_too_large", "invalid", "unreadable",
   "timed_out"]);

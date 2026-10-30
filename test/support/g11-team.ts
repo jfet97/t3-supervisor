@@ -45,7 +45,7 @@ const unused = (client: string) => Effect.die(new Error(`unused native ${client}
 // the read clients of the workflow native access and the helper transport over the fake
 const readClients = (native: TeamNative) => Layer.mergeAll(
   Layer.succeed(NativeShell, {baseline: unused("shell baseline"), threads: Effect.suspend(native.listThreads)}),
-  Layer.succeed(T3Client, {descriptor: () => unused("T3 descriptor"), watch: () => unused("T3 watch"),
+  Layer.succeed(T3Client, {watchThread: () => Effect.never, descriptor: () => unused("T3 descriptor"), watch: () => unused("T3 watch"),
     projection: (threadId) => Effect.map(Effect.suspend(() => native.projection(threadId)), (projection) => ({snapshotSequence: 0, projection}))}),
   Layer.succeed(NativeRpc, {
     call: (tag, payload) => tag === "orchestration.getTurnItem" ? Effect.map(native.turnItem(String(payload.itemId)), (item) => ({item})) : unused(tag),

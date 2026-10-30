@@ -99,7 +99,7 @@ it.live("CT-HEALTH-01: /health and /live answer over real HTTP with the exact st
   const ingested = yield* Deferred.make<void>();
   const {console} = yield* eventConsole();
   const clock = yield* pinnableClock;
-  const client: T3ClientShape = {
+  const client: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Deferred.succeed(descriptorCalled, undefined).pipe(
       Effect.andThen(Deferred.await(descriptorGate)), Effect.as(environment)),
     projection: () => Effect.fail(new T3TransportError("No projection is expected")),
@@ -187,7 +187,7 @@ it.live("CT-HEALTH-01: enabled supervision that is not ready keeps /health at 50
   const {console} = yield* eventConsole((event) => {
     if (event === "supervision_unavailable") Deferred.doneUnsafe(supervisionFailed, Exit.void);
   });
-  const client: T3ClientShape = {
+  const client: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Effect.succeed(environment),
     projection: () => Effect.fail(new T3TransportError("No projection is expected")),
     watch: (_cursor, onItem) => onItem(projectItem).pipe(
@@ -230,7 +230,7 @@ it.live("CT-HEALTH-02: health listens on loopback unless HEALTH_HOST opens it, a
       const {ref} = yield* liveStatus(settings);
       const watching = yield* Deferred.make<void>();
       const {console} = yield* eventConsole();
-      const client: T3ClientShape = {
+      const client: T3ClientShape = {watchThread: () => Effect.never,
         descriptor: () => Effect.succeed(environment),
         projection: () => Effect.fail(new T3TransportError("No projection is expected")),
         watch: (_cursor, onItem) => onItem(projectItem).pipe(Effect.andThen(Deferred.succeed(watching, undefined)), Effect.andThen(Effect.never)),
@@ -252,7 +252,7 @@ it.effect("CT-MAIN-04: a descriptor failure sets t3_authentication and retries e
     const descriptorCalls = yield* Queue.unbounded<number>();
     const watchCalls = yield* Queue.unbounded<number>();
     let attempts = 0;
-    const client: T3ClientShape = {
+    const client: T3ClientShape = {watchThread: () => Effect.never,
       descriptor: () => Effect.gen(function* () {
         const now = yield* Clock.currentTimeMillis;
         attempts += 1;
@@ -296,7 +296,7 @@ it.effect("CT-MAIN-04: a supervision failure degrades and restarts the guidance 
     const {console, events} = yield* eventConsole((event) => {
       if (event === "supervision_unavailable") Queue.offerUnsafe(failures, event);
     });
-    const client: T3ClientShape = {
+    const client: T3ClientShape = {watchThread: () => Effect.never,
       descriptor: () => Clock.currentTimeMillis.pipe(Effect.flatMap(now => Queue.offer(descriptorCalls, now)), Effect.as(environment)),
       projection: () => Effect.fail(new T3TransportError("No projection is expected")),
       watch: () => Effect.never,
@@ -333,7 +333,7 @@ it.effect("CT-MAIN-04: a watch failure clears t3Connected and restarts the watch
     });
     let connectedBeforeFailure = false;
     let attempts = 0;
-    const client: T3ClientShape = {
+    const client: T3ClientShape = {watchThread: () => Effect.never,
       descriptor: () => Effect.succeed(environment),
       projection: () => Effect.fail(new T3TransportError("No projection is expected")),
       watch: (_cursor, onItem) => Effect.gen(function* () {
@@ -369,7 +369,7 @@ it.live("CT-MAIN-05: interrupting runSupervisor closes the health listener and l
   const {ref, status} = yield* liveStatus(settings);
   const watching = yield* Deferred.make<void>();
   const {console, events} = yield* eventConsole();
-  const client: T3ClientShape = {
+  const client: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Effect.succeed(environment),
     projection: () => Effect.fail(new T3TransportError("No projection is expected")),
     watch: (_cursor, onItem) => onItem(projectItem).pipe(
@@ -396,7 +396,7 @@ it.live("CT-MAIN-05: interruption inside the deferred-retry sleep logs no furthe
   const {console, events} = yield* eventConsole((event) => {
     if (event === "operation_deferred") Deferred.doneUnsafe(deferredLogged, Exit.void);
   });
-  const client: T3ClientShape = {
+  const client: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Effect.succeed(environment),
     projection: () => Effect.fail(new T3TransportError("No projection is expected")),
     watch: () => Effect.fail(new T3TransportError("stream dropped")),

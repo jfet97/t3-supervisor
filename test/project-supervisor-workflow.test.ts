@@ -589,6 +589,22 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.equal((yield* fixture.task())!.requestRoleVersion, undefined, "a pointer request carries no version to confirm");
 }));
 
+it.effect("an interpretation completed after compaction cannot confirm its old role notice", () => Effect.gen(function* () {
+  const fixture = yield* makeWorkflowFixture();
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.cycle;
+  const binding = (yield* fixture.binding())!;
+  const task = (yield* fixture.task())!;
+  assert.ok(task.requestRoleVersion);
+  yield* fixture.store.recordCompaction(binding, {itemId: "completed-compaction", runId: "compacted-run", runOrdinal: 1, itemOrdinal: 1});
+  yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
+  yield* supervisor.cycle;
+  assert.equal((yield* fixture.binding())?.deliveredRoleVersion, undefined);
+  const next = (yield* supervisor.conversation.rootWake(binding))!;
+  assert.ok(next.roleVersion && next.roleVersion !== task.requestRoleVersion);
+  assert.match(next.text, /Context compacted: reread core\/index/u);
+}));
+
 it.effect("an Enable or re-enable saved during the final awaits leaves the request undispatched and a finished result unapplied", () => Effect.gen(function* () {
   {
     const fixture = yield* makeWorkflowFixture();

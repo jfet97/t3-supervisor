@@ -21,6 +21,7 @@ import type { GlobalDefinitionsControlInfo } from "./supervisor-control-contract
 import type { ProposalContext } from "./supervisor-workflow.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import type { TaskInterpretationFields } from "./interpretation-evidence.js";
+import { CompactionReminder, RootCompaction, laterRootCompaction, roleDeliveryMatchesCompaction } from "./supervisor-compaction-contract.js";
 
 // the default for new roots is GPT-6.1 Sol medium; saved settings and existing bindings keep their own selection
 export const defaultSupervisorModel: SupervisorModelSelection = {instanceId: "codex", model: "gpt-6.1-sol", options: [{id: "reasoningEffort", value: "medium"}]};
@@ -35,6 +36,9 @@ export type SupervisorStopNotice = {messageId: string; commandId: string; stoppe
 export type BindingRecord = SupervisorBinding & {mainQuietSince?: number | null; mainQuietFingerprint?: string; mainSettlementBlockedBy?: string | null; mainSettlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number};
   /** The direct human resume that lifted the latest Stop from this Supervisor's own conversation; any later Stop or Enable replaces it. */
   supervisionResume?: SupervisionResume;
+  /** Successful root compaction and the one immutable recovery delivery attempted for a run. */
+  roleCompaction?: RootCompaction;
+  compactionReminder?: CompactionReminder;
   /** The settlement of each T3-managed participant per completed execution, by thread id and environment; earlier executions' rows are history. */
   participantSettlements?: ParticipantSettlement[]};
 /**
@@ -176,6 +180,9 @@ export interface ProjectSupervisorStoreShape {
   readonly bindings: () => StoreEffect<BindingRecord[]>;
   readonly reserve: (projectId: string, mainThreadId: string, title: string, selection: SupervisorModelSelection, watermark: number, now: number) => StoreEffect<BindingRecord>;
   readonly setBinding: (value: BindingRecord) => StoreEffect<void>;
+  readonly recordCompaction: (binding: BindingRecord, value: RootCompaction) => StoreEffect<boolean>;
+  readonly setCompactionReminder: (binding: BindingRecord, expectedMessageId: string | null, value: CompactionReminder) => StoreEffect<boolean>;
+  readonly acknowledgeRole: (binding: BindingRecord, version: string) => StoreEffect<void>;
   /** Records a Stop, or lifts it by an Enable or, with `resume`, by a direct human resume; any later Stop or Enable clears an earlier resume. */
   readonly setSupervisionStop: (binding: BindingRecord, stop: SupervisionStop | null, resume?: SupervisionResume | null) => StoreEffect<void>;
   readonly setStopNotice: (binding: BindingRecord, expectedMessageId: string | null, notice: SupervisorStopNotice) => StoreEffect<void>;
@@ -192,7 +199,8 @@ export interface ProjectSupervisorStoreShape {
 // row boundaries: the columns are decoded with Schema; a stored JSON document is parsed and checked against the fields its
 // readers rely on, then kept whole, because every other field is user data written back byte for byte
 const isStoredObject = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
-export const isStoredBinding = Schema.is(Schema.Struct({projectId: Schema.String, mainThreadId: Schema.String, threadId: Schema.String, generation: Schema.Finite, state: Schema.String}));
+export const isStoredBinding = Schema.is(Schema.Struct({projectId: Schema.String, mainThreadId: Schema.String, threadId: Schema.String, generation: Schema.Finite, state: Schema.String,
+  roleCompaction: Schema.optionalKey(RootCompaction), compactionReminder: Schema.optionalKey(CompactionReminder)}));
 const isStoredTask = Schema.is(Schema.Struct({threadId: Schema.String, projectId: Schema.String, status: Schema.String, conversation: Schema.optionalKey(ConversationFacts), sourceReadRetryFor: Schema.optionalKey(Schema.String)}));
 const isStoredStart = Schema.is(Schema.Struct({threadId: Schema.String, status: Schema.String}));
 const isStoredSettings = Schema.is(Schema.Struct({generation: Schema.Finite}));
@@ -387,6 +395,10 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     stop ? putMeta(unboundStopKey(threadId), JSON.stringify(stop)) : deleteMeta(unboundStopKey(threadId));
 
   // preserve exact notice objects, including null epoch fields, across stale lifecycle writes
+  const writeBindingOf = Effect.fnUntraced(function* (value: BindingRecord, previous: BindingRecord | null) {
+    yield* sql`UPDATE supervisor_main_bindings SET document=${JSON.stringify(value)} WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`;
+    yield* invalidate(projectKeys(value.projectId, value.mainThreadId), previous, value);
+  });
   const setBindingOf = Effect.fnUntraced(function* (value: BindingRecord) {
     const current = yield* bindingOf(value.projectId, value.mainThreadId);
     const next = {...value};
@@ -394,8 +406,12 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
       if (current?.[key] !== undefined) Object.assign(next, {[key]: current[key]});
       else delete next[key];
     }
-    yield* sql`UPDATE supervisor_main_bindings SET document=${JSON.stringify(next)} WHERE project_id=${value.projectId} AND main_thread_id=${value.mainThreadId}`;
-    yield* invalidate(projectKeys(value.projectId, value.mainThreadId), current, next);
+    for (const key of ["roleCompaction", "compactionReminder"] as const) {
+      if (current?.threadId === value.threadId && current.generation === value.generation && current[key] !== undefined)
+        Object.assign(next, {[key]: current[key]});
+      else delete next[key];
+    }
+    yield* writeBindingOf(next, current);
   });
 
   const saveTaskOf = Effect.fnUntraced(function* (task: TaskRecord) {
@@ -648,6 +664,25 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return value;
   }));
   const setBinding = (value: BindingRecord) => write(setBindingOf(value));
+  const currentBinding = (value: BindingRecord) => Effect.map(bindingOf(value.projectId, value.mainThreadId), current =>
+    current?.threadId === value.threadId && current.generation === value.generation ? current : null);
+  const recordCompaction = (value: BindingRecord, compaction: RootCompaction) => write(Effect.gen(function* () {
+    const current = yield* currentBinding(value);
+    if (!current || !laterRootCompaction(compaction, current.roleCompaction)) return false;
+    yield* writeBindingOf({...current, roleCompaction: compaction}, current);
+    return true;
+  }));
+  const setCompactionReminder = (value: BindingRecord, expectedMessageId: string | null, reminder: CompactionReminder) => write(Effect.gen(function* () {
+    const current = yield* currentBinding(value);
+    if (!current || (current.compactionReminder?.messageId ?? null) !== expectedMessageId ||
+      current.compactionReminder?.state === "visible" && reminder.state !== "visible") return false;
+    yield* writeBindingOf({...current, compactionReminder: reminder}, current);
+    return true;
+  }));
+  const acknowledgeRole = (value: BindingRecord, version: string) => write(Effect.gen(function* () {
+    const current = yield* currentBinding(value);
+    if (current && roleDeliveryMatchesCompaction(version, current)) yield* writeBindingOf({...current, deliveredRoleVersion: version}, current);
+  }));
   const setSupervisionStop = (value: BindingRecord, stop: SupervisionStop | null, resume: SupervisionResume | null = null) => run(Effect.gen(function* () {
     const previous = yield* bindingOf(value.projectId, value.mainThreadId);
     yield* stop
@@ -670,6 +705,8 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     delete next.settlement;
     // the replacement conversation has seen no standing instructions and owns no settlement diagnosis yet
     delete next.deliveredRoleVersion;
+    delete next.roleCompaction;
+    delete next.compactionReminder;
     yield* sql`INSERT INTO supervisor_owned_threads VALUES(${next.threadId})`;
     yield* setBindingOf(next);
     for (const task of yield* tasksOf(value.projectId)) {
@@ -773,7 +810,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     clearFolderPresence, recordFolderPresence, autoControlInitialized, isManual, control, setGlobalFolderPresence, globalDefinitionsControl,
     useGlobalDefinitions, saveGlobalDefinitionsControl, hasGlobalDefinitionsEvent, globalDefinitionsChangeAuthorized, definitionUserGlobalToggle,
     enabled, saveControl, settings, saveSettings, modelState, observeModel, modelAttempt, binding, bindingForSupervisor, tasksFor, bindings, reserve,
-    setBinding, setSupervisionStop, setStopNotice, replaceMissingBinding, task, tasks, saveTask, recordDefinitionUserSave, definitionUserSave,
+    setBinding, recordCompaction, setCompactionReminder, acknowledgeRole, setSupervisionStop, setStopNotice, replaceMissingBinding, task, tasks, saveTask, recordDefinitionUserSave, definitionUserSave,
     recordGlobalDefinitionsPresence, prune,
   } satisfies ProjectSupervisorStoreShape;
 });

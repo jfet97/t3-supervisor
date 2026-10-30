@@ -154,7 +154,7 @@ const fixtureWith = (mode: "held" | number) => Effect.gen(function* () {
   };
   let projectionGate: Deferred.Deferred<void> | null = null;
   let projectionReads = 0;
-  const projections: T3ClientShape = {
+  const projections: T3ClientShape = {watchThread: () => Effect.never,
     descriptor: () => Effect.die(new Error("unused T3 descriptor")),
     watch: () => Effect.die(new Error("unused T3 watch")),
     projection: () => Effect.gen(function* () {

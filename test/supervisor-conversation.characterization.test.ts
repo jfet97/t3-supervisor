@@ -272,6 +272,20 @@ it.effect("CT-CONV-04: a failure at the monitor acknowledgement rolls back compl
   assert.deepEqual(yield* fixture.monitor.pending(projectId, operativeThreadId), []);
 }), {timeout: 10_000});
 
+it.effect("a confirmed check-in cannot acknowledge a role notice from before its compaction", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const {fixture, request, run} = yield* waitingReview(clock);
+  yield* fixture.projectStore.recordCompaction(fixture.binding, {itemId: "completed-compaction", runId: run.id, runOrdinal: run.ordinal, itemOrdinal: 1});
+  assert.equal((yield* recordOutcome(fixture, fixture.supervisor, request)).status, "recorded");
+  completeRun(fixture.supervisor, run, `No intervention needed. ${request.completionMarker}`, clock.now + 1);
+  yield* setNow(clock, clock.now + 1);
+  yield* fixture.run;
+  assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.deliveredRoleVersion, undefined);
+  const next = (yield* fixture.conversation.rootWake(fixture.binding))!;
+  assert.ok(next.roleVersion && next.roleVersion !== request.roleVersion);
+  assert.match(next.text, /Context compacted: reread core\/index/u);
+}));
+
 it.effect("CT-CONV-04: a failure after the miss increment rolls back the counter and the request state, also after reopen", () => Effect.gen(function* () {
   const clock = {now: baseTime};
   const {fixture, request, run} = yield* waitingReview(clock);

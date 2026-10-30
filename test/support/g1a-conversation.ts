@@ -193,7 +193,7 @@ export const turnItemDetails = (projection: (threadId: string) => Projection | n
 export type ProjectionRead = (threadId: string) => Effect.Effect<Projection, T3TransportError>;
 
 /** The T3 client over `read`; projections are returned unchanged and by reference, and nothing else is used. */
-export const t3Projections = (read: ProjectionRead): T3ClientShape => ({
+export const t3Projections = (read: ProjectionRead): T3ClientShape => ({watchThread: () => Effect.never,
   descriptor: () => Effect.die(new Error("unused T3 descriptor")),
   watch: () => Effect.die(new Error("unused T3 watch")),
   projection: (threadId) => Effect.map(Effect.suspend(() => read(threadId)), (projection) => ({snapshotSequence: 1, projection})),

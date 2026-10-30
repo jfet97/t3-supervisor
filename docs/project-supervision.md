@@ -445,8 +445,10 @@ wait naming who acts next), when a wait result names the next action or tells th
 end the turn, when the host reports a context handoff or limit for that turn, on a genuine human Stop, or for genuine external waiting
 that a native watcher reports (never the operative's own running turn). A timed-out wait
 while the target still runs is not an ending, however many waits timed out: the Supervisor
-reads forward and waits again. A context ending requires a host handoff/compaction event
-or a tool result reporting the limit; the model's own context estimate, elapsed time,
+reads forward and waits again. Successful automatic compaction while the run continues
+is not an ending: reread the core instructions and continue the watch. A context ending
+requires a host instruction to yield or a tool result reporting a limit that ends this
+turn; the model's own context estimate, elapsed time,
 repeated timeouts or quiet activity never justify one. An operative run that ended with agreed duties still
 planned is not an ending either. Check-in and liveness wakes point at the same endings:
 the watch outcome is recorded when the watch ends, not at a fixed per-wake point. Child
@@ -457,8 +459,28 @@ all covered actors are idle. Recording progress or a review outcome does not end
 watch. Wake or completion instructions read in a target's transcript apply to that
 target; only the Supervisor's own native wait result can direct its yield. When T3 requires a yield, the service promptly
 continues verified active work. Active following bypasses the idle age/count thresholds
-and cooldown, and never steers into a Supervisor's ongoing thinking. One model turn runs
-per owner.
+and cooldown. Routine monitoring never steers into a Supervisor's ongoing thinking.
+One model turn runs per owner.
+
+Owned roots have a scoped native thread subscription for compaction recovery. While
+the current root run compacts, the service can send one short native steering reminder
+per run, including cascaded compactions. It requires explicit active-steering capability,
+no active root tool or pending input, and fresh binding, enabled-scope and Stop checks.
+Providers whose steering can interrupt foreground tools use the ordinary-wake backup,
+even when no tool was running at the last read. The reminder points to the role and
+current state; it copies no plan or activity index.
+A late message remains harmless on its own. Unknown delivery keeps its original
+message identity and is never retried as a queued task. An unresolved earlier delivery
+also defers later immediate reminders, with a classified service log; completed
+compaction still refreshes the normal-wake role notice. Native steering is advisory:
+the service cannot guarantee delivery before the model's next tool in every race.
+
+Each successful root compaction also changes the existing role-delivery confirmation
+identity. The next newly prepared normal wake carries the full short role notice and
+asks for a core reread even if its content version is unchanged. An older interpretation
+or check-in completion cannot confirm this newer identity. The notice returns to its
+compact pointer after a matching completion. This backup adds no wake, timer or message
+by itself, and does not rewrite messages already accepted by T3.
 
 The service's fallback covers only a turn that ended anyway: when the main's latest run
 completed while the agreed workflow is unfinished and no current wait is recorded, the

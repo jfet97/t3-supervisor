@@ -72,6 +72,10 @@ const linRoutes = (peer: LinState): PeerRoutes[] => {
   const deliveryDetails = new Map<string, Record<string, unknown>>();
   const defaultRpc = (entry: RpcEntry): RpcAnswer | undefined | Effect.Effect<RpcAnswer> => {
     const input = entry.payload;
+    if (entry.tag === "orchestration.subscribeThread") {
+      const projection = peer.projections.get(String(input.threadId));
+      return projection ? {stream: [{kind: "snapshot", snapshotSequence: 20, projection: structuredClone(projection)}]} : {fail: true};
+    }
     if (entry.tag === "server.getConfig") return {value: modelConfig};
     if (entry.tag === "orchestration.getArchivedShellSnapshot") return {value: {schemaVersion: 2, snapshotSequence: 20, threads: []}};
     if (entry.tag === "orchestration.getTurnItem") return {value: {item: peer.details.get(String(input.itemId)) ?? null}};

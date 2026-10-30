@@ -76,6 +76,48 @@ const shiftedMonotonic = Clock.clockWith((live) => Effect.sync(() => {
 const monotonicMillis = Effect.map(Clock.monotonicTimeNanos, (nanos) => Number(nanos) / 1_000_000);
 
 describe("T3 watch wire", () => {
+  it.live("thread subscriptions validate the root and await compaction ingestion before Ack, sharing heartbeat and scoped cleanup", () => Effect.gen(function*() {
+    const projection = {thread: {id: "root", title: "Root", projectId: "project", lineage: {parentThreadId: null, relationshipToParent: null}}, runs: [], messages: []};
+    const values = [{kind: "snapshot", snapshotSequence: 7, projection},
+      {kind: "event", sequence: 8, event: {type: "turn-item.updated", payload: {id: "compaction", type: "compaction", status: "running"}}}];
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag === "Request") socket.send(JSON.stringify([{_tag: "Ping"}, {_tag: "Chunk", requestId: "1", values}]));
+    });
+    const client = yield* clientOf(peer.baseUrl);
+    const holding = yield* Deferred.make<void>();
+    const release = yield* Deferred.make<void>();
+    const seen: JsonRecord[] = [];
+    const pending = yield* Effect.forkChild(client.watchThread("root", 6, item => Effect.gen(function* () {
+      seen.push(item);
+      if (item.kind !== "event") return;
+      yield* Deferred.succeed(holding, undefined);
+      yield* Deferred.await(release);
+    })));
+    yield* Deferred.await(holding);
+    yield* barrier(peer.baseUrl);
+    const subscription = requestText("1", "orchestration.subscribeThread", {requestCompletionMarker: true, afterSequence: 6, threadId: "root", acceptBoundedSnapshot: true});
+    assert.deepEqual(peer.texts(), [subscription, pongText]);
+    assert.deepEqual(seen, values);
+    yield* Deferred.succeed(release, undefined);
+    yield* peer.frame(frame => frame.text === ackText("1"));
+    assert.deepEqual(peer.texts(), [subscription, pongText, ackText("1")]);
+    yield* Fiber.interrupt(pending);
+    yield* peer.closed;
+  }), {timeout: 10_000});
+
+  it.live("a thread snapshot for a different root fails without acknowledgment", () => Effect.gen(function* () {
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag === "Request") socket.send(JSON.stringify({_tag: "Chunk", requestId: "1", values: [{kind: "snapshot", snapshotSequence: 7,
+        projection: {thread: {id: "other-root", title: "Other", projectId: null, lineage: {parentThreadId: null, relationshipToParent: null}}, runs: [], messages: []}}]}));
+    });
+    const client = yield* clientOf(peer.baseUrl);
+    const error = yield* failureOf(client.watchThread("root", undefined, () => Effect.die("foreign snapshot reached the callback")));
+    assert.ok(error instanceof T3TransportError);
+    assert.equal(error.message, "T3 thread subscription item has an unsupported schema or shape");
+    yield* peer.closed;
+    assert.equal(peer.texts().some(text => text === ackText("1")), false);
+  }), {timeout: 10_000});
+
   it.live("T3-PORT-01: writes the shell subscription, answers Ping in order and acknowledges each chunk only after its items were ingested", () => Effect.gen(function*() {
     const peer = yield* envelopePeer((socket, frame) => {
       if (frame._tag === "Request" && frame.id === "1") socket.send(JSON.stringify([

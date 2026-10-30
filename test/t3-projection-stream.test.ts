@@ -66,6 +66,7 @@ const snapshotBody = () => ({
         streaming: false, createdAt: "2026-10-20T10:00:01Z", updatedAt: "2026-10-20T10:00:01Z"},
     ],
     plans: [{id: "plan", markdown: "x".repeat(2000)}],
+    providerSessions: [{id: "session", capabilities: {turns: {supportsActiveSteering: true}}}],
     turnItems: [
       {id: "i1", threadId: "main", runId: "run-1", type: "user_message", messageId: "m1",
         text: "Task with \"quotes\", \\slashes\\, \n newline, é and 😀", ordinal: 1},
