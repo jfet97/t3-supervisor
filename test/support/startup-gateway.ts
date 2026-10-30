@@ -174,6 +174,14 @@ export const startStartupSession: Effect.Effect<StartupSession, never, Scope.Sco
         const itemId = installSubmission(root, task, args);
         state.details.set(itemId, submissionDetail(root, itemId));
       }
+      if (name === "supervision_plan") {
+        const task = readTask();
+        const caller = state.projections.get(String(args.callerThreadId));
+        const run = caller?.runs.at(-1);
+        assert.ok(task && caller && run, "the proposal reader has its own native run");
+        const itemId = installSubmission(caller, task, args, {tool: "plan", runId: run.id});
+        state.details.set(itemId, submissionDetail(caller, itemId));
+      }
       const reply = yield* mcpCall(endpoint, name, args);
       if (reply.httpStatus !== 200) return yield* Effect.die(new Error(`gateway ${name} http ${reply.httpStatus}: ${JSON.stringify(reply.value)}`));
       return reply.value;

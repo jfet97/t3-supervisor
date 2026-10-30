@@ -507,8 +507,11 @@ service verifies the caller's own executed native tool call with exactly these a
 in its own main run, then returns the complete current proposal: objective and authorized
 scope, limits, required references, the plan with its omissions and branches, the branch
 protocol and the exact acceptance record. It also supplies shared participant and completion
-guidance: assign outcomes, declare work outside native lineage through the supported
-contribution protocol, account for owned results and jobs, and retain reviewers while
+guidance: announce declared transitions briefly and refresh the next contract and applicable
+references/skills before substantive work, continuing without routine confirmation. Resume
+refreshes lost step context. It also covers assigning outcomes, declaring work outside native
+lineage through the supported contribution protocol, accounting for owned results and jobs,
+and retaining reviewers while
 another round may be needed. Settlement remains the service's best-effort responsibility,
 with the user settling leftovers manually unless they request otherwise. Project definitions own their evidence and review policy;
 they need not repeat these host-neutral coordination duties. It answers only for the caller's own interpreted

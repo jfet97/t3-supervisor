@@ -679,6 +679,16 @@ Reviewers stay available while another round may be needed; the service owns set
 with the user handling leftovers unless they request otherwise. Participants are never
 assumed to be T3 conversations.
 
+The main and native operative children also receive the same step-entry guidance in their
+own plan reads. A brief transition announcement names prior evidence and the next definition
+path or local node; nested entries share one message. Before substantive work, refresh the
+assigned contract and applicable references/skills, reusing current context where valid and
+stating missing material as a gap. Continue without a routine approval reply or ending a turn
+just for the announcement. Resuming recovers the current step and outstanding obligations.
+The Supervisor checks declarations against actual work; a concrete skipped duty warrants one
+delta, while absent read traces alone remain uncertain. No new gate or structured record is
+introduced, and the continuous watch and bootstrap mechanisms are unchanged.
+
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. When the task completed (every applicable member settled, no
 pending return), the service makes one best-effort automatic attempt per T3 participant:
