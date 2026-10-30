@@ -898,7 +898,7 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   assert.ok(read.status === "ok" && read.proposal.includes(workflowFence("workflow-acceptance", acceptance)) &&
     /not applicable: Check prevent — No defect or correction exposed a gap\./u.test(read.proposal), "the read holds the omission and the exact record");
   assert.ok(read.status === "ok");
-  assert.match(read.proposal, /give each participant its assigned outcome and applicable duties/u);
+  assert.match(read.proposal, /Give each participant its assigned outcome and applicable duties/u);
   assert.match(read.proposal, /declare its actual kind/u);
   assert.match(read.proposal, /account for every result and background job you own/u);
   assert.match(read.proposal, /The service owns best-effort supported T3 settlement/u);
