@@ -84,21 +84,21 @@ provenance. Scheduled/imported/MCP-originated requests remain outside automatic
 initial interpretation. User/tool quotations, private reasoning and arbitrary
 agent-selected excerpts do not establish task authority.
 
-Project settings has one exception, **Supervise conversations created by agents**,
-off by default and saved per project. When on, an ordinary main that T3 created
-through its MCP server (native `creationSource: mcp`, an independent root, not a
-delegated child or fork) is supervised for requests from the agent that launched
-it: the sender of its opening request (`createdBy: agent`, `creationSource: mcp`,
-`senderThreadId`). That sender must still be an active T3 conversation outside every
-Supervisor's lineage. Only such requests written after the setting was turned on
-count, so enabling it never sweeps up earlier launches; turning it off again makes
-an agent-sourced task no longer current. Other agents, Supervisor roots and helpers,
-anything they delegated, scheduled or service prompts and imported messages never
-become tasks. The interpretation context names the launching conversation
-(`requestedBy`), and the request is never presented as a human's. Human-created conversations are unchanged. While off, the chat origin remains excluded even after genuine human follow-ups.
-While on, the exact launcher and genuine humans can request work in an eligible
-ordinary main. The setting governs conversation eligibility: Start, Stop and definition approval still require a
-genuine human message, and No Project modes and exclusions still apply.
+Project settings includes **Supervise conversations created by agents**, off by
+default. When enabled, an ordinary main created through T3's MCP server is eligible:
+its actual native agent opening supplies the task, even if its sender ID is missing
+or its launcher is not in this machine's catalog. Such a source stays explicitly
+agent-attributed, never human. Later unattributed agent messages do not grant scope
+expansion; genuine human requests are evaluated independently. Known launchers in
+Supervisor lineage remain excluded. Native children belong to their parent's scope,
+not another independent Supervisor.
+
+Only eligible agent requests after the setting was enabled count. While off, the
+agent-created chat origin remains excluded even after human follow-ups; enabling
+does not adopt old launches. Scheduled, imported, system/service and owned
+Supervisor/helper sources remain excluded. Creation route establishes no human
+authority: Start, Stop and definition approval retain their genuine-human checks,
+and the project/master controls, No Project modes and exclusions still apply.
 
 The Supervisor interprets the latest genuine request together with earlier unresolved
 requests in the same main, such as an issue link that did not yet establish an
@@ -457,18 +457,31 @@ or a settled pair keeps it quiet, and no timer or extra monitor is involved. Mod
 adherence to the watch itself is proved live, not by tests: the fallback bounds a yield
 to one wake per generation.
 
-Own inbox: the root reads its own queued messages at the boundaries it chooses (after
-each wait, before each record or send) with `t3_queue` on its own thread. What it cancels
-is decided from the queued run's native metadata (sender thread and origin), never from
-quoted text: only a verified operative-origin run it actually handled with one delta or a
-record; service-owned, unknown-origin and unanswered genuine human runs stay queued, a
-human's message is handled first, and the service promotes nothing to steer. When
-`t3_queue` is not exposed the root discovers it and otherwise states once that its own
-queue is not drainable and ends its turn after each read-forward pass, so queued messages
-start as normal turns while the service continues active work. A queued message is seen
-at the root's next boundary: the wait between boundaries is bounded (five to ten
-seconds); the latency of a long thought or tool call in progress is not, and only a human
-can steer.
+Own inbox: after each wait and before recording, reporting or sending, the root reads
+its own queued messages with `t3_queue`, completing cut-off text. It answers a new
+question once, prioritizing humans only when native metadata identifies them, and leaves entries queued.
+Reading and answering do not consume the scheduled turn. A later already-answered
+turn checks that the answer still applies and finishes quietly, without duplicate
+contact or progress writes. Unknown origin is never inferred from quoted text;
+entries are not promoted to steering. Missing queue capability is discovered; if
+unavailable, the root says so once and yields after each read-forward pass so normal
+queued turns can run. Bounded waits do not bound long thinking or tool calls.
+
+Routine progress and step-entry announcements stay in the operative's own chat,
+which the Supervisor reads. Targeted questions and requested replies may use queue
+delivery. Prefer the host's application-owned delegated tasks (`delegate_task` in
+T3 where supported); explain unavailable or unsuitable routes and their actual
+visibility/control limits. External participants are never assumed to be T3.
+
+During a watch, keep separate thread cursors and pending delegation item IDs.
+Refresh verified scope on catch-up and when child membership changes, using small
+`workflow_read` status lineage pages (`lineageOffset`, `limit`), not full documents
+on every wait. Add verified new descendants during the current turn. After waits,
+refresh pending delegation items by ID and read each child's own activity while it
+works; an empty parent page is not evidence of a quiet child. Link a verified child
+on first observation and attach its known assigned occurrence while work runs.
+Unknown assignments stay unknown; a link or final report does not prove live reading.
+Monitoring helpers remain optional and cover only their current assigned subtrees.
 
 Idle work retains the project age/count thresholds and 30-second fallback cooldown.
 Routine and no-plan work stays quiet. Helpers follow only their assigned subtrees;

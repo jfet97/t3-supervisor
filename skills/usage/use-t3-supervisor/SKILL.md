@@ -81,13 +81,15 @@ hidden inside a dashboard task.
 The global supervision master switch overrides remembered project choices. Global
 definitions are separately opt-in in the T3 server user's home; scratch needs that
 input. Model/reasoning choices are defaults for new roots; edit existing chats in T3.
-Without saved preferences, new roots use Sol 6.1 with low reasoning. Existing roots
+Without saved preferences, new roots use Sol 6.1 with medium reasoning. Existing roots
 and saved selections keep their models; a model change does not establish a valid plan.
 Settings chat exclusions are per-instance, persistent and independent of Telegram.
 
 The default-off agent-created option excludes the chat origin, including later human
-follow-ups. When enabled, genuine humans and the exact launching agent can request
-work in an eligible ordinary main; agent provenance remains explicit.
+follow-ups. When enabled, an ordinary native agent opening can request work even
+without a local launcher identity; its agent provenance remains explicit. Genuine
+human requests are evaluated independently. Child conversations stay under their
+parent supervision, and unknown later agent messages grant no scope expansion.
 
 Select the actual main to inspect its binding, objective, proposal, agreement,
 current workflow and native descendants. Plans preserve nested structure, stable

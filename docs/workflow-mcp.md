@@ -18,6 +18,12 @@ historical accepted snapshot; current task-source and definition validity remain
 part of the existing agreement/recovery system. Neither acceptance nor an
 observation note proves execution.
 
+Compact `workflow_read` status also returns fresh verified native lineage and its
+`lineageOffset`/`lineageHasMore` pagination, with current team coverage when available.
+Use small `limit` pages to discover children created during a running watch without
+requesting complete plans or history. Discovery, assignment, actual reading and
+assessment remain separate facts.
+
 ## Native workflow proposal and acceptance records
 
 Native chat negotiation uses compact top-level fenced records; they are separate from
@@ -435,8 +441,11 @@ coordinates. Its explicit document view includes bounded workflow state and nati
 including child parent-step references and archive flags. Reads require the shared MCP transport token but are not
 actor-authenticated to a particular T3 conversation and grant no edit authority.
 `workflow_read` defaults to compact `status`. Use `view: "documents"` only when complete
-records, history, evidence or accepted snapshots are needed; document and lineage pagination
-remain available in that view. Other `view` values return bounded context for the verified binding instead of
+records, history, evidence or accepted snapshots are needed. Fresh lineage and
+coverage also appear in compact status; lineageOffset and limit page it independently
+of workflowOffset, including children created since the previous read. The shared
+limit bounds both pages; each has its own hasMore flag, so one complete page does
+not establish that the other list is complete. Other `view` values return bounded context for the verified binding instead of
 workflow documents:
 
 - `context`: compact by default: the task's identity, revision pins, objective, status,

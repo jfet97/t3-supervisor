@@ -166,6 +166,8 @@ const interpretationViews: ReadonlySet<string> = new Set<SupervisorContextViewNa
 /** A status view row: its reach is stated only off the unconditional path. */
 export type StatusViewRow = Omit<PlanStatusOutlineRow, "reach"> & {reach?: Exclude<PlanReach, "unconditional">};
 export type WorkflowStatusViewResult = {status: "ok"; view: "status"; mainTaskAgreementStatus: "agreed" | "stale" | null;
+  lineage: Extract<WorkflowReadResult, {status: "ok"}>["lineage"]; lineageOffset: number; lineageHasMore: boolean;
+  coverage?: Extract<WorkflowReadResult, {status: "ok"}>["coverage"];
   workflowOffset: number; workflowHasMore: boolean; workflows: Array<{workflowId: string; threadId: string; parentWorkflowId: string | null;
     revision: number; status: WorkflowExecutionStatus; membersSettled: boolean; occurrences: StatusViewRow[]; pendingBranchDecisions: string[];
     pendingReturns: Array<{returnId: string; backToNodeId: string; targetNodeId: string; attempt: number; regionNodeIds: string[]; reason: string; requestedAt: number}>}>};
@@ -755,8 +757,7 @@ const parseReadPayload = (value: unknown): ParsedReadInput => {
   // compact status and explicit complete records page the same workflows
   if (value.view === "status" || value.view === "documents") {
     const documents = parseReadPayload(Object.fromEntries(Object.entries(value).filter(([key]) => key !== "view")));
-    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record", "requestId"].every(key => value[key] === undefined) &&
-      (value.view === "documents" || value.lineageOffset === undefined)
+    return documents.ok && ["section", "revision", "definitionIds", "includeSources", "record", "requestId"].every(key => value[key] === undefined)
       ? {ok: true, value: {...documents.value, view: value.view}} : {ok: false, reason: "invalid_read_arguments"};
   }
   if (value.view !== undefined) {
@@ -1045,7 +1046,7 @@ export const supervisionInterpretationSubmitToolDefinition = {
 
 export const workflowReadToolDefinition = {
   name: "workflow_read",
-  description: "Read compact workflow status by default, or request context, definitions, instructions, interpretation, check, the frozen envelope of one of your own check-ins (view request) or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
+  description: "Read compact workflow status and fresh paged native lineage by default, or request context, definitions, instructions, interpretation, check, the frozen envelope of one of your own check-ins (view request) or complete documents. Writes accept only strong native item references; a record or currentAgreementKey proves neither acceptance, execution nor definition validity, and main-reported external contributions stay untrusted until assessed.",
   // the read input names no plan, so it advertises none of the plan schema
   inputSchema: {
     type: "object",
@@ -1058,7 +1059,7 @@ export const workflowReadToolDefinition = {
       lineageOffset: {type: "integer", minimum: 0, maximum: 10_000},
       limit: {type: "integer", minimum: 1, maximum: maxWorkflowReadDocs},
       view: {type: "string", enum: ["status", "documents", "context", "definitions", "instructions", "interpretation", "check", "request"],
-        description: "Omit for status: current occurrences, nesting, progress, branch reach, omissions and attempts. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."},
+        description: "Omit for status: current occurrences, nesting, progress, branch reach, omissions, attempts and fresh paged lineage. lineageOffset pages native descendants without complete documents. documents explicitly requests complete paged records with history, evidence and accepted snapshots. context: task identities, states and requested sections. definitions: index or complete definitionIds. instructions: core/index or a requested section. interpretation: classification or requested plan rules. check: dry-run one proposal without publishing it."},
       section: {type: "string", description: "With view instructions: one section id from its index. With view interpretation: \"plan\", read only when a plan is needed. With view context: \"conversation\", \"plan\" or \"diagnostics\"."},
       revision: {type: "string", enum: ["approved", "observed"], description: "With view definitions: the approved definitions of the task (default) or the checkout's current ones."},
       definitionIds: {type: "array", maxItems: 50, items: idSchema(), description: "With view definitions: exact step or workflow IDs to return completely."},
@@ -2231,6 +2232,8 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
       const documents = yield* read(Object.fromEntries(Object.entries(readInput as Record<string, unknown>).filter(([key]) => key !== "view")), cancel);
       if (documents.status !== "ok") return documents;
       return {status: "ok", view: "status", mainTaskAgreementStatus: documents.mainTaskAgreementStatus,
+        lineage: documents.lineage, lineageOffset: documents.lineageOffset, lineageHasMore: documents.lineageHasMore,
+        ...(documents.coverage ? {coverage: documents.coverage} : {}),
         workflowOffset: documents.workflowOffset, workflowHasMore: documents.workflowHasMore,
         workflows: documents.workflows.map(({document, pendingBranchDecisions: pending}) => {
           const selected = documentBranchSelections(document);

@@ -67,7 +67,7 @@ const modelConfig = {
         type: "select",
         currentValue: "high",
         options: [
-          { id: "low", label: "Low" },
+          { id: "low", label: "Low" }, { id: "medium", label: "Medium" },
           { id: "high", label: "High" },
           { id: "max", label: "Max" },
         ],

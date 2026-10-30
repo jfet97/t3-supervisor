@@ -14,7 +14,7 @@ import { introductionOutcomeUnknown, SupervisorConversationStore } from "./super
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
 import { NativeOperateRpc } from "./supervisor-native.js";
 import { mainConversation } from "./supervisor-scope.js";
-import { agentCreatedOrigin, conversationOriginAllowed, launchingAgent, projectRequesterPolicy } from "./task-requester.js";
+import { conversationOriginAllowed, projectRequesterPolicy } from "./task-requester.js";
 import { T3Client, type T3TransportError } from "./t3.js";
 import type { ThreadPolicySettings } from "./thread-policy-contract.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
@@ -191,8 +191,8 @@ const makeSupervisionControl = Effect.gen(function* () {
       const decision = yield* transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult | {activate: SupervisionStartRecord}, SupervisionStoreError> {
         if (main.thread.projectId !== thread.projectId || !scope.mainShape(main.thread)) return {status: "denied", reason: "scope_changed"};
         const policy = yield* projectRequesterPolicy(store, projectId);
+        // an included origin is enough: a human's Start never depends on this machine knowing the chat's launcher
         if (!conversationOriginAllowed(main.thread, policy)) return {status: "denied", reason: "conversation_origin_excluded"};
-        if (agentCreatedOrigin(main.thread) && !launchingAgent(main, policy.owned)) return {status: "denied", reason: "conversation_origin_unverified"};
         let message = userMessageId ? genuineUserMessage(main, userMessageId) : null;
         const latestHuman = latestHumanMessage(main);
         if (route === "agent" && (!message || message.runId !== runId || latestHuman?.id !== message.id)) return {status: "denied", reason: "start_call_not_in_genuine_human_turn"};

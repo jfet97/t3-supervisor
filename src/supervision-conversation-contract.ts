@@ -4,7 +4,7 @@ const text = (max: number) => Schema.String.check(Schema.isMaxLength(max));
 const texts = (count: number, max: number) => Schema.Array(text(max)).check(Schema.isMaxLength(count));
 export const RequesterSource = Schema.Struct({
   messageId: text(512), runId: text(512), ordinal: Schema.Int, hash: text(128),
-  requester: Schema.Literals(["human", "launching_agent"]),
+  requester: Schema.Literals(["human", "launching_agent", "unattributed_agent"]),
 });
 export type RequesterSource = typeof RequesterSource.Type;
 export const ConversationDraft = Schema.Struct({

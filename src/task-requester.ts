@@ -4,8 +4,10 @@ import { isSupervisorThreadId, type ProjectSupervisorStore, type ProjectSupervis
 import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "./types.js";
 
 // chat origin is checked before requester provenance. Agent-created mains remain excluded while the project's opt-in is off,
-// including later human follow-ups. With it on, genuine humans and the exact launching agent may request work. An agent is never
-// treated as a human one, and the human-only Start, Stop and definition approvals keep their own human-only checks
+// including later human follow-ups. With it on, genuine humans, the exact launching agent and the native opening of an ordinary
+// agent-created main whose sender is unknown may request work; an unattributed opening carries only its own stated scope, a later
+// agent message with no verified launcher grants nothing. An agent is never treated as a human one, and the human-only Start, Stop
+// and definition approvals keep their own human-only checks
 
 /**
  * The requesters a main's task discovery accepts: agent requests only when written after the project turned agent-created
@@ -24,6 +26,10 @@ const humanRequest = (message: MessageInfo): boolean => message.createdBy === "u
 const agentMessage = (thread: ThreadInfo, message: MessageInfo, owned: ReadonlySet<string>): message is MessageInfo & {senderThreadId: string} =>
   message.createdBy === "agent" && message.creationSource === "mcp" && typeof message.senderThreadId === "string" && message.senderThreadId !== thread.id &&
   !isSupervisorThreadId(owned, message.senderThreadId) && !message.scheduledTaskId && !message.source;
+// an agent's message through T3's MCP server whose sender T3 does not name here (for example a launch from a linked environment),
+// never a scheduled or imported one; only the opening of an ordinary agent-created main is accepted in this form
+const unattributedAgentMessage = (message: MessageInfo): boolean => message.createdBy === "agent" && message.creationSource === "mcp" &&
+  !message.senderThreadId && !message.scheduledTaskId && !message.source;
 
 /** An ordinary main created through T3's MCP server: an independent root, not a delegated child, fork or Supervisor thread. */
 export const agentCreatedMain = (thread: ThreadInfo, owned: ReadonlySet<string>): boolean => thread.creationSource === "mcp" &&
@@ -31,29 +37,44 @@ export const agentCreatedMain = (thread: ThreadInfo, owned: ReadonlySet<string>)
   (thread.lineage.rootThreadId === undefined || thread.lineage.rootThreadId === thread.id) && !isSupervisorThreadId(owned, thread.id);
 
 export const agentCreatedOrigin = (thread: ThreadInfo): boolean => thread.createdBy === "agent" || thread.creationSource === "mcp";
-/** Immutable native origin plus the current opt-in; source verification additionally requires the actual opening launcher. */
+/** Immutable native origin plus the current project opt-in; requester authority is checked independently. */
 export const conversationOriginAllowed = (thread: ThreadInfo, policy: TaskRequesterPolicy): boolean =>
   !isSupervisorThreadId(policy.owned, thread.id) && thread.lineage.relationshipToParent !== "subagent" &&
   thread.createdBy !== "system" && thread.creationSource !== "server" &&
   (!agentCreatedOrigin(thread) || policy.agentRequestsAfter !== null && agentCreatedMain(thread, policy.owned));
 
-/** The agent thread that launched an ordinary agent-created main: the sender of its visible opening request, else null. */
-export const launchingAgent = (projection: Projection, owned: ReadonlySet<string>): string | null => {
+// the visible opening request of an ordinary agent-created main: its earliest run's own finished root message, else null
+const openingRequest = (projection: Projection, owned: ReadonlySet<string>): MessageInfo | null => {
   const {thread} = projection;
   if (!agentCreatedMain(thread, owned)) return null;
   const opening = projection.runs.filter(run => run.threadId === thread.id).reduce<RunInfo | undefined>((first, run) => !first || run.ordinal < first.ordinal ? run : first, undefined);
   const message = opening && projection.messages.find(item => item.id === opening.userMessageId && item.threadId === thread.id && item.runId === opening.id);
-  return opening && message && message.role === "user" && message.streaming === false && agentMessage(thread, message, owned) &&
-    nativeUserMessageVisible(projection, opening, message) ? message.senderThreadId : null;
+  return opening && message && message.role === "user" && message.streaming === false && nativeUserMessageVisible(projection, opening, message) ? message : null;
 };
 
+/** The agent thread that launched an ordinary agent-created main: the sender of its visible opening request, else null. */
+export const launchingAgent = (projection: Projection, owned: ReadonlySet<string>): string | null => {
+  const message = openingRequest(projection, owned);
+  return message && agentMessage(projection.thread, message, owned) ? message.senderThreadId : null;
+};
+
+/**
+ * Who asked: a genuine human, the exact launching agent, or the native unattributed agent opening of an ordinary agent-created main.
+ * The opening's authority is its own text; no sender or human identity is ever derived for it.
+ */
+export type TaskRequester = {readonly kind: "human"} | {readonly kind: "agent"; readonly threadId: string} | {readonly kind: "unattributed_agent"};
+
 /** The requester of a message that may become or support a main's task: a finished, visible root message of the main's own run. */
-export const taskRequester = (projection: Projection, run: RunInfo, message: MessageInfo, policy: TaskRequesterPolicy): {readonly kind: "human"} | {readonly kind: "agent"; readonly threadId: string} | null => {
-  if (!conversationOriginAllowed(projection.thread, policy) || agentCreatedOrigin(projection.thread) && !launchingAgent(projection, policy.owned)) return null;
+export const taskRequester = (projection: Projection, run: RunInfo, message: MessageInfo, policy: TaskRequesterPolicy): TaskRequester | null => {
+  if (!conversationOriginAllowed(projection.thread, policy)) return null;
   if (message.threadId !== projection.thread.id || message.runId !== run.id || message.role !== "user" || message.streaming !== false ||
     message.id.startsWith("supervisor-notice:") || !nativeUserMessageVisible(projection, run, message)) return null;
+  // a genuine human asks in an included chat whether or not its launcher is known here
   if (humanRequest(message)) return {kind: "human"};
-  if (policy.agentRequestsAfter === null || !((timestampMs(message.createdAt) ?? 0) > policy.agentRequestsAfter) ||
-    !agentMessage(projection.thread, message, policy.owned)) return null;
-  return message.senderThreadId === launchingAgent(projection, policy.owned) ? {kind: "agent", threadId: message.senderThreadId} : null;
+  if (policy.agentRequestsAfter === null || !((timestampMs(message.createdAt) ?? 0) > policy.agentRequestsAfter) || !agentCreatedMain(projection.thread, policy.owned)) return null;
+  if (agentMessage(projection.thread, message, policy.owned)) {
+    const launcher = launchingAgent(projection, policy.owned);
+    return launcher !== null && message.senderThreadId === launcher ? {kind: "agent", threadId: message.senderThreadId} : null;
+  }
+  return unattributedAgentMessage(message) && openingRequest(projection, policy.owned)?.id === message.id ? {kind: "unattributed_agent"} : null;
 };

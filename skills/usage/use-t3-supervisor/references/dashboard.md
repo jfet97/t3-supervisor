@@ -71,7 +71,7 @@ Supervisor preferences belong to the project, independently of the configuration
 selected working directory. Model and reasoning choices come from native T3
 capabilities. Save stores defaults for new Supervisors. The selected conversation’s Supervision view shows its separately observed model. Each main gets its own bound Supervisor automatically.
 Edit existing models in T3. Independent requests and retries do not cross mains.
-When no preference is saved, new roots default to Sol 6.1 with low reasoning;
+When no preference is saved, new roots default to Sol 6.1 with medium reasoning;
 this does not replace an existing root's model or a saved selection.
 
 Model drafts follow the same explicit refresh/conflict/session-guard rules. A

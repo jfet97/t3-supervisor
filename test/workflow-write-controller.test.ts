@@ -6,7 +6,7 @@ import {fingerprint} from "../src/guidance-store.js";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
 import type {WorkflowAgreementImport} from "../src/workflow-state-contract.js";
-import {changedPlanNext, submittedApplyPointer, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch} from "../src/workflow-write-controller.js";
+import {changedPlanNext, submittedApplyPointer, workflowReadToolDefinition, workflowWriteToolDefinition, type WorkflowApplyPatch, type WorkflowStatusViewResult} from "../src/workflow-write-controller.js";
 import {workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames, workflowTurnItemDetailMaxBytes} from "../src/workflow-write-evidence.js";
 import type {WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js";
 import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
@@ -3100,6 +3100,62 @@ it.live("workflow_read returns compact progress by default and complete records 
     assert.match(JSON.stringify(results[2]), /"draft_created"/u, "the complete read retains the actual creation event");
     assert.deepEqual(yield* fixture.controller.readTool({...locator(fixture), definitionIds: ["check"]}),
       {status: "invalid", reason: "invalid_read_arguments"}, "default progress never silently ignores a definition selector");
+  } finally {yield* fixture.close;}
+}));
+
+it.live("compact MCP reads discover new verified children and can map their work before completion", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    const ensure = ensureArgs(fixture, "scope-create", "Follow the current work.");
+    installEvidence(fixture, ensure);
+    const created = yield* fixture.controller.write(ensure);
+    assert.equal(created.status, "created");
+    if (created.status !== "created") return;
+    const server = createServer();
+    yield* Layer.build(HttpRouter.serve(WorkflowMcpRoute, {disableLogger: true, disableListenLog: true}).pipe(
+      Layer.provide(workflowMcpLayer(fixture.controller)),
+      Layer.provide(NodeHttpServer.layer(() => server, {port: 0, host: "127.0.0.1"})),
+    ));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const read = (lineageOffset: number) => Effect.promise(async () => {
+      const response = await fetch(`http://127.0.0.1:${address.port}/mcp/workflows`, {method: "POST",
+        headers: {"Content-Type": "application/json", Accept: "application/json, text/event-stream"},
+        body: JSON.stringify({jsonrpc: "2.0", id: lineageOffset, method: "tools/call", params: {name: "workflow_read",
+          arguments: {...locator(fixture), view: "status", lineageOffset, limit: 1}}})});
+      const body = await response.json() as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
+      assert.notEqual(body.result?.isError, true);
+      return JSON.parse(body.result?.content?.[0]?.text ?? "null") as WorkflowStatusViewResult;
+    });
+    const initial = yield* read(0);
+    assert.equal(initial.status, "ok");
+    assert.deepEqual(initial.lineage.map(row => row.threadId), [fixture.mainThreadId]);
+    assert.equal(initial.lineageHasMore, false);
+
+    const child = thread("live-reviewer", fixture.projectId, fixture.mainThreadId, "subagent", fixture.mainThreadId);
+    const nested = thread("nested-reviewer", fixture.projectId, child.id, "subagent", fixture.mainThreadId);
+    fixture.threads.push(child, nested, thread("unrelated-reviewer", fixture.projectId),
+      thread("forked-reviewer", fixture.projectId, fixture.mainThreadId, "fork", fixture.mainThreadId));
+    const fresh = yield* read(1);
+    assert.deepEqual(fresh.lineage.map(row => row.threadId), [child.id]);
+    assert.equal(fresh.lineageOffset, 1);
+    assert.equal(fresh.lineageHasMore, true);
+    assert.deepEqual((yield* read(2)).lineage.map(row => row.threadId), [nested.id]);
+    assert.equal((yield* read(2)).lineageHasMore, false, "unrelated and forked chats never enter this scope");
+    assert.doesNotMatch(JSON.stringify(fresh), /"document"|"evidence"|"acceptedAgreements"/u);
+
+    const link = {action: "link_child", ...locator(fixture), operationId: "scope-link", childThreadId: child.id, note: "Reviewer just started."};
+    installEvidence(fixture, link);
+    assert.equal((yield* fixture.controller.write(link)).status, "created");
+    const parent = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    const assign = yield* applyArgs(fixture, {operationId: "scope-assign", workflowId: parent.workflowId, expectedRevision: parent.revision,
+      plan: sequencePlan([localStep("Review", "Review the current artifact.", [child.id])]), note: "Assign the reviewer before its result."});
+    installEvidence(fixture, assign);
+    assert.equal((yield* fixture.controller.write(assign)).status, "applied");
+    const assigned = (yield* fixture.workflows.get(fixture.projectId, fixture.mainThreadId))!;
+    assert.deepEqual(mainStep(assigned.plan)?.contributorThreadIds, [child.id]);
+    assert.equal(mainStep(assigned.plan)?.status, "planned", "assignment invents no execution or completion");
+    assert.notEqual((yield* fixture.workflows.get(fixture.projectId, child.id))?.status, "completed");
   } finally {yield* fixture.close;}
 }));
 

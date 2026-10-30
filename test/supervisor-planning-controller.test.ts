@@ -33,7 +33,8 @@ it.effect("a registering helper reads its own reference on demand without receiv
   assert.doesNotMatch(helperInstructions, /Root team coordination|recruit or manage other helpers/u);
   assert.match(helperInstructions, /Do not perform operative work/u);
   assert.match(helperInstructions, /workflow_read returns compact status by default/u);
-  assert.match(helperInstructions, /request view documents only for complete plans, lineage, history or evidence/u);
+  assert.match(helperInstructions, /status includes fresh paged lineage/u);
+  assert.match(helperInstructions, /request view documents only for complete plans, history or evidence/u);
   assert.equal((yield* f.workflows.readTool({...input, memberEpoch: member.epoch + 1}, cancel)).status, "denied");
   assert.notEqual((yield* f.workflows.readTool({...input, view: "context"}, cancel)).status, "ok", "registration grants reference reading only");
   // the root's frozen check-in envelope is the root's own: a registering helper's authority does not read it
