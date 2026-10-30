@@ -897,6 +897,14 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   assert.equal(read.status, "ok", JSON.stringify(read));
   assert.ok(read.status === "ok" && read.proposal.includes(workflowFence("workflow-acceptance", acceptance)) &&
     /not applicable: Check prevent — No defect or correction exposed a gap\./u.test(read.proposal), "the read holds the omission and the exact record");
+  assert.ok(read.status === "ok");
+  assert.match(read.proposal, /give each participant its assigned outcome and applicable duties/u);
+  assert.match(read.proposal, /declare its actual kind/u);
+  assert.match(read.proposal, /account for every result and background job you own/u);
+  assert.match(read.proposal, /The service owns best-effort supported T3 settlement/u);
+  assert.match(read.proposal, /Only the user settles leftovers by hand; do not settle participants yourself unless the user requests it/u);
+  assert.equal(read.proposal.split("Coordination:").length, 2, "shared duties occur once in the on-demand read");
+  assert.ok(!String(noticesSince()[0]!.payload.text).includes("Coordination:"), "the notice only points to the read");
   yield* fixture.run();
   yield* fixture.run();
   const notice = (yield* fixture.conversation.requests.introduction(task.id))!;
@@ -908,6 +916,10 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   yield* observeAgreement(fixture, clock.now + 90_000);
   const settled = (yield* fixture.projectStore.task(task.threadId))!;
   assert.deepEqual([settled.agreement?.status, settled.agreement?.proposalId], ["agreed", revisionId]);
+  const agreedRead = yield* fixture.conversation.operativeProposal({callerThreadId: operativeThreadId, projectId, taskId: task.id, proposalId: revisionId, caller: fixture.operative});
+  assert.equal(agreedRead.status, "ok");
+  assert.ok(agreedRead.status === "ok" && agreedRead.proposal.includes("account for every result and background job you own"), "completion guidance stays readable after agreement");
+  assert.equal(preparedAcceptanceRecord(settled)?.digest, acceptance.digest, "reading guidance does not revise agreement");
 }));
 
 // a plan at the stored validation's nesting bound: a branch in each group down to the deepest group level, which holds a workflow
@@ -4584,6 +4596,12 @@ it.effect("the operative introduction points to the contribution record and the 
   const text = workflowProposalText(fixture.task);
   assert.match(text, /ask your Supervisor for the external-contribution record format/u);
   assert.doesNotMatch(text, /exact fence named external-contribution/u);
+  const provisional = workflowProposalText({...fixture.task, workflow: {...fixture.task.workflow!, status: "provisional", definitionsComplete: false}});
+  assert.match(provisional, /account for every result and background job you own/u);
+  assert.equal(provisional.split("Coordination:").length, 2);
+  const editing = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions", section: "workflow_edit"});
+  assert.match(String(editing.instructions), /reconcile unread native-child results and external contributions awaiting a result/u);
+  assert.match(String(editing.instructions), /an explicit current wait remains a wait, not completed work/u);
   const role = yield* fixture.conversation.roleFor(fixture.binding);
   assert.match(role, /exact fence named external-contribution/u);
   assert.match(role, /Reporting a result never completes a step, and no progress reports are needed/u);

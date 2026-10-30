@@ -668,6 +668,17 @@ choices for that Supervisor (pin, disabled auto-settle, reactivation); only such
 choice made after the stop holds it. The operative main is never settled or
 interrupted because supervision stopped, and other chats keep their supervision.
 
+The operative's on-demand proposal read carries shared coordination duties: assign each
+participant its outcome and applicable contract, declare outside work with its actual kind,
+and account for every owned result or background job before reporting completion. Collected,
+withdrawn and explicitly running or waiting work are distinct outcomes. The root's editing
+guidance asks it to reconcile unread child results and awaiting contributions against that
+accounting before recording completion, sending one delta for an omission. An explicit
+current wait is not task completion. These instructions add no new runtime gate or authority.
+Reviewers stay available while another round may be needed; the service owns settlement,
+with the user handling leftovers unless they request otherwise. Participants are never
+assumed to be T3 conversations.
+
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. When the task completed (every applicable member settled, no
 pending return), the service makes one best-effort automatic attempt per T3 participant:
