@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.19
+
+### Patch Changes
+
+- bb6dde5: Remind operators and their children to announce workflow transitions and refresh the applicable step, references and skills before starting work, without waiting for routine approval.
+
 ## 0.0.18
 
 ### Patch Changes
