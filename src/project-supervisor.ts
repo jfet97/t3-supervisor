@@ -1364,6 +1364,22 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             const owner = yield* store.bindingForSupervisor(job.supervisorThreadId);
             if (owner && owner.deliveredRoleVersion !== job.requestRoleVersion) yield* store.setBinding({...owner, deliveredRoleVersion: job.requestRoleVersion});
           }
+          // an unread but resolved source gets one new request; its first attempt and receipt remain immutable
+          const submittedArguments = decodeSubmittedArguments(receipt.argumentsCanonical);
+          const unreadSource = status === "needs_context" && Exit.isSuccess(submittedArguments) &&
+            Array.isArray(submittedArguments.value.sourceMessageIds) && submittedArguments.value.sourceMessageIds.length === 0 &&
+            (payload.conversation?.sourceMessageIds.length ?? 0) === 0 &&
+            finished.interpretationSources?.requesterMessages.some(item => item.messageId === finished.sourceMessageId && item.readItemId);
+
+          if (unreadSource && retained.sourceReadRetryFor !== finished.sourceMessageId) {
+            const retry: {-readonly [K in keyof TaskRecord]: TaskRecord[K]} = {...next, status: "queued", sourceReadRetryFor: finished.sourceMessageId,
+              messageId: `${finished.messageId}:source-read-retry`, requestText: "", supervisorRunId: null, dispatchedAt: null, replayCount: 0,
+              reason: "The interpretation cited no source; one fresh attempt will read the same pinned request.", updatedAt: now()};
+            delete retry.attempt;delete retry.definitionContext;delete retry.definitionSnapshot;delete retry.interpretationSources;
+            delete retry.definitionReadAttempts;delete retry.revalidationAttempts;delete retry.requestRoleVersion;
+            yield* store.saveTask(retry);
+            return "queued";
+          }
           yield* complete(next, status, next.objective, payload.reason);return status;
         }));
       }));

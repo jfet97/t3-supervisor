@@ -222,7 +222,7 @@ export const proportionatePlanRule = "Plan only what this task needs. The catalo
   "definition belongs only where its described applicability holds; otherwise assess it not applicable with a task-specific reason. Tracked or ignored " +
   "files alone never decide whether a review applies.";
 
-export const localThreadToolRules = "Use this environment's local T3 thread tools. A same-named tool for another environment is not a substitute; a failed foreign lookup does not establish that a local thread is missing.";
+export const localThreadToolRules = "Use this environment's local T3 thread tools. Before declaring a named local tool unavailable, check the host's exposed tools and try that native operation once. Gateway discovery inventories only that gateway, not the host's native tools. A same-named tool for another environment is not a substitute; a failed foreign lookup does not establish that a local thread is missing.";
 /** The one neutral routing reminder: instructions name operations and tools, and the model calls the tools exposed to it. */
 export const toolRouteReminder = "If a named tool is absent, use available discovery tools to check for a connected gateway. Keep lookup output to names and short summaries.";
 

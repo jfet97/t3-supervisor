@@ -77,6 +77,8 @@ export const startStartupSession: Effect.Effect<StartupSession, never, Scope.Sco
     requestedAt: createdAt, startedAt: createdAt, completedAt: createdAt, rootNodeId, userMessageId: humanMessageId, providerThreadId: "startup-main-provider"}],
   messages: [{id: humanMessageId, threadId: startupMainThreadId, runId, nodeId: rootNodeId, role: "user", text: "Is this checkout current with its remote?",
     streaming: false, createdAt, updatedAt: createdAt, createdBy: "user", creationSource: "web"}],
+  turnItems: [{id: "startup-published-source-item", type: "user_message", messageId: humanMessageId,
+    threadId: startupMainThreadId, runId, status: "completed", text: "Is this checkout current with its remote?", streaming: false}],
   nodes: [{id: rootNodeId, threadId: startupMainThreadId, runId, parentNodeId: null, rootNodeId, kind: "root_turn", status: "completed", providerThreadId: "startup-main-provider"}],
   runtimeRequests: []} as Projection);
   const knownDirectory = (path: string): boolean => {

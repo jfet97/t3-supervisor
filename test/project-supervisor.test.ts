@@ -16,6 +16,116 @@ import {
   retryInput, startIntake, workflowResult, workflowSnapshot, type PsFixture, type Turn,
 } from "./support/ps-fixture.js";
 
+const unreadSourceFields = (cited: string[] = []): Record<string, unknown> => ({
+  objective: null, reason: "The source has not been read.", sourceMessageIds: [], supervision: "needed", workflow: null,
+  conversation: {draft: {objective: null, constraints: [], questions: ["What is requested?"], findings: [], duties: []},
+    intent: "following", outcome: null, limits: [], sourceMessageIds: cited, antecedentMessageIds: [], scope: "same"},
+});
+
+const unreadSourceFixture = Effect.fnUntraced(function* (text = "Build the local export") {
+  const fixture = yield* makeFixture([{threadId: "unread-main", projectId: "project-a", turns: [{id: "unread-request", sequence: 11, text}]}]);
+  const main = fixture.projections.get("unread-main")!;
+  const request = main.messages.find(message => message.id === "unread-request")!;
+  main.turnItems = [...(main.turnItems ?? []), {id: "native-source-read-handle", type: "user_message", messageId: request.id,
+    threadId: main.thread.id, runId: request.runId, status: "completed", text: request.text, streaming: false}];
+  return fixture;
+});
+
+it.effect("an unread-source interpretation gets one fresh pinned attempt without rewriting its receipt", () => Effect.gen(function* () {
+  const fixture = yield* unreadSourceFixture();
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  const first = (yield* fixture.store.task("unread-main"))!;
+  assert.ok(first.interpretationSources?.requesterMessages.some(item => item.messageId === first.sourceMessageId && item.readItemId));
+  assert.equal((yield* supervisor.submit(first, unreadSourceFields())).status, "submitted");
+  completeSupervisorRequest(fixture.projections.get(first.supervisorThreadId)!, first.messageId, "The source was not read.");
+  yield* supervisor.runOnce;
+  const queued = (yield* fixture.store.task("unread-main"))!;
+  assert.equal(queued.status, "queued");
+  assert.equal(queued.sourceReadRetryFor, first.sourceMessageId);
+  assert.notEqual(queued.messageId, first.messageId);
+  yield* supervisor.runOnce;
+  const second = (yield* fixture.store.task("unread-main"))!;
+  assert.equal(second.status, "waiting");
+  assert.notEqual(second.attempt?.attemptId, first.attempt?.attemptId);
+  assert.deepEqual(second.attempt?.key.source, first.attempt?.key.source);
+  assert.equal(second.id, first.id);
+  assert.equal((yield* supervisor.submit(first, unreadSourceFields())).status, "duplicate");
+  assert.equal((yield* supervisor.submit(first, {...unreadSourceFields(), reason: "Changed old receipt"})).status, "conflict");
+  assert.equal((yield* supervisor.submit(second, taskFields(second, "Build the local export", "The source was read."))).status, "submitted");
+  completeSupervisorRequest(fixture.projections.get(second.supervisorThreadId)!, second.messageId, "Submitted after reading.");
+  yield* supervisor.runOnce;
+  assert.equal((yield* fixture.store.task("unread-main"))?.status, "inferred");
+}));
+
+it.effect("an unread-source retry budget survives restart and a second empty result rests", () => Effect.gen(function* () {
+  const fixture = yield* unreadSourceFixture();
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  const first = (yield* fixture.store.task("unread-main"))!;
+  yield* supervisor.submit(first, unreadSourceFields());
+  completeSupervisorRequest(fixture.projections.get(first.supervisorThreadId)!, first.messageId, "Source unavailable.");
+  yield* supervisor.runOnce;
+  const restarted = yield* fixture.makeSupervisor();
+  yield* restarted.runOnce;
+  const second = (yield* fixture.store.task("unread-main"))!;
+  assert.equal(second.sourceReadRetryFor, first.sourceMessageId);
+  assert.equal((yield* restarted.submit(second, unreadSourceFields())).status, "submitted");
+  completeSupervisorRequest(fixture.projections.get(second.supervisorThreadId)!, second.messageId, "Still unavailable.");
+  yield* restarted.runOnce;
+  yield* restarted.runOnce;
+  assert.equal((yield* fixture.store.task("unread-main"))?.status, "needs_context");
+  assert.equal(fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === first.supervisorThreadId).length, 2);
+  fixture.addTurn("unread-main", "project-a", {id: "new-request", sequence: 12, text: "Build another local export"});
+  const main = fixture.projections.get("unread-main")!;
+  const request = main.messages.find(message => message.id === "new-request")!;
+  main.turnItems = [...(main.turnItems ?? []), {id: "new-source-read-handle", type: "user_message", messageId: request.id,
+    threadId: main.thread.id, runId: request.runId, status: "completed", text: request.text, streaming: false}];
+  yield* restarted.runOnce;
+  const fresh = (yield* fixture.store.task("unread-main"))!;
+  assert.equal(fresh.sourceMessageId, "new-request");
+  yield* restarted.submit(fresh, unreadSourceFields());
+  completeSupervisorRequest(fixture.projections.get(fresh.supervisorThreadId)!, fresh.messageId, "The new source was not read.");
+  yield* restarted.runOnce;
+  assert.equal((yield* fixture.store.task("unread-main"))?.status, "queued");
+  assert.equal((yield* fixture.store.task("unread-main"))?.sourceReadRetryFor, "new-request");
+}));
+
+it.effect("a cited unclear interpretation and a historical needs-context task do not get an unread-source retry", () => Effect.gen(function* () {
+  for (const kind of ["cited", "historical", "unpublished"] as const) {
+    const fixture = yield* unreadSourceFixture("Help with this");
+    if (kind === "unpublished") fixture.projections.get("unread-main")!.turnItems = [];
+    const supervisor = yield* fixture.makeSupervisor();
+    yield* supervisor.runOnce;
+    const first = (yield* fixture.store.task("unread-main"))!;
+    if (kind === "historical") yield* fixture.store.saveTask({...first, status: "needs_context", objective: null});
+    else yield* supervisor.submit(first, unreadSourceFields(kind === "cited" ? [first.sourceMessageId] : []));
+    completeSupervisorRequest(fixture.projections.get(first.supervisorThreadId)!, first.messageId, "Unclear task.");
+    yield* supervisor.runOnce;
+    yield* supervisor.runOnce;
+    assert.equal((yield* fixture.store.task("unread-main"))?.status, "needs_context");
+    assert.equal((yield* fixture.store.task("unread-main"))?.sourceReadRetryFor, undefined);
+    assert.equal(fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === first.supervisorThreadId).length, 1);
+  }
+}));
+
+for (const boundary of ["stop", "disable", "enable"] as const) it.effect(`an unread-source retry respects ${boundary} before dispatch`, () => Effect.gen(function* () {
+  const fixture = yield* unreadSourceFixture();
+  const supervisor = yield* fixture.makeSupervisor();
+  yield* supervisor.runOnce;
+  const first = (yield* fixture.store.task("unread-main"))!;
+  yield* supervisor.submit(first, unreadSourceFields());
+  completeSupervisorRequest(fixture.projections.get(first.supervisorThreadId)!, first.messageId, "Source unavailable.");
+  yield* supervisor.runOnce;
+  assert.equal((yield* fixture.store.task("unread-main"))?.status, "queued");
+  if (boundary === "stop") yield* supervisor.setChatSupervision({projectId: "project-a", mainThreadId: first.threadId,
+    policyGeneration: (yield* fixture.policy.get()).generation, enabled: false});
+  else if (boundary === "disable") yield* fixture.store.saveControl("project-a", 1, false);
+  else yield* fixture.store.recordChatEnable(first.threadId, Date.parse(baseTime) + day);
+  yield* supervisor.runOnce;
+  assert.equal(fixture.operations.filter(call => call.payload.type === "message.dispatch" && call.payload.threadId === first.supervisorThreadId).length, 1);
+}));
+
 it.effect("scopeSnapshot returns current binding coordinates and verified descendant lineage across project mirrors", () => Effect.gen(function* () {
   const fixture = yield* makeFixture([{threadId: "source-thread", projectId: "project-a", turns: []}]);
   const binding = yield* reserveReadyBinding(fixture);
