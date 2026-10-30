@@ -443,7 +443,12 @@ or a tool result reporting the limit; the model's own context estimate, elapsed 
 repeated timeouts or quiet activity never justify one. An operative run that ended with agreed duties still
 planned is not an ending either. Check-in and liveness wakes point at the same endings:
 the watch outcome is recorded when the watch ends, not at a fixed per-wake point. Child
-lists are metadata, not transcript reads. When T3 requires a yield, the service promptly
+lists are metadata, not transcript reads. Standby covers every target and verified child:
+an idle parent waiting for active reviewers is not standby, and the Supervisor follows
+those children. A wait names a requester or party outside that scope who must act once
+all covered actors are idle. Recording progress or a review outcome does not end a
+watch. Wake or completion instructions read in a target's transcript apply to that
+target; only the Supervisor's own native wait result can direct its yield. When T3 requires a yield, the service promptly
 continues verified active work. Active following bypasses the idle age/count thresholds
 and cooldown, and never steers into a Supervisor's ongoing thinking. One model turn runs
 per owner.

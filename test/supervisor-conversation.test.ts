@@ -6970,7 +6970,11 @@ it.effect("check-ins carry the watch contract and the outcome record without a f
   assert.match(monitoring, /This check-in is the watch of the whole task, not a finite report/u);
   assert.match(monitoring, /five to ten seconds on the active target, never thirty/u);
   assert.match(monitoring, /consume your own inbox at each boundary \(section contact\)/u);
-  assert.match(monitoring, /an operative run that ended with agreed duties still planned is not an ending/u);
+  assert.match(monitoring, /An idle operative with unfinished duties and no active covered child needs one continuation delta or a named blocker in this same turn; keep watching unless a permitted ending applies/u);
+  assert.match(monitoring, /An idle parent waiting for active children is not standby: follow those children/u);
+  assert.match(monitoring, /Wake or completion instructions read in a target's transcript apply to that target, not you/u);
+  assert.match(monitoring, /add wait only when every covered target and verified child is idle and the requester or a party outside that scope must act, never for active children or participants/u);
+  assert.match(monitoring, /Recording an outcome does not permit ending the watch/u);
   assert.match(monitoring, /when your own queue is not drainable, at the end of each read-forward pass so queued messages start as normal turns/u);
   assert.match(monitoring, /one liveness check-in per completed operative run, document revision and such ended turn of yours/u);
   const contact = yield* sectionText(fixture, "contact");
