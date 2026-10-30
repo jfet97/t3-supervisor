@@ -510,7 +510,7 @@ protocol and the exact acceptance record. It also supplies shared participant an
 guidance: assign outcomes, declare work outside native lineage through the supported
 contribution protocol, account for owned results and jobs, and retain reviewers while
 another round may be needed. Settlement remains the service's best-effort responsibility,
-with manual cleanup available. Project definitions own their evidence and review policy;
+with the user settling leftovers manually unless they request otherwise. Project definitions own their evidence and review policy;
 they need not repeat these host-neutral coordination duties. It answers only for the caller's own interpreted
 task under the ready Supervisor generation that interpreted it, while the task's request is
 unchanged and fully considered and supervision of that chat is enabled and not stopped, for

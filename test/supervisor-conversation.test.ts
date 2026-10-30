@@ -902,6 +902,7 @@ it.effect("a revised proposal that omits a flexible member from the agreed plan 
   assert.match(read.proposal, /declare its actual kind/u);
   assert.match(read.proposal, /account for every result and background job you own/u);
   assert.match(read.proposal, /The service owns best-effort supported T3 settlement/u);
+  assert.match(read.proposal, /Only the user settles leftovers by hand; do not settle participants yourself unless the user requests it/u);
   assert.equal(read.proposal.split("Coordination:").length, 2, "shared duties occur once in the on-demand read");
   assert.ok(!String(noticesSince()[0]!.payload.text).includes("Coordination:"), "the notice only points to the read");
   yield* fixture.run();

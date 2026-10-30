@@ -676,7 +676,8 @@ guidance asks it to reconcile unread child results and awaiting contributions ag
 accounting before recording completion, sending one delta for an omission. An explicit
 current wait is not task completion. These instructions add no new runtime gate or authority.
 Reviewers stay available while another round may be needed; the service owns settlement,
-and participants are never assumed to be T3 conversations.
+with the user handling leftovers unless they request otherwise. Participants are never
+assumed to be T3 conversations.
 
 Quiet completion/archive/deletion can settle the owned chat once children and
 pending work are quiet. When the task completed (every applicable member settled, no

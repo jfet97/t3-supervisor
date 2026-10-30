@@ -232,7 +232,8 @@ requester's explicit decision on the remaining findings.
 
 For repeated rounds, strongly prefer the same exact persistent reviewer chats per
 main-owned cycle. Record IDs, actual models and reasoning, artifact and base, rounds,
-findings and responses privately. Different mains own different reviewer chats. Use
+findings and responses privately. These notes supplement the supported participant
+declaration, not replace it. Different mains own different reviewer chats. Use
 supported conversation or session APIs; copied context in a new task is not conversation
 persistence. The host and Supervisor guidance own supported conversation lifecycle,
 participant identity and return mechanics; reference them instead of encoding a native
