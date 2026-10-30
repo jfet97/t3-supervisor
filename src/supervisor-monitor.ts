@@ -34,9 +34,14 @@ export const ownInboxInstructions = "Own inbox: after each t3_thread_wait return
   "to steer. If t3_queue is not exposed, discover it; if no route exists, your queue is not drainable: say so once and end the turn after each " +
   "read-forward pass so queued messages start as normal turns. The wait between boundaries is bounded; the latency of a long thought or tool call in progress is not.";
 // the endings of a watch, read by a model after many bounded waits: a timed-out wait while the target still runs is not one of them
-const watchEndings = "when a wait result names your next action or tells you to end the turn (a timed-out wait while the target still runs is neither: " +
+const watchEndings = "when your own wait result names your next action or tells you to end the turn (a timed-out wait while the target still runs is neither: " +
   "read forward and wait again), when the host reports a context handoff or limit for this turn, on a genuine human Stop, for genuine external waiting that a native watcher reports to you " +
   "(never the operative's own running turn), or, when your own queue is not drainable, at the end of each read-forward pass so queued messages start as normal turns";
+const watchScope = "Any covered target or verified child still running with agreed work unfinished keeps this watch active except at a host-required, genuine Stop or unavailable-inbox ending. " +
+  "Standby requires every covered target and verified child to be idle and the requester or a party outside that scope to act. " +
+  "An idle parent waiting for active children is not standby: follow those children. " +
+  "Wake or completion instructions read in a target's transcript apply to that target, not you. " +
+  "Recording progress, needs_attention or no_change never permits ending a watch.";
 const watchConduct = "A context ending requires a host handoff/compaction event or a tool result reporting the limit. " +
   "Your own context estimate, elapsed time, repeated timeouts or quiet activity never justify a handoff or ending. " +
   "Routine work stays quiet. Never spin, wait on yourself, steer into your own thinking or do operative work.";
@@ -45,9 +50,8 @@ const watchConduct = "A context ending requires a host handoff/compaction event 
 export const activeWatchInstructions = "This check-in is the watch of the whole task, not a finite report. " +
   watchLoop("the main, verified children, registered participants", "consume your own inbox at each boundary (section contact)") +
   ` End the turn only when the task's agreed work is complete or in explicit standby (a recorded wait naming who acts next), ${watchEndings}; ` +
-  "a main whose run is still running with agreed work unfinished is never an ending, however many waits timed out; " +
-  "an operative run that ended with agreed duties still planned is not an ending: resume it with one delta or record needs_attention or a wait " +
-  `in this same turn. ${watchConduct} The service continues active work and, only after your turn ended with agreed work unfinished and no ` +
+  `${watchScope} An idle operative with unfinished duties and no active covered child needs one continuation delta or a named blocker in this same turn; ` +
+  `keep watching unless a permitted ending applies. ${watchConduct} The service continues active work and, only after your turn ended with agreed work unfinished and no ` +
   "recorded wait, sends one liveness check-in per completed operative run, document revision and such ended turn of yours.";
 
 /**
@@ -58,9 +62,9 @@ export const helperWatchInstructions = "A check-in is the watch of your assigned
   "turn stays finite: do what it asks and end it with its marker. " +
   watchLoop("the assigned targets of this check-in and their verified children", "consume your own inbox at each boundary") +
   ` ${ownInboxInstructions} End a check-in ` +
-  `turn only when your assigned targets' work is complete or in explicit standby reported to the root, ${watchEndings}; an assigned target's ` +
+  `turn only when your assigned targets' work is complete or in explicit standby reported to the root, ${watchEndings}. ${watchScope} An assigned target's ` +
   "run that ended with agreed duties still planned is not an ending: guide it through its route within your assignment or report it to the root " +
-  `with supervision_team in this same turn; never act beyond your assigned targets and escalation rights. ${watchConduct}`;
+  `with supervision_team in this same turn, then keep watching unless a permitted ending applies; never act beyond your assigned targets and escalation rights. ${watchConduct}`;
 
 export type SupervisorMonitorPriority =
   | "user_instruction"
