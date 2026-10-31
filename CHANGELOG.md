@@ -1,5 +1,15 @@
 # T3 Supervisor
 
+## 0.0.22
+
+### Patch Changes
+
+- c627df5: Make dashboard pages easier to scan. Page titles keep their read time and refresh beside them, and help explanations collapse to compact controls instead of full-width bands. Home shows supervised work before the option to start supervision for a No Project chat, and single-page lists no longer show inactive page buttons. A conversation's Task view separates the task and its current state from the plan and history; Supervision leads with the chat's supervision state and Stop; Connected work separates child conversations from participants. Definitions shows the catalog before the folder's requirements summary, and keyboard focus now moves to an opened definition and returns to it from Back to catalog. Project settings keeps long eligibility rules in help and shows when its settings were read.
+
+  Keyboard focus also follows the work instead of falling back to the page: choosing a working folder collapses the chooser and keeps focus on Change working folder, Back to Definitions returns to Edit project.yaml, Review project changes lands in the editor or settings form, conversation tabs keep focus after Back and Forward, a session that ends while the dashboard is open focuses Sign in again and signing in again returns to the kept view, and a finished Start for a No Project chat focuses its outcome. The sign-in help now explains where to run the token command without naming particular platforms.
+
+- c627df5: Add a repository-owned local setup for developing and testing Supervisor. `pnpm dev:fixture` serves the dashboard over the real Supervisor application with scripted T3 data for empty, populated and unavailable states. `pnpm dev:stack` runs a pinned, unmodified published T3 beside Supervisor from the checkout, with its own state, ports and scoped T3 credentials, and removes everything when it stops; `pnpm dev:stack --check` verifies that path end to end. Contributor guidance now relies only on this setup, not on personal machines.
+
 ## 0.0.21
 
 ### Patch Changes
