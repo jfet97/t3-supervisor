@@ -526,10 +526,10 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
   const mainCoverage = coverage.get(mainThreadId);
 
   return <section className="stack connected-work" aria-labelledby="connected-work-title">
-    <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div><HelpDisclosure title="About child conversations and contributions"><p><GuideLink topic="connected-child">Native and delegated children</GuideLink> are different ways of connecting conversations. A contribution links work to a parent step; a <GuideLink topic="helper">Supervisor assignment</GuideLink> identifies who follows it. Neither a finished conversation nor an assignment proves that a parent step is complete. <GuideLink topic="children">How child tasks contribute</GuideLink>.</p></HelpDisclosure><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
+    <div className="row between"><h2 id="connected-work-title">Connected work</h2>{metadata}</div>
     {mainCoverage && mainCoverage.state !== "root" && <WorkflowAssignee coverage={mainCoverage}/>}
-    <WorkflowParticipants workflow={workflows.get(mainThreadId)} localEnvironmentId={localEnvironmentId}/>
-    <ul className="stack">{children.map(thread => {
+    <div className="connected-children"><h3 id="connected-children-title">Child conversations</h3><p className="muted">Conversations started from this task. Their workflows and contributions are recorded separately; a finished child does not complete a parent step.</p><HelpDisclosure title="About child conversations and contributions"><p><GuideLink topic="connected-child">Native and delegated children</GuideLink> are different ways of connecting conversations. A contribution links work to a parent step; a <GuideLink topic="helper">Supervisor assignment</GuideLink> identifies who follows it. Neither a finished conversation nor an assignment proves that a parent step is complete. <GuideLink topic="children">How child tasks contribute</GuideLink>.</p></HelpDisclosure>{children.length === 0 && <p>{complete ? "No contributing child conversations are recorded in this read." : "No children in the loaded pages. More conversations may be on a later page."}</p>}
+    {children.length > 0 && <ul className="stack">{children.map(thread => {
       const lifecycle = lifecyclePresentation(thread);
       const workflow = workflows.get(thread.threadId);
       const notes = workflow ? stepNotes(task, {kind: "live", workflow, plan: workflow.plan ?? {kind: "sequence", templatePath: null, nodes: []}}) : null;
@@ -565,7 +565,8 @@ export function ConnectedWork({threads, mainThreadId, workflows, coverage, task,
           {!workflow && <p className="small muted">{complete ? "No workflow document is recorded for this conversation." : "Workflow state for this conversation may be on a later page."}</p>}
         </div></EntityDetails>
       </li>;
-    })}</ul>
+    })}</ul>}</div>
+    <WorkflowParticipants workflow={workflows.get(mainThreadId)} localEnvironmentId={localEnvironmentId}/>
   </section>;
 }
 
@@ -614,6 +615,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     : task?.status === "waiting" || task?.status === "queued" || task?.status === "dispatching" ? "Reading the request"
     : progress?.loading ? "Reading assessment…" : "No assessment recorded";
   return <div className="task-workspace stack">
+    <div className="task-summary">
     <section className="task-band" aria-label="Task">
       <ConversationStatus explicitlyStopped={stopped} engagement={task?.engagement} fresh={connected && snapshot.available && currentRead}/>
       <p className="task-objective">{task?.objective ?? (snapshot.available ? "No task objective has been recorded for this conversation." : "The task could not be read.")}</p>
@@ -625,7 +627,6 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
         <span className="task-refresh">{readAt !== null && <span>Read {new Date(readAt).toLocaleTimeString()}</span>}<RefreshAction label="Refresh task and supervision state" busy={refreshing} enabled={connected} onRefresh={onRefresh}/></span>
       </div>
     </section>
-    <HelpDisclosure title="How to read this task and plan"><p><GuideLink topic="task">Task outcomes and step states</GuideLink> are separate from <GuideLink topic="agreement">proposal and acceptance</GuideLink>. An accepted plan does not prove work was performed.</p><p><GuideLink topic="task-local-step">Task-local steps</GuideLink> add duties for this request. <GuideLink topic="task-interpretation">Understanding and draft duties</GuideLink> and <GuideLink topic="plan-provenance">plan provenance</GuideLink> explain its context. Open <GuideLink topic="records">step records and evidence</GuideLink> to inspect assessments and contributions.</p><p>A <GuideLink topic="branches">branch</GuideLink> names its condition and labelled paths; the next item follows the whole branch. The agent records which path applies; a selection is a decision, not completed work, and steps on an undecided or not-selected path are not outstanding. <GuideLink topic="branch-decision">Branch decision states</GuideLink></p></HelpDisclosure>
     <ConversationUnderstanding draft={task?.conversation?.draft}/>
     {(attention.length > 0 || task?.definitionReview || task?.workflowProtocolDiagnostic) && <section className="notice stack attention-band" aria-labelledby="task-attention-title">
       <h2 id="task-attention-title">Needs attention</h2>
@@ -641,9 +642,14 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       <p className="notice" key={item.returnId}>Return to {item.targetName ?? "an earlier step"} requested. The Supervisor must confirm affected work is paused or quiet before starting attempt {item.attempt + 1}.</p>)}
     {record.kind === "live" && (record.workflow.returns ?? []).filter(item => item.state === "exhausted" && item.resolvedAt === null).map(item =>
       <p className="notice" key={item.returnId}>Return to {item.targetName ?? "an earlier step"} has used every successful jump its maximum allows. The failure stays unresolved, and another jump does not start.</p>)}
+    </div>
+    <div className="task-plan-region">
+    <div className="task-plan-head">
     <div className="row task-view-switch" role="group" aria-label="Task view">
       <button type="button" aria-pressed={!historyVisible} onClick={() => setSelectedView({threadId, view: "plan"})}>Plan</button>
       <button type="button" aria-pressed={historyVisible} onClick={() => setSelectedView({threadId, view: "history"})}>History</button>
+    </div>
+    <HelpDisclosure title="How to read this task and plan"><p><GuideLink topic="task">Task outcomes and step states</GuideLink> are separate from <GuideLink topic="agreement">proposal and acceptance</GuideLink>. An accepted plan does not prove work was performed.</p><p><GuideLink topic="task-local-step">Task-local steps</GuideLink> add duties for this request. <GuideLink topic="task-interpretation">Understanding and draft duties</GuideLink> and <GuideLink topic="plan-provenance">plan provenance</GuideLink> explain its context. Open <GuideLink topic="records">step records and evidence</GuideLink> to inspect assessments and contributions.</p><p>A <GuideLink topic="branches">branch</GuideLink> names its condition and labelled paths; the next item follows the whole branch. The agent records which path applies; a selection is a decision, not completed work, and steps on an undecided or not-selected path are not outstanding. <GuideLink topic="branch-decision">Branch decision states</GuideLink></p></HelpDisclosure>
     </div>
     {historyVisible ? <WorkflowHistory workflow={mainWorkflow}/> : <div className="workflow-journey-layout">
       <section className="workflow-plan-surface" aria-labelledby="journey-title">
@@ -668,7 +674,6 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           <p>{latestObservation.note}</p><p className="small muted">{latestObservation.targetNodeId ? latestObservation.targetNodeName ?? "Step" : "Whole task"} · {formatProgressTime(latestObservation.recordedAt)}</p></section>}
       </aside>
     </div>}
-    <div className="connected-summary"><Icon name="tree" size={18}/><span>{[...view.threadById.keys()].filter(id => id !== threadId).length} connected conversations in this read</span>{connectedWorkLink}</div>
     {historyVisible && <EntityDetails title={<>Sources and earlier plans</>} className="evidence-history"><div className="stack">
       <p className="small muted">Statuses and notes are the Supervisor’s assessments of the conversation’s work; they are not independent proof of execution. A parent step does not complete when a child finishes.</p>
       {record.kind === "live" && <BranchDecisionHistory workflow={record.workflow}/>}
@@ -684,6 +689,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
         <SupervisorRecords workflow={workflow}/></EntityDetails>)}
       {(view.latest?.incompatibleWorkflows.length ?? 0) > 0 && <p className="notice" role="status">Some retained workflow records use an incompatible format and remain read-only: {view.latest!.incompatibleWorkflows.map(item => item.workflowId).join(", ")}.</p>}
     </div></EntityDetails>}
+    </div>
+    <div className="connected-summary"><Icon name="tree" size={18}/><span>{[...view.threadById.keys()].filter(id => id !== threadId).length} connected conversations in this read</span>{connectedWorkLink}</div>
     {view.canLoadMore && <button type="button" disabled={!connected || progress?.loading} onClick={onLoadMore}>Load more connected workflows and activity</button>}
   </div>;
 }
@@ -811,13 +818,32 @@ export function ProjectSupervisorView({
     {(section === "all" || section === "task") && threadId && <TaskWorkspace currentRead={currentRead} snapshot={snapshot} task={selectedTask} threadId={threadId} progress={workflowProgress} connected={connected}
       attention={attention} stopped={Boolean(snapshot.chatSupervision?.stopped)} readAt={readAt} refreshing={refreshing} onRefresh={onRefresh}
       onLoadMore={onWorkflowProgressLoadMore ?? (() => {})} {...(supervisionLink ? {supervisionLink} : {})} {...(connectedWorkLink ? {connectedWorkLink} : {})}/>}
+    {(section === "supervision" || section === "connected") && <div className="view-state-row"><ConversationStatus engagement={selectedTask?.engagement} fresh={connected && snapshot.available && currentRead} explicitlyStopped={Boolean(snapshot.chatSupervision?.stopped)}/>{section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}</div>}
     {section === "connected" && threadId && (() => {
       const view = progressView(workflowProgress?.pages ?? []);
       return <div className="stack"><ConnectedWork localEnvironmentId={localEnvironmentId} awareness={snapshot.monitoringStatus?.awareness} metadata={<Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>} threads={[...view.threadById.values()]} mainThreadId={threadId} workflows={view.workflowByThreadId} coverage={view.coverageByThreadId} task={selectedTask} complete={view.complete}/>{workflowProgress?.error && <p role="status">{workflowProgress.error}</p>}{view.canLoadMore && <button type="button" disabled={!connected || workflowProgress?.loading} onClick={onWorkflowProgressLoadMore}>Load more connected workflows and activity</button>}</div>;
     })()}
-    {(section === "supervision" || section === "connected") && <ConversationStatus engagement={selectedTask?.engagement} fresh={connected && snapshot.available && currentRead} explicitlyStopped={Boolean(snapshot.chatSupervision?.stopped)}/>}
-    {section === "supervision" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
     {(section === "all" || section === "supervision") && snapshot.mainThreadId && snapshot.chatSupervision?.stopped && snapshot.chatSupervision.stoppedAt !== null && <StopNotice title={threadId ?? snapshot.mainThreadId} audit={{route: snapshot.chatSupervision.stoppedBy ?? "unknown", stoppedAt: snapshot.chatSupervision.stoppedAt, callerThreadId: snapshot.chatSupervision.stoppedCallerThreadId ?? null, userMessageId: snapshot.chatSupervision.stoppedUserMessageId ?? null}} onEnable={() => onChatSupervision(true)} busy={!connected || chatSupervisionBusy || chatSupervisionLocked}/>}
+    <div hidden={section !== "all" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
+        <h4>Chat supervision</h4>
+        <p>{snapshot.chatSupervision.stopped
+          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
+          : snapshot.chatSupervision.activation === "not_started" ? "Not started. Choose this chat from Home to start supervision." : snapshot.chatSupervision.activation === "pending" ? "Start pending. No supervision effects are authorized yet." : "Allowed for this chat; project/global settings still apply."}</p>
+        {(!snapshot.chatSupervision.stopped || snapshot.chatSupervision.stoppedAt === null) && <div><button type="button" className={snapshot.chatSupervision.stopped ? "primary" : "danger-button"} disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
+          onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
+          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>}
+        <p role="status">{chatSupervisionMessage ?? ""}</p>
+      </div>}
+    </div>
+    {shouldOfferRetry && <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
+      <h3>{snapshot.binding?.state === "missing" ? "Deleted Supervisor conversation" : "Native Supervisor access"}</h3>
+      <p className="muted">{snapshot.binding?.state === "missing"
+        ? "T3 confirmed that the bound conversation was deleted. This explicit action replaces it with a new Supervisor conversation."
+        : "Use this explicit action to retry the selected conversation’s pending or rejected native operation."}</p>
+      {!snapshot.binding && <p role="status">No bound Supervisor conversation is available to retry yet. Refresh after the service establishes one.</p>}
+      {dirty && <p role="status">Save or discard your settings draft before retrying native access.</p>}
+      <button type="button" disabled={!canRetry || saving || blocked} onClick={onRetry}>{retryButtonLabel}</button>
+    </div>}
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
       <div className="row between">
         <h3>Supervisor health</h3>
@@ -827,9 +853,9 @@ export function ProjectSupervisorView({
       {snapshot.binding?.state === "missing"
         ? <p>Deleted Supervisor conversation: <code>{snapshot.binding.threadId}</code></p>
         : snapshot.binding
-          ? <p>Bound conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a> <code>{snapshot.binding.threadId}</code></p>
+          ? <p>Bound Supervisor conversation: <a href={`t3-thread://v1/${snapshot.binding.threadId}`}>Open in T3</a></p>
         : <p>{snapshot.mainThreadId ? "No Supervisor is bound to this main conversation yet." : "Select a main conversation to inspect its Supervisor."}</p>}
-      <HelpDisclosure title="About Supervisor health and controls"><p>A <GuideLink topic="supervisor-conversation">bound Supervisor conversation</GuideLink> is assigned to this main chat. Its readiness is separate from task progress. <GuideLink topic="monitoring">Monitoring and check-ins</GuideLink> explain when reviews are due; <GuideLink topic="stop-vs-exclusion">Stop, disable and exclude</GuideLink> act at different scopes.</p></HelpDisclosure><EntityDetails title={<>Conversation and model details</>} ><div className="stack"><p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
+      <HelpDisclosure title="About Supervisor health and controls"><p>A <GuideLink topic="supervisor-conversation">bound Supervisor conversation</GuideLink> is assigned to this main chat. Its readiness is separate from task progress. <GuideLink topic="monitoring">Monitoring and check-ins</GuideLink> explain when reviews are due; <GuideLink topic="stop-vs-exclusion">Stop, disable and exclude</GuideLink> act at different scopes.</p></HelpDisclosure><EntityDetails className="compact" title={<>Conversation and model details</>} ><div className="stack">{snapshot.binding && snapshot.binding.state !== "missing" && <p><strong>Supervisor conversation ID:</strong> <code>{snapshot.binding.threadId}</code></p>}<p className="muted">Saving settings does not start a conversation. T3 creates the Supervisor conversation for the first task that needs it, then reuses it when that main conversation resumes. Independent main conversations have separate Supervisors.</p>
       {snapshot.binding?.settlementState && <p>{settlementText[snapshot.binding.settlementState]} Resumed work uses this same conversation.</p>}
       {snapshot.binding?.settlementBlockedBy && snapshot.binding.settlementBlockedBy !== "unfinished_agreed_work" && !snapshot.binding.settlementState && <p className="muted">Parking this idle Supervisor is waiting on: {snapshot.binding.settlementBlockedBy.replaceAll("_", " ")}.</p>}
       {snapshot.binding?.keptActive && <p>This Supervisor stays active because you chose to keep its conversation active.</p>}
@@ -847,29 +873,30 @@ export function ProjectSupervisorView({
 
 
     <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
+        <h3 id="supervisor-monitoring-status-title">Monitoring</h3>
         <PlanningStatus snapshot={snapshot}/>
         {snapshot.mainThreadId && <ActivityAwareness awareness={snapshot.monitoringStatus?.awareness} threadId={snapshot.mainThreadId}/>}
         {snapshot.binding?.mainSettlementBlockedBy && <p className="small muted">Main conversation remains active: {snapshot.binding.mainSettlementBlockedBy.replaceAll("_", " ")}.</p>}
         {snapshot.binding?.mainSettlementState === "settled" && <p className="small">The service settled the completed main conversation.</p>}
-        {snapshot.monitoringStatus && <section className="stack" aria-labelledby="supervisor-monitoring-status-title">
-          <h4 id="supervisor-monitoring-status-title">Monitoring</h4><p>{snapshot.monitoringStatus.message}</p><p className="small"><GuideLink topic="monitoring">About pending activity and check-ins</GuideLink></p><EntityDetails title={<>Monitoring details and check-ins</>} ><div className="stack">
+        {snapshot.monitoringStatus && <div className="stack">
+          <p>{snapshot.monitoringStatus.message}</p><p className="small"><GuideLink topic="monitoring">About pending activity and check-ins</GuideLink></p><EntityDetails className="compact" title={<>Monitoring details and check-ins</>} ><div className="stack">
           <p><strong>Status:</strong> {snapshot.monitoringStatus.state}</p>
           <p><strong>Pending activities:</strong> {snapshot.monitoringStatus.pendingItems}</p>
           <p><strong>Next review:</strong> {formatMonitoringTime(snapshot.monitoringStatus.nextReviewAt)}</p>
           <p><strong>Last notice:</strong> {formatMonitoringTime(snapshot.monitoringStatus.lastNoticeAt)}</p>
           <p>{snapshot.monitoringStatus.message}</p>
           {snapshot.monitoringStatus.review && <ReviewOutcomes review={snapshot.monitoringStatus.review} />}</div></EntityDetails>
-        </section>}
+        </div>}
     </div>
 
-    {section === "settings" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}
     <form hidden={section !== "all" && section !== "settings"} className="supervisor-settings-form" onSubmit={onSubmit} aria-label="Supervisor settings">
-      <div className="panel settings-card"><fieldset disabled={fieldsDisabled} className="settings-section">
-        <legend>Which conversations are supervised</legend><div className="settings-fields">
+      <div className="panel settings-card"><div className="row between settings-card-heading"><h3 id="supervised-conversations-title" data-route-focus>Which conversations are supervised</h3>{section === "settings" && <Freshness readAt={readAt} refreshing={refreshing} connected={connected} onRefresh={onRefresh}/>}</div>
+        <fieldset disabled={fieldsDisabled} className="settings-section" aria-labelledby="supervised-conversations-title"><div className="settings-fields">
         <p className="muted">{snapshot.noProjectMode ? noProjectEligibility[snapshot.noProjectMode] : "People’s requests in this project’s main conversations are supervised while the project switch above is on."}</p>
         <div className="field-group"><label className="toggle" htmlFor="supervisor-agent-created-threads"><input id="supervisor-agent-created-threads" name="superviseAgentCreatedThreads" type="checkbox" aria-describedby="supervisor-agent-created-help"
           checked={agentThreads} onChange={event => onAgentThreadsChange(event.target.checked)} />
-          <span>Supervise conversations created by agents</span></label><p className="small muted" id="supervisor-agent-created-help">Off by default: agent-created conversations stay excluded even after later human messages. When on, genuine human requests and requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</p></div>
+          <span>Supervise conversations created by agents</span></label><p className="small muted" id="supervisor-agent-created-help">Off by default: conversations started by agents stay excluded, even after later human messages.</p>
+          <HelpDisclosure title="When agent-created conversations are supervised"><p>When on, genuine human requests and requests written afterwards by the agent that launched an ordinary conversation {snapshot.noProjectMode ? "outside a project" : "in this project"} are interpreted and negotiated like a person’s task, and remain attributed to that agent. Earlier requests, other agents, Supervisor conversations, helpers and delegated child tasks are never supervised this way. Start, Stop and definition approval still need a person.{snapshot.noProjectMode && " The No Project mode still decides which chats are supervised."}</p></HelpDisclosure></div>
       </div></fieldset></div>
       <section className="panel settings-card settings-defaults"><h3>Defaults for new Supervisors</h3>
       <fieldset disabled={fieldsDisabled} className="settings-section">
@@ -946,27 +973,6 @@ export function ProjectSupervisorView({
       {dirty && <button type="button" disabled={saving || blocked} onClick={onDiscard}>Discard draft</button>}</div>
     </form>
 
-    {shouldOfferRetry && <div hidden={section !== "all" && section !== "supervision"} className="panel stack">
-      <h3>{snapshot.binding?.state === "missing" ? "Deleted Supervisor conversation" : "Native Supervisor access"}</h3>
-      <p className="muted">{snapshot.binding?.state === "missing"
-        ? "T3 confirmed that the bound conversation was deleted. This explicit action replaces it with a new Supervisor conversation."
-        : "Use this explicit action to retry the selected conversation’s pending or rejected native operation."}</p>
-      {!snapshot.binding && <p role="status">No bound Supervisor conversation is available to retry yet. Refresh after the service establishes one.</p>}
-      {dirty && <p role="status">Save or discard your settings draft before retrying native access.</p>}
-      <button type="button" disabled={!canRetry || saving || blocked} onClick={onRetry}>{retryButtonLabel}</button>
-    </div>}
-
-    <div hidden={section !== "all" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
-        <h4>Chat supervision</h4>
-        <p>{snapshot.chatSupervision.stopped
-          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
-          : snapshot.chatSupervision.activation === "not_started" ? "Not started. Choose this chat from Home to start supervision." : snapshot.chatSupervision.activation === "pending" ? "Start pending. No supervision effects are authorized yet." : "Allowed for this chat; project/global settings still apply."}</p>
-        {(!snapshot.chatSupervision.stopped || snapshot.chatSupervision.stoppedAt === null) && <div><button type="button" className={snapshot.chatSupervision.stopped ? "primary" : "danger-button"} disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
-          onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
-          {chatSupervisionBusy ? "Saving…" : snapshot.chatSupervision.stopped ? "Enable supervision" : "Stop supervision"}</button></div>}
-        <p role="status">{chatSupervisionMessage ?? ""}</p>
-      </div>}
-    </div>
     <div hidden={section !== "all" && section !== "supervision"}><ProjectSupervisorTeamPanel team={snapshot.team} settings={readTeamSettings(snapshot)} mainThreadId={snapshot.mainThreadId}/></div>
   </div>;
 }

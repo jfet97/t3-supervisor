@@ -1,6 +1,6 @@
 import { HelpDisclosure, EntityDetails } from "./disclosure.js";
 import {GuideLink} from "./guide-link.js";
-import {useEffect, useState} from "react";
+import {useEffect, useRef, useState} from "react";
 import {useAtomSet, useAtomValue} from "@effect/atom-react";
 import {Effect, Exit, Option} from "effect";
 import {KeyValueStore} from "effect/persistence";
@@ -220,16 +220,25 @@ export function StartSupervisionPanel({active, onStateChange, onChanged}: {activ
   const start = useAtomSet(startSupervision, {mode: "promiseExit"});
   const check = useAtomSet(checkStartStatus, {mode: "promiseExit"});
   useEffect(() => onStateChange(busy || intent !== null), [busy, intent, onStateChange]);
-  // the shell refreshes its snapshot after a Start settles
-  const settled = async (outcome: Promise<Exit.Exit<boolean, unknown>>) => {const exit = await outcome;if (Exit.isSuccess(exit) && exit.value) onChanged();};
-  return <section hidden={!active} className="panel stack" aria-labelledby="start-supervision-heading">
-    <EntityDetails title={<>Start supervision for a No Project chat</>}  summaryProps={{"id":"start-supervision-heading"}}><div className="stack"><p>Choose a recent chat, search by title or ID, or paste its T3 link. Start stays enabled until explicit Stop. <GuideLink topic="no-project">About No Project chats and activation</GuideLink>.</p>
+  const status = useRef<HTMLParagraphElement>(null);
+  /*
+    The shell refreshes its snapshot after a Start settles. A Start disables the activated row button, so its settled
+    outcome takes focus unless focus already moved to another control; nothing is sent again.
+  */
+  const settled = async (outcome: Promise<Exit.Exit<boolean, unknown>>) => {
+    const exit = await outcome;
+    if (Exit.isSuccess(exit) && exit.value) onChanged();
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement) || active === document.body || active.matches(":disabled")) status.current?.focus();
+  };
+  return <section hidden={!active} className="stack start-supervision" aria-labelledby="start-supervision-heading">
+    <EntityDetails className="compact" title={<>Start supervision for a No Project chat</>}  summaryProps={{"id":"start-supervision-heading"}}><div className="stack"><p>Choose a recent chat, search by title or ID, or paste its T3 link. Start stays enabled until explicit Stop. <GuideLink topic="no-project">About No Project chats and activation</GuideLink>.</p>
     <div className="field-group"><label htmlFor="start-chat-search">Find a chat</label><input id="start-chat-search" type="search" value={query} maxLength={512} autoCapitalize="off" autoCorrect="off" spellCheck={false} aria-describedby="start-chat-help" onChange={event => setQuery(event.target.value)}/>
     <p id="start-chat-help" className="small muted">{candidates.error || candidates.data?.message || "Loading recent chats…"}</p></div>
     {candidates.error && <button type="button" onClick={candidates.reload}>Reload chat search</button>}
     <ul className="candidate-list">{candidates.data?.candidates.map(chat => <li key={chat.id} className="row between"><div><strong>{chat.title}</strong><p className="small muted">{chat.id}{chat.active ? " · Started" : chat.excluded ? " · Stopped" : ""}</p></div><button type="button" disabled={busy || intent !== null || chat.active} aria-label={`Start supervision for ${chat.title}`} onClick={() => void settled(start(chat.id))}>{chat.active ? "Started" : "Start supervision"}</button></li>)}</ul>
     {intent && <div className="notice stack"><p>Retained Start for <code>{intent.threadId}</code></p><button type="button" disabled={busy} onClick={() => void settled(check())}>Check Start status</button></div>}
-    <p role="status">{message}</p>
+    <p role="status" ref={status} tabIndex={-1}>{message}</p>
     </div></EntityDetails>
   </section>;
 }

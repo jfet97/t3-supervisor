@@ -1,7 +1,7 @@
 import type {Route} from "../ui/src/navigation.js";
 import assert from "node:assert/strict";
 import { it } from "vitest";
-import { createNavigator, directoryRoute, openProject, parseRoute, rememberContext, routeHref } from "../ui/src/navigation.js";
+import { createNavigator, directoryRoute, openProject, parseRoute, rememberContext, returnFocus, routeHref } from "../ui/src/navigation.js";
 
 it("deep links preserve exact opaque project and conversation identities and explicit root choice", () => {
   const route = {...directoryRoute, projectId: "project/with ?#%", main: "mcp:chat/&?#", section: "supervision" as const};
@@ -12,6 +12,21 @@ it("deep links preserve exact opaque project and conversation identities and exp
   assert.equal(parseRoute("#/projects/a/definitions?main=").main, "");
   assert.equal(parseRoute("#/projects/a/task?main=deleted-thread").main, "deleted-thread");
   assert.deepEqual(parseRoute("#/projects/%ZZ/task"), directoryRoute);
+});
+
+it("a same-view change returns focus to the control that reopens the view it leaves", () => {
+  const unchosen = {...directoryRoute, projectId: "p", section: "definitions" as const};
+  const catalog = {...unchosen, checkout: "/work/a"};
+  // a folder choice collapses the chooser into Change working folder, also when it leaves an open entry
+  assert.equal(returnFocus(unchosen, catalog), "checkout");
+  assert.equal(returnFocus({...catalog, definition: "workflow:delivery"}, {...catalog, checkout: "/work/b"}), "checkout");
+  // Back to catalog restores the opened entry; Back to Definitions restores Edit project.yaml
+  assert.equal(returnFocus({...catalog, definition: "workflow:delivery"}, catalog), "definition:workflow:delivery");
+  assert.equal(returnFocus({...catalog, section: "editor"}, catalog), "editor");
+  // opening an entry or the editor focuses the destination's own target instead
+  assert.equal(returnFocus(catalog, {...catalog, definition: "workflow:delivery"}), null);
+  assert.equal(returnFocus(catalog, {...catalog, section: "editor"}), null);
+  assert.equal(returnFocus(parseRoute(routeHref(catalog)), catalog), null);
 });
 
 it("Guide topic links round-trip independently of project context and reject malformed topic addresses", () => {

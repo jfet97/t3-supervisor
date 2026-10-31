@@ -279,12 +279,72 @@ const rememberListScroll = (route: Route) => {
   try {sessionStorage.setItem(listScrollKey(route), String(window.scrollY));} catch { /* storage is optional */ }
 };
 
+/**
+ * The control that reopens the view a same-view change leaves, matched by its `data-route-return` value: a folder choice
+ * collapses the chooser into Change working folder, Back to catalog restores the opened entry and Back to Definitions restores
+ * Edit project.yaml.
+ */
+export const returnFocus = (previous: Route, next: Route): string | null =>
+  (previous.checkout ?? "") !== (next.checkout ?? "") ? "checkout"
+    : previous.definition && !next.definition ? `definition:${previous.definition}`
+      : previous.section === "editor" && next.section === "definitions" ? "editor" : null;
+
+/** Navigates and, when the navigation guard accepted the destination, moves focus there as an activated link does. */
+export function navigateWithFocus(navigate: (route: Route) => void, previous: Route, next: Route) {
+  navigate(next);
+  if (routeHref(parseRoute(window.location.hash)) === routeHref(next)) focusAfterNavigation(previous, next);
+}
+
+const shown = (element: HTMLElement) => !element.closest("[hidden]") && element.getClientRects().length > 0;
+// the shown view's own target: the element it marks for arrival, else its page heading
+const viewTarget = () => [...document.querySelectorAll<HTMLElement>("#workspace [data-route-focus]")].find(shown)
+  ?? [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => shown(element) && !element.closest(".sr-only"));
+const focusTarget = (target: HTMLElement, block: ScrollLogicalPosition) => {
+  if (!target.matches("a[href], button, input, select, textarea, summary")) target.tabIndex = -1;
+  target.focus({preventScroll: true});
+  target.scrollIntoView?.({block});
+};
+
+/**
+ * Signing in again removes the sign-in form while the retained view reappears. Focus moves to that view's alert that takes
+ * focus (an unconfirmed save outcome), else to the view's own target; a focused control that survived keeps focus.
+ */
+export function focusRetainedView() {
+  if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
+  requestAnimationFrame(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body && shown(active)) return;
+    const target = [...document.querySelectorAll<HTMLElement>("#workspace [role=alert][tabindex='-1']")].find(shown) ?? viewTarget();
+    if (target) focusTarget(target, "center");
+  });
+}
+
 /** The native frame adapter focuses the destination and restores retained list positions. */
 export function focusAfterNavigation(previous: Route, next: Route, restoreListPosition = false) {
   // the mounted Guide focuses its topic after rendering, including initial loads and query-only changes
   if (next.page === "guide") return;
-  if (previous.page === next.page && previous.projectId === next.projectId && previous.main === next.main && next.projectId) return;
   if (typeof requestAnimationFrame !== "function" || typeof document === "undefined") return;
+  if (previous.page === next.page && previous.projectId === next.projectId && previous.main === next.main && next.projectId) {
+    /*
+      Within one project or conversation a filter, switch or pager stays mounted and keeps focus, and a section link keeps it
+      within its navigation on the link that now marks the destination, after a click or a history step. When the destination
+      replaced the activated control (a catalog entry, Back to catalog, the editor link or a folder choice), or a surviving
+      shortcut such as Review project changes or a breadcrumb led elsewhere, focus moves to the control a return restores or
+      to the destination's own target instead of staying behind.
+    */
+    requestAnimationFrame(() => {
+      const back = returnFocus(previous, next);
+      const returned = back === null ? undefined : [...document.querySelectorAll<HTMLElement>("#workspace [data-route-return]")].find(element => element.dataset.routeReturn === back && shown(element));
+      const active = document.activeElement instanceof HTMLElement && document.activeElement !== document.body && shown(document.activeElement) ? document.activeElement : null;
+      if (!returned && active?.matches("button, input, select, textarea, summary")) return;
+      const current = active?.closest("nav")?.querySelector<HTMLElement>("a[aria-current=page]");
+      const target = returned ?? (current && shown(current) ? current : viewTarget());
+      if (!target || target === active) return;
+      // a restored entry returns to the middle of the view with its neighbours; a destination target only needs to be visible
+      focusTarget(target, target === returned ? "center" : "nearest");
+    });
+    return;
+  }
   requestAnimationFrame(() => {
     const heading = [...document.querySelectorAll<HTMLElement>("#workspace h1")].find(element => !element.closest("[hidden]") && !element.closest(".sr-only"));
     let top = 0;
@@ -311,9 +371,6 @@ export function RouteLink({to, navigate, children, ...props}: Omit<React.AnchorH
     props.onClick?.(event);
     if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
     event.preventDefault();
-    const previous = parseRoute(window.location.hash);
-    navigate(to);
-    if (routeHref(parseRoute(window.location.hash)) !== routeHref(to)) return;
-    focusAfterNavigation(previous, to);
+    navigateWithFocus(navigate, parseRoute(window.location.hash), to);
   }}>{children}</a>;
 }

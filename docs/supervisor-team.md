@@ -116,9 +116,8 @@ and nonempty, disjoint native sessions belonging to the exact root/helper thread
 Unavailable or unverifiable isolation blocks recruitment and raises root attention.
 Existing helpers are not moved. Unset configuration retains normal recruitment.
 
-This is a temporary installation workaround. The Lab's
-`supervisor-provider-isolation-workaround-2026-10-16.md` records configuration,
-verification and removal after the fixed published build is actually installed.
+This is a temporary installation workaround. Remove the setting once the installed
+T3 build contains the correction.
 
 The default maximum is five helpers per root. Project settings accept an integer
 from zero to twenty. Zero disables new recruitment, and lowering the limit does
@@ -448,6 +447,6 @@ The root may use the native-proof `quarantine` team action. Coverage returns to
 the root, but unresolved writes and notices stay fenced and visible. This does not
 stop the helper's T3 conversation or any turn already in progress.
 
-Source behavior, staged acceptance and live deployment are separate evidence.
-Consult the Lab tracking records before making claims about an installed revision
-or an actual helper pilot.
+Source behavior, local-stack acceptance and live deployment are separate evidence.
+A claim about an installed revision or an actual helper pilot needs that
+installation's own observation.

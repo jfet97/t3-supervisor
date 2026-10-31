@@ -18,10 +18,11 @@ independently of any selected project.
 ## Sign in
 
 Enter the owner-generated single-use sign-in token in the sign-in page. The login
-page shows `t3-supervisor auth forge`. For a direct installation, run it as the
-service account from any directory. For Docker or a VM, run it inside that
-environment. A custom state directory must match the service's DATA_DIRECTORY or
-`--data-dir` option. This mints a fresh token valid for five minutes. Tokens come
+page shows `t3-supervisor auth forge`. Run it as the account that runs the
+Supervisor instance, from any directory in the same runtime environment: inside
+its container when it runs in one. A custom state directory must match the
+service's DATA_DIRECTORY or `--data-dir` option. This mints a fresh token
+valid for five minutes. Tokens come
 from private service state and must not be put in chat or a URL. Ordinary usage
 does not authorize retrieving or provisioning credentials. The browser stores only
 a 30-day session shared across tabs and browser restarts for that exact origin,
@@ -246,7 +247,7 @@ open its originating conversation. Expired details are unavailable evidence, not
 reconstructed facts.
 
 Settings → Chat settings controls excluded chats per instance. Changes apply live
-and persist in the instance state volume. Mac and Lima policies are independent.
+and persist in the instance state volume. Each instance keeps its own policy.
 Project Supervisors skip excluded chats while preserving existing bindings and
 history.
 

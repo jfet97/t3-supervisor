@@ -39,5 +39,6 @@ export function CheckoutChooser({inventory, selected, onSelect, disabled, onRefr
       {!matching.length && <p className="muted">No working folders match your search.</p>}
     </>}
   </section>;
-  return selected ? <EntityDetails title="Change working folder" icon="folder">{content}</EntityDetails> : content;
+  // a choice remounts the collapsed chooser, so the route focus path finds Change working folder instead of the removed choice
+  return selected ? <EntityDetails key={selected} className="compact" title="Change working folder" icon="folder" summaryProps={{"data-route-return": "checkout"}}>{content}</EntityDetails> : content;
 }

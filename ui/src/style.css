@@ -81,9 +81,13 @@ p, li, code, strong, a, summary, small, .small { overflow-wrap: anywhere; }
 .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #8a681e; margin-right: 7px; flex-shrink: 0; }
 .dot.online, .native-state.active .dot { background: #168475; }
 main#workspace { max-width: 1560px; padding: 26px 38px 24px; margin: 0 auto; scroll-margin-top: 20px; }
-.page-heading { display: grid; gap: 8px; margin-bottom: 8px; }
+.page-heading { display: grid; gap: 12px; margin-bottom: 8px; }
 .page-heading p { max-width: 72ch; margin-top: 5px; }
-.heading-actions { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+/* a page heading with actions is one row: its copy takes the free width and the actions keep their own size, wrapping below when narrow */
+.page-heading.heading-actions { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px 24px; flex-wrap: wrap; }
+.page-heading.heading-actions > .heading-copy { flex: 1 1 32rem; min-width: 0; }
+.heading-copy > .disclosure { margin-top: 12px; }
+.page-heading.heading-actions > .row { flex: 0 0 auto; padding-top: 6px; }
 .section-heading { margin: 6px 0 12px; }
 .section-heading p { margin-top: 8px; }
 .section-heading a, .work-section > .section-heading a { display: inline-flex; align-items: center; gap: 7px; min-height: 44px; font-size: 13px; font-weight: 550; }
@@ -255,8 +259,8 @@ dialog pre { margin: 0; max-height: 400px; overflow: auto; background: var(--sof
   h1 { font-size: 25px; }
   h2 { font-size: 19px; }
   .home-workspace { gap: 25px; }
-  .heading-actions { gap: 15px; }
-  .heading-actions > .row { justify-content: space-between; width: 100%; }
+  .page-heading.heading-actions { gap: 12px 15px; }
+  .page-heading.heading-actions > .row { justify-content: space-between; width: 100%; padding-top: 0; }
   .panel, .task-focus { padding: 19px; }
   .attention-row { padding: 16px; gap: 10px; }
   .attention-row > svg:first-child { display: none; }
@@ -330,7 +334,10 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 @media (max-width: 760px) {.candidate-list > li {align-items: flex-start; flex-direction: column;}}
 
 /* One task workspace: the task and its state, one journey, one agreement context, then evidence and history. */
-.task-workspace { container: workflow / inline-size; gap: 14px; }
+.task-workspace { container: workflow / inline-size; gap: 28px; }
+.task-summary, .task-plan-region { display: grid; gap: 14px; min-inline-size: 0; }
+.task-plan-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; }
+.task-plan-head > .disclosure-help[open] { flex-basis: 100%; order: 1; }
 .task-band { display: grid; gap: 10px; }
 .task-band .task-objective { font-size: clamp(1.1rem, .95rem + .5cqi, 1.35rem); line-height: 1.35; font-weight: 650; margin: 0; max-width: 92ch; text-wrap: pretty; }
 .task-band > .muted { max-width: 75ch; }
@@ -343,6 +350,8 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .task-reading { display: flex; align-items: center; gap: 6px 24px; flex-wrap: wrap; color: var(--quiet); font-size: .85rem; }
 .task-refresh, .view-freshness { display: inline-flex; align-items: center; gap: 10px; margin-inline-start: auto; }
 .view-freshness { display: flex; justify-content: flex-end; }
+.view-state-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+.view-state-row > .view-freshness { margin-inline-start: auto; }
 .task-refresh button, .view-freshness button { min-height: 34px; padding: 4px 10px; }
 .attention-band { padding: 12px 16px; gap: 8px; }
 .attention-band h2 { font-size: .95rem; }
@@ -446,7 +455,11 @@ input[aria-invalid="true"] { border-color: light-dark(#a32f25, #ffb9b3); }
 .evidence-history h3 { font-size: .95rem; }
 .supervisor-records { padding-inline-start: 18px; }
 .connected-work h2 { font-size: 1.05rem; }
-.workflow-participants h3 { font-size: 1rem; }
+.workflow-participants h3, .connected-children h3 { font-size: 1rem; }
+.connected-work { gap: 24px; }
+.connected-children, .connected-work > .workflow-participants { display: grid; gap: 12px; }
+.connected-work > .workflow-participants { padding-top: 22px; border-top: 1px solid var(--line); }
+.connected-children > p, .workflow-participants > p { margin: 0; max-width: 72ch; }
 .workflow-participant-list { margin: 0; padding: 0; list-style: none; }
 .workflow-participant { padding: 14px 0; border-top: 1px solid var(--line); display: grid; gap: 8px; overflow-wrap: anywhere; }
 .workflow-participant > .disclosure { margin-top: 4px; }
@@ -596,6 +609,7 @@ button.danger-button:hover:not(:disabled):not([aria-disabled="true"]) { color: l
 .disclosure-cue > svg:last-child, .disclosure[open] > summary .disclosure-cue > svg:first-child { display: none; }
 .disclosure[open] > summary .disclosure-cue > svg:last-child { display: block; }
 .disclosure-body { padding: 8px 12px 12px; display: grid; gap: 8px; max-width: 76ch; }
+.disclosure-help:not([open]), .disclosure.compact:not([open]) { inline-size: fit-content; max-inline-size: 100%; }
 .disclosure-entity > .disclosure-body { border-top: 1px solid var(--line); max-width: none; }
 .disclosure-body > :first-child { margin-top: 0; }
 .disclosure-body > :last-child { margin-bottom: 0; }
@@ -617,10 +631,9 @@ button.danger-button:hover:not(:disabled):not([aria-disabled="true"]) { color: l
 
 /* operate spacing keeps related controls together and separates sections */
 h1:focus { width: fit-content; max-width: 100%; }
-.page-heading { display: grid; gap: 12px; }
 .page-heading p, .section-heading p { max-width: 72ch; }
 .panel .panel { border: 0; border-radius: 0; padding: 16px 0; background: transparent; box-shadow: none; border-top: 1px solid var(--line); }
-.row, .toolbar, .filter-bar, .heading-actions { column-gap: 8px; }
+.row, .toolbar, .filter-bar { column-gap: 8px; }
 fieldset.stack { gap: 12px; padding: 20px 0 0; border: 0; border-top: 1px solid var(--line); min-width: 0; }
 fieldset.stack > legend { font-weight: 650; padding-inline-end: 8px; }
 fieldset.stack > p { max-width: 72ch; }
@@ -646,6 +659,9 @@ select { max-width: 36rem; }
 .definition-catalog p { margin: 4px 0; }
 .definition-detail { display: grid; gap: 16px; min-width: 0; }
 .definition-workspace { gap: 32px; }
+.definition-workspace .filter-bar { padding: 0; border: 0; border-radius: 0; background: transparent; }
+.definition-requirements-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
+.definition-requirements-row > p { margin: 0; }
 .definition-heading { gap: 8px; }
 .definition-issues li { display: grid; gap: 8px; }
 .template-tree { display: grid; gap: 12px; padding-inline-start: 20px; border-inline-start: 1px solid var(--line); }
@@ -733,6 +749,8 @@ select { max-width: 36rem; }
 }
 
 .supervisor-settings-form { display: grid; gap: 24px; }
+.settings-card-heading { align-items: center; gap: 8px 16px; padding-block-end: 12px; }
+.settings-card-heading h3 { font-size: 1rem; }
 .settings-card { padding: 24px; }
 .settings-defaults { display: grid; gap: 32px; }
 .settings-section { margin: 0; padding: 0; border: 0; }

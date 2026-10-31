@@ -38,6 +38,12 @@ complete main and runner harness suites to GitHub, as the CI policy specifies.
 Counts of passing tests cannot establish that a rendered control exists or that
 a user can complete a journey.
 
+Prove live behavior only on the repository's
+[local development stack](../../../docs/local-stack.md): `pnpm dev:fixture` for
+dashboard states, `pnpm dev:stack` for the published T3 boundary. Label each
+observation fixture, local stack or provider. Never test against a personal host,
+an existing installation or copied credentials, logins or MCP registrations.
+
 ## Review and deliver
 
 Keep implementation ownership explicit when collaborating. Freeze the exact
