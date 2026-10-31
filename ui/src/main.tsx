@@ -29,7 +29,7 @@ import {
 import { admit, admittedMutation, authEpoch, authEpochAtom, draftFamily, environmentAtom, scopeKey, snapshotAtom, refreshOnDashboardChange, uiRuntime, type MutationKey } from "./atoms.js";
 import { themeAtom, ThemeSelector } from "./theme.js";
 import "./style.css";
-import { directoryRoute, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
+import { directoryRoute, focusRetainedView, homeRoute, RouteLink, useNavigation, type Route } from "./navigation.js";
 import { Home, useOverview } from "./overview.js";
 import { Icon } from "./icons.js";
 import { ProjectDefinitionsPanel } from "./project-definitions.js";
@@ -453,6 +453,21 @@ function Dashboard({onSignedOut}: {onSignedOut: () => void}) {
   );
 }
 
+/*
+  The browser focus adapter of the session boundary. When an open dashboard loses its session, its sign-in page takes focus
+  on this heading; when signing in again removes that page, focus returns to the retained view. A first sign-in and ordinary
+  access refreshes leave focus where it is.
+*/
+function SignInHeading({reopened}: {reopened: boolean}) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    if (!reopened) return;
+    heading.current?.focus();
+    return focusRetainedView;
+  }, [reopened]);
+  return <h1 ref={heading} tabIndex={reopened ? -1 : undefined}>{reopened ? "Sign in again" : "Sign in to Supervisor"}</h1>;
+}
+
 function App() {
   useAtomMount(themeAtom);
   const access = useAtomValue(accessAtom);
@@ -466,7 +481,7 @@ function App() {
   return <>
     {opened && <div hidden={!ready}><Dashboard onSignedOut={() => setToken("")} /></div>}
     {!ready && <div className="sign-in-layout"><div className="sign-in-intro"><img src="/app-icon.png" width="76" height="76" alt=""/><p className="sign-in-tagline">Keep work<br/>in view.</p><p>Follow the task. Understand the plan. Know when to step in.</p></div><main className="connecting stack">
-      <h1>{opened ? "Sign in again" : "Sign in to Supervisor"}</h1>
+      <SignInHeading reopened={opened}/>
       {ready === null ? <p role="status">Opening Supervisor…</p> : <form className="stack" onSubmit={async event => {
         event.preventDefault();
         const exit = await signIn(token);
@@ -475,9 +490,9 @@ function App() {
       }}>
         {opened && <p>Your open draft is kept in this tab.</p>}
         <p>Stay signed in for 30 days on this browser, until you sign out.</p>
-        <p className="muted">Use a one-time token from the machine running Supervisor.</p><HelpDisclosure title={<>How to get a sign-in token</>} ><div className="stack"><p>Generate a sign-in token on the machine running T3 Supervisor:</p>
+        <p className="muted">Use a one-time token generated where Supervisor runs.</p><HelpDisclosure title={<>How to get a sign-in token</>} ><div className="stack"><p>Generate a sign-in token where this Supervisor instance runs:</p>
         <pre><code>t3-supervisor auth forge</code></pre>
-        <p className="muted">Run it in your terminal as the account running Supervisor. For Docker or a VM, run it inside that environment. Tokens expire after five minutes and can be used once.</p></div></HelpDisclosure>
+        <p className="muted">Run it as the account that runs this Supervisor instance, in the same runtime environment: inside its container when it runs in one. Tokens expire after five minutes and can be used once.</p></div></HelpDisclosure>
         <div className="field-group"><label htmlFor="access-token">Sign-in token</label>
         <input id="access-token" name="token" type="password" autoComplete="one-time-code" autoCapitalize="none" spellCheck={false} required maxLength={128} value={token} onChange={event => setToken(event.target.value)} />
         </div>

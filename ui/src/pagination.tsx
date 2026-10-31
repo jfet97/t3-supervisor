@@ -13,7 +13,7 @@ export function ListPager({total, page, onPage, size = defaultPageSize, label = 
   const range = pageWindow(total, page, size);
   return <nav className="list-pager" aria-label={`${label} pages`}>
     <p className="small muted" role="status">{range.start}–{range.end} of {total} <span>· Page {range.page} of {range.pages}</span></p>
-    <div className="row"><button type="button" aria-disabled={disabled || range.page === 1} onClick={() => {if (!disabled && range.page > 1) onPage(range.page - 1);}}><Icon name="back" size={16}/>Previous</button>
-      <button type="button" aria-disabled={disabled || range.page === range.pages} onClick={() => {if (!disabled && range.page < range.pages) onPage(range.page + 1);}}>Next<Icon name="arrow" size={16}/></button></div>
+    {range.pages > 1 && <div className="row"><button type="button" aria-disabled={disabled || range.page === 1} onClick={() => {if (!disabled && range.page > 1) onPage(range.page - 1);}}><Icon name="back" size={16}/>Previous</button>
+      <button type="button" aria-disabled={disabled || range.page === range.pages} onClick={() => {if (!disabled && range.page < range.pages) onPage(range.page + 1);}}>Next<Icon name="arrow" size={16}/></button></div>}
   </nav>;
 }

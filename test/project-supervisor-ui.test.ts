@@ -291,8 +291,9 @@ it("Supervisor settings markup explains automatic conversation reuse and separat
     saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false, shouldOfferRetry: false, retryButtonLabel: "Retry native access", canRetry: false,
     onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
-  assert.match(html, /Bound conversation/);
-  assert.match(html, /t3-thread:\/\/v1\/exact-thread-123/);
+  assert.match(html, /Bound Supervisor conversation: <a href="t3-thread:\/\/v1\/exact-thread-123">Open in T3<\/a>/);
+  // the identifier itself sits in the conversation details record
+  assert.match(html, /Supervisor conversation ID:<\/strong> <code>exact-thread-123<\/code>/);
   assert.match(html, /Saving settings does not start a conversation/);
   assert.match(html, /Role instructions limit it to reading and messaging through T3, but those instructions do not enforce tool restrictions/);
   assert.match(html, /creates the Supervisor conversation for the first task that needs it/);
@@ -441,7 +442,9 @@ it("Project settings offers agent-created supervision as an unchecked checkbox t
     onDiscard: () => {}, onRetry: () => {}, onSubmit: event => event.preventDefault(),
   }));
   const off = render(false);
-  assert.match(off, /<legend>Which conversations are supervised<\/legend>/);
+  // the form heading is also where Review project changes and a lost focus arrive in Project settings
+  assert.match(off, /<h3 id="supervised-conversations-title" data-route-focus="true">Which conversations are supervised<\/h3>/);
+  assert.match(off, /<fieldset[^>]*aria-labelledby="supervised-conversations-title"/);
   assert.ok(off.indexOf("superviseAgentCreatedThreads") < off.indexOf("Defaults for new Supervisors"), "eligibility comes before the defaults for new Supervisors");
   assertAgentCreatedCheckbox(off, false);
   assert.match(off, /Start, Stop and definition approval still need a person/);

@@ -144,6 +144,9 @@ it.effect("the project folder and Git-reported trunk checkout are distinct, dedu
   const html = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: same, selected: null, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
   assert.equal((html.match(/checkout-prominent/g) ?? []).length, 1);
   assert.match(html, /Project folder/); assert.match(html, /Default branch trunk/);
+  // a chosen folder collapses the chooser into the control the route focus path returns to
+  const chosen = renderToStaticMarkup(createElement(CheckoutChooser, {inventory: same, selected: f.root, disabled: false, onRefresh: () => {}, onSelect: () => {}}));
+  assert.match(chosen, /<details class="disclosure disclosure-entity compact"><summary data-route-return="checkout">.*Change working folder/);
 }));
 
 it("every workspace level renders one explicit parent link while retaining conversation and checkout context", () => {

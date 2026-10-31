@@ -429,9 +429,9 @@ listening socket in the same Supervisor process, serving only `/mcp/workflows`.
 `WORKFLOW_MCP_PORT` defaults to the dashboard port. This lets the dashboard stay on
 loopback while the actual MCP endpoint binds directly to a private Docker bridge.
 Missing bind interfaces fail startup; no forwarding service or proxy is involved.
-For the Lima lab the MCP listener is `172.19.0.1:19008`, with dashboard loopback
-`127.0.0.1:19008`. Mac containers use their existing shared private network and
-direct `http://t3-supervisor:9008/mcp/workflows`.
+For example, a host-network deployment can keep the dashboard on `127.0.0.1:9008`
+while the MCP listener binds a private bridge address on the same port; containers
+on a shared private network can use `http://t3-supervisor:9008/mcp/workflows`.
 
 A successful read through the installed gateway establishes transport/permission
 behavior, not a positive workflow edit or complete configured-project dialogue.
@@ -845,8 +845,8 @@ execution proofs, a task scheduler, or a pre-first-tool negotiation barrier. The
 separate progress view and current delivery timing and child-routing limits are
 documented in [project supervision](project-supervision.md). Initial guidance can
 wait while T3 prepares a target turn, but no gate guarantees that it arrives before
-a tool starts. Consult T3 Lab's three maintained tracking documents for source
-checks, remote review, staged VM evidence and the installed revision.
+a tool starts. Source checks, review, local-stack evidence ([local development
+stack](local-stack.md)) and an installed revision are separate facts.
 
 ## Supervisor team authority and messages
 
@@ -870,9 +870,9 @@ readiness and dashboard presentation.
 ## Local access and rotation
 
 Dashboard sign-in uses a freshly forged one-time token, valid for five minutes.
-Run `t3-supervisor auth forge` as the service account, from any directory. A direct
-installation uses the same user state directory for service and CLI; Docker/VM
-users run it inside their deployment environment. Custom state paths use the same
+Run `t3-supervisor auth forge` as the account that runs the service, from any
+directory in the same runtime environment: inside its container when it runs in
+one. Service and CLI then use the same user state directory. Custom state paths use the same
 DATA_DIRECTORY or `--data-dir /absolute/path` for both commands. The CLI requires initialized
 private auth state. The login page shows this exact portable command. Private
 SQLite stores token hashes rather than raw codes. Consumption and session creation
@@ -889,7 +889,7 @@ New sessions last 30 days and retain their original deadline across service rest
 and deployments. Existing shorter sessions keep their original deadline. Only hashes
 and issue/expiry times are stored; the browser keeps the
 raw session in origin-scoped localStorage, shared across tabs and browser restarts.
-Mac and forwarded VM ports remain separate origins. Storage changes synchronize
+Different hosts and forwarded ports remain separate origins. Storage changes synchronize
 sign-in and sign-out across tabs without replaying writes; open drafts stay in their
 tab. Sign out durably revokes the session
 across service instances and restarts. Only the service initializes a missing

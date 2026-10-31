@@ -21,7 +21,7 @@ export function ConversationStatus({engagement, fresh, explicitlyStopped = false
 
 export function ConversationUnderstanding({draft}: {draft: ConversationDraft | undefined}) {
   if (!draft || !draft.objective && !draft.constraints.length && !draft.questions.length && !draft.findings.length && !draft.duties.length) return null;
-  return <EntityDetails title={<>Understanding and draft duties</>} className="small"><div className="stack">
+  return <EntityDetails title={<>Understanding and draft duties</>} className="small compact"><div className="stack">
     {draft.objective && <p>{draft.objective}</p>}
     {draft.constraints.length > 0 && <div><strong>Constraints</strong><ul>{draft.constraints.map((text, i) => <li key={i}>{text}</li>)}</ul></div>}
     {draft.questions.length > 0 && <div><strong>Open questions</strong><ul>{draft.questions.map((text, i) => <li key={i}>{text}</li>)}</ul></div>}

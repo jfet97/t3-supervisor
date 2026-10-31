@@ -182,16 +182,16 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
   const workflowIds = [...new Set(config.workflows.flatMap(workflow => catalogEntryId("workflows", workflow.path) ?? []))];
   const unreadableSource = brokenConfigSource && <EntityDetails title={<>Inspect the unreadable project.yaml source</>} className="definition-block"><pre className="definition-copy">{brokenConfigSource.content}</pre></EntityDetails>;
 
-  if (definitions.globalOnly) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">This view is global-only. Its definitions are inspectable, but a project editor does not write global files.</p></div>;
-  if (!definitions.editingAvailable) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">Editing needs a dedicated filesystem read/write credential configured through deployment setup.</p></div>;
-  if (!definitions.complete || !definitions.revision) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">Editing requires a complete read and a current revision. Refresh after access or repository issues are resolved.</p></div>;
-  if (!projectConfig && !brokenConfigSource) return <div className="panel stack"><h3>Project configuration</h3><p className="muted">This checkout has no readable project.yaml to update. Create <code>.t3-supervisor/project.yaml</code> with <code>workflows: []</code> and <code>steps: []</code>, then index any existing definitions and refresh.</p></div>;
+  if (definitions.globalOnly) return <div className="panel stack"><h3 data-route-focus>Project configuration</h3><p className="muted">This view is global-only. Its definitions are inspectable, but a project editor does not write global files.</p></div>;
+  if (!definitions.editingAvailable) return <div className="panel stack"><h3 data-route-focus>Project configuration</h3><p className="muted">Editing needs a dedicated filesystem read/write credential configured through deployment setup.</p></div>;
+  if (!definitions.complete || !definitions.revision) return <div className="panel stack"><h3 data-route-focus>Project configuration</h3><p className="muted">Editing requires a complete read and a current revision. Refresh after access or repository issues are resolved.</p></div>;
+  if (!projectConfig && !brokenConfigSource) return <div className="panel stack"><h3 data-route-focus>Project configuration</h3><p className="muted">This checkout has no readable project.yaml to update. Create <code>.t3-supervisor/project.yaml</code> with <code>workflows: []</code> and <code>steps: []</code>, then index any existing definitions and refresh.</p></div>;
 
   if (!editing) {
     const required = projectConfig ? requiredReferences(projectConfig).map(reference => "step" in reference ? `step:${reference.step}` : `workflow:${reference.workflow}`) : [];
     return <div className="panel stack project-configuration-summary">
       <div>
-        <h3>{projectConfig ? "Project configuration" : "Project configuration needs repair"}</h3>
+        <h3 data-route-focus>{projectConfig ? "Project configuration" : "Project configuration needs repair"}</h3>
         <p className="definition-path">Target: <code>{definitions.workspaceRoot}/.t3-supervisor/project.yaml</code></p><p className="muted">This is the shared file for conversations using this folder. This editor changes only the selected checkout's <code>.t3-supervisor/project.yaml</code>. Reusable step and workflow files remain read-only here.</p>
       </div>
       {projectConfig
@@ -213,7 +213,7 @@ export function ProjectConfigurationEditor({definitions, onSaved, onDirtyChange,
     completeSave(resolveSave(plan.input)(await save(plan.input)), plan.normalized, setDraft, {onSaved, onDirtyChange, onSavingChange});
   }}>
     <div className="stack">
-      <h3>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</h3>
+      <h3 data-route-focus>{projectConfig ? "Edit project configuration" : "Repair project configuration"}</h3>
       <p className="definition-path">Target: <code>{definitions.workspaceRoot}/.t3-supervisor/project.yaml</code></p>
       <p className="muted">Edit this folder’s existing index. Every conversation working in this folder reads the same project.yaml. Full step and workflow files remain read-only here. <GuideLink topic="config">About the index, required entries and starting workflow</GuideLink>.</p>
       {!projectConfig && <><p className="panel" role="note">The current file could not be parsed. This replacement starts with empty workflows and steps lists; its original requirements remain unknown. Review the source before saving.</p>{unreadableSource}</>}

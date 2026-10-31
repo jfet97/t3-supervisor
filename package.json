@@ -31,6 +31,8 @@
     "test:harness": "node --import tsx scripts/run-tests.ts --config vitest.harness.config.ts",
     "start": "node dist/main.js",
     "dev:ui": "vite build --watch",
+    "dev:fixture": "node --import tsx scripts/dev-fixture.ts",
+    "dev:stack": "node --import tsx scripts/local-stack.ts",
     "test:suites": "node --import tsx scripts/run-tests.ts"
   },
   "dependencies": {
