@@ -31,7 +31,12 @@ harness suites to GitHub CI rather than duplicating them locally.
 - Define the requested behavior and observable acceptance cases before editing.
   Fix demonstrated failures in the existing path. Remove superseded code and
   instructions instead of layering workarounds, stores, parsers or compatibility.
-- Test the riskiest user journey early on the VM, before a long implementation or
+- Develop and test only on the repository-owned local setup
+  ([local development stack](docs/local-stack.md)): `pnpm dev:fixture` for dashboard
+  states and `pnpm dev:stack` for a pinned published T3. Never use or connect to a
+  personal host, an existing T3 or Supervisor instance, or another installation's
+  credentials, provider logins or MCP registrations for development or tests.
+- Test the riskiest user journey early on the local stack, before a long implementation or
   review campaign. For negotiation and flooding, inspect actual rendered prompts,
   total traffic, repeated messages, tool arguments and native event timestamps.
   Permissive size ceilings and hundreds of passing unit tests do not prove these
@@ -80,33 +85,28 @@ This project has an LLM-maintained knowledge base in `knowledge/` (git-ignored).
 - Keep release-infrastructure work and dry runs free of registry publication,
   credential provisioning or publishing-setting changes unless explicitly requested.
 
-## Batch completion and deployment
+## Batch completion
 
-After completing an implementation batch, deploy the completed Supervisor to both
-the Mac and T3 Lab VM and activate any associated MCP/MCPX connection changes.
-Source checks alone do not complete a batch. Carry out the normal commit/source
-synchronization and deployment steps without asking for confirmation again, unless
-the current user explicitly limits deployment or a concrete blocker prevents it.
-Verify the running revision, relevant health and a bounded real MCP call; preserve
-state volumes, credentials, existing thread identities and instance settings.
-Update the Lab's current-state, next-steps and progress documents with the outcome.
-Choose checks proportionate to the change; do not replay the entire historical
-foundation test campaign. Never modify T3 source or its installed app/server.
+A source batch is complete when its pull request head passes the `check` status and
+its reviewer accepted the agreed evidence. Prove live behavior on the local stack
+and report fixture, local-stack and provider observations separately. Choose checks
+proportionate to the change; do not replay the entire historical foundation test
+campaign. Publishing a release and deploying a running service are separate steps
+for their owners; personal deployment procedures stay outside this repository.
+Never modify T3 source or its installed app/server.
 
 ## Standing rule: no Supervisor proxy workarounds
 
 Do not add or retain extra HTTP proxies, reverse proxies or relay sidecars to make
 Supervisor integrations work. Fix endpoint exposure, authentication, accepted hosts
-and client configuration in Supervisor itself. MCPX must connect directly to the
-Supervisor MCP endpoint. The existing MCPX gateway remains the client connection;
-do not introduce another intermediary. The two legacy workflow HTTP proxy services were
-removed by the completed direct-authentication batch. Never modify
-T3 source or its installed app/server as a workaround.
+and client configuration in Supervisor itself. MCP clients and gateways such as
+MCPX connect directly to the Supervisor MCP endpoint; do not introduce another
+intermediary. Never modify T3 source or its installed app/server as a workaround.
 
 
 ## Current phase: rapid development, no backward compatibility
 
-This is an experimental project being iterated quickly on the Mac and Lab VM.
+This is an experimental project being iterated quickly.
 Backward compatibility with previous prototype versions, schemas, file formats,
 CLI behavior or configuration is not a requirement unless the user explicitly
 requests it for a particular change. Prefer the simplest current implementation.
