@@ -851,8 +851,8 @@ owned identities and workflow documents have explicit bounds. Overflow remains
 visible rather than truncating policy. Native chats use T3/provider context
 management for project and workflow supervision.
 See [workflow MCP](workflow-mcp.md) for exact write authorization, size limits,
-receipts and mutable-plan history. Source tests, staged VM proof and actual service
-deployment are separate claims; current installed revisions belong in Lab tracking.
+receipts and mutable-plan history. Source tests, local-stack proof and actual service
+deployment are separate claims.
 
 ## Dashboard updates
 

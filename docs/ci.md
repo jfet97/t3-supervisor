@@ -26,7 +26,10 @@ to the PR itself still require a successful check on its new head. Admin bypasse
 remain exceptional.
 
 While editing, run focused local cases, lint and types. Leave the final complete
-main and harness suites to GitHub rather than repeating them locally.
+main and harness suites to GitHub rather than repeating them locally. The main suite
+includes the dashboard fixture and the local stack's guard rails; the published-T3
+path itself downloads T3, so run it locally with `pnpm dev:stack --check`
+([local development stack](local-stack.md)).
 
 ## Release metadata fast track
 

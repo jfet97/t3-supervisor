@@ -246,7 +246,7 @@ open its originating conversation. Expired details are unavailable evidence, not
 reconstructed facts.
 
 Settings → Chat settings controls excluded chats per instance. Changes apply live
-and persist in the instance state volume. Mac and Lima policies are independent.
+and persist in the instance state volume. Each instance keeps its own policy.
 Project Supervisors skip excluded chats while preserving existing bindings and
 history.
 

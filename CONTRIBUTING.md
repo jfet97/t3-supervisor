@@ -6,7 +6,9 @@ and pnpm 12.14.0, and supports Apple Silicon macOS and x86_64/aarch64 Linux.
 Run `nix develop` in the checkout to enter it, or prefix a command with
 `nix develop --command`. The project's `packageManager` field pins pnpm 12.14.0;
 dependency installation uses the committed `pnpm-lock.yaml` with
-`pnpm install --frozen-lockfile`.
+`pnpm install --frozen-lockfile`. When the host's Nix configuration does not enable
+flakes, use `nix --extra-experimental-features "nix-command flakes" develop`; the
+setup script below passes that option itself.
 
 New worktrees reuse pnpm's shared package store with `--prefer-offline` and
 hardlinks, fetching packages that are missing while keeping each worktree's
@@ -74,6 +76,21 @@ deterministically, so all four shard indices are required for full coverage.
 
 Read [AGENTS.md](AGENTS.md) and the local knowledge base before changing the project.
 
+## Local stack
+
+Develop and test against the repository-owned local setup only; it needs no
+personal host or existing installation and never connects to one. After `pnpm build`:
+
+```sh
+pnpm dev:fixture            # dashboard over the production application, scripted T3 states
+pnpm dev:stack              # pinned unmodified published T3 + Supervisor from this checkout
+pnpm dev:stack --check      # the early risky path end to end, then a full cleanup
+```
+
+Each run uses a fresh private folder, its own ports and scoped T3 credentials, and
+removes everything when it stops. See [local development stack](docs/local-stack.md)
+for scenarios, credentials, provider sign-in and evidence labels.
+
 ## Releases
 
 Add a changeset for user-visible changes. See [RELEASING.md](RELEASING.md).
@@ -88,8 +105,9 @@ pnpm build
 pnpm start
 ```
 
-Set `T3_URL` and `T3_TOKEN_FILE` as described in
-[installation](docs/installation.md). To register the CLI globally, use
+This connects to the T3 named by `T3_URL` and `T3_TOKEN_FILE`, as described in
+[installation](docs/installation.md); for development and tests, use the
+[local stack](docs/local-stack.md) instead. To register the CLI globally, use
 `pnpm add --global .`. `pnpm pack` builds a complete archive, including the dashboard.
 
 To build a development container, set the Compose variables from the README and

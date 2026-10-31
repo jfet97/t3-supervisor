@@ -14,7 +14,7 @@ current state and the relevant next action together.
 
 ## Operating context
 
-The same React application runs against separate Mac and Lab Supervisor instances.
+The same React application runs against every Supervisor instance, each with its own state, settings and sign-in.
 Projects contain main conversations and connected work. Each main has its own
 Supervisor, task interpretation, plan and assessments. Definitions belong to the
 selected operative checkout; project defaults and instance settings have distinct scopes.
