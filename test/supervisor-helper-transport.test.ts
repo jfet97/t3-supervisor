@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import {createServer, type IncomingMessage, type ServerResponse} from "node:http";
+import {join} from "node:path";
+import {NodeFileSystem} from "@effect/platform-node";
 import {describe, it} from "@effect/vitest";
-import {Cause, Clock, Deferred, Effect, Exit, Fiber} from "effect";
+import {Cause, Clock, Deferred, Effect, Exit, Fiber, FileSystem} from "effect";
 import {TestClock} from "effect/testing";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {attributesHelperDelivery, helperDeliveryBody, helperDeliveryBudget, publishedRendering, renderedLengthBound} from "../src/supervisor-helper-transport.js";
@@ -15,9 +18,12 @@ import {
   type HelperTransportUnit, type HelperTransportUnitOptions, type RpcHandler,
 } from "./support/g3-team.js";
 
-// the helper transport suite on the production HelperTransport and SupervisorTeamRuntime layers over the store services of a
-// temporary guidance database, under the test clock: the native side is a fake scheduler (the operate rpc), the helper's T3
-// projection and a stubbed fetch under the production fetch client; a restart builds the layers again over the same file
+/* The helper transport suite on the production HelperTransport and SupervisorTeamRuntime layers over the store services of a
+ * temporary guidance database, under the test clock: the native side is a fake scheduler (the operate rpc), the helper's T3
+ * projection and a stubbed fetch under the production fetch client; a restart builds the layers again over the same file, and
+ * a crash closes the file's client under the running layers before the stores are opened again. The live cases at the end
+ * reach a real loopback peer through the platform fetch.
+ */
 
 const fixture = Effect.gen(function* () {
   yield* TestClock.setTime(wallClock);
@@ -108,8 +114,11 @@ const helperBatch = (threadId: string) => Effect.map(Clock.currentTimeMillis, (d
   return {projectId: "p", createdAt: detectedAt, trigger: "priority", finalizedActivityCount: 1, pendingItemCount: 1, truncated: false, threads: [thread]};
 });
 
-// `requests` is the conversation store the runtime writes through, for a suite that injects a fault into it
-const teamRuntime = (f: Fixture, transport: HelperTransportUnit, requests?: SupervisorConversationStoreShape) => Effect.gen(function* () {
+/* `requests` is the conversation store the runtime writes through, for a suite that injects a fault into it;
+ * `supervisionStopped` is the per-chat stop of the main the runtime reads right before each fresh helper delivery.
+ */
+type TeamRuntimeOptions = {readonly requests?: SupervisorConversationStoreShape; readonly supervisionStopped?: (mainThreadId: string) => boolean};
+const teamRuntime = (f: Fixture, transport: HelperTransportUnit, {requests, supervisionStopped}: TeamRuntimeOptions = {}) => Effect.gen(function* () {
   const main = f.binding.mainThreadId;
   const helper = (yield* f.team.snapshot(f.binding)).members.find(member => member.threadId === "helper")!;
   const ready = helper.state === "ready" ? helper : yield* f.team.markReady(f.binding, helper.threadId, helper.epoch);
@@ -125,7 +134,7 @@ const teamRuntime = (f: Fixture, transport: HelperTransportUnit, requests?: Supe
   yield* f.team.completeTransfer(f.binding, operational.id, assignment.epoch);
   const threads = [f.helper.thread, operational, {id: main, title: main, projectId: "p",
     lineage: {parentThreadId: null, relationshipToParent: null, rootThreadId: main}} as ThreadInfo];
-  const runtime = yield* teamRuntimeUnit({stores: f.db, transport, projection: f.options.projection, requests});
+  const runtime = yield* teamRuntimeUnit({stores: f.db, transport, projection: f.options.projection, requests, supervisionStopped});
   const batch = yield* helperBatch(operational.id);
   const partition = yield* runtime.partition(f.binding, threads, batch);
   assert.equal(partition.helperBatches.length, 1);
@@ -481,6 +490,89 @@ it.effect("uncertain webhook POST never repeats across restart, and native evide
   assert.equal(f.state.posts, 1);
 }));
 
+/* CT-TRUN-01's crash: the file's client closes under the running runtime while T3 holds the POST's reply, as a killed process
+ * leaves it. The driver's restart is graceful and cannot leave a row 'sending' (H1 keeps CT-TRUN-01's abort).
+ */
+it.effect("a check-in whose POST is in flight at a crash stays 'sending' on reopen; the new process marks it uncertain and never posts it again (CT-TRUN-01)", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const posts: string[] = [];
+  const reached = yield* Deferred.make<void>();
+  const held: Array<PromiseWithResolvers<Response>> = [];
+  let restarted = false;
+  // before the crash the reply never arrives; a POST after the restart would be accepted, so a second POST is counted, not held
+  const fetch: typeof globalThis.fetch = async (_url, init) => {
+    posts.push(String(init?.body));
+    Deferred.doneUnsafe(reached, Effect.void);
+    if (restarted) return Response.json({deliveryId: `delivery-${posts.length}`}, {status: 202});
+    const reply = Promise.withResolvers<Response>();held.push(reply);return reply.promise;
+  };
+  const r = yield* teamRuntime(f, yield* helperTransportUnit({...f.options, fetch}));
+  yield* r.runtime.startCycle(f.binding);
+  const abandoned = yield* Effect.forkChild(r.runtime.runHelperBatch(f.binding, r.threads, r.batch).pipe(Effect.as("settled"), Effect.orElseSucceed(() => "failed")));
+  // the abandoned POST ends with the test, and the abandoned run then settles
+  yield* Effect.addFinalizer(() => Effect.sync(() => {for (const reply of held) reply.reject(new Error("abandoned POST"));}).pipe(
+    Effect.andThen(Fiber.await(abandoned)), Effect.asVoid));
+  yield* Deferred.await(reached);
+  const sending = yield* r.requests.pending("p", "helper");
+  assert.ok(sending?.state === "sending");
+  yield* f.db.close;
+
+  restarted = true;
+  const reopened = yield* reopenTeamStores(f.directory);
+  const runtime = yield* teamRuntimeUnit({stores: reopened, transport: yield* helperTransportUnit({...f.options, stores: reopened, fetch}), projection: f.options.projection});
+  assert.deepEqual(yield* reopened.requests.pending("p", "helper"), sending, "reopening performs no recovery");
+  yield* cycleOf(f, runtime, r.threads);
+  assert.deepEqual(yield* reopened.requests.pending("p", "helper"), {...sending, state: "uncertain",
+    error: "The helper request may have been accepted; its original native identity is retained."});
+  yield* cycleOf(f, runtime, r.threads);
+  assert.equal((yield* reopened.requests.pending("p", "helper"))?.state, "uncertain");
+  assert.deepEqual((yield* rows(reopened.sql, "SELECT document FROM supervisor_helper_deliveries")).map(row => (JSON.parse(String(row.document)) as {state: string}).state),
+    ["posting"]);
+  assert.equal(posts.length, 1);
+}));
+
+/* CT-HTX-01: the caller's cancel ends the wait for a POST whose delivery T3 never shows. On the driver (H1's cancel) T3 logs
+ * the delivery, so there it binds after the restart.
+ */
+it.effect("a POST its caller cancels leaves the receipt 'posting' with its exact text; reconcile and send stay uncertain without a second POST, also from the reopened file (CT-HTX-01)", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const posts: string[] = [];
+  const reached = yield* Deferred.make<void>();
+  // the reply never arrives; the POST ends only when the transport aborts it
+  const abortingFetch: typeof globalThis.fetch = async (_url, init) => {
+    posts.push(String(init?.body));
+    Deferred.doneUnsafe(reached, Effect.void);
+    const signal = init?.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      if (signal?.aborted) {reject(signal.reason);return;}
+      signal?.addEventListener("abort", () => reject(signal.reason), {once: true});
+    });
+  };
+  const input = {threadId: "helper", commandId: "aborted-command", messageId: "aborted-message", text: "Durable check-in text for aborted"};
+  const transport = yield* helperTransportUnit({...f.options, fetch: abortingFetch});
+  const cancel = yield* Deferred.make<void>();
+  const sending = yield* Effect.forkChild(transport.send(f.binding, input, {cancel}));
+  yield* Deferred.await(reached);
+  const posting = yield* receiptOf<Record<string, unknown>>(f, input.messageId);
+  assert.equal(posting.state, "posting");
+  yield* Deferred.succeed(cancel, undefined);
+  assert.equal(yield* Fiber.join(sending), "uncertain");
+  assert.deepEqual(yield* receiptOf<Record<string, unknown>>(f, input.messageId), posting);
+  assert.equal(posting.text, input.text);
+  assert.deepEqual(posts, [helperDeliveryBody(input.messageId, input.text)]);
+
+  assert.equal(yield* transport.reconcileDelivery(f.binding, input), "uncertain");
+  assert.equal(yield* transport.send(f.binding, input), "uncertain");
+  const reopened = yield* reopenTeamStores(f.directory);
+  const restarted = yield* helperTransportUnit({...f.options, stores: reopened, fetch: abortingFetch});
+  assert.equal(yield* restarted.reconcileDelivery(f.binding, input), "uncertain");
+  assert.equal(yield* restarted.send(f.binding, input), "uncertain");
+  assert.equal(posts.length, 1);
+  const [stored] = yield* rows(reopened.sql, "SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?",
+    f.binding.threadId, f.binding.generation, input.messageId);
+  assert.deepEqual(stored ? JSON.parse(String(stored.document)) as Record<string, unknown> : null, posting);
+}));
+
 it.effect("a refusal after an unknown POST never reports the original identity as rejected", () => Effect.gen(function* () {
   for (const refusal of ["helper_archived", "binding_replaced"] as const) yield* Effect.scoped(Effect.gen(function* () {
     const f = yield* fixture;
@@ -527,6 +619,58 @@ it.effect("a check-in revoked before its POST fails and settles only its own req
   assert.equal((yield* f.team.unresolvedRequests(f.binding)).length, 0, "proven non-delivery releases only that check-in's fence");
 }));
 
+/* CT-TRUN-02: each revocation commits after the runtime admitted the check-in ('sending') and while the transport is still in one
+ * of its own reads, so only the transport's final guard can fence it.
+ */
+it.effect("a quarantine committed while the transport reads the helper leaves no receipt and no POST and fails only its own check-in (CT-TRUN-02)", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const gate = yield* Deferred.make<void>();
+  const held = yield* Deferred.make<void>();
+  const r = yield* teamRuntime(f, yield* helperTransportUnit({...f.options, projection: () => Effect.gen(function* () {
+    yield* Deferred.succeed(held, undefined);yield* Deferred.await(gate);return f.helper;
+  })}));
+  yield* r.runtime.startCycle(f.binding);
+  const running = yield* Effect.forkChild(r.runtime.runHelperBatch(f.binding, r.threads, r.batch));
+  yield* Deferred.await(held);
+  const request = yield* r.requests.pending("p", "helper");
+  assert.ok(request?.state === "sending");
+  yield* f.team.quarantineMember(f.binding, "helper");
+  yield* Deferred.succeed(gate, undefined);
+  yield* Fiber.join(running);
+  assert.deepEqual(yield* rows(f.db.sql, "SELECT document FROM supervisor_helper_deliveries"), []);
+  assert.equal(f.state.posts, 0);
+  const failed = (yield* r.requests.requests("p", "helper")).find(value => value.id === request.id);
+  assert.equal(failed?.state, "failed");
+  assert.equal(failed?.error, "The helper lost its authority before this check-in was posted; nothing was posted and pending activity is retained.");
+  assert.equal((yield* f.team.unresolvedRequests(f.binding)).some(value => value.requestId === request.id), false);
+}));
+
+it.effect("a stop committed while the transport lists the helper's channel leaves no receipt and no POST and fails the check-in (CT-TRUN-02)", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  let stopped = false;
+  const gate = yield* Deferred.make<void>();
+  const listed = yield* Deferred.make<void>();
+  // only the transport's first channel list is held
+  let hold = true;
+  const rpc = f.options.rpc!;
+  const transport = yield* helperTransportUnit({...f.options, rpc: (tag, input) => tag === "scheduledTasks.list" && hold
+    ? Effect.gen(function* () {hold = false;yield* Deferred.succeed(listed, undefined);yield* Deferred.await(gate);return yield* rpc(tag, input);})
+    : rpc(tag, input)});
+  const r = yield* teamRuntime(f, transport, {supervisionStopped: () => stopped});
+  yield* r.runtime.startCycle(f.binding);
+  const running = yield* Effect.forkChild(r.runtime.runHelperBatch(f.binding, r.threads, r.batch));
+  yield* Deferred.await(listed);
+  const request = yield* r.requests.pending("p", "helper");
+  assert.ok(request?.state === "sending");
+  stopped = true;
+  yield* Deferred.succeed(gate, undefined);
+  yield* Fiber.join(running);
+  assert.deepEqual(yield* rows(f.db.sql, "SELECT document FROM supervisor_helper_deliveries"), []);
+  assert.equal(f.state.posts, 0);
+  assert.equal((yield* r.requests.requests("p", "helper")).find(value => value.id === request.id)?.state, "failed");
+  assert.equal((yield* f.team.unresolvedRequests(f.binding)).some(value => value.requestId === request.id), false);
+}));
+
 // a call that ends with the injected fault: the baseline rejection, matched on the fault's string form
 const rejectsWith = <A, E>(effect: Effect.Effect<A, E>, pattern: RegExp) => Effect.map(Effect.exit(effect), (exit) => {
   assert.ok(Exit.isFailure(exit), "the call fails");
@@ -557,7 +701,7 @@ describe("a revoked check-in recovers its own fence across restart boundaries wi
       if (request.state === "failed" && phase === "after-failed-save") return Effect.andThen(save(request), Effect.die(new Error("restart_boundary")));
       return save(request);
     }};
-    const r = yield* teamRuntime(f, transport, requests);
+    const r = yield* teamRuntime(f, transport, {requests});
     yield* r.runtime.startCycle(f.binding);
     const dispatch = r.runtime.runHelperBatch(f.binding, r.threads, r.batch);
     if (phase === "normal") yield* dispatch;
@@ -1792,3 +1936,138 @@ it.effect("a project disabled during the transport's own reads posts nothing and
   assert.equal(result, "busy");
   assert.equal(f.state.posts, 0);
 }));
+
+/* The live transport cases: the webhook is a real loopback HTTP peer reached through the platform fetch, so the clock stays live.
+ * The registered helper and the fake scheduler are the suite's, except that the upsert reply also names the hook's full url,
+ * token included, which no stored document or file may keep.
+ */
+const webhookPath = "/api/hooks/fixture/fixture-only-token";
+const loopbackFixture = (baseUrl: string) => Effect.gen(function* () {
+  const db = yield* teamStoresFixture("helper-transport-loopback-");
+  yield* execute(db, "INSERT INTO meta VALUES(?,?)", 'supervisor_control:"p"', JSON.stringify({enabled: true, manual: true, generation: 1}));
+  const binding = {...yield* db.store.reserve("p", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};yield* db.store.setBinding(binding);
+  yield* db.teamStore.registerMember(binding, {threadId: "helper", taskId: "bootstrap", bootstrapRunId: "boot"});
+  const helper: Projection = {thread: {id: "helper", projectId: "p", title: "helper", modelSelection: defaultSupervisorModel,
+    runtimeMode: "full-access", interactionMode: "default", lineage: {parentThreadId: binding.threadId, relationshipToParent: "subagent"}},
+  runs: [], messages: [], runtimeRequests: []};
+  const tasks: Record<string, unknown>[] = [];
+  const rpc: RpcHandler = (tag, input) => {
+    if (tag === "scheduledTasks.list") return Effect.succeed({tasks});
+    if (tag === "scheduledTasks.upsert") {
+      const task = {...input, createdAt: "2026-10-16T10:00:00Z", webhook: {path: webhookPath, url: `${baseUrl}${webhookPath}`}};
+      tasks.splice(0, tasks.length, task);return Effect.succeed({task});
+    }
+    if (tag === "scheduledTasks.listWebhookDeliveries") return Effect.succeed({deliveries: []});
+    return Effect.fail(rpcUncertain());
+  };
+  const options: HelperTransportUnitOptions = {stores: db, rpc, baseUrl, projection: () => Effect.succeed(helper)};
+  const receipt = (messageId: string) => Effect.map(
+    rows(db.sql, "SELECT document FROM supervisor_helper_deliveries WHERE owner_thread_id=? AND owner_generation=? AND message_id=?",
+      binding.threadId, binding.generation, messageId),
+    ([row]) => row ? JSON.parse(String(row.document)) as Record<string, unknown> : null);
+  return {db, binding, options, receipt};
+});
+
+const durableCheckin = (name: string) => ({threadId: "helper", commandId: `${name}-command`, messageId: `${name}-message`, text: `Durable check-in text for ${name}`});
+
+type Seen = {method: string; path: string; body: string; origin: string};
+
+// a loopback HTTP peer, closed with the test scope
+const loopback = (seen: Seen[], handler: (request: IncomingMessage, response: ServerResponse) => void) => Effect.acquireRelease(Effect.callback<{server: ReturnType<typeof createServer>; url: string}>((resume) => {
+  let port = 0;
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      seen.push({method: request.method ?? "", path: request.url ?? "", body: Buffer.concat(chunks).toString("utf8"), origin: `http://127.0.0.1:${port}`});
+      handler(request, response);
+    });
+  });
+  server.once("error", (error) => resume(Effect.die(error)));
+  server.listen(0, "127.0.0.1", () => {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    port = address.port;
+    resume(Effect.succeed({server, url: `http://127.0.0.1:${port}`}));
+  });
+}), ({server}) => Effect.callback<void>((resume) => {
+  server.closeAllConnections();
+  server.close(() => resume(Effect.void));
+})).pipe(Effect.map(({url}) => url));
+
+const acceptedReply = (response: ServerResponse) => response.writeHead(202, {"content-type": "application/json"}).end(JSON.stringify({deliveryId: "delivery-1"}));
+
+// the CT-HTX-03 (the unreadable 2xx body runs as H3 in helper-webhook-integration.test.ts)
+it.live("a 2xx, 4xx or 5xx webhook reply comes from exactly one platform fetch POST, which no client retries (CT-HTX-03)", () => Effect.gen(function* () {
+  for (const [status, outcome, state] of [[202, "waiting", "posted"], [400, "rejected", "rejected"], [503, "uncertain", "posting"]] as const) {
+    const seen: Seen[] = [];
+    const baseUrl = yield* loopback(seen, (_request, response) => status === 202 ? acceptedReply(response) : response.writeHead(status).end());
+    const f = yield* loopbackFixture(baseUrl);
+    const input = durableCheckin(`status-${status}`);
+    // the real global fetch, with each response kept so a body the transport leaves unread is released afterwards
+    const responses: Response[] = [];
+    const {transport} = yield* helperTransportUnit({...f.options, fetch: async (url, init) => {
+      const response = await fetch(url, init);
+      responses.push(response);
+      return response;
+    }});
+    assert.equal(yield* transport.send(f.binding, input), outcome, String(status));
+    assert.deepEqual(responses.map(response => [response.status, response.bodyUsed]), [[status, status === 202]], String(status));
+    // the transport ends an unread reply's request itself, which errors its body with an AbortError; only that is tolerated
+    for (const response of responses) if (!response.bodyUsed) yield* Effect.promise(async () => response.body?.cancel().catch((error: unknown) => {if (!(error instanceof Error && error.name === "AbortError")) throw error;}));
+    assert.equal((yield* f.receipt(input.messageId))?.state, state, String(status));
+    // a later send of the same identity only reconciles it
+    yield* transport.send(f.binding, input);
+    assert.deepEqual(seen.map(request => [request.method, request.path, request.body]), [["POST", webhookPath, helperDeliveryBody(input.messageId, input.text)]], String(status));
+  }
+}), {timeout: 10_000});
+
+it.live("the platform fetch follows a redirected webhook POST: 307 re-POSTs the body to Location, also on another origin, and 303 turns into a GET (CT-HTX-03)", () => Effect.gen(function* () {
+  const otherSeen: Seen[] = [];
+  const other = yield* loopback(otherSeen, (_request, response) => acceptedReply(response));
+  for (const [status, location, expected] of [
+    [307, "/redirected", "same"],
+    [307, `${other}/elsewhere`, "other"],
+    [303, "/redirected", "get"],
+  ] as const) {
+    otherSeen.length = 0;
+    const seen: Seen[] = [];
+    const baseUrl = yield* loopback(seen, (request, response) => request.url === webhookPath
+      ? response.writeHead(status, {location}).end()
+      : acceptedReply(response));
+    const f = yield* loopbackFixture(baseUrl);
+    const input = durableCheckin(`redirect-${status}-${expected}`);
+    const body = helperDeliveryBody(input.messageId, input.text);
+    assert.equal(yield* (yield* helperTransportUnit(f.options)).transport.send(f.binding, input), "waiting", expected);
+    const followed = [...seen, ...otherSeen].map(request => [request.origin === baseUrl ? "base" : "other", request.method, request.path, request.body]);
+    if (expected === "same") assert.deepEqual(followed, [["base", "POST", webhookPath, body], ["base", "POST", "/redirected", body]]);
+    if (expected === "other") assert.deepEqual(followed, [["base", "POST", webhookPath, body], ["other", "POST", "/elsewhere", body]]);
+    if (expected === "get") assert.deepEqual(followed, [["base", "POST", webhookPath, body], ["base", "GET", "/redirected", ""]]);
+    assert.equal((yield* f.receipt(input.messageId))?.state, "posted");
+  }
+}), {timeout: 10_000});
+
+it.live("the webhook path and its token never reach the channel or delivery documents nor the database files (CT-HTX-04)", () => Effect.gen(function* () {
+  const seen: Seen[] = [];
+  const baseUrl = yield* loopback(seen, (_request, response) => acceptedReply(response));
+  const f = yield* loopbackFixture(baseUrl);
+  const {transport} = yield* helperTransportUnit(f.options);
+  for (const name of ["first", "second"]) assert.equal(yield* transport.send(f.binding, durableCheckin(name)), "waiting");
+  assert.equal(yield* transport.reconcileDelivery(f.binding, durableCheckin("first")), "uncertain");
+  assert.equal(seen.length, 2);
+  const documents = [
+    ...yield* rows(f.db.sql, "SELECT document FROM supervisor_helper_channels"),
+    ...yield* rows(f.db.sql, "SELECT document FROM supervisor_helper_deliveries"),
+  ].map(row => String(row.document));
+  assert.equal(documents.length, 3);
+  for (const document of documents) {
+    assert.equal(document.includes("fixture-only-token"), false, document);
+    assert.equal(document.includes("/api/hooks"), false, document);
+  }
+  yield* f.db.close;
+  const fs = yield* FileSystem.FileSystem;
+  for (const name of yield* fs.readDirectory(f.db.directory)) {
+    const bytes = Buffer.from(yield* fs.readFile(join(f.db.directory, name)));
+    assert.equal(bytes.includes("fixture-only-token"), false, name);
+  }
+}).pipe(Effect.provide(NodeFileSystem.layer)), {timeout: 10_000});
