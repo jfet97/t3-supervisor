@@ -7290,7 +7290,7 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
     yield* interp.projectStore.saveControl(projectId, currentControl.generation, true, {snapshotSequence: 1, threads: []});
     const callsBefore = interp.calls.length;
     yield* interpService.cycle;
-    const dispatched = interp.calls.slice(callsBefore).find(call => call.payload.threadId === interp.binding.threadId && String(call.payload.text).includes("Interpretation requested"));
+    const dispatched = interp.calls.slice(callsBefore).find(call => call.payload.threadId === interp.binding.threadId && String(call.payload.messageId).startsWith("supervisor-objective:"));
     assert.ok(dispatched, `the edited source is interpreted again (task ${(yield* interp.projectStore.task(interp.task.threadId))?.status})`);
     const queued = (yield* interp.projectStore.task(interp.task.threadId))!;
     const run = interp.supervisor.runs.find(item => item.userMessageId === queued.messageId);

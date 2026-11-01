@@ -6,7 +6,7 @@ import type { SupervisorMonitorBatch, SupervisorMonitorThreadBatch } from "../sr
 import type { RunInfo, SupervisorSettings } from "../src/types.js";
 import { wallClock } from "./support/g1b-conversation.js";
 import { appendRun, baseTime, iso, makeFixture, operativeThreadId, projectId, type Fixture } from "./support/c1-conversation-fixture.js";
-import { helperBatch, projectId as linProjectId, seedTeam, startLinFixture } from "./support/lin-fixture.js";
+import { helperBatch, projectId as linProjectId, seedTeam, startScenario } from "./support/scenario-driver.js";
 
 // audit F7: a Supervisor's own T3 thread reads count toward its awareness on the deployment's configured gateway call tools, as its
 // workflow calls are proven. The production conversation collects them from the run of its pending request through the read
@@ -77,7 +77,7 @@ it.effect("with the documented registrations the MCPX call tool counts and the o
 // the helper path: a helper's own reads during its delivered monitoring review count on the same configured routes
 it.live("a helper's read through the configured gateway call tool counts toward its review; the unconfigured MCPX default and another gateway do not", () =>
   Effect.gen(function* () {
-    const f = yield* startLinFixture({config: {workflowMcpGatewayTools: ["gateway.invoke"]}});
+    const f = yield* startScenario({config: {workflowMcpGatewayTools: ["gateway.invoke"]}});
     const binding = yield* f.bindSupervisor;
     const {helper} = yield* seedTeam(f);
     const threads = [helper.thread, ...f.threads];
