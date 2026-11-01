@@ -24,8 +24,9 @@ export const MergeProof = Schema.Struct({
   jobs: Schema.Array(Schema.Struct({ name: Schema.String, run_id: Id, conclusion: Schema.NullOr(Schema.String) })),
 });
 
-// these are the full jobs in check.yml, including the native ARM64 artifact check; a lightweight main run can never supply this proof
-export const requiredFullJobs = ["static", "arm64", "main (1/4)", "main (2/4)", "main (3/4)", "main (4/4)", "harness", "startup", "check"] as const;
+// these are the full jobs in check.yml, including the native ARM64 artifact check and the browser journeys; a lightweight main
+// run can never supply this proof
+export const requiredFullJobs = ["static", "arm64", "main (1/4)", "main (2/4)", "main (3/4)", "main (4/4)", "harness", "startup", "browser", "check"] as const;
 
 export const newestPrRun = (runs: ReadonlyArray<typeof CiRun.Type>, expected: typeof MergeProof.Type.expected) =>
   runs.filter((run) => run.workflow_id === expected.workflowId && run.head_sha === expected.head &&
@@ -93,7 +94,7 @@ export const releaseOnlyChange = (input: unknown): {readonly baseline: string; r
 
 /**
  * A baseline proven under its own commit's policy must also have run every job the current policy requires, so evidence
- * from before a newly required job, such as the native ARM64 check, never counts as a full baseline.
+ * from before a newly required job, such as the native ARM64 check or the browser journeys, never counts as a full baseline.
  */
 export const proveCurrentFullJobs = (input: unknown): void => {
   const {runId, jobs} = Schema.decodeUnknownSync(Schema.Struct({runId: Id, jobs: MergeProof.fields.jobs}))(input);
@@ -136,7 +137,8 @@ export const proveReleaseRun = (input: unknown): {readonly runId: number; readon
     const matches = jobs.filter(job => job.name === name);
     if (matches.length !== 1 || matches[0]!.run_id !== run.id || matches[0]!.conclusion !== "success") throw new Error("release validation job is missing or unsuccessful");
   }
-  if (jobs.filter(job => job.name === "harness" && job.conclusion === "skipped").length !== 1 || !jobs.some(job => job.name.startsWith("main (") && job.conclusion === "skipped")) throw new Error("skipped release suites are missing");
+  if (["harness", "browser"].some(name => jobs.filter(job => job.name === name && job.conclusion === "skipped").length !== 1) ||
+    !jobs.some(job => job.name.startsWith("main (") && job.conclusion === "skipped")) throw new Error("skipped release suites are missing");
   if (jobs.some(job => job.run_id !== run.id || !releaseJobs.includes(job.name) && job.conclusion !== "skipped")) throw new Error("release validation contains an unexpected job");
   return {runId: run.id, tree: headTree};
 };

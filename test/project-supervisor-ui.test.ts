@@ -1260,7 +1260,10 @@ it("an external contribution diagnostic explains the record without implying a s
   assert.doesNotMatch(html, /workflow acceptance was not recognized/);
 });
 
-it("the selected chat shows its saved supervision state with one native Stop supervision or Enable supervision button", () => {
+// the controls themselves, the stopped state's Enable and the outcome in the status region are the browser journeys' own
+// (test/e2e/chat-stop-enable.test.ts); this keeps what they do not reach: the descriptions, one status region and the
+// disabled button while a change is pending here or in another chat
+it("the chat supervision section describes the saved state, keeps one status region and disables its button while a change is pending", () => {
   const render = (stopped: boolean, busy = false, message: string | null = null) => renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults, section: "supervision", snapshot: {...snapshot, chatSupervision: {stopped, policyGeneration: 4, stoppedBy: stopped ? "relay" : null, stoppedAt: stopped ? 1 : null}},
     selection, monitoring, threadId: "task-thread", connected: true, saving: false, fieldsBusy: false, blocked: false, dirty: false, canSave: false,
@@ -1269,12 +1272,9 @@ it("the selected chat shows its saved supervision state with one native Stop sup
   }));
   const on = render(false);
   assert.match(on, /Allowed for this chat; project\/global settings still apply\./u, "an allowed chat is not described as supervised while project or global settings may disable it");
-  assert.match(on, /<button type="button" class="danger-button">Stop supervision<\/button>/u, "stopping is styled as the consequential action it is");
   assert.equal(on.match(/role="status"/gu)?.length ?? 0, 1, "one status region reports the saved result or error");
   const stopped = render(true, false, "Supervision is stopped for this chat.");
   assert.match(stopped, /Supervision is stopped for this chat \(asked in this chat\)/u);
-  assert.match(stopped, /<button type="button"[^>]*>Enable supervision<\/button>/u);
-  assert.match(stopped, /<p role="status">Supervision is stopped for this chat\.<\/p>/u);
   assert.match(render(true, true), /<button type="button" disabled=""[^>]*>Enable supervision<\/button>/u, "a pending change cannot be submitted twice");
   const locked = renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults, section: "supervision", snapshot: {...snapshot, chatSupervision: {stopped: false, policyGeneration: 4, stoppedBy: null, stoppedAt: null}},

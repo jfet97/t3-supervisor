@@ -26,6 +26,8 @@ usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
   fixture [ARGS]      the dashboard fixture: production Supervisor over scripted T3 states
   ui-fixture [ARGS]   the synthetic dashboard API fixture
   check [ARGS]        a disposable published-T3 stack check, removed when it ends
+  e2e [ARGS]          the browser journeys: builds the dashboard, then runs vitest with vitest.e2e.config.ts in the e2e
+                      image (ARGS go to vitest); each journey owns its Supervisor, scripted T3 and Chromium
   reset               remove test data: the workspaces' T3 projects with their chats, Supervisor data and the
                       workspaces; provider sign-ins, T3 settings and T3 provider connections stay
   reset-auth          sign out every provider: T3's own sign-out for each instance it offers one for, including
@@ -167,6 +169,11 @@ case $command in
       --port "$T3SUP_DEV_UI_FIXTURE_PORT" "$@"
     ;;
   check) tools pnpm dev:stack --check --cache-dir /cache/t3-runtime "$@" ;;
+  e2e)
+    setup
+    compose build e2e
+    compose run --rm e2e sh -c 'pnpm build && exec pnpm test:e2e "$@"' sh "$@"
+    ;;
   reset)
     running || compose up --detach --wait --wait-timeout 900 env
     in_environment reset-projects

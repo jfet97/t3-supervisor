@@ -131,13 +131,16 @@ it.live("preparing makes private folders and file storage and leaves an existing
   assert.equal(yield* fs.readFileString(join(paths.codexHome, "config.toml")), 'cli_auth_credentials_store = "file"\nmodel = "gpt-6"\n');
 }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)));
 
-type Service = {environment: Record<string, string>; ports?: string[]; volumes: Array<{type: string; source: string; target: string}>};
+type Service = {environment: Record<string, string>; ports?: string[]; volumes: Array<{type: string; source: string; target: string}>;
+  build?: {target?: string; args?: Record<string, string>}; profiles?: string[]};
 
 it("the compose file publishes loopback ports only and mounts the checkout and the environment's own volumes, never host credentials", () => {
   const compose = parse(readFileSync(join(repositoryRoot, "docker", "dev", "compose.yaml"), "utf8"), {merge: true}) as {
     services: Record<string, Service>; volumes: Record<string, unknown>};
   assert.deepEqual(Object.keys(compose.volumes).sort(), ["cache", "credentials", "data", "node_modules"]);
-  for (const [name, service] of Object.entries(compose.services)) {
+  const {e2e, ...environment} = compose.services;
+  for (const [name, service] of Object.entries(environment)) {
+    assert.equal(service.build?.target, "development", name);
     for (const port of service.ports ?? []) assert.match(port, /^127\.0\.0\.1:\$\{\w+\}:\$\{\w+\}$/u, `${name} publishes ${port}`);
     assert.deepEqual(service.volumes.map((volume) => `${volume.type}:${volume.source}:${volume.target}`), [
       "bind:../..:/workspace", "volume:node_modules:/workspace/node_modules", "volume:credentials:/credentials", "volume:data:/data", "volume:cache:/cache"]);
@@ -149,6 +152,25 @@ it("the compose file publishes loopback ports only and mounts the checkout and t
     assert.equal(env.T3SUP_DEV_DATA, "/data");
   }
   assert.deepEqual(compose.services.env?.ports?.length, 3);
+  // the browser journeys see the checkout, its dependencies and the shared caches: never a sign-in, T3 data or this
+  // environment's Supervisor data, and they publish nothing
+  assert.ok(e2e);
+  assert.equal(e2e.build?.target, "e2e");
+  assert.deepEqual(e2e.profiles, ["e2e"]);
+  assert.equal(e2e.ports, undefined);
+  assert.deepEqual(e2e.volumes.map((volume) => `${volume.type}:${volume.source}:${volume.target}`), [
+    "bind:../..:/workspace", "volume:node_modules:/workspace/node_modules", "volume:cache:/cache"]);
+  for (const [variable, value] of Object.entries(e2e.environment)) assert.doesNotMatch(value, /^\/(credentials|data)(\/|$)/u, variable);
+});
+
+it("the e2e image installs the headless Chromium of exactly the playwright-core version the lockfile installs", () => {
+  const manifest = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")) as {devDependencies: Record<string, string>};
+  const dockerfile = readFileSync(join(repositoryRoot, "docker", "dev", "Dockerfile"), "utf8");
+  const pinned = /^ARG PLAYWRIGHT_VERSION=(\S+)$/mu.exec(dockerfile)?.[1];
+  assert.match(manifest.devDependencies["playwright-core"] ?? "", /^\d+\.\d+\.\d+$/u, "an exact version");
+  assert.equal(pinned, manifest.devDependencies["playwright-core"]);
+  assert.match(dockerfile, /^FROM development AS e2e$/mu);
+  assert.match(dockerfile, /playwright-core install --with-deps --only-shell chromium/u);
 });
 
 it.live("the host entry validates its input before it needs Docker", () => Effect.gen(function* () {

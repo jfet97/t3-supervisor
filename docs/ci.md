@@ -14,7 +14,14 @@ owns this server-side protection; local hooks are not the enforcement boundary.
 
 Ordinary PRs and manual **Check Supervisor** dispatches run lint, both type checks,
 build, package/container smoke checks, all four main-suite shards, the runner
-harness and the production startup integration. The `static` job builds and runs the
+harness, the production startup integration and the browser journeys. The `browser`
+job runs `./dev e2e`, the same entry contributors use: the production Supervisor over
+the scripted T3 peer drives this checkout's dashboard in the pinned `e2e` image's
+headless Chromium ([testing](testing.md)). It needs no credentials. A failed journey
+uploads its trace, screenshot and page errors, which hold only its own destroyed test
+sessions, as an artifact kept for seven days. A manual dispatch can set
+`browser_repetitions` (1 to 20, default 1) to calibrate the journeys' flakiness on the
+x64 runner: the job repeats them without retries and stops at the first failure. The `static` job builds and runs the
 AMD64 container on an x64 runner; the `arm64` job builds and runs the ARM64 container
 on a native `ubuntu-24.04-arm` runner. Nothing is emulated, and each job first checks
 its image's architecture. Each test file runs in its native shard, with one worker per runner.
@@ -38,8 +45,8 @@ path itself downloads T3, so run it locally with `./dev check`
 
 The `changeset-release/main` version PR may reuse full validation of its parent
 commit. Static checks, both type checks, build, package smoke and both container
-smokes, AMD64 and native ARM64, still run on the new version. Only the four main shards
-and harness skip.
+smokes, AMD64 and native ARM64, still run on the new version. Only the four main shards,
+the harness and the browser journeys skip.
 The production startup integration runs in full, reuse and release modes.
 The required aggregate `check` always runs and requires that exact combination.
 
@@ -63,7 +70,7 @@ every full job. A skipped suite never supplies full evidence. Another fast-track
 release therefore cannot become a baseline merely by being green; there is no
 chain of lightweight verdicts. The baseline must also have run every job the current
 policy requires, even when its own older policy did not, so evidence from before the
-native `arm64` job never counts as a full baseline.
+native `arm64` job or the `browser` journeys never counts as a full baseline.
 
 The release classifier is loaded from the parent's Git tree, so changing the proof
 policy in a PR cannot make that PR classify itself as release metadata. The
@@ -99,15 +106,16 @@ After merging, main first tries to reuse GitHub's full PR verdict. Reuse require
 - The latest matching **Check Supervisor** run is completed and successful.
   It must be a PR run, or a dispatch on that PR's branch, at its exact final head.
 - Static checks, each of the four main shards, the harness, the startup
-  integration and aggregate `check` all succeeded in that run's latest attempt.
-  Skipped jobs do not qualify.
+  integration, the browser journeys and aggregate `check` all succeeded in that
+  run's latest attempt. Skipped jobs do not qualify.
 
 For a merged fast-tracked version PR, main instead requires the exact same tree,
-a successful latest release run with `plan`, `static`, `startup` and `check`
-passed and the suites skipped, and independently rederives the release diff and
+a successful latest release run with `plan`, `static`, `arm64`, `startup` and `check`
+passed and the suites and browser journeys skipped, and independently rederives the release diff and
 full baseline proof above. A successful release summary alone is insufficient.
 
-Only with one of these proofs do the main shards and harness skip. The startup
+Only with one of these proofs do the main shards, the harness and the browser
+journeys skip. The startup
 integration still runs. The aggregate check requires the planner to succeed and
 the jobs selected for that mode to have their expected results, and links the
 source run and any release baseline in the job summary. No test results,

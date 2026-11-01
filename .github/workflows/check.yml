@@ -12,6 +12,11 @@ on:
         options: [full, auto]
         default: full
         required: true
+      browser_repetitions:
+        description: Consecutive runs of the browser journeys in the browser job, 1 to 20; more than 1 calibrates their flakiness
+        type: number
+        default: 1
+        required: true
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
@@ -203,9 +208,44 @@ jobs:
       - uses: ./.github/actions/setup-dependencies
       - run: pnpm test test/startup-integration.test.ts
 
+  # the browser journeys (docs/testing.md): the production Supervisor over the scripted T3 peer and this checkout's dashboard in
+  # the pinned e2e image's headless Chromium, through the same ./dev entry contributors use. It needs no credentials; a failed
+  # journey's trace, screenshot and page errors hold only its own destroyed test sessions
+  browser:
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' && needs.plan.outputs.mode != 'release' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      # ordinary validation runs the journeys once; a manual calibration repeats them without retries and stops at the first failure.
+      # A dispatched number is formatted before the fallback because a number 0 is falsy and would otherwise become 1 unseen.
+      - name: Run the browser journeys
+        env:
+          REPETITIONS: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.browser_repetitions) || 1 }}
+        run: |
+          set -eu
+          case "$REPETITIONS" in ''|*[!0-9]*) echo "browser_repetitions must be a whole number" >&2; exit 2 ;; esac
+          if [ "$REPETITIONS" -lt 1 ] || [ "$REPETITIONS" -gt 20 ]; then echo "browser_repetitions must be between 1 and 20" >&2; exit 2; fi
+          for run in $(seq 1 "$REPETITIONS"); do
+            started=$(date +%s)
+            ./dev e2e
+            echo "browser journeys run $run of $REPETITIONS passed in $(($(date +%s) - started)) s on $(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Keep the failed journeys' browser evidence
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-journeys-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .e2e-artifacts/
+          if-no-files-found: ignore
+          retention-days: 7
+
   check:
     if: ${{ always() }}
-    needs: [plan, static, arm64, main, harness, startup]
+    needs: [plan, static, arm64, main, harness, startup, browser]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -218,6 +258,7 @@ jobs:
           MAIN_RESULT: ${{ needs.main.result }}
           HARNESS_RESULT: ${{ needs.harness.result }}
           STARTUP_RESULT: ${{ needs.startup.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$STARTUP_RESULT" = success
@@ -227,18 +268,21 @@ jobs:
               test "$ARM64_RESULT" = skipped
               test "$MAIN_RESULT" = skipped
               test "$HARNESS_RESULT" = skipped
+              test "$BROWSER_RESULT" = skipped
               ;;
             release)
               test "$STATIC_RESULT" = success
               test "$ARM64_RESULT" = success
               test "$MAIN_RESULT" = skipped
               test "$HARNESS_RESULT" = skipped
+              test "$BROWSER_RESULT" = skipped
               ;;
             full)
               test "$STATIC_RESULT" = success
               test "$ARM64_RESULT" = success
               test "$MAIN_RESULT" = success
               test "$HARNESS_RESULT" = success
+              test "$BROWSER_RESULT" = success
               ;;
             *) exit 1 ;;
           esac

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import {readFileSync, readdirSync} from "node:fs";
+import {chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from "node:fs";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import {spawnSync} from "node:child_process";
 import {runInNewContext} from "node:vm";
 import {it} from "@effect/vitest";
@@ -13,7 +15,7 @@ const repository = "jfet97/t3-supervisor";
 const manifest = '{\n  "name": "@jfet97/t3-supervisor",\n  "version": "0.0.4"\n}\n';
 const run = (id: number, head_sha: string, event: string, branch: string): typeof policy.CiRun.Type => ({id, workflow_id: 42, head_sha, head_branch: branch, event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
 const full = (id: number) => policy.requiredFullJobs.map(name => ({name, run_id: id, conclusion: "success"}));
-const release = (id: number) => ["plan", "static", "arm64", "startup", "check", "harness", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "arm64", "startup", "check"].includes(name) ? "success" : "skipped"}));
+const release = (id: number) => ["plan", "static", "arm64", "startup", "check", "harness", "browser", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "arm64", "startup", "check"].includes(name) ? "success" : "skipped"}));
 const pr = (merge: string | null, head: string, branch: string) => ({merged_at: merge ? "2026-10-25T00:00:00Z" : null, merge_commit_sha: merge, base: {ref: "main"}, head: {sha: head, ref: branch, repo: {full_name: repository}}});
 const rawChange = (path: string, status = "M") => `:100644 ${status === "D" ? "000000" : "100644"} ${B} ${status === "D" ? "0".repeat(40) : H} ${status}\0${path}\0`;
 
@@ -80,31 +82,36 @@ it.effect("source changes, bad manifest inputs, incomplete API responses, reruns
   }
 }));
 
-// a baseline policy from before the native ARM64 job: it proves the same jobs but never asks for arm64
-const withoutArm64Requirement = (input: {jobs: ReadonlyArray<{name: string; run_id: number; conclusion: string | null}>}) =>
-  ({...input, jobs: input.jobs.some(job => job.name === "arm64") ? input.jobs : [...input.jobs, {name: "arm64", run_id: input.jobs[0]?.run_id ?? 1, conclusion: "success"}]});
-const olderPolicy = {...policy,
-  proveMergedValidation: (input: unknown) => policy.proveMergedValidation(withoutArm64Requirement(input as Parameters<typeof withoutArm64Requirement>[0])),
-  provePushValidation: (input: unknown) => policy.provePushValidation(withoutArm64Requirement(input as Parameters<typeof withoutArm64Requirement>[0]))};
+// a baseline policy from before a newly required job: it proves the same jobs but never asks for that one
+const olderPolicyWithout = (required: string) => {
+  const withoutRequirement = (input: {jobs: ReadonlyArray<{name: string; run_id: number; conclusion: string | null}>}) =>
+    ({...input, jobs: input.jobs.some(job => job.name === required) ? input.jobs : [...input.jobs, {name: required, run_id: input.jobs[0]?.run_id ?? 1, conclusion: "success"}]});
+  return {...policy,
+    proveMergedValidation: (input: unknown) => policy.proveMergedValidation(withoutRequirement(input as Parameters<typeof withoutRequirement>[0])),
+    provePushValidation: (input: unknown) => policy.provePushValidation(withoutRequirement(input as Parameters<typeof withoutRequirement>[0]))};
+};
 
-it.effect("evidence from before the native ARM64 job never counts as a full release baseline, also under the baseline's own older policy", () => Effect.gen(function*() {
-  const withoutArm64 = (id: number) => full(id).filter(job => job.name !== "arm64");
-  // through the baseline's directly checked PR
-  const viaPr = fixture();
-  viaPr.jobs.set(10, withoutArm64(10));
-  assert.deepEqual(yield* planCi({...viaPr, loadPolicy: () => Effect.succeed(olderPolicy)}), {mode: "full"});
-  // through the baseline's own full push run
-  const viaPush = fixture();
-  viaPush.jobs.set(20, withoutArm64(20));
-  assert.deepEqual(yield* planCi({...viaPush, loadPolicy: () => Effect.succeed(olderPolicy)}), {mode: "full"});
-  // the same evidence with the native job still qualifies under that older policy
-  const complete = fixture();
-  complete.jobs.set(20, full(20));
-  assert.equal((yield* planCi({...complete, loadPolicy: () => Effect.succeed(olderPolicy)})).baselineRunId, 20);
-  // and a full PR proof for main never reuses a run without it
-  const merged = fixture();
-  merged.jobs.set(30, withoutArm64(30));
-  assert.deepEqual(yield* planCi({...merged, context: {...merged.context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}}}), {mode: "full"});
+it.effect("evidence from before the native ARM64 job or the browser journeys never counts as a full release baseline, also under the baseline's own older policy", () => Effect.gen(function*() {
+  for (const required of ["arm64", "browser"]) {
+    const olderPolicy = olderPolicyWithout(required);
+    const without = (id: number) => full(id).filter(job => job.name !== required);
+    // through the baseline's directly checked PR
+    const viaPr = fixture();
+    viaPr.jobs.set(10, without(10));
+    assert.deepEqual(yield* planCi({...viaPr, loadPolicy: () => Effect.succeed(olderPolicy)}), {mode: "full"}, required);
+    // through the baseline's own full push run
+    const viaPush = fixture();
+    viaPush.jobs.set(20, without(20));
+    assert.deepEqual(yield* planCi({...viaPush, loadPolicy: () => Effect.succeed(olderPolicy)}), {mode: "full"}, required);
+    // the same evidence with that job still qualifies under that older policy
+    const complete = fixture();
+    complete.jobs.set(20, full(20));
+    assert.equal((yield* planCi({...complete, loadPolicy: () => Effect.succeed(olderPolicy)})).baselineRunId, 20, required);
+    // and a full PR proof for main never reuses a run without it
+    const merged = fixture();
+    merged.jobs.set(30, without(30));
+    assert.deepEqual(yield* planCi({...merged, context: {...merged.context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}}}), {mode: "full"}, required);
+  }
 }));
 
 it.effect("missing baseline policy never lets the implementing PR approve its own shortcut", () => Effect.gen(function*() {
@@ -160,32 +167,71 @@ it.effect("the actual scope adapter preserves default full dispatch and selects 
   assert.equal(workflow.on.workflow_dispatch.inputs.validation.default, "full");
 }));
 
-it.live("the actual aggregate shell rejects missing proof, a skipped or failed static or native ARM64 check, failed suites, a skipped or failed startup and unknown modes", () => Effect.sync(() => {
+it.live("the actual aggregate shell rejects missing proof, a skipped or failed static or native ARM64 check, failed suites or browser journeys, a skipped or failed startup and unknown modes", () => Effect.sync(() => {
   const script = workflow.jobs.check.steps[0].run as string;
-  for (const [mode, plan, stat, arm64, main, harness, startup, succeeds] of [
-    ["full", "success", "success", "success", "success", "success", "success", true],
-    ["release", "success", "success", "success", "skipped", "skipped", "success", true],
-    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "success", true],
-    ["release", "success", "skipped", "success", "skipped", "skipped", "success", false],
-    ["release", "success", "success", "success", "failure", "skipped", "success", false],
-    ["reuse", "failure", "skipped", "skipped", "skipped", "skipped", "success", false],
-    ["full", "success", "success", "success", "skipped", "success", "success", false],
-    ["", "success", "success", "success", "success", "success", "success", false],
-    ["full", "success", "success", "success", "success", "success", "skipped", false],
-    ["full", "success", "success", "success", "success", "success", "failure", false],
-    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "skipped", false],
-    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "failure", false],
-    ["release", "success", "success", "success", "skipped", "skipped", "skipped", false],
-    ["release", "success", "success", "success", "skipped", "skipped", "failure", false],
-    ["full", "success", "success", "skipped", "success", "success", "success", false],
-    ["full", "success", "success", "failure", "success", "success", "success", false],
-    ["full", "success", "success", "cancelled", "success", "success", "success", false],
-    ["release", "success", "success", "skipped", "skipped", "skipped", "success", false],
-    ["release", "success", "success", "failure", "skipped", "skipped", "success", false],
-    ["reuse", "success", "skipped", "success", "skipped", "skipped", "success", false],
+  for (const [mode, plan, stat, arm64, main, harness, startup, browser, succeeds] of [
+    ["full", "success", "success", "success", "success", "success", "success", "success", true],
+    ["release", "success", "success", "success", "skipped", "skipped", "success", "skipped", true],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "success", "skipped", true],
+    ["release", "success", "skipped", "success", "skipped", "skipped", "success", "skipped", false],
+    ["release", "success", "success", "success", "failure", "skipped", "success", "skipped", false],
+    ["reuse", "failure", "skipped", "skipped", "skipped", "skipped", "success", "skipped", false],
+    ["full", "success", "success", "success", "skipped", "success", "success", "success", false],
+    ["", "success", "success", "success", "success", "success", "success", "success", false],
+    ["full", "success", "success", "success", "success", "success", "skipped", "success", false],
+    ["full", "success", "success", "success", "success", "success", "failure", "success", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "skipped", "skipped", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "failure", "skipped", false],
+    ["release", "success", "success", "success", "skipped", "skipped", "skipped", "skipped", false],
+    ["release", "success", "success", "success", "skipped", "skipped", "failure", "skipped", false],
+    ["full", "success", "success", "skipped", "success", "success", "success", "success", false],
+    ["full", "success", "success", "failure", "success", "success", "success", "success", false],
+    ["full", "success", "success", "cancelled", "success", "success", "success", "success", false],
+    ["release", "success", "success", "skipped", "skipped", "skipped", "success", "skipped", false],
+    ["release", "success", "success", "failure", "skipped", "skipped", "success", "skipped", false],
+    ["reuse", "success", "skipped", "success", "skipped", "skipped", "success", "skipped", false],
+    // the browser journeys are a full job: required in full validation, skipped exactly where the suites are
+    ["full", "success", "success", "success", "success", "success", "success", "skipped", false],
+    ["full", "success", "success", "success", "success", "success", "success", "failure", false],
+    ["full", "success", "success", "success", "success", "success", "success", "cancelled", false],
+    ["full", "success", "success", "success", "success", "success", "success", "", false],
+    ["release", "success", "success", "success", "skipped", "skipped", "success", "success", false],
+    ["release", "success", "success", "success", "skipped", "skipped", "success", "failure", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "success", "success", false],
   ] as const) {
     const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, ARM64_RESULT: arm64,
-      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup}});
-    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, arm64, main, harness, startup}));
+      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup, BROWSER_RESULT: browser}});
+    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, arm64, main, harness, startup, browser}));
+  }
+  // the browser journeys run through the contributors' own entry and are selected exactly where the suites are
+  assert.equal(workflow.jobs.browser.if, workflow.jobs.harness.if);
+  assert.ok((workflow.jobs.check.needs as Array<string>).includes("browser"));
+}));
+
+it.live("the browser job runs the journeys once unless a manual calibration asks for up to twenty runs without retries", () => Effect.sync(() => {
+  const step = (workflow.jobs.browser.steps as Array<{name?: string; run?: string; env?: Record<string, string>}>).find((candidate) => candidate.name === "Run the browser journeys");
+  assert.ok(step?.run && step.env);
+  // only a dispatch supplies a count, kept as the text it was so a 0 reaches the check below instead of falling back to 1
+  assert.equal(step.env.REPETITIONS, "${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.browser_repetitions) || 1 }}");
+  assert.equal(workflow.on.workflow_dispatch.inputs.browser_repetitions.default, 1);
+  const bin = mkdtempSync(join(tmpdir(), "t3sup-browser-runs-"));
+  try {
+    // a stand-in ./dev that records each call and fails on the call FAIL_AT names
+    writeFileSync(join(bin, "dev"), "#!/bin/sh\necho call >> \"$CALLS\"\n[ \"$(wc -l < \"$CALLS\")\" -ne \"${FAIL_AT:-0}\" ]\n");
+    chmodSync(join(bin, "dev"), 0o755);
+    const run = (repetitions: string, failAt = "0") => {
+      const calls = join(bin, `calls-${repetitions}-${failAt}`);
+      writeFileSync(calls, "");
+      const result = spawnSync("bash", ["-c", step.run!.replaceAll("./dev e2e", `${join(bin, "dev")} e2e`)], {encoding: "utf8",
+        env: {PATH: process.env.PATH, REPETITIONS: repetitions, FAIL_AT: failAt, CALLS: calls, GITHUB_STEP_SUMMARY: join(bin, "summary")}});
+      return {ok: result.status === 0, calls: readFileSync(calls, "utf8").split("\n").filter(Boolean).length};
+    };
+    assert.deepEqual(run("1"), {ok: true, calls: 1});
+    assert.deepEqual(run("10"), {ok: true, calls: 10});
+    // the first failing run ends the calibration: nothing is retried and no later run starts
+    assert.deepEqual(run("10", "3"), {ok: false, calls: 3});
+    for (const invalid of ["0", "21", "", "2x"]) assert.deepEqual(run(invalid), {ok: false, calls: 0}, invalid);
+  } finally {
+    rmSync(bin, {recursive: true, force: true});
   }
 }));
