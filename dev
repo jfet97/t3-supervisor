@@ -30,10 +30,11 @@ usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
                       image (ARGS go to vitest); each journey owns its Supervisor, scripted T3 and Chromium
   soak [ARGS]         the scripted soaks: vitest with vitest.soak.config.ts in the toolchain container (ARGS go to vitest);
                       each soak runs the Supervisor process against a fake T3 on the wall clock, without credentials
-  trial SCENARIO --budget-minutes N [--model MODEL] [--keep]
+  trial SCENARIO[,SCENARIO...] --budget-minutes N [--follow-up-minutes M] [--model MODEL] [--keep]
                       a provider trial in the running signed-in environment: a disposable project and chat of its own,
-                      observed for the whole budget, then removed with its chats unless --keep; local only, never in CI
-                      (scripts/provider-trial.ts)
+                      or a No Project chat of its own, observed for the whole budget, then removed unless --keep;
+                      several observing workload scenarios may share one launch; local only, never in CI
+                      (scripts/provider-trial.ts, docs/local-stack.md)
   reset               remove test data: the workspaces' T3 projects with their chats, Supervisor data and the
                       workspaces; provider sign-ins, T3 settings and T3 provider connections stay
   reset-auth          sign out every provider: T3's own sign-out for each instance it offers one for, including

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Effect, Exit, FileSystem } from "effect";
 import { parse } from "yaml";
-import { cliSignOuts, devPaths, devPorts, environmentSessions, prepare, sessionSubjectPrefix, signedOutByT3, t3Environment, withCodexFileStore } from "../scripts/dev-environment.js";
+import { cliSignOuts, devPaths, devPorts, environmentSessions, prepare, sessionSubjectPrefix, signedOutByT3, supervisorEnvironment, t3Environment, withCodexFileStore } from "../scripts/dev-environment.js";
 import { repositoryRoot } from "../scripts/local-run.js";
 import { runProcess } from "./support/g8-process.js";
 
@@ -107,6 +107,24 @@ it.effect("T3 and the provider CLIs it starts see the credentials volume and not
   for (const name of ["T3_URL", "OPENAI_API_KEY", "SSH_AUTH_SOCK", "T3SUP_DEV_DATA"]) assert.equal(env[name], undefined, name);
   // T3's worktree setup runs `sh dev setup` with this environment, inside the container
   assert.equal(t3Environment({...containerEnv, T3SUP_DEV_CONTAINER: "1"}, paths).T3SUP_DEV_CONTAINER, "1");
+}));
+
+it.effect("Supervisor takes the scratch project T3 keeps under the base directory it is served with for No Project", () => Effect.gen(function* () {
+  const paths = yield* devPaths(containerEnv);
+  const ports = yield* devPorts(containerEnv);
+  const env = supervisorEnvironment({env: t3Environment(containerEnv, paths), paths, ports, t3Url: `http://127.0.0.1:${ports.t3}`, assets: "/workspace/ui-dist",
+    files: {T3_TOKEN_FILE: "/data/supervisor/access/t3-token"}});
+  // T3 keeps its scratch project at path.resolve(baseDir, "scratch") (apps/server/src/project/ManagedProjectFolders.ts) and runs here
+  // with --base-dir paths.t3Home; Supervisor compares an absolute, normalized root with the project's workspace root
+  const root = env.T3_MANAGED_SCRATCH_ROOT ?? "";
+  assert.equal(root, posix.resolve(paths.t3Home, "scratch"));
+  assert.equal(root, "/credentials/t3/scratch");
+  assert.ok(posix.isAbsolute(root) && posix.normalize(root) === root, "an absolute, normalized root");
+  assert.ok(!root.startsWith(paths.workspaces), "never a development workspace");
+  // the rest of Supervisor's environment is unchanged by it: its own data, the T3 it reads and its issued session files
+  assert.equal(env.DATA_DIRECTORY, paths.supervisorData);
+  assert.equal(env.T3_URL, "http://127.0.0.1:47773");
+  assert.equal(env.T3_TOKEN_FILE, "/data/supervisor/access/t3-token");
 }));
 
 it.live("preparing makes private folders and file storage and leaves an existing login untouched", () => Effect.gen(function* () {
