@@ -113,6 +113,20 @@ export const t3Environment = (env: NodeJS.ProcessEnv, paths: DevPaths): Record<s
   };
 };
 
+/*
+  Supervisor's environment: its data, the T3 it reads, its dashboard and health listeners on the published ports, and the session
+  files it was issued. T3 keeps its No Project chats in its scratch project, at `path.resolve(config.baseDir, "scratch")` for a base
+  directory outside a Git checkout (apps/server/src/project/ManagedProjectFolders.ts), and this environment serves T3 with
+  `--base-dir paths.t3Home` in the credentials volume; Supervisor takes exactly the project at the absolute, normalized
+  T3_MANAGED_SCRATCH_ROOT for No Project (src/guidance-application.ts), as an installation configures it.
+*/
+export const supervisorEnvironment = (input: {readonly env: Readonly<Record<string, string>>; readonly paths: DevPaths; readonly ports: DevPorts;
+  readonly t3Url: string; readonly assets: string; readonly files: Readonly<Record<string, string>>}): Record<string, string> => ({
+  PATH: input.env.PATH ?? "", HOME: input.paths.home, LANG: "C.UTF-8", TMPDIR: input.env.TMPDIR ?? "/tmp", DATA_DIRECTORY: input.paths.supervisorData,
+  T3_URL: input.t3Url, UI_ASSETS_DIRECTORY: input.assets, UI_HOST: "0.0.0.0", UI_PORT: String(input.ports.ui), HEALTH_HOST: "0.0.0.0",
+  HEALTH_PORT: String(input.ports.health), T3_MANAGED_SCRATCH_ROOT: join(input.paths.t3Home, "scratch"), ...input.files,
+});
+
 // scoped T3 sessions of this environment carry these subjects, so a later start finds and revokes them after any stop
 export const sessionSubjectPrefix = "t3-supervisor-dev:";
 export const devSessionTtl = "24h";
@@ -228,10 +242,7 @@ const serve = Effect.scoped(Effect.gen(function* () {
     return yield* failure(`T3 serves orchestration protocol ${descriptor.orchestrationProtocolVersion}; Supervisor reads protocol ${orchestrationProtocol}`);
   const revoked = yield* revokeEnvironmentSessions(cli);
   const project = yield* workspaceProject(cli, paths);
-  const supervisorEnv = (files: Record<string, string>) => ({
-    PATH: env.PATH ?? "", HOME: paths.home, LANG: "C.UTF-8", TMPDIR: env.TMPDIR ?? "/tmp", DATA_DIRECTORY: paths.supervisorData, T3_URL: t3Url,
-    UI_ASSETS_DIRECTORY: assets, UI_HOST: "0.0.0.0", UI_PORT: String(ports.ui), HEALTH_HOST: "0.0.0.0", HEALTH_PORT: String(ports.health), ...files,
-  });
+  const supervisorEnv = (files: Record<string, string>) => supervisorEnvironment({env, paths, ports, t3Url, assets, files});
   yield* Console.log([
     `T3 ${descriptor.serverVersion} (published, unmodified) at http://127.0.0.1:${ports.t3}; ${revoked} earlier scoped session(s) revoked`,
     `development sandbox ${project.id ?? "(registered earlier)"} at ${project.path}`,
