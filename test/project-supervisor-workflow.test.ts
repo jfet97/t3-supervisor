@@ -10,6 +10,7 @@ import {
 } from "./support/ctl-workflow.js";
 import { interpretationPlanRules, interpretationRules, localThreadToolRules, toolRouteReminder } from "../src/supervisor-workflow.js";
 import { messageReadRule } from "../src/message-read-handle.js";
+import { workflowReadToolDefinition } from "../src/workflow-write-controller.js";
 import { repeatedUnits } from "./support/exchange-audit.js";
 
 // the interpretation fields a root submits for the export task
@@ -147,7 +148,7 @@ it.effect("a transient preparation read failure recovers across Supervisor insta
   assert.equal(waiting?.definitionReadAttempts, 1);
   assert.equal(waiting?.definitionContext?.revision, "revision-1");
   assert.equal(fixture.dispatches().length, 1);
-  assert.match(String(fixture.dispatches()[0]?.payload.text), /Interpretation requested\./u);
+  assert.equal(fixture.dispatches()[0]?.payload.messageId, waiting?.messageId, "the one dispatch is the task's interpretation request");
 
   yield* (yield* fixture.makeSupervisor()).cycle;
   assert.equal(fixture.definitionReads.length, 2);
@@ -180,7 +181,7 @@ it.effect("bounded unavailable preparation reads still dispatch a provisional wo
   assert.equal(dispatched?.definitionContext?.complete, false);
   assert.equal(dispatched?.definitionContext?.requirementsKnown, false);
   assert.equal(dispatched?.definitionContext?.revision, null);
-  assert.match(String(request), /Interpretation requested\./u);
+  assert.equal(fixture.dispatches()[0]?.payload.messageId, dispatched?.messageId, "the one dispatch is the task's interpretation request");
   assert.doesNotMatch(String(request), /"requirementsKnown"/u, "unknown definition details stay in the source-bound reader");
   assert.equal(fixture.dispatches().length, 1);
 
@@ -337,8 +338,9 @@ it.effect("persisted objective-only records are not backfilled or replayed", () 
   const definitionsEnabledSupervisor = yield* fixture.makeSupervisor();
   yield* definitionsEnabledSupervisor.cycle;
   assert.equal(fixture.definitionReads.length, 0, "the persisted in-flight request is not prepared again");
-  // an in-flight record without a typed attempt has no recorded submission: its final chat answer is never applied (typed
-  // protocol; the old final-chat parser applied it as inferred)
+  /* An in-flight record without a typed attempt has no recorded submission: its final chat answer is never applied (typed
+   * protocol; the old final-chat parser applied it as inferred).
+   */
   completeSupervisorRequest(native, legacyTask.messageId, objectiveResponse(legacyTask.sourceMessageId));
   yield* definitionsEnabledSupervisor.cycle;
 
@@ -573,7 +575,15 @@ it.effect("the interpretation request carries the root notice and handles; the c
   const later = fixture.dispatches().slice(dispatchedBefore).find(call => call.payload.threadId === binding.threadId);
   assert.ok(later, "the second request is interpreted in the same binding");
   const laterText = String(later.payload.text);
-  assert.match(laterText, new RegExp(`^Supervisor root for main "${sourceThreadId}": instructions workflow_read view instructions with \\{"supervisorThreadId":"${binding.threadId}","bindingGeneration":${binding.generation}\\}, version ${String(index.version)}\\.\\nInterpretation requested\\.`, "u"));
+  /* Its first line is the pointer, holding the main, the reader coordinates and the instructions version; the request after it names the
+   * second message as its source.
+   */
+  const [pointer = "", ...request] = laterText.split("\n");
+  assert.ok(pointer.includes(workflowReadToolDefinition.name), "the pointer names the context reader");
+  assert.match(pointer, /\binstructions\b/u, "the pointer names the instructions view");
+  for (const handle of [JSON.stringify(sourceThreadId), JSON.stringify({supervisorThreadId: binding.threadId, bindingGeneration: binding.generation}),
+    String(index.version)]) assert.ok(pointer.includes(handle), `${handle} in ${pointer}`);
+  assert.equal((JSON.parse(request.at(-1) ?? "null") as {sourceMessageId?: string} | null)?.sourceMessageId, "second-request");
   assert.deepEqual(repeatedUnits(laterText, [supervisor.conversation.rootNotice(binding)!]), [], "no sentence of the full notice is repeated");
   assert.equal((yield* fixture.task())!.requestRoleVersion, undefined, "a pointer request carries no version to confirm");
 }));
@@ -598,8 +608,9 @@ it.effect("an Enable or re-enable saved during the final awaits leaves the reque
   {
     const fixture = yield* makeWorkflowFixture();
     const supervisor = yield* fixture.makeSupervisor();
-    // the Enable lands while the last read before dispatch is awaited, after the queued gate and definition preparation; the
-    // hook's read and write run synchronously, before the read answers, as the baseline hook's did
+    /* The Enable lands while the last read before dispatch is awaited, after the queued gate and definition preparation; the
+     * hook's read and write run synchronously, before the read answers, as the baseline hook's did.
+     */
     fixture.onModelsRead(() => Effect.gen(function* () {
       const queued = yield* fixture.store.task(sourceThreadId);
       if (queued?.status === "queued" && queued.definitionContext) yield* fixture.store.recordChatEnable(sourceThreadId, Date.now());
@@ -615,8 +626,9 @@ it.effect("an Enable or re-enable saved during the final awaits leaves the reque
     const first = (yield* fixture.task())!;
     yield* submitAndComplete(fixture, supervisor, first, workflowFields(sourceMessageId));
     const load = fixture.definitions.load;
-    // the project is disabled and re-enabled with its boundary at the request's run while the finished result is revalidated; the
-    // reads and writes run synchronously once the read has its value, as the baseline ones did
+    /* The project is disabled and re-enabled with its boundary at the request's run while the finished result is revalidated; the
+     * reads and writes run synchronously once the read has its value, as the baseline ones did.
+     */
     fixture.definitions.load = (loadedProjectId, threadId) => Effect.gen(function* () {
       const value = yield* load(loadedProjectId, threadId);
       if ((yield* fixture.store.task(sourceThreadId))?.status === "waiting") {
@@ -750,9 +762,10 @@ it.effect("the proposal is introduced in the same cycle its interpretation compl
   assert.equal(introduction?.payload.messageId, `supervisor-notice:workflow:${task.id}:${task.sourceHash.slice(0, 20)}`, "the introduction goes out in the completion cycle");
 }));
 
-// native proof 2026-10-28 (VM run 4): t3_thread_read with a message ID as itemId returns no items; T3 reads a user message by its own
-// turn item, `turn-item:message:<URI-encoded message ID>`. The context names that exact native item, as the projection reports it,
-// beside the message ID, which stays provenance and is never a read itemId.
+/* Native proof 2026-10-28 (VM run 4): t3_thread_read with a message ID as itemId returns no items; T3 reads a user message by its own
+ * turn item, `turn-item:message:<URI-encoded message ID>`. The context names that exact native item, as the projection reports it,
+ * beside the message ID, which stays provenance and is never a read itemId.
+ */
 it.effect("the interpretation context names each requester message's exact native read item beside its message ID", () => Effect.gen(function* () {
   const fixture = yield* makeWorkflowFixture();
   const source = fixture.projections.get(sourceThreadId)!;

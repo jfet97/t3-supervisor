@@ -12,7 +12,7 @@ import type { JsonRecord } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { conversationUnit, dataDirectory, nativeClient, openStores, t3Projections, workflowStore } from "./support/g1a-conversation.js";
 import { baseTime, emptySupervisorProjection, makeSourceProjection } from "./support/ps-fixture.js";
-import { nativeWrites, rpcRequests, startLinFixture } from "./support/lin-fixture.js";
+import { nativeWrites, rpcRequests, startScenario } from "./support/scenario-driver.js";
 
 // the real scoped controller, stores, policy and admission gate; only native I/O is synthetic
 const fixture = Effect.fnUntraced(function* () {
@@ -298,7 +298,7 @@ it.effect("completed compaction invalidates the ordinary role acknowledgment; la
 }));
 
 it.live("the production graph receives a native subscription snapshot and sends one guarded steer through the operate transport", () => Effect.gen(function* () {
-  const f = yield* startLinFixture();
+  const f = yield* startScenario();
   const binding = yield* f.bindSupervisor;
   const root = yield* f.supervisor;
   root.thread.activeRunId = "compacting-run";

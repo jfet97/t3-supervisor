@@ -1508,7 +1508,8 @@ it.effect("native Start runs one intent interpretation, grants only that chat an
   assert.ok(task);
   assert.equal(yield* f.supervisor.scopeEnabled("project-a", "manual"), false);
   assert.equal(yield* f.supervisor.workflowEditingEnabled("project-a", "manual"), false);
-  assert.match(task.requestText, /Interpretation requested\./u);
+  assert.equal((JSON.parse(task.requestText.slice(task.requestText.lastIndexOf("\n{") + 1)) as {mainThreadId?: string}).mainThreadId, task.threadId,
+    "the task holds the interpretation request for its own main");
   assert.equal((yield* f.supervisor.conversation.readContextView((yield* f.fixture.store.binding("project-a", "manual"))!, {view: "context"})).supervision, "pending_start", "the Start verdict is asked through the context it reads");
   assert.equal(f.fixture.operations.filter(op => op.payload.type === "message.dispatch").length, 1);
   const root = f.fixture.projections.get(task.supervisorThreadId)!;

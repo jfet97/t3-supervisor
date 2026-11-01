@@ -4,21 +4,24 @@ import { Deferred, Effect, Fiber } from "effect";
 import type { BindingRecord } from "../src/project-supervisor-store.js";
 import { atWallTime, within } from "./support/g1b-conversation.js";
 import {
-  abortHonouringSend, addCommandActivity, appendNoticeToOperative, baseTime, makeFixture, operativeThreadId, proceed, projectId, setNow, type Fixture,
+  abortHonouringSend, addCommandActivity, appendNoticeToOperative, baseTime, makeFixture, operativeThreadId, projectId, setNow, type Fixture,
   type FixtureClock, type Flight, type RpcCall,
 } from "./support/c1-conversation-fixture.js";
 
-// target regressions of the ported root check-in (S6b): its guard, 'sending' receipt and POST run in the one admission
-// section the policy writers use, the reply is awaited outside it, and an interrupted cycle classifies the send it owns.
-// the cases are Effect tests on the production conversation, project supervisor, admission gate and stores over real files in a
-// temporary directory, with the fake T3 as an effect fake and the suite clock on the test clock; the baseline per-call 8 s
-// abort deadlines and the observation's 5 s are gone with the signal parameter: hang guards, which each case's 10 s bound and
-// the 3 s live-clock bounds of its awaited events still cover
+/* Target regressions of the ported root check-in (S6b): its preparation, guard, 'sending' receipt and POST run in the one admission
+ * section the policy writers use, and an interrupted cycle classifies the send it owns. A Stop made while a check-in's reply is
+ * pending (S6b-CONV-01) runs over the real sockets in stop-linearization.test.ts (CT-LIN-06, root check-in).
+ * the cases are Effect tests on the production conversation, project supervisor, admission gate and stores over real files in a
+ * temporary directory, with the fake T3 as an effect fake and the suite clock on the test clock; the baseline per-call 8 s
+ * abort deadlines and the observation's 5 s are gone with the signal parameter: hang guards, which each case's 10 s bound and
+ * the 3 s live-clock bounds of its awaited events still cover.
+ */
 
 const isCheckIn = (fixture: Fixture) => (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.threadId === fixture.binding.threadId;
 
-// three due command activities beside a sent introduction, observed into the monitor; the project is enabled for the
-// supervisor's own scope predicates
+/* Three due command activities beside a sent introduction, observed into the monitor; the project is enabled for the
+ * supervisor's own scope predicates.
+ */
 const dueCheckIn = (clock: FixtureClock) => Effect.gen(function* () {
   yield* setNow(clock, clock.now);
   const fixture = yield* makeFixture(clock, {settings: {intervalMinutes: 2, activityThreshold: 3}});
@@ -30,34 +33,6 @@ const dueCheckIn = (clock: FixtureClock) => Effect.gen(function* () {
 });
 
 const binding = (fixture: Fixture) => Effect.map(fixture.projectStore.binding(projectId, operativeThreadId), (current) => current as BindingRecord);
-
-it.effect("S6b-CONV-01: a Stop requested while a root check-in's reply is pending commits without waiting for it; the check-in keeps its identity", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  const fixture = yield* dueCheckIn(clock);
-  const service = yield* fixture.makeProjectSupervisor;
-  const reached = yield* Deferred.make<RpcCall>();
-  const reply = yield* Deferred.make<unknown>();
-  fixture.intercept(call => {
-    if (!isCheckIn(fixture)(call)) return null;
-    return Effect.andThen(Deferred.succeed(reached, call), Deferred.await(reply));
-  });
-  const running = yield* Effect.forkChild(service.conversation.run(yield* binding(fixture), fixture.supervisor, fixture.threadList));
-  const call = yield* within(Deferred.await(reached), 3_000, "check-in POST");
-  const sending = yield* service.requests.pending(projectId, fixture.binding.threadId);
-  assert.equal(sending?.state, "sending");
-  assert.equal(call.payload.commandId, `supervisor-review:${sending.id}`);
-
-  // the dashboard Stop runs its policy write in the same admission section the POST was started in
-  const stopped = yield* within(service.supervisor.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false,
-    policyGeneration: (yield* fixture.threadPolicy.get()).generation}), 3_000, "Stop while the reply is pending");
-  assert.equal(stopped.status, "saved");
-  assert.deepEqual(yield* service.requests.pending(projectId, fixture.binding.threadId), sending, "the Stop leaves the started check-in's identity untouched");
-
-  yield* Deferred.succeed(reply, proceed);
-  yield* within(Fiber.join(running), 3_000, "cycle");
-  assert.deepEqual(yield* service.requests.pending(projectId, fixture.binding.threadId), {...sending, state: "waiting"});
-  assert.deepEqual(fixture.calls.filter(isCheckIn(fixture)), [call]);
-}), {timeout: 10_000});
 
 it.effect("S6b-CONV-02: a Stop committed while a root check-in waits for the admission section prepares and sends nothing", () => Effect.gen(function* () {
   const clock = {now: baseTime};
