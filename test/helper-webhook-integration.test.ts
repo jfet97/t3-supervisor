@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Clock, Deferred, Duration, Effect } from "effect";
+import { Clock, Deferred, Duration, Effect, Fiber, Option } from "effect";
 import { helperDeliveryBody } from "../src/supervisor-helper-transport.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
 import { execute, row } from "./support/glinint-wiring.js";
-import { json } from "./support/int-native-peer.js";
+import { json, type HttpAnswer } from "./support/int-native-peer.js";
 import {
   assertHelperCredentials, helperReceipt, helperRequest, helperTeamRequest, hookPath, publishedWrapper, redirectedHookPath, rpcRequests, runHelperBatch,
   startHelperScenario, webhookPosts, type HelperScenario, type Scenario,
@@ -13,7 +13,9 @@ import {
 /* Production team runtime -> production helper transport -> platform fetch -> loopback socket; operate RPC over a real websocket;
  * restart reopens the files, on the replay scenario driver (support/scenario-driver.ts). it.live: the webhook POSTs, the websocket
  * RPC and the projection reads cross real loopback sockets, and H2's stalled body ends at the caller's own 3 s deadline on the live
- * clock. The Stop cases H4a, H4c and H5 run with the Stop linearization cases in stop-linearization.test.ts.
+ * clock. The Stop cases H4a, H4c and H5 run with the Stop linearization cases in stop-linearization.test.ts. A POST whose delivery T3
+ * never shows stays unresolved in supervisor-team-runtime.characterization.test.ts (CT-TRUN-01 crash) and
+ * supervisor-helper-transport.characterization.test.ts (CT-HTX-01): this driver's peer logs every POST that reaches it.
  */
 
 // `deadline`: the caller's own deadline, a cancel completed after it on the live clock, as the baseline AbortSignal.timeout aborted
@@ -41,50 +43,69 @@ const assertCredentials = (f: Scenario): void => {
   assert.deepEqual(f.peer.unexpected, []);
 };
 
-it.live("CT-INT-03: H1 an accepted POST whose reply is lost stays uncertain, is never re-posted and binds by exact body after restart", () => Effect.gen(function* () {
-  const h = yield* startHelperScenario();
-  const {f} = h;
-  f.peer.webhook = () => Effect.succeed({raw: (request) => {request.socket.destroy();}});
-  yield* runBatch(h);
+/* The two ways an accepted POST's outcome stays unknown: T3 logged the delivery and holds its reply until the case ends the exchange,
+ * by cutting the socket (H1) or by the caller's own cancel while the reply is still held (CT-TRUN-01's abort, which the baseline
+ * characterized over a stubbed fetch).
+ */
+for (const outcome of ["its reply is lost", "the caller cancels while T3 holds its reply"] as const) {
+  it.live(`CT-INT-03: H1 (CT-TRUN-01 abort) an accepted POST whose outcome is unknown because ${outcome} stays uncertain, is never re-posted and binds by exact body after restart`, () => Effect.gen(function* () {
+    const h = yield* startHelperScenario();
+    const {f} = h;
+    const arrived = yield* Deferred.make<void>();
+    const cut = yield* Deferred.make<void>();
+    const lost: HttpAnswer = {raw: (request) => {request.socket.destroy();}};
+    f.peer.webhook = () => Effect.andThen(Deferred.succeed(arrived, undefined), Effect.as(Deferred.await(cut), lost));
+    const cancel = yield* Deferred.make<void>();
+    const batch = yield* Effect.forkChild(runHelperBatch(h, outcome === "its reply is lost" ? undefined : cancel));
+    yield* Deferred.await(arrived);
+    // the runtime admitted the request and the transport committed its receipt before the POST left
+    const sending = yield* helperRequest(f);
+    assert.equal(sending.state, "sending");
+    assert.equal((yield* helperReceipt(f))!.state, "posting");
+    yield* Deferred.succeed(outcome === "its reply is lost" ? cut : cancel, undefined);
+    // retain the retired cancellation case's ten-second bound within the live journey
+    const ended = yield* Effect.timeoutOption(Fiber.join(batch), "10 seconds");
+    assert.ok(Option.isSome(ended), "the batch ends while T3's reply is still unavailable");
 
-  const posts = webhookPosts(f.peer);
-  assert.equal(posts.length, 1, "no retry of a non-idempotent POST");
-  const input = yield* sentInput(f);
-  assert.equal(posts[0]!.path, hookPath);
-  assert.equal(posts[0]!.body, helperDeliveryBody(input.messageId, input.text));
-  assert.equal(posts[0]!.body, JSON.stringify({batchId: input.messageId, text: input.text}));
-  assert.equal(posts[0]!.contentType, "application/json");
-  const receipt = (yield* helperReceipt(f))!;
-  assert.equal(receipt.state, "posting");
-  assert.equal(receipt.messageId, input.messageId);
-  assert.equal(receipt.commandId, input.commandId);
-  assert.equal(receipt.text, input.text);
-  assert.equal(receipt.hash, workflowRequestHash(input));
-  assert.equal(receipt.taskId, f.peer.tasks[0]!.id);
-  assert.match(String(receipt.taskId), /^supervisor-helper:[0-9a-f]{64}$/u);
-  assert.equal("nativeDeliveryId" in receipt, false);
-  const request = yield* helperRequest(f);
-  assert.equal(request.state, "uncertain");
-  assert.equal((yield* helperTeamRequest(f)).state, "uncertain");
+    const posts = webhookPosts(f.peer);
+    assert.equal(posts.length, 1, "no retry of a non-idempotent POST");
+    const input = yield* sentInput(f);
+    assert.equal(posts[0]!.path, hookPath);
+    assert.equal(posts[0]!.body, helperDeliveryBody(input.messageId, input.text));
+    assert.equal(posts[0]!.body, JSON.stringify({batchId: input.messageId, text: input.text}));
+    assert.equal(posts[0]!.contentType, "application/json");
+    const receipt = (yield* helperReceipt(f))!;
+    assert.equal(receipt.state, "posting");
+    assert.equal(receipt.messageId, input.messageId);
+    assert.equal(receipt.commandId, input.commandId);
+    assert.equal(receipt.text, input.text);
+    assert.equal(receipt.hash, workflowRequestHash(input));
+    assert.equal(receipt.taskId, f.peer.tasks[0]!.id);
+    assert.match(String(receipt.taskId), /^supervisor-helper:[0-9a-f]{64}$/u);
+    assert.equal("nativeDeliveryId" in receipt, false);
+    const request = yield* helperRequest(f);
+    assert.deepEqual(request, {...sending, state: "uncertain", error: "Helper delivery is uncertain; its original native identity is retained."});
+    assert.equal((yield* helperTeamRequest(f)).state, "uncertain");
 
-  yield* f.restart;
-  const binding = yield* f.binding;
-  yield* f.core.teamRuntime.startCycle(binding);
-  yield* f.core.teamRuntime.reconcile(binding, h.threads);
-  assert.equal(webhookPosts(f.peer).length, 1, "reconciliation after restart posts nothing");
-  const reconciled = (yield* helperReceipt(f))!;
-  assert.equal(reconciled.state, "posted");
-  assert.equal(reconciled.nativeDeliveryId, "native-delivery-1");
-  assert.equal(reconciled.renderedText, publishedWrapper(input.text));
-  assert.equal(reconciled.messageId, input.messageId);
-  assert.equal(reconciled.hash, receipt.hash);
-  const reconciledRequest = yield* helperRequest(f);
-  assert.equal(reconciledRequest.id, request.id);
-  assert.equal(reconciledRequest.messageId, request.messageId);
-  assert.equal(reconciledRequest.state, "waiting");
-  assert.ok(rpcRequests(f.peer, "scheduledTasks.getWebhookDelivery").length >= 1);
-  assertCredentials(f);
-}), {timeout: 60_000});
+    yield* f.restart;
+    const binding = yield* f.binding;
+    yield* f.core.teamRuntime.startCycle(binding);
+    yield* f.core.teamRuntime.reconcile(binding, h.threads);
+    assert.equal(webhookPosts(f.peer).length, 1, "reconciliation after restart posts nothing");
+    const reconciled = (yield* helperReceipt(f))!;
+    assert.equal(reconciled.state, "posted");
+    assert.equal(reconciled.nativeDeliveryId, "native-delivery-1");
+    assert.equal(reconciled.renderedText, publishedWrapper(input.text));
+    assert.equal(reconciled.messageId, input.messageId);
+    assert.equal(reconciled.hash, receipt.hash);
+    const reconciledRequest = yield* helperRequest(f);
+    assert.equal(reconciledRequest.id, request.id);
+    assert.equal(reconciledRequest.messageId, request.messageId);
+    assert.equal(reconciledRequest.state, "waiting");
+    assert.ok(rpcRequests(f.peer, "scheduledTasks.getWebhookDelivery").length >= 1);
+    assertCredentials(f);
+  }), {timeout: 60_000});
+}
 
 it.live("CT-INT-03: H2 a stalled 2xx body is read until the caller's deadline, then stays uncertain as recorded acceptance", () => Effect.gen(function* () {
   const h = yield* startHelperScenario();
