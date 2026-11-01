@@ -1,20 +1,23 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { it } from "@effect/vitest";
-import { Context, Deferred, Effect, Layer, Schema } from "effect";
+import { Context, Deferred, Effect, Fiber, Layer, Schema } from "effect";
 import { TestClock, TestConsole } from "effect/testing";
 import { effectiveIndex, makeDefinitionFixture, projectIndex, stepSource } from "./project-definitions-fixture.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { ProjectSupervisorSave, ProjectSupervisorSnapshot } from "../src/project-supervisor-contract.js";
 import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
+import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeT3Client, T3Client, T3TransportError } from "../src/t3.js";
 import { taskFields } from "./support/interpretation-submit.js";
 import { projectRequesterPolicy, taskRequester } from "../src/task-requester.js";
 import {
-  activationSequence, addPendingHelperCheckin, baseTime, completeSupervisorRequest, day, emptySupervisorProjection, interruptHungPass,
+  activationSequence, addPendingHelperCheckin, addSupervisorRequest, baseTime, completeSupervisorRequest, day, emptySupervisorProjection, interruptHungPass,
   makeFixture, makeSourceProjection, markRootMissing, missingDefinitions, noProjectFixture, registerReadyHelper, reserveReadyBinding,
   retryInput, startIntake, workflowResult, workflowSnapshot, type PsFixture, type Turn,
 } from "./support/ps-fixture.js";
+import { submitInterpretation, workflowFields } from "./support/psx-submission.js";
+import { makeFixture as makeCrashFixture, type PsxFixture } from "./support/psx-supervisor.js";
 
 const unreadSourceFields = (cited: string[] = []): Record<string, unknown> => ({
   objective: null, reason: "The source has not been read.", sourceMessageIds: [], supervision: "needed", workflow: null,
@@ -713,35 +716,106 @@ it.effect("unknown dispatch survives restart and retention with the original nat
   assert.equal(fixture.operations.some((call) => ["runtime-request.respond", "thread.interrupt", "runtime-request.interrupt"].includes(String(call.payload.type))), false);
 }));
 
-it.effect("accepted requests without native runs stop after two replays and remain available for explicit retry", () => Effect.gen(function* () {
-  const fixture = yield* makeFixture([
-    { threadId: "source-thread", projectId: "project-a", turns: [{ id: "source-task", sequence: 11, text: "Create a migration plan" }] },
-  ]);
-  fixture.setAcceptedDispatchesWithoutRun(3);
+/* ---- an interpretation dispatch cut off by a crash ----
+ * these cases run on psx-supervisor's fixture, whose restart closes the stores under a supervisor that keeps running, as a killed
+ * process leaves its files: the dead process's late reply reaches only its closed file and the task stays exactly as the crash left it.
+ * This suite's fixture and the scenario driver close the services before the stores, which records an in-flight dispatch 'uncertain'
+ * at shutdown instead; that start state runs over the real sockets in unknown-send-reconciliation.test.ts (CT-PS-01 abort).
+ */
+
+const crashSource = [{threadId: "source-thread", projectId: "project-a", turns: [{id: "source-task", sequence: 11, text: "Create a migration plan"}]}];
+const dispatchIdentity = (call: {payload: Record<string, unknown>}) => ({commandId: call.payload.commandId, messageId: call.payload.messageId,
+  text: call.payload.text, threadId: call.payload.threadId});
+const interpretationRows = (fixture: PsxFixture) =>
+  Effect.map(fixture.db.prepare("SELECT count(*) AS n FROM supervisor_task_interpretations WHERE thread_id=?").get("source-thread"), (row) => Number(row?.n));
+
+// the first interpretation dispatch reaches T3, the process crashes while T3 holds the reply, and T3 then answers the dead process
+const crashWhileDispatching = (lateReply: "accepted" | "rejected") => Effect.gen(function* () {
+  const fixture = yield* makeCrashFixture(crashSource);
+  const reached = yield* Deferred.make<void>();
+  const release = yield* Deferred.make<{accepted: boolean}, SupervisorRpcError>();
+  fixture.setOperateHook((tag, payload) => {
+    if (tag !== "orchestration.dispatchCommand" || payload.type !== "message.dispatch") return null;
+    fixture.setOperateHook(null);
+    return Effect.andThen(Deferred.succeed(reached, undefined), Deferred.await(release));
+  });
+  // the dead process's cycle is detached: its late write hits the closed file and must not fail the live process
+  const crashed = yield* Effect.flatMap(fixture.makeSupervisor(), (supervisor) => Effect.forkDetach(supervisor.cycle));
+  yield* Deferred.await(reached);
+  yield* fixture.restart();
+  yield* lateReply === "accepted" ? Deferred.succeed(release, {accepted: true}) : Deferred.fail(release, new SupervisorRpcError("rejected"));
+  yield* Fiber.await(crashed);
+  const dispatching = yield* fixture.supervisorStore.task("source-thread");
+  assert.ok(dispatching);
+  assert.equal(dispatching.status, "dispatching", `the dead process's late ${lateReply} reply records nothing`);
+  assert.equal(dispatching.messageId, `supervisor-objective:${dispatching.id}:${dispatching.sourceOrdinal}:${dispatching.sourceHash.slice(0, 20)}`);
+  assert.equal(dispatching.replayCount, 0);
+  assert.equal(typeof dispatching.dispatchedAt, "number");
+  const binding = yield* fixture.supervisorStore.binding("project-a", "source-thread");
+  assert.ok(binding?.state === "ready");
+  assert.equal(fixture.messageDispatches().length, 1);
+  const first = fixture.messageDispatches()[0]!;
+  assert.equal(first.payload.commandId, `supervisor-objective:${dispatching.attempt!.attemptId}`);
+  return {fixture, dispatching, binding, first};
+});
+
+it.live("an interpretation left 'dispatching' by a crash is reconciled from T3's result: a present typed result is applied once and the identity is never sent again (CT-PS-02)", () => Effect.gen(function* () {
+  const {fixture, dispatching, binding} = yield* crashWhileDispatching("rejected");
+  const root = fixture.projections.get(binding.threadId);
+  assert.ok(root);
+  addSupervisorRequest(root, {messageId: dispatching.messageId, text: dispatching.requestText});
   const supervisor = yield* fixture.makeSupervisor();
-  yield* supervisor.runOnce;
-  for (let attempt = 0; attempt < 3; attempt += 1) yield* supervisor.runOnce;
+  // the present native result is the root's typed submission in the request run; its final chat text is not read
+  assert.equal((yield* submitInterpretation({...fixture.stores, workflows: fixture.workflows, projections: fixture.projections}, dispatching,
+    workflowFields(dispatching.sourceMessageId, "Create a migration plan", "The source asks for a plan."))).status, "submitted");
+  completeSupervisorRequest(root, dispatching.messageId, "Submitted the interpretation.");
+  yield* supervisor.cycle;
+  const applied = yield* fixture.supervisorStore.task("source-thread");
+  assert.ok(applied);
+  assert.equal(applied.id, dispatching.id);
+  assert.equal(applied.status, "inferred");
+  assert.equal(applied.objective, "Create a migration plan");
+  assert.equal(applied.supervisorRunId, root.runs[0]!.id);
+  yield* supervisor.cycle;
+  const again = yield* fixture.supervisorStore.task("source-thread");
+  assert.equal(again?.id, dispatching.id);
+  assert.equal(again?.status, "inferred");
+  assert.equal(again?.objective, "Create a migration plan");
+  assert.equal(fixture.messageDispatches().filter(call => String(call.payload.messageId).startsWith(`supervisor-objective:${dispatching.id}:`)).length, 1,
+    "the identity is never resent once its native result exists");
+  assert.equal(yield* interpretationRows(fixture), 1);
+}), {timeout: 10_000});
 
-  const uncertain = yield* fixture.store.task("source-thread");
-  const binding = ((yield* fixture.store.bindings()).find(binding => binding.projectId === "project-a") ?? null);
-  assert.ok(uncertain && binding);
-  assert.equal(uncertain.status, "uncertain");
-  assert.equal(uncertain.replayCount, 2);
-  const dispatches = fixture.operations.filter((call) => call.payload.type === "message.dispatch");
-  assert.equal(dispatches.length, 3);
-  assert.ok(dispatches.every((call) => call.payload.commandId === dispatches[0]?.payload.commandId));
-  assert.ok(dispatches.every((call) => call.payload.messageId === dispatches[0]?.payload.messageId));
+/* Merges the replay half of CT-PS-01's crash variant, CT-PS-02's absent result and the former "accepted requests without native runs
+ * stop after two replays and remain available for explicit retry" of this suite: one replay path from the same start state.
+ */
+it.live("an interpretation left 'dispatching' by a crash keeps its identity: with no native run it is replayed at most twice exactly as sent, then waits 'uncertain' for an explicit retry, which replays it once more (CT-PS-01 crash, CT-PS-02)", () => Effect.gen(function* () {
+  const {fixture, dispatching, binding, first} = yield* crashWhileDispatching("accepted");
+  // T3 accepts every later request but starts no run for it
+  fixture.setAcceptedDispatchesWithoutRun(10);
+  const supervisor = yield* fixture.makeSupervisor();
+  const states: Array<[string, number]> = [];
+  for (let cycle = 0; cycle < 4; cycle++) {
+    yield* supervisor.cycle;
+    const task = yield* fixture.supervisorStore.task("source-thread");
+    assert.equal(task?.id, dispatching.id, "no new task identity");
+    states.push([task.status, task.replayCount]);
+  }
+  assert.deepEqual(states, [["waiting", 1], ["waiting", 2], ["uncertain", 2], ["uncertain", 2]]);
+  assert.equal((yield* fixture.supervisorStore.task("source-thread"))?.reason, "The accepted request has no matching native run. Retry native access to reconcile its retained identity.");
+  assert.deepEqual(fixture.messageDispatches().map(dispatchIdentity), [dispatchIdentity(first), dispatchIdentity(first), dispatchIdentity(first)],
+    "two replays with the original identity");
+  assert.equal(fixture.launches().length, 1, "the bound Supervisor is not launched again");
+  assert.equal(yield* interpretationRows(fixture), 1);
 
-  yield* supervisor.runOnce;
-  assert.equal(fixture.operations.filter((call) => call.payload.type === "message.dispatch").length, 3, "uncertainty waits for an explicit UI retry");
-  const retry = yield* supervisor.retry(retryInput("project-a", 0, binding, "retry"));
+  yield* supervisor.cycle;
+  assert.equal(fixture.messageDispatches().length, 3, "uncertainty waits for an explicit UI retry");
+  const retry = yield* supervisor.retry(retryInput("project-a", (yield* fixture.supervisorStore.settings("project-a")).generation, binding, "retry"));
   assert.equal(retry.status, "saved");
-  assert.equal((yield* fixture.store.task("source-thread"))?.status, "waiting");
-  const retried = fixture.operations.filter((call) => call.payload.type === "message.dispatch");
-  assert.equal(retried.length, 4);
-  assert.equal(retried[3]?.payload.commandId, retried[0]?.payload.commandId);
-  assert.equal(retried[3]?.payload.messageId, retried[0]?.payload.messageId);
-}));
+  assert.equal((yield* fixture.supervisorStore.task("source-thread"))?.status, "waiting");
+  assert.deepEqual(fixture.messageDispatches().map(dispatchIdentity), Array.from({length: 4}, () => dispatchIdentity(first)), "the retry replays the same identity");
+  assert.equal(yield* interpretationRows(fixture), 1);
+}), {timeout: 10_000});
 
 it.effect("a transient Supervisor projection failure is not treated as proof the thread is missing", () => Effect.gen(function* () {
   const fixture = yield* makeFixture([

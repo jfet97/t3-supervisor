@@ -20,7 +20,6 @@ import {
 
 const time = Date.parse("2026-10-16T10:00:00.000Z");
 const iso = (value: number) => new Date(value).toISOString();
-const uncertainError = "Helper delivery is uncertain; its original native identity is retained.";
 
 // real SupervisorHelperTransport over a fake native scheduler, copied from the baseline transport suite; fetch is held per test
 const transportTeam = Effect.gen(function* () {
@@ -47,15 +46,13 @@ const transportTeam = Effect.gen(function* () {
   };
   const posts: string[] = [];
   const pending: Array<PromiseWithResolvers<Response>> = [];
-  let mode: "abort" | "crash" | "accept" = "accept";
+  let mode: "crash" | "accept" = "accept";
   const reached = yield* Deferred.make<void>();
   const fetch: typeof globalThis.fetch = async (_url, init) => {
     posts.push(String(init?.body));
     Deferred.doneUnsafe(reached, Effect.void);
     if (mode === "accept") return Response.json({deliveryId: `delivery-${posts.length}`}, {status: 202});
-    if (mode === "crash") {const never = Promise.withResolvers<Response>();pending.push(never);return never.promise;}
-    const signal = init?.signal;
-    return new Promise<Response>((_resolve, reject) => signal?.addEventListener("abort", () => reject(signal.reason), {once: true}));
+    const never = Promise.withResolvers<Response>();pending.push(never);return never.promise;
   };
   // an abandoned POST ends with the test
   const endPosts = Effect.sync(() => {for (const never of pending) never.reject(new Error("abandoned POST"));});
@@ -102,34 +99,6 @@ const transportTeam = Effect.gen(function* () {
       return {guidance, store: guidance.store, team: guidance.teamStore, ...yield* compose(guidance)};
     })};
 });
-
-it.effect("CT-TRUN-01: aborting the helper POST after the 'sending' commit makes the request 'uncertain', keeps the receipt 'posting' and never posts again", () => Effect.gen(function* () {
-  const f = yield* transportTeam;
-  f.setMode("abort");
-  const controller = yield* Deferred.make<void>();
-  yield* f.runtime.startCycle(f.binding);
-  const running = yield* Effect.forkChild(f.runtime.runHelperBatch(f.binding, f.threads, f.helperBatches, controller));
-  yield* Deferred.await(f.reached);
-  const sending = yield* f.requests.pending("p", "helper");
-  assert.ok(sending);
-  assert.equal(sending.state, "sending");
-  assert.deepEqual((yield* f.receipts(f.db)).map(receipt => [receipt.messageId, receipt.state, receipt.text]), [[sending.messageId, "posting", sending.text]]);
-  yield* Deferred.succeed(controller, undefined);
-  yield* Fiber.join(running);
-  assert.deepEqual(yield* f.requests.pending("p", "helper"), {...sending, state: "uncertain", error: uncertainError});
-  assert.equal((yield* f.team.unresolvedRequests(f.binding)).find(request => request.requestId === sending.id)?.state, "uncertain");
-  assert.equal((yield* f.receipts(f.db))[0]?.state, "posting");
-
-  f.setMode("accept");
-  yield* f.runtime.startCycle(f.binding);
-  yield* f.runtime.reconcile(f.binding, f.threads);
-  const restarted = yield* f.reopen;
-  yield* restarted.runtime.startCycle(f.binding);
-  yield* restarted.runtime.reconcile(f.binding, f.threads);
-  assert.equal((yield* restarted.requests.pending("p", "helper"))?.state, "uncertain");
-  assert.equal((yield* f.receipts(restarted.guidance))[0]?.state, "posting");
-  assert.equal(f.posts.length, 1);
-}), {timeout: 10_000});
 
 it.effect("CT-TRUN-01: a crash during the helper POST keeps the request 'sending'; a new process marks it 'uncertain' and never posts again", () => Effect.gen(function* () {
   const f = yield* transportTeam;

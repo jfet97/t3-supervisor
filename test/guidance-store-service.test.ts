@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Clock, Effect, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { GuidanceDb } from "../src/db.js";
 import type { GuidanceSettings } from "../src/guidance-contract.js";
@@ -8,10 +8,11 @@ import { GuidanceStoreError } from "../src/guidance-sql.js";
 import { GuidanceConflictError, GuidanceStore, type GuidanceStoreShape } from "../src/guidance-store.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
-// target regressions of the GuidanceStore effect service on a temporary guidance.sqlite3 through the production layers:
-// open-time schema (recovery and migration, CT-GDB-01 and CT-GDB-02, live in test/guidance.characterization.test.ts),
-// transactions that join the caller's (CT-GDB-06's target), the CC-GDB-IMPLICIT sequences in one transaction, typed row and
-// sql failures and the synchronous store's method results
+/* Target regressions of the GuidanceStore effect service on a temporary guidance.sqlite3 through the production layers:
+ * the open-time schema and the one-time recovery of committed notices on reopen (CT-GDB-01; the migration of a pre-migration
+ * file, CT-GDB-02, stays in test/guidance.characterization.test.ts), transactions that join the caller's (CT-GDB-06's target),
+ * the CC-GDB-IMPLICIT sequences in one transaction, typed row and sql failures and the synchronous store's method results.
+ */
 
 const layer = (directory: string) => GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
 
@@ -22,6 +23,27 @@ const withGuidance = <A, E>(directory: string, use: (store: GuidanceStoreShape, 
   }).pipe(Effect.provide(layer(directory)));
 
 const defaults: GuidanceSettings = { generation: 1, evidenceHours: 24 };
+
+// one statement on a client of the file, as a writer beside the store
+const execute = (db: GuidanceDb["Service"], statement: string, ...params: ReadonlyArray<unknown>) => db.unsafe(statement, params).pipe(Effect.asVoid, Effect.orDie);
+
+/* Notices committed by a process that ended before reconciling them: one whose dispatch never started, one whose dispatch started,
+ * and one already visible.
+ */
+const seedNotices = (directory: string) => Effect.gen(function* () {
+  yield* withGuidance(directory, () => Effect.void);
+  yield* Effect.gen(function* () {
+    const db = yield* GuidanceDb;
+    const insert = "INSERT INTO notices(id,thread_id,rule_id,run_id,epoch,state,text,message_id,created_at,dispatch_started) VALUES(?,?,?,?,?,?,?,?,?,?)";
+    yield* execute(db, insert, "not-started", "thread-a", "rule-a", "run-a", 3, "committed", "text a", null, 1_000, 0);
+    yield* execute(db, insert, "started", "thread-b", "rule-b", "run-b", 4, "committed", "text b", null, 2_000, 1);
+    yield* execute(db, insert, "visible", "thread-c", "rule-c", "run-c", 5, "visible", "text c", null, 3_000, 1);
+  }).pipe(Effect.provide(guidanceDb(directory)));
+});
+
+const recoveryRows = (db: GuidanceDb["Service"]) => rows(db,
+  "SELECT json_extract(document,'$.noticeId') AS noticeId, json_extract(document,'$.state') AS state, json_extract(document,'$.episodeEpoch') AS epoch FROM activity WHERE json_extract(document,'$.reason')='process_recovery' ORDER BY noticeId",
+);
 
 const conflictMessage = (error: unknown): string => {
   assert.ok(error instanceof GuidanceConflictError, `expected a GuidanceConflict, got ${String(error)}`);
@@ -42,6 +64,35 @@ describe("GuidanceStore", () => {
     assert.deepEqual(first.settings, defaults);
     assert.deepEqual(first.saved, { ...defaults, generation: 2 });
     assert.deepEqual(yield* withGuidance(directory, (store) => store.settings()), first.saved);
+  }), { timeout: 10_000 });
+
+  it.live("reopening recovers each committed notice once, lists the uncertain one first and records nothing on a second reopen (CT-GDB-01)", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* seedNotices(directory);
+    // the reopen's clock reads 50 000 and its identities are numbered from 1 in draw order
+    const clock = yield* Effect.scoped(TestClock.make());
+    yield* clock.setTime(50_000);
+    yield* withGuidance(directory, (first, db) => Effect.gen(function* () {
+      assert.deepEqual(yield* rows(db, "SELECT id,state FROM notices ORDER BY id"),
+        [{ id: "not-started", state: "not_delivered_restart" }, { id: "started", state: "uncertain" }, { id: "visible", state: "visible" }]);
+      assert.deepEqual(yield* recoveryRows(db), [{ noticeId: "not-started", state: "not_delivered_restart", epoch: 3 }, { noticeId: "started", state: "uncertain", epoch: 4 }]);
+      // identities come from SupervisorIds in recovery order and the time from Clock
+      assert.deepEqual(yield* rows(db, "SELECT id,created_at FROM activity ORDER BY id"), [
+        { id: "00000000-0000-4000-8000-000000000001", created_at: 50_000 },
+        { id: "00000000-0000-4000-8000-000000000002", created_at: 50_000 },
+      ]);
+      const activities = yield* first.activities();
+      assert.deepEqual(activities[0], { id: "notice:started", noticeId: "started", episodeEpoch: 4, threadId: "thread-b", ruleId: "rule-b", runId: "run-b",
+        kind: "guidance", state: "uncertain", reason: "unreconciled_notice", detail: null, createdAt: 2_000 });
+      // the uncertain notice's own recovery row is folded into its unresolved entry
+      assert.deepEqual(activities.slice(1).map((item) => [item.noticeId, item.reason, item.state]), [["not-started", "process_recovery", "not_delivered_restart"]]);
+    })).pipe(Effect.provideService(Clock.Clock, clock));
+
+    yield* withGuidance(directory, (second, db) => Effect.gen(function* () {
+      assert.deepEqual(yield* recoveryRows(db), [{ noticeId: "not-started", state: "not_delivered_restart", epoch: 3 }, { noticeId: "started", state: "uncertain", epoch: 4 }]);
+      assert.equal((yield* rows(db, "SELECT COUNT(*) AS count FROM activity"))[0]?.count, 2);
+      assert.equal((yield* second.activities())[0]?.id, "notice:started");
+    }));
   }), { timeout: 10_000 });
 
   // audit F10: the dashboard no longer serves the retired reminder settings, but an existing installation's stored row is never

@@ -9,11 +9,11 @@ import { workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { SupervisionScopeService } from "../src/supervision-gate.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import type { Projection } from "../src/types.js";
-import { abortCall, atWallTime, execute, openConversationStore, query, rejectionOf, temporaryDirectory, within } from "./support/g1b-conversation.js";
+import { atWallTime, execute, openConversationStore, query, rejectionOf, temporaryDirectory, within } from "./support/g1b-conversation.js";
 import { seedAgreementCandidates, storedCandidateCounts } from "./support/agreement-candidates.js";
 import { recordReview, rootNative } from "./support/review-record.js";
 import {
-  abortHonouringSend, addCommandActivity, appendMessageToRun, proceed, appendNoticeToOperative, appendOperativeAcceptance, appendSupervisorProposal, baseTime, completeRun,
+  addCommandActivity, appendMessageToRun, proceed, appendNoticeToOperative, appendOperativeAcceptance, appendSupervisorProposal, baseTime, completeRun,
   makeFixture, observeAgreement, operativeThreadId, projectId, setNow, workflowRecord, type Fixture, type FixtureClock, type RpcCall,
 } from "./support/c1-conversation-fixture.js";
 
@@ -37,179 +37,8 @@ const dueCheckIn = (clock: FixtureClock, idle = false) => Effect.gen(function* (
   return fixture;
 });
 
-// holds the matching send at the fake peer: abort-honouring, or never settling until the test ends
-const holdSend = (fixture: Fixture, matches: (call: RpcCall) => boolean, mode: "abort" | "crash") => Effect.gen(function* () {
-  const reached = yield* Deferred.make<RpcCall>();
-  fixture.intercept((call, flight) => {
-    if (!matches(call)) return null;
-    return Effect.andThen(Deferred.succeed(reached, call), mode === "abort" ? abortHonouringSend(flight) : Effect.never);
-  });
-  return within(Deferred.await(reached), 3_000, "held send");
-});
-
-// a run left parked at its held send when the process crashes; it ends with the test, interrupted within the bound
-const abandon = (fixture: Fixture) => Effect.gen(function* () {
-  const abandoned = yield* Effect.forkScoped(fixture.run);
-  yield* Effect.addFinalizer(() => within(Fiber.interrupt(abandoned), 3_000, "abandoned run"));
-});
-
-it.effect("CT-CONV-01: aborting run() after the 'sending' commit saves the check-in 'uncertain' with its identity and one dispatch", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  const fixture = yield* dueCheckIn(clock);
-  const reached = yield* holdSend(fixture, isCheckIn(fixture), "abort");
-  const running = yield* Effect.forkChild(fixture.run);
-  const call = yield* reached;
-  const sending = yield* fixture.requests.pending(projectId, fixture.binding.threadId);
-  assert.ok(sending?.kind === "review");
-  assert.equal(sending.state, "sending");
-  assert.equal(sending.sentAt, clock.now);
-  assert.equal(yield* fixture.requests.lastNotice(fixture.binding.threadId), clock.now);
-  assert.equal(call.payload.messageId, sending.messageId);
-  assert.equal(call.payload.commandId, `supervisor-review:${sending.id}`);
-
-  yield* within(abortCall(running), 3_000, "aborted run");
-  const uncertain = yield* fixture.requests.pending(projectId, fixture.binding.threadId);
-  assert.deepEqual(uncertain, {...sending, state: "uncertain",
-    error: "Supervisor request delivery is uncertain; its original identity is retained and only observed, never resent."});
-
-  fixture.intercept(null);
-  yield* setNow(clock, clock.now + 120_000);
-  yield* fixture.run;
-  yield* fixture.run;
-  assert.deepEqual(yield* fixture.requests.pending(projectId, fixture.binding.threadId), uncertain);
-  assert.equal(fixture.calls.filter(isCheckIn(fixture)).length, 1);
-}), {timeout: 10_000});
-
-it.effect("CT-CONV-01: a crash after the 'sending' commit keeps the row 'sending' until a new controller marks it 'uncertain', with one dispatch", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  const fixture = yield* dueCheckIn(clock);
-  const reached = yield* holdSend(fixture, isCheckIn(fixture), "crash");
-  yield* abandon(fixture);
-  const call = yield* reached;
-  const sending = yield* fixture.requests.pending(projectId, fixture.binding.threadId);
-  assert.ok(sending?.state === "sending");
-  yield* fixture.crash;
-
-  fixture.intercept(null);
-  const restarted = yield* fixture.reopen;
-  assert.deepEqual(yield* restarted.requests.pending(projectId, fixture.binding.threadId), sending, "reopening performs no recovery");
-  yield* setNow(clock, clock.now + 1_000);
-  yield* restarted.run;
-  const uncertain = yield* restarted.requests.pending(projectId, fixture.binding.threadId);
-  assert.deepEqual(uncertain, {...sending, state: "uncertain",
-    error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
-  yield* setNow(clock, clock.now + 120_000);
-  yield* restarted.run;
-  assert.deepEqual(yield* restarted.requests.pending(projectId, fixture.binding.threadId), uncertain);
-  assert.deepEqual(fixture.calls.filter(isCheckIn(fixture)), [call]);
-  assert.equal(call.payload.commandId, `supervisor-review:${sending.id}`);
-  assert.equal(fixture.calls.length, 1);
-}), {timeout: 10_000});
-
 const isIntroduction = (fixture: Fixture) => (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.threadId === operativeThreadId &&
   String(call.payload.messageId).startsWith(`supervisor-notice:workflow:${fixture.task.id}`);
-
-it.effect("CT-CONV-02: aborting the introduction POST saves it 'uncertain'; Retry, later cycles and a restart never dispatch it again", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock);
-  const reached = yield* holdSend(fixture, isIntroduction(fixture), "abort");
-  const running = yield* Effect.forkChild(fixture.run);
-  const call = yield* reached;
-  const sending = yield* fixture.requests.introduction(fixture.task.id);
-  assert.ok(sending);
-  assert.equal(sending.state, "sending");
-  assert.deepEqual(sending.dispatchMode, {type: "steer_active", targetRunId: "operative-active-run"});
-  assert.equal(call.payload.messageId, sending.messageId);
-  assert.equal(call.payload.commandId, `supervisor-workflow:${sending.messageId}`);
-
-  yield* within(abortCall(running), 3_000, "aborted run");
-  const uncertain = yield* fixture.requests.introduction(fixture.task.id);
-  assert.deepEqual(uncertain, {...sending, state: "uncertain", definiteRejection: false, error: "Proposal delivery is uncertain. Its exact message identity is retained."});
-
-  fixture.intercept(null);
-  yield* setNow(clock, clock.now + 61_000);
-  yield* fixture.run;
-  const observed = yield* fixture.requests.introduction(fixture.task.id);
-  assert.deepEqual(observed, uncertain, "observation preserves the unknown receipt unchanged");
-  yield* fixture.conversation.retry(projectId, fixture.binding.threadId);
-  yield* fixture.run;
-  const restarted = yield* fixture.reopen;
-  yield* restarted.conversation.retry(projectId, fixture.binding.threadId);
-  yield* restarted.run;
-  yield* restarted.run;
-  assert.deepEqual(yield* restarted.requests.introduction(fixture.task.id), observed);
-  assert.deepEqual(fixture.calls.filter(isIntroduction(fixture)), [call]);
-  assert.deepEqual(fixture.calls, [call]);
-}), {timeout: 10_000});
-
-it.effect("CT-CONV-02: a crash during the introduction POST keeps it 'sending'; the next cycle marks it 'uncertain' and Retry never resends", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock);
-  const reached = yield* holdSend(fixture, isIntroduction(fixture), "crash");
-  yield* abandon(fixture);
-  const call = yield* reached;
-  const sending = yield* fixture.requests.introduction(fixture.task.id);
-  assert.ok(sending?.state === "sending");
-  yield* fixture.crash;
-
-  fixture.intercept(null);
-  const restarted = yield* fixture.reopen;
-  assert.deepEqual(yield* restarted.requests.introduction(fixture.task.id), sending, "reopening performs no recovery");
-  yield* setNow(clock, clock.now + 1_000);
-  yield* restarted.run;
-  const uncertain = yield* restarted.requests.introduction(fixture.task.id);
-  assert.deepEqual(uncertain, {...sending, state: "uncertain",
-    error: "Proposal delivery is uncertain; its message identity is retained. Retry native access rather than sending another proposal."});
-  yield* restarted.conversation.retry(projectId, fixture.binding.threadId);
-  yield* setNow(clock, clock.now + 61_000);
-  yield* restarted.run;
-  const again = yield* fixture.reopen;
-  yield* again.run;
-  assert.deepEqual(yield* again.requests.introduction(fixture.task.id), uncertain);
-  assert.deepEqual(fixture.calls, [call]);
-}), {timeout: 10_000});
-
-it.effect("CT-CONV-03: aborting the Stop-notice POST keeps the notice 'uncertain' with its identity; later observation never sends a second notice", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock);
-  yield* appendNoticeToOperative(fixture);
-  const {supervisor: service} = yield* fixture.makeProjectSupervisor;
-  yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: (yield* fixture.threadPolicy.get()).generation});
-  const prepared = (yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice;
-  assert.ok(prepared);
-  const isNotice = (call: RpcCall) => call.payload.type === "message.dispatch" && call.payload.messageId === prepared.messageId;
-  const reached = yield* holdSend(fixture, isNotice, "abort");
-  const running = yield* Effect.forkChild(fixture.conversation.reconcileStopNotice(fixture.binding));
-  const call = yield* reached;
-  const uncertain = (yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice;
-  assert.ok(uncertain);
-  assert.equal(uncertain.state, "uncertain");
-  assert.deepEqual(uncertain.dispatchMode, {type: "steer_active", targetRunId: "operative-active-run"});
-  assert.equal(call.payload.commandId, prepared.commandId);
-  assert.equal(call.payload.threadId, operativeThreadId);
-
-  yield* within(abortCall(running), 3_000, "aborted notice");
-  assert.deepEqual((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice, uncertain, "a non-definite failure saves nothing over the reservation");
-
-  fixture.intercept(null);
-  for (let index = 0; index < 4; index++) {
-    yield* setNow(clock, clock.now + 61_000);
-    yield* fixture.conversation.reconcileStopNotice(fixture.binding);
-  }
-  yield* fixture.conversation.retry(projectId, fixture.binding.threadId);
-  yield* fixture.conversation.reconcileStopNotice(fixture.binding);
-  const observed = (yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice;
-  assert.equal(observed?.messageId, prepared.messageId);
-  assert.equal(observed?.commandId, prepared.commandId);
-  assert.equal(observed?.text, prepared.text);
-  // three invisible observations made it unconfirmed; Retry only re-armed one more observation of the same identity
-  assert.equal(observed?.state, "uncertain");
-  assert.equal(observed?.visibilityMisses, 1);
-  assert.deepEqual(fixture.calls.filter(item => item.payload.threadId === operativeThreadId), [call]);
-}), {timeout: 10_000});
 
 const reviewState = (sql: SqlClient.SqlClient, supervisorThreadId: string, requestId: string) => Effect.gen(function* () {
   const [request] = yield* query(sql, "SELECT document FROM supervisor_conversation_requests WHERE id=?", requestId);
@@ -563,25 +392,6 @@ it.effect("CT-CSTORE-01: prepare() beside a pending request throws supervisor_re
   assert.equal(next.state, "prepared");
   assert.equal(yield* requestCount(sql), 5, "the successful prepare pruned the old completed request and inserted one");
   assert.equal((yield* store.requests(projectId, "other-supervisor")).length, 0);
-}), {timeout: 10_000});
-
-it.effect("CT-CSTORE-03: a request saved 'sending' survives reopen unchanged and only the controller marks it 'uncertain'", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  yield* setNow(clock, clock.now);
-  const fixture = yield* makeFixture(clock);
-  const prepared = yield* fixture.requests.prepare(reviewInput(fixture.binding.threadId), clock.now);
-  const sending: ConversationRequest = {...prepared, state: "sending", sentAt: clock.now};
-  yield* fixture.requests.saveRequest(sending);
-  yield* fixture.crash;
-  const reopened = yield* fixture.reopen;
-  assert.deepEqual(yield* reopened.requests.pending(projectId, fixture.binding.threadId), sending);
-  const again = yield* fixture.reopen;
-  assert.deepEqual(yield* again.requests.requests(projectId), [sending]);
-  yield* setNow(clock, clock.now + 1_000);
-  yield* again.run;
-  assert.deepEqual(yield* again.requests.pending(projectId, fixture.binding.threadId), {...sending, state: "uncertain",
-    error: "The native request has no confirmed matching run yet. Its identity and pending activity are retained."});
-  assert.deepEqual(fixture.calls.filter(isCheckIn(fixture)), []);
 }), {timeout: 10_000});
 
 const candidate = (taskId: string, proposalId: string, at: number): WorkflowAgreementCandidate => ({taskId, projectId, proposalId, planHash: `hash-${proposalId}`,
