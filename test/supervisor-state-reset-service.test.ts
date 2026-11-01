@@ -9,9 +9,11 @@ import { ProjectSupervisorMonitorStore } from "../src/supervisor-monitor-store.j
 import { SupervisorStateReset, type SupervisorStateResetShape } from "../src/supervisor-state-reset.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
-// the SupervisorStateReset effect service on a temporary guidance.sqlite3 opened through the production layers, in the
-// synchronous constructors' order (guidance schema first): the scope-lifecycle reset cases at service level (CT-RESET-01 lives
-// in the scope-lifecycle characterization) and the reset inside the caller's transaction
+/* The SupervisorStateReset effect service on a temporary guidance.sqlite3 opened through the production layers, in the
+ * synchronous constructors' order (guidance schema first): the scope-lifecycle reset cases at service level (a reset whose
+ * version insert fails, CT-RESET-01, runs at store construction in supervisor-scope-lifecycle.test.ts) and the reset inside the
+ * caller's transaction.
+ */
 
 const layer = (directory: string) => Layer.mergeAll(SupervisorStateReset.layer, SupervisorConversationStore.layer,
   ProjectSupervisorMonitorStore.layer).pipe(Layer.provideMerge(GuidanceStore.layer), Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));

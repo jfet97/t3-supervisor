@@ -10,12 +10,12 @@ import {
   startHelperScenario, webhookPosts, type HelperScenario, type Scenario,
 } from "./support/scenario-driver.js";
 
-/* Production team runtime -> production helper transport -> platform fetch -> loopback socket; operate RPC over a real websocket;
+/* Production team runtime -> production helper transport -> platform fetch -> loopback socket; operate rpc over a real websocket;
  * restart reopens the files, on the replay scenario driver (support/scenario-driver.ts). it.live: the webhook POSTs, the websocket
  * RPC and the projection reads cross real loopback sockets, and H2's stalled body ends at the caller's own 3 s deadline on the live
  * clock. The Stop cases H4a, H4c and H5 run with the Stop linearization cases in stop-linearization.test.ts. A POST whose delivery T3
- * never shows stays unresolved in supervisor-team-runtime.characterization.test.ts (CT-TRUN-01 crash) and
- * supervisor-helper-transport.characterization.test.ts (CT-HTX-01): this driver's peer logs every POST that reaches it.
+ * never shows stays unresolved in supervisor-helper-transport.test.ts (CT-TRUN-01's crash, CT-HTX-01's cancel): this driver's
+ * peer logs every POST that reaches it.
  */
 
 // `deadline`: the caller's own deadline, a cancel completed after it on the live clock, as the baseline AbortSignal.timeout aborted
@@ -129,7 +129,10 @@ it.live("CT-INT-03: H2 a stalled 2xx body is read until the caller's deadline, t
   assertCredentials(f);
 }), {timeout: 60_000});
 
-it.live("CT-INT-03: H3 an unreadable 2xx body cut by socket loss stays uncertain as recorded acceptance", () => Effect.gen(function* () {
+/* H3 holds CT-HTX-03's unreadable 2xx body too: the same single POST, posted receipt without a delivery id and uncertain outcome,
+ * over a chunked body where the baseline declared a longer length.
+ */
+it.live("CT-INT-03: H3 (CT-HTX-03) an unreadable 2xx body cut by socket loss stays uncertain as recorded acceptance", () => Effect.gen(function* () {
   const h = yield* startHelperScenario();
   const {f} = h;
   f.peer.webhook = () => Effect.succeed({raw: (request, response) => {
