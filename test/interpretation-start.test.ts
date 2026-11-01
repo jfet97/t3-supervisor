@@ -136,6 +136,106 @@ it.live("CT-ISUB-07: a mode change, a later Stop or a rolled-back tool item befo
   }
 }), {timeout: 60_000});
 
+// a no project main whose request a person started from the dashboard while its run was open: the Start activates at once and pins
+// that request, written before the Start's own intent (663 ms before it, as observed live), as its task's source
+const uiRequest = "Add a CSV export to the report page.";
+const activeStart = Effect.gen(function* () {
+  const f = yield* startInterpretationFixture({noProject: true});
+  f.addRequest("request-ui", uiRequest);
+  const run = f.main().runs.find(value => value.userMessageId === "request-ui")!;
+  Object.assign(run, {status: "running", completedAt: null});
+  assert.equal((yield* f.core.control.dashboardStart(f.mainThreadId, "ui-start").pipe(Effect.orDie)).status, "active");
+  const start = (yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))!;
+  assert.deepEqual([start.route, start.status, start.source?.messageId], ["ui", "active", "request-ui"]);
+  assert.equal(yield* f.core.store.chatEnabledAt(f.mainThreadId).pipe(Effect.orDie), start.intentAt, "the Start records its own Enable");
+  f.main().messages.find(message => message.id === "request-ui")!.createdAt = new Date(start.intentAt - 663).toISOString();
+  Object.assign(run, {status: "completed", completedAt: new Date().toISOString()});
+  yield* f.runOnce();
+  yield* f.runOnce();
+  const task = yield* f.task();
+  assert.equal(task.id, start.taskId, "the task the Start pinned");
+  assert.equal(task.status, "waiting");
+  // the root reads the pinned request among its requester messages although it precedes the Start's Enable
+  const context = yield* f.read({view: "context"});
+  assert.equal(context.supervision, "enabled");
+  assert.ok((context.task as {sources: {requesterMessages: Array<{messageId: string}>}}).sources.requesterMessages
+    .some(item => item.messageId === "request-ui"), JSON.stringify(context.task));
+  return {f, task};
+});
+
+// a typed interpretation whose conversation decision authorizes the pinned request's scope
+const decided = (task: TaskRecord, scope: "same" | "changed") => submissionArguments(task, {...planFields(task, uiRequest),
+  conversation: {draft: {objective: uiRequest, constraints: [], questions: [], findings: [], duties: []}, intent: "authorize", outcome: uiRequest, limits: [],
+    sourceMessageIds: [task.sourceMessageId], antecedentMessageIds: [], scope}});
+
+it.live("an active dashboard Start's pinned request sources the typed conversation decision from submission through its finalization", () => Effect.gen(function* () {
+  const {f, task} = yield* activeStart;
+  // a fresh decision cannot keep a scope nobody authorized before
+  const same = yield* f.submit(task, decided(task, "same"));
+  assert.equal(same.value.status, "invalid");
+  assert.deepEqual(same.value.status === "invalid" ? same.value.issues : [], [{code: "invalid_value", path: "/conversation"}]);
+  assert.equal((yield* f.receipts()).length, 0);
+  assert.equal((yield* f.submit(task, decided(task, "changed"))).value.status, "submitted", "the corrected decision in the same run");
+  f.endRun(task, "completed");
+  yield* f.runOnce();
+  const finalized = yield* f.task();
+  assert.equal(finalized.status, "inferred");
+  assert.equal(finalized.supervision, "needed");
+  assert.equal(finalized.conversation?.authorization?.state, "authorized");
+  assert.deepEqual(finalized.conversation?.authorization?.scopeSources.map(source => source.messageId), ["request-ui"]);
+  assert.equal(finalized.conversation?.considered?.messageId, "request-ui");
+  // the decided request's proposal reaches the operative once: the Start's own Enable does not block its introduction
+  yield* f.runOnce();
+  assert.equal(f.operativeSends().filter(command => String(command.messageId).startsWith("supervisor-notice:workflow:")).length, 1,
+    JSON.stringify(f.operativeSends().map(command => command.messageId)));
+  assert.deepEqual(f.peer.unexpected, []);
+}), {timeout: 60_000});
+
+it.live("a Stop after the Start-pinned request's proposal was admitted waits for that delivery and sends it nothing again", () => Effect.gen(function* () {
+  const {f, task} = yield* activeStart;
+  assert.equal((yield* f.submit(task, decided(task, "changed"))).value.status, "submitted");
+  f.endRun(task, "completed");
+  yield* f.runOnce();
+  yield* f.runOnce();
+  const proposals = () => f.operativeSends().filter(command => String(command.messageId).startsWith("supervisor-notice:workflow:"));
+  assert.equal(proposals().length, 1, "the proposal was admitted and dispatched once");
+  // the accepted delivery is not yet in the main's projection, including the queued run it creates
+  const main = f.main();
+  const proposalMessageId = proposals()[0]!.messageId;
+  main.messages = main.messages.filter(message => message.id !== proposalMessageId);
+  main.runs = main.runs.filter(run => run.userMessageId !== proposalMessageId);
+  yield* f.core.supervisor.setChatSupervision({projectId: task.projectId, mainThreadId: f.mainThreadId,
+    policyGeneration: (yield* f.core.policy.get().pipe(Effect.orDie)).generation, enabled: false}).pipe(Effect.orDie);
+  yield* f.runOnce();
+  const notice = (yield* f.core.store.binding(task.projectId, f.mainThreadId).pipe(Effect.orDie))?.stopNotice;
+  assert.ok(notice, "the Stop prepared its notice");
+  assert.equal(notice.enabledAt, (yield* f.core.store.start(f.mainThreadId).pipe(Effect.orDie))?.intentAt, "the epoch the Stop ends is the Start's own");
+  assert.equal(f.operativeSends().filter(command => command.messageId === notice.messageId).length, 0, "the Stop notice waits for the earlier proposal");
+  assert.deepEqual(f.peer.unexpected, []);
+  assert.equal(proposals().length, 1, "the proposal is not sent again");
+}), {timeout: 60_000});
+
+it.live("a later Stop, a later Enable or an edited request keeps an active Start's pinned request from sourcing a decision", () => Effect.gen(function* () {
+  for (const change of ["stop", "enable", "edited"] as const) {
+    const {f, task} = yield* activeStart;
+    const stop = (enabled: boolean) => Effect.gen(function* () {
+      yield* f.core.supervisor.setChatSupervision({projectId: task.projectId, mainThreadId: f.mainThreadId,
+        policyGeneration: (yield* f.core.policy.get().pipe(Effect.orDie)).generation, enabled}).pipe(Effect.orDie);
+    });
+    if (change !== "edited") yield* stop(false);
+    // a person's Enable after the Stop is a later boundary: the earlier Start and its request no longer apply
+    if (change === "enable") yield* stop(true);
+    if (change === "edited") f.main().messages.find(message => message.id === "request-ui")!.text = "Changed request";
+    const reply = yield* f.submit(task, decided(task, "changed"));
+    assert.notEqual(reply.value.status, "submitted", `${change}: ${JSON.stringify(reply.value)}`);
+    assert.equal((yield* f.receipts()).length, 0, change);
+    f.endRun(task, "completed");
+    yield* f.runOnce();
+    assert.notEqual((yield* f.task()).conversation?.authorization?.state, "authorized", change);
+    assert.ok(f.operativeSends().every(command => !String(command.messageId).startsWith("supervisor-notice:workflow:")), `${change}: no introduction`);
+  }
+}), {timeout: 60_000});
+
 // the final proof read awaits getturnitem after its main snapshot. a genuine source edit inside that await is a later revision
 const editSourceAtProof = (f: InterpretationFixture, task: TaskRecord) => {
   let changed = 0;

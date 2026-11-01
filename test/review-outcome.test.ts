@@ -65,6 +65,8 @@ it.effect("record_review refuses an unknown, unpinned, settled or other-run revi
       ["insufficient-without-reason", recordArgs(fixture, "any", "insufficient_evidence", "insufficient-without-reason")],
       ["progress-without-applies", recordArgs(fixture, "any", "progress_updated", "progress-without-applies")],
       ["no-change-with-applies", recordArgs(fixture, "any", "no_change", "no-change-with-applies", {applyOperationIds: ["apply"]})],
+      // a field of another action: workflow_write's advertised record_review names no note, and the parser keeps refusing one
+      ["no-change-with-note", {...recordArgs(fixture, "any", "no_change", "no-change-with-note"), note: "A note belongs to ensure_main, link_child and assess_contribution."}],
     ] as const) assert.deepEqual(yield* fixture.controller.write(args), {status: "invalid", operationId, reason: "invalid_record_review"});
 
     const unpinned = yield* pendingReview(fixture, {pinned: false});

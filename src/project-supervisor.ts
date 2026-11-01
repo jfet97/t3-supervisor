@@ -1320,9 +1320,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           let scopeChanged = false;
           if (payload.conversation) {
             const rawFloor = yield* sourceFloor(finished.threadId, settled);
-            const floor = pendingStart ? Math.min(rawFloor ?? finished.sourceOrdinal, finished.sourceOrdinal - 1) : rawFloor;
+            // as at the commit: the Start the task answers, pending or active since its own intent (pinnedStart), pins its request
+            const startPinned = pendingStart !== null || (yield* pinnedStart(finished)) !== null;
+            const floor = startPinned ? Math.min(rawFloor ?? finished.sourceOrdinal, finished.sourceOrdinal - 1) : rawFloor;
             const policy = yield* requesterPolicy(finished.projectId);
-            const enabledAt = pendingStart ? null : yield* store.chatEnabledAt(finished.threadId);
+            const enabledAt = startPinned ? null : yield* store.chatEnabledAt(finished.threadId);
             const watermark = requesterSources(settled, policy, floor ?? Infinity, enabledAt).find(item => item.messageId === finished.sourceMessageId);
             const decision = watermark && floor !== null ? resolveConversationDecision({previous: retained.conversation, decision: payload.conversation,
               main: settled, policy, floor, enabledAt, watermark, attemptId: receipt.attemptId, now: now(), initialRevision: finished.sourceHash}) : null;
@@ -1534,10 +1536,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         const notice = wake?.text ?? null;
         // a matching pending Start asks for its verdict in the same submission
         const startVerdict = taskPendingStart(preparing, yield* store.start(preparing.threadId));
-        // the genuine requester messages and operative replies since the activation floor, each with the exact native turn item T3 reads it
-        // by, as the projection names it; message IDs stay provenance and are never a read itemId
-        const contextFloor = startVerdict ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
-        const contextEnabledAt = startVerdict ? null : yield* store.chatEnabledAt(preparing.threadId);
+        /* The genuine requester messages and operative replies carry the exact native turn item T3 reads, as the projection names it.
+         * Message IDs stay provenance. A matched pending or active Start pins a request that may precede its intent, so read from it on.
+         */
+        const startPinned = startVerdict || (yield* pinnedStart(preparing)) !== null;
+        const contextFloor = startPinned ? preparing.sourceOrdinal - 1 : yield* sourceFloor(preparing.threadId, source);
+        const contextEnabledAt = startPinned ? null : yield* store.chatEnabledAt(preparing.threadId);
         const ordinalOf = (runId: string | null | undefined) => source.runs.find(run => run.id === runId)?.ordinal;
         const sourceMessage = (messageId: string): InterpretationSourceMessage => ({messageId, readItemId: messageReadItemId(source, preparing.threadId, messageId)});
         const interpretationSources: InterpretationSources = {

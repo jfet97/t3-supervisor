@@ -327,7 +327,17 @@ operative's delegated children, Supervisor's helpers and its workflow progress
 (`/api/guidance/workflow-progress`): at most 10 helpers and 20 descendants a look, and any
 beyond that bound is reported unread, an evidence gap, never silently left out. A
 descendant's lineage is in the scope, outside it, or unknown until its own projection is
-read and its parent decided; unknown is never taken for outside.
+read and its parent decided; unknown is never taken for outside. A provider-native child
+can work with no run in T3's history (its projection's `runs` empty), so the trial also
+keeps, apart from runs, each descendant's own timed work (the commands, replies, file
+changes and tool calls its own projection shows with their native start) and its direct
+parent's record of its lifecycle: the parent's subagent record and subagent turn item,
+reconciled as Supervisor reconciles them (one status, the turn item preferred). An own
+item shows that the child ran, never that it ended. The parent's record bounds the child
+as a run does when it shows the child running since its native start, or ended with both
+native times and no own item outside them. Without such a record, or with conflicting,
+untimed or stale ones, a verdict that needs a verified child quiet, or running at a
+moment, is `inconclusive` and names that child; it never passes on an empty run history.
 
 Each of them fails on a contradiction of Supervisor's own traffic rules, whatever its
 oracle: the same proposal text reaching one chat twice;
@@ -344,20 +354,22 @@ counts as a repeat.
 | --- | --- | --- |
 | `negotiation` | the proposal reached the operative and Supervisor recorded agreement from the operative's own later reply | the recorded agreement rests on a message that is not the operative's own reply, or predates the proposal |
 | `message-volume` | the supervised work and Supervisor both ended within the budget with no plain message repeated; the totals by kind and chat, and any repeated text, are printed | |
-| `active-children` | a child whose own projection names the operative, or a verified child, as its subagent parent ran, and Supervisor's root or a helper read or assessed it after it started | |
+| `active-children` | a child whose own projection names the operative, or a verified child, as its subagent parent ran (a run of it started, or a timed item of its own work), and Supervisor's root or a helper read or assessed it after it started | |
 | `sustained-monitoring` | the agreed work was read or assessed at least twice after the proposal and once after its last run, then Supervisor parked and stayed quiet for its monitor's age bound and cooldown with nothing pending | the parked Supervisor ran or sent anything without a new human message |
 | `compaction` | the Supervisor's root completed a genuine compaction, then read its instructions again and went on with its own watch: a read or assessment Supervisor recorded for it, a check-in it completed, or workflow progress from its own write; a reminder is never required | |
 | `helpers` | a helper became ready with an assignment and received a check-in | the team held more helpers than its limit |
-| `guides` | a guide was steered into a delegated child's open run | a guide reached Supervisor's own thread or a descendant read and shown outside the operative's scope; one of unknown lineage is `inconclusive` |
+| `guides` | a guide was steered into a delegated child's open run | a guide reached Supervisor's own thread or a descendant read and shown outside the operative's scope; one of unknown lineage, or one reaching a child with no run in T3's history, is `inconclusive` |
 | `workflow-write` | a root's recognised `workflow_write` returned a successful receipt, and its operation's history was recorded within that call's native times | one operation returned two different successful receipts, or was recorded before the root run that wrote it started |
 
 T3 often omits a tool call's output from a thread's projection. For `workflow-write`, the
 trial then reads that completed `workflow_write` call's full record through the
 read-scoped `orchestration.getTurnItem`, as Supervisor reads its own evidence: at most
 four calls per look, ten seconds and three attempts each, keeping only the receipt's
-status and digest. A record that is another item, is not completed, omits the output too
-or holds no successful receipt gives no receipt, and the scenario stays `inconclusive`
-without one.
+status and digest. The result is read from the MCP result envelope or, as T3 records a
+Codex `dynamic_tool` call, from its content blocks alone (`[{type: "text", text:
+"<JSON>"}]`), which must be exactly one text block. A record that is another item, is not
+completed, omits the output too, holds more than one block or no successful receipt gives
+no receipt, and the scenario stays `inconclusive` without one.
 
 Choose a longer budget for `sustained-monitoring` and `compaction`: the first passes only
 when the whole supervised task, its parking and the quiet after it fit in the budget, and
@@ -375,10 +387,12 @@ trial ends `unavailable`. The trial then observes M more minutes; `--budget-minu
 bounds the wait for parking. It passes when T3's own settlement time is no sooner than
 Supervisor's 60-second quiet window after the scope's last run ended (the main's, its
 verified children's and the Supervisor root's own), never judged by when the trial first
-saw it; a descendant of unknown lineage or a finished run without its completion time is
-`inconclusive`. It also requires that Supervisor stayed parked through the wait, and the
-follow-up woke the same Supervisor root and generation; it fails when Supervisor settled
-sooner, woke without a human message or handled the follow-up with another Supervisor.
+saw it; a descendant of unknown lineage, a verified child with no run in T3's history or
+a finished run without its completion time is `inconclusive`, while a settlement inside
+the quiet window of the runs it can bound still fails. It also requires that Supervisor
+stayed parked through the wait, and the follow-up woke the same Supervisor root and
+generation; it fails when Supervisor settled sooner, woke without a human message or
+handled the follow-up with another Supervisor.
 
 `no-project-start` and `no-project-stop` start their chat in T3's scratch project, which
 T3 opens for a chat without a project (`projects.ensureScratch`), and need Supervisor to
@@ -424,7 +438,8 @@ runtime T3 runs. A workload trial also
 prints what it observed, by identity, kind, chat, run, status and native time and never
 by a message body or tool arguments: Supervisor's messages with their totals, the
 Supervisor roots and helpers, the children found and whether their lineage was verified,
-the agreement, compactions, the root's recognised workflow writes and their receipts'
+each descendant's own timed work and the verified children T3 recorded no run of, the
+agreement, compactions, the root's recognised workflow writes and their receipts'
 status and where each was read, the full-record reads with why any gave no receipt, the
 parking with its follow-up, and the Start. A Stop trial prints its press: the times of
 the reads before it, its sending, its answer and the reads after it, Supervisor's

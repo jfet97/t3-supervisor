@@ -10,11 +10,14 @@ import { helperInstructionsVersion } from "../src/supervisor-helper-instructions
 import { NativeRpc, type NativeRpcShape } from "../src/supervisor-native.js";
 import { interpretationRulesVersion } from "../src/supervisor-workflow.js";
 import { canonicalJson, isRecord, recognisedWorkflowCallArguments } from "../src/workflow-write-evidence.js";
+import { directParentChildLifecycle } from "../src/supervisor-observation.js";
+import type { Projection } from "../src/types.js";
 import { runProcess } from "../test/support/g8-process.js";
 import { devPaths, devPorts, t3Environment } from "./dev-environment.js";
 import { checkoutInputs } from "./local-run.js";
 import { decodeDescriptor, ensureRuntime, issueSession, orchestrationProtocol, t3Command, t3Release, type T3Cli } from "./local-stack.js";
-import { classifyWorkload, isWorkloadScenario, nativeTime, quietTailMs, repeatedContent, trafficKind, trafficTotals, type NativeRun, type ParkingFacts,
+import { classifyWorkload, isWorkloadScenario, nativeTime, quietTailMs, repeatedContent, trafficKind, trafficTotals, unboundedChildren, type ChildLifecycle,
+  type NativeExecution, type NativeRun, type ParkingFacts,
   type TrafficMessage, type WorkloadObservation, type WriteCall } from "./provider-trial-oracles.js";
 
 /*
@@ -539,7 +542,33 @@ const StartedItem = Schema.Struct({startedAt: optionalText});
 // a subagent turn item or a subagent record of the parent (src/supervisor-observation.ts, directParentChildLifecycle)
 const ChildRecord = Schema.Struct({childThreadId: optionalText});
 const SubagentItem = Schema.Struct({type: Schema.Literal("subagent"), childThreadId: optionalText});
-// what an MCP tool call returned: its structured content, or its one text content holding JSON
+/* A turn item of a thread's own work (packages/contracts/src/orchestrationV2.ts): a command it ran, a reply it wrote, a file it
+ * changed or a tool it called. A user message, a checkpoint or a subagent record is no work of the thread's own.
+ */
+const ExecutionItem = Schema.Struct({id: Schema.String, type: Schema.Literals(["command_execution", "assistant_message", "file_change", "dynamic_tool"]),
+  threadId: optionalText, status: Schema.optional(Schema.String), ...itemTimes});
+
+/**
+ * A thread's own timed work as its own projection shows it: the items of its own work that carry a native start, kept apart from
+ * T3's runs. A provider-native child can have such items while T3 records no run of it.
+ */
+export const ownExecutions = (threadId: string, turnItems: ReadonlyArray<unknown>): ReadonlyArray<NativeExecution> => turnItems.flatMap((item) =>
+  Option.toArray(Option.flatMap(Schema.decodeUnknownOption(ExecutionItem)(item), (work) => (work.threadId ?? threadId) === threadId && work.startedAt
+    && nativeTime(work.startedAt) !== null ? Option.some({itemId: work.id, type: work.type, status: work.status ?? null, startedAt: work.startedAt,
+      completedAt: work.completedAt ?? null}) : Option.none())));
+/**
+ * A child's lifecycle as its direct parent's projection records it, through Supervisor's own reconciliation of the parent's subagent
+ * record and subagent turn item (directParentChildLifecycle: one status, the turn item preferred); null when the parent records none
+ * or conflicting statuses. The reconciliation reads only those two lists of the parent's projection, so only they are passed.
+ */
+export const parentChildLifecycle = (parent: {readonly subagents?: ReadonlyArray<unknown> | undefined; readonly turnItems?: ReadonlyArray<unknown> | undefined},
+  childThreadId: string): ChildLifecycle | null => {
+  const records = (values: ReadonlyArray<unknown> | undefined) => (values ?? []).filter(isRecord);
+  const record = directParentChildLifecycle({subagents: records(parent.subagents), turnItems: records(parent.turnItems)} as unknown as Projection, childThreadId);
+  return record === null ? null : {status: record.status, source: record.source, recordId: record.recordId, parentRunId: record.parentRunId,
+    startedAt: record.startedAt, completedAt: record.completedAt};
+};
+// what an MCP tool call returned: its structured content, or its one text content holding JSON (toolResult)
 const ToolEnvelope = Schema.Struct({isError: Schema.optional(Schema.Boolean), structuredContent: Schema.optional(Schema.Unknown),
   content: Schema.optional(Schema.Array(Schema.Unknown))});
 const TextContent = Schema.Struct({type: Schema.Literal("text"), text: Schema.String});
@@ -581,14 +610,27 @@ const hashText = (text: string): string => createHash("sha256").update(text).dig
 const jsonValue = (value: unknown): unknown => typeof value === "string"
   ? Option.getOrElse(Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))(value), () => value) : value;
 
+// the JSON of the one text block among content blocks; none, or more than one, is no single result
+const oneText = (blocks: ReadonlyArray<unknown>): unknown => {
+  const texts = blocks.flatMap((block) => Option.toArray(Schema.decodeUnknownOption(TextContent)(block)));
+  return texts.length === 1 ? jsonValue(texts[0]!.text) : null;
+};
+/*
+  The one result a workflow tool call returned, from its output as T3 records it, itself or as JSON text: the MCP result envelope
+  (its structured content, or its one text block of JSON); the content blocks alone, as T3's full record of a Codex dynamic_tool
+  call holds them ([{type: "text", text: "<JSON>"}]), which must be exactly one text block; or the result itself. An error envelope,
+  and blocks that are not exactly one text block, give none: the output is an error, or ambiguous.
+*/
+const toolResult = (output: unknown): unknown => {
+  const value = jsonValue(output);
+  if (Array.isArray(value)) return value.length === 1 ? oneText(value) : null;
+  return Option.match(Schema.decodeUnknownOption(ToolEnvelope)(value), {onNone: () => value, onSome: (result) => result.isError === true ? null
+    : result.structuredContent !== undefined ? result.structuredContent : result.content !== undefined ? oneText(result.content) : value});
+};
+
 /** The successful receipt a workflow tool call returned, as its status and a digest of its canonical form, or null. */
 export const successfulReceipt = (output: unknown): {readonly status: string; readonly hash: string} | null => {
-  const value = jsonValue(output);
-  const envelope = Schema.decodeUnknownOption(ToolEnvelope)(value);
-  const texts = Option.match(envelope, {onNone: () => [], onSome: (result) =>
-    (result.content ?? []).flatMap((item) => Option.toArray(Schema.decodeUnknownOption(TextContent)(item)))});
-  const body = Option.match(envelope, {onNone: () => value, onSome: (result) => result.isError === true ? null
-    : result.structuredContent !== undefined ? result.structuredContent : texts.length === 1 ? jsonValue(texts[0]!.text) : value});
+  const body = toolResult(output);
   return Option.getOrNull(Option.map(Schema.decodeUnknownOption(SuccessfulReceipt)(body), (receipt) => ({status: receipt.status, hash: hashText(canonicalJson(body))})));
 };
 
@@ -901,6 +943,9 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
    */
   const ledger = {
     runs: new Map<string, Map<string, NativeRun>>(),
+    // each descendant's own timed work, and its lifecycle as its direct parent recorded it, apart from its runs
+    executions: new Map<string, Map<string, NativeExecution>>(),
+    lifecycles: new Map<string, ChildLifecycle | null>(),
     traffic: new Map<string, TrafficMessage>(),
     operativeMessages: new Map<string, {readonly role: string | null; readonly createdAt: string | null; readonly senderThreadId: string | null}>(),
     supervisors: new Map<string, {readonly threadId: string; readonly generation: number; readonly firstSeenAt: number}>(),
@@ -911,7 +956,7 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
     settlements: new Map<string, {readonly threadId: string; readonly settledAt: string}>(),
     compactions: new Map<string, WorkloadObservation["compactions"][number]>(),
     rootLatestStart: new Map<string, string>(),
-    instructionReads: new Map<string, {readonly threadId: string; readonly startedAt: string | null}>(),
+    instructionReads: new Map<string, {readonly threadId: string; readonly startedAt: string | null; readonly status: string}>(),
     writes: new Map<string, WriteCall>(),
     // the completed workflow_write calls whose output the projection omitted, read through getTurnItem: wanted, attempts, results
     detailWanted: new Map<string, {readonly itemId: string; readonly threadId: string; readonly toolName: string | null}>(),
@@ -964,7 +1009,8 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
           ledger.detailWanted.set(tool.value.id, {itemId: tool.value.id, threadId, toolName: tool.value.toolName ?? null});
       }
       const reread = recognisedWorkflowCallArguments(call, "read");
-      if (reread !== null && reread.view === "instructions") ledger.instructionReads.set(tool.value.id, {threadId, startedAt: tool.value.startedAt ?? null});
+      if (reread !== null && reread.view === "instructions") ledger.instructionReads.set(tool.value.id,
+        {threadId, startedAt: tool.value.startedAt ?? null, status: tool.value.status});
     }
   };
   const childrenOf = (view: ProjectionView): ReadonlyArray<string> => [
@@ -1311,12 +1357,17 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
       }
       const childReads = readBound([...ledger.children.keys()], 20);
       for (const skipped of childReads.skipped) unread.push(`child ${skipped} (beyond the 20 descendants read per look)`);
+      // the projections of this look, by thread, and each child's direct parent, for the parent's own record of the child's lifecycle
+      const looked = new Map<string, ProjectionView>([[operative, view]]);
+      const parentOf = new Map<string, string>();
       for (const child of childReads.read) {
         const childView = yield* readThread(child);
         noteActor(child, "child", childView.ok ? childView.value.projection.thread.modelSelection : undefined);
         if (!childView.ok) {unread.push(`child ${child} (${childView.problem})`); continue;}
+        looked.set(child, childView.value.projection);
         const lineage = childView.value.projection.thread.lineage;
         const parent = lineage?.parentThreadId ?? null;
+        if (parent !== null) parentOf.set(child, parent);
         const subagent = lineage?.relationshipToParent === "subagent";
         const parentRecord = parent === null ? undefined : ledger.children.get(parent);
         const verified = subagent && parent !== null && (parent === operative || parentRecord?.lineageVerified === true);
@@ -1329,8 +1380,16 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
         ledger.children.set(child, {threadId: child, lineageVerified: verified || previous?.lineageVerified === true,
           lineageKnown: verified || outside || previous?.lineageKnown === true});
         remember(child, childView.value.projection);
+        const work = ledger.executions.get(child) ?? new Map<string, NativeExecution>();
+        for (const item of ownExecutions(child, childView.value.projection.turnItems ?? [])) work.set(item.itemId, item);
+        ledger.executions.set(child, work);
         for (const grandchild of childrenOf(childView.value.projection)) if (!ledger.children.has(grandchild))
           ledger.children.set(grandchild, {threadId: grandchild, lineageVerified: false, lineageKnown: false});
+      }
+      // each child's lifecycle as its direct parent's projection of this look records it, or none; an unread parent keeps the last
+      for (const [child, parent] of parentOf) {
+        const parentView = looked.get(parent);
+        if (parentView !== undefined) ledger.lifecycles.set(child, parentChildLifecycle(parentView, child));
       }
     }
     const sent = view.messages.filter((message) => message.id.startsWith("supervisor-") ||
@@ -1506,6 +1565,8 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
     task: ledger.task,
     traffic: [...ledger.traffic.values()],
     runs: Object.fromEntries([...ledger.runs].map(([threadId, runs]) => [threadId, [...runs.values()]])),
+    executions: Object.fromEntries([...ledger.executions].map(([threadId, items]) => [threadId, [...items.values()]])),
+    childLifecycles: Object.fromEntries(ledger.lifecycles),
     stopPresses: stop === null ? 0 : 1,
     agreement: ledger.agreement === null ? null : {...ledger.agreement, message: ledger.operativeMessages.get(ledger.agreement.agentMessageId) ?? null},
     children: [...ledger.children.values()],
@@ -1536,6 +1597,12 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
     fullRecordReads: {attempts: Object.fromEntries(ledger.detailAttempts), withoutReceipt: Object.fromEntries(ledger.detailProblems)},
     history: workload.history, parking: workload.parking, start: workload.start,
     runs: Object.fromEntries(Object.entries(workload.runs).map(([threadId, runs]) => [threadId, runs.length])),
+    // each descendant's own timed work and its parent's record of its lifecycle, and the verified children whose lifecycle nothing bounds
+    executions: Object.fromEntries(Object.entries(workload.executions).map(([threadId, items]) => [threadId, {items: items.length,
+      types: [...new Set(items.map((item) => item.type))], firstStartedAt: items.reduce<string | null>((first, item) =>
+        first === null || (nativeTime(item.startedAt) ?? Infinity) < (nativeTime(first) ?? Infinity) ? item.startedAt : first, null)}])),
+    childLifecycles: workload.childLifecycles,
+    childrenUnbounded: unboundedChildren(workload),
   }};
   const recordedStopAt = afterPress.recorded?.stoppedAt ?? null;
   const sinceLaunch = (reading: TaskReading | null) => reading === null ? null

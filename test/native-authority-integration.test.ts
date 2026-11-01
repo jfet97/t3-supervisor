@@ -304,6 +304,13 @@ it.live("CT-INT-01: v excess and forbidden argument fields are rejected by the b
   assert.equal(forbiddenReply.isError, true);
   assert.deepEqual(forbiddenReply.value, {status: "invalid", operationId: "int-forbidden", reason: "invalid_ensure_main"});
 
+  // a field of another action: a review outcome with ensure_main's note, which the advertised schema no longer accepts either
+  const crossed = {...ensureArgs(f, "int-review-note", "A note belongs to ensure_main."), action: "record_review", requestId: "monitor:1", outcome: "no_change"};
+  installEvidence(f, crossed);
+  const crossedReply = yield* mcpCall(f.endpoint, "workflow_write", crossed);
+  assert.equal(crossedReply.isError, true);
+  assert.deepEqual(crossedReply.value, {status: "invalid", operationId: "int-review-note", reason: "invalid_record_review"});
+
   assert.deepEqual(f.peer.log, []);
   yield* noWriteRows(f);
 }), {timeout: 60_000});

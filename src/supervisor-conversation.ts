@@ -35,7 +35,7 @@ import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from ".
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { agreementEvidenceNames, agreementEvidenceOf, interpretationPlanDigest, type InterpretationEvidence, type InterpretationSubmissionEvidence, type SupervisorMessageEvidence } from "./interpretation-evidence.js";
 import { interpretationSourcePin, type InterpretationSourcePin } from "./interpretation-submission.js";
-import { taskPendingStart } from "./interpretation-intake.js";
+import { interpretationChecks, taskPendingStart } from "./interpretation-intake.js";
 import { configuredWorkflowToolRoutes, recognisedWorkflowCallArguments, verifyWorkflowToolEvidence, workflowRequestHash, workflowTurnItemDetailMaxBytes, type WorkflowToolRoutes } from "./workflow-write-evidence.js";
 import { messageReadRule } from "./message-read-handle.js";
 import { agreedWorkUnfinished, explicitWaitRecorded, latestExecutedRun, livenessWakeKey, returnWaiting, sameLivenessKey, unsettledNodeIds } from "./workflow-liveness.js";
@@ -584,6 +584,8 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const t3 = yield* T3Client;
   const ids = yield* SupervisorIds;
   const store = yield* ProjectSupervisorStore;
+  // the Start a task answers, as the interpretation reads it: its pinned request is never before that Start's own boundary
+  const {pinnedStart} = interpretationChecks(store, scope);
   const requests = yield* SupervisorConversationStore;
   const monitor = yield* ProjectSupervisorMonitorStore;
   const team = yield* SupervisorTeamStore;
@@ -2293,7 +2295,9 @@ Turns without a service request: do pending context/planning work, then keep the
           const floor = yield* store.baselineOrdinal(binding.mainThreadId, mainRead.value);
           const enabledAt = yield* introductionEnableBoundary(binding.projectId, binding.mainThreadId);
           const source = mainRead.value.messages.find(message => message.id === currentConversationTask.sourceMessageId);
-          if (floor !== null && (currentConversationTask.sourceOrdinal <= floor || enabledAt !== null && (timestampMs(source?.createdAt) ?? 0) <= enabledAt))
+          /* The request the task's own Start pins may precede that Start's Enable. A later Stop, Enable or mode change ends the pin. */
+          if (floor !== null && !(yield* pinnedStart(currentConversationTask)) && (currentConversationTask.sourceOrdinal <= floor ||
+            enabledAt !== null && (timestampMs(source?.createdAt) ?? 0) <= enabledAt))
             yield* blockIntroduction(currentConversationTask.id, "Supervision was enabled again after this request; the draft was not sent and the chat's next request is interpreted afresh.");
         }
       }
@@ -2376,7 +2380,12 @@ Turns without a service request: do pending context/planning work, then keep the
     const resumed = resumedAt !== null && (nativeSettledSince === null || resumedAt >= nativeSettledSince) && (enabledAt === null || resumedAt >= enabledAt);
     const settled = nativeSettled && !resumed;
     const settledSince = settled ? nativeSettledSince : null;
-    const restingSince = resumed ? null : settledSince === null ? enabledAt : enabledAt === null ? settledSince : Math.max(settledSince, enabledAt);
+    /* A matched Start supervises its pinned request, written before its own Enable, so that Enable sets no rest boundary.
+     * A later Enable, Stop, mode or master change or source edit ends the pin. Settlement still rests the pair until a new human message.
+     */
+    const mainTask = yield* store.task(binding.mainThreadId);
+    const restEnabledAt = mainTask !== null && (yield* pinnedStart(mainTask)) !== null ? null : enabledAt;
+    const restingSince = resumed ? null : settledSince === null ? restEnabledAt : restEnabledAt === null ? settledSince : Math.max(settledSince, restEnabledAt);
     // the control state that decision used: a wake admitted later in this cycle rechecks it, so a Stop and Enable during the cycle's
     // reads never carry an earlier resume's wake past them; the next cycle decides afresh
     const restDecisionCurrent = Effect.gen(function* () {
@@ -2716,8 +2725,14 @@ Turns without a service request: do pending context/planning work, then keep the
         yield* save({...notice, state: "superseded"});return null;
       }
       const tasks = yield* store.tasksFor(owner);
+      /* An introduction of the Enable epoch this notice ends, admitted before it: its source postdates that Enable, or its task is the one
+       * the Start that recorded that Enable pinned. That Start allocated the task itself, so the task's introduction was admitted under it
+       * although its source precedes the Start's intent; an earlier epoch's task, or a later Start's, stays outside.
+       */
+      const start = yield* store.start(owner.mainThreadId);
+      const epochStartTask = start !== null && notice.enabledAt !== null && start.intentAt === notice.enabledAt ? start.taskId ?? null : null;
       const introductions = (yield* requests.introductions(owner.projectId)).filter(intro => intro.supervisorThreadId === owner.threadId && intro.threadId === owner.mainThreadId &&
-        ["sending", "uncertain", "accepted", "sent"].includes(intro.state) && (notice.enabledAt === null ||
+        ["sending", "uncertain", "accepted", "sent"].includes(intro.state) && (notice.enabledAt === null || epochStartTask !== null && intro.taskId === epochStartTask ||
           (timestampMs(main.messages.find(message => message.id === tasks.find(task => task.id === intro.taskId)?.sourceMessageId)?.createdAt) ?? 0) > notice.enabledAt));
       const pendingIntroduction = introductions.some(intro => !main.messages.some(message => message.id === intro.messageId && message.text === intro.text));
       if (pendingIntroduction) {yield* defer("The earlier proposal delivery is not yet visible.", observedNow);return null;}
@@ -3186,13 +3201,14 @@ Turns without a service request: do pending context/planning work, then keep the
           return {_tag: "Answer", value: undefined};
         // the per-chat stop is rechecked after every awaited read: a stop saved meanwhile keeps the introduction unsent
         if (!(yield* guard.scopeEnabled(task.projectId, task.threadId)) || (yield* guard.supervisionStopped(task.threadId))) return {_tag: "Answer", value: undefined};
-        // a fresh POST belongs to the current supervision epoch: a request at or before the activation boundary, or written before the
-        // chat's latest Enable, is never introduced after it (an unknown boundary sends nothing)
+        /* A fresh POST belongs to the current supervision epoch. An unknown boundary sends nothing. Only a matched Start's pinned
+         * request belongs to that Start's epoch despite preceding the Enable it recorded.
+         */
         const floor = yield* store.baselineOrdinal(task.threadId, agent);
         if (floor === null) return {_tag: "Answer", value: undefined};
         const enabledAt = yield* introductionEnableBoundary(task.projectId, task.threadId);
         const source = agent.messages.find(message => message.id === task.sourceMessageId);
-        if (task.sourceOrdinal <= floor || enabledAt !== null && !((timestampMs(source?.createdAt) ?? 0) > enabledAt)) {
+        if (!(yield* pinnedStart(currentTask)) && (task.sourceOrdinal <= floor || enabledAt !== null && !((timestampMs(source?.createdAt) ?? 0) > enabledAt))) {
           yield* blockIntroduction(task.id, "Supervision was enabled again after this request; the draft was not sent and the chat's next request is interpreted afresh.");return {_tag: "Answer", value: undefined};
         }
         const mode = dispatchMode;

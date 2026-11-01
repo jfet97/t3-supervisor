@@ -1070,6 +1070,39 @@ export const workflowReadToolDefinition = {
   },
 } as const;
 
+// the fields of workflow_write's actions beside the locator and the action, each with its type and limits
+const writeActionProperties = {
+  operationId: operationIdSchema,
+  note: textSchema(workflowMutationLimits.maxTextLength),
+  childThreadId: idSchema(),
+  input: applyInputSchema,
+  workflowId: idSchema(),
+  expectedRevision: {type: "integer", minimum: 1},
+  contributionId: {type: "string", pattern: "^[A-Za-z0-9._:-]{1,64}$"},
+  resultRevision: {type: "integer", minimum: 1, maximum: externalContributionLimits.maxRevision},
+  decision: {type: "string", enum: externalContributionDecisions},
+  requestId: idSchema(),
+  outcome: {type: "string", enum: reviewOutcomes},
+  reason: textSchema(reviewLimits.maxReasonLength),
+  applyOperationIds: {type: "array", minItems: 1, maxItems: reviewLimits.maxApplies, uniqueItems: true, items: idSchema()},
+  wait: {type: "object", additionalProperties: false, required: ["waitingOn", "resumesWhen"],
+    description: "With record_review: an explicit current wait when the main has stopped with agreed work unfinished: who must act (requester or external, never the operative's own unfinished action) and what resumes the work.",
+    properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength),
+      messageId: {...idSchema(), description: "With waitingOn requester: the id of the human's own message (web, mobile or a runtime answer) in your own or the main conversation that the wait answers; an agent's, the service's or your own message is refused (wait_source_not_human)."}}},
+} as const;
+type WriteActionField = keyof typeof writeActionProperties;
+/*
+  One action of workflow_write: exactly the keys its parser accepts (parseWritePayload, hasExactKeys), the shared locator and
+  authority fields included, so a call the schema accepts never names another action's field; the outer properties keep each
+  field's type and limits.
+*/
+const writeAction = <A extends string>(action: A, required: readonly WriteActionField[], optional: readonly WriteActionField[] = []) => ({
+  properties: {action: {const: action}, ...Object.fromEntries([...Object.keys(locatorProperties), ...required, ...optional].map((key) => [key, {}] as const))} as
+    {readonly action: {readonly const: A}; readonly [key: string]: unknown},
+  required,
+  additionalProperties: false,
+} as const);
+
 export const workflowWriteToolDefinition = {
   name: "workflow_write",
   description: "Create the main draft, link a verified live descendant, apply semantic workflow changes with revision CAS, assess a main-reported external contribution result (it never changes any status), or record a check-in's outcome (record_review is root-only; It sends nothing; messaging the operative is a separate decision), as sections workflow_edit and monitoring of workflow_read view instructions describe. The service verifies your own executed call; keep operationId unique within this binding. New live steps start \"planned\"; mark them underway or completed in a separate later apply with status_changed evidence. Optional sourceThreadId/sourceRunId/sourceMessageId/sourceItemId link existing in-scope T3 activity for navigation, never proof or authority. On rejection, read the reason, code, and path.",
@@ -1081,31 +1114,14 @@ export const workflowWriteToolDefinition = {
     properties: {
       ...locatorProperties,
       action: {type: "string", enum: ["ensure_main", "link_child", "apply", "assess_contribution", "record_review"]},
-      operationId: operationIdSchema,
-      note: textSchema(workflowMutationLimits.maxTextLength),
-      childThreadId: idSchema(),
-      input: applyInputSchema,
-      workflowId: idSchema(),
-      expectedRevision: {type: "integer", minimum: 1},
-      contributionId: {type: "string", pattern: "^[A-Za-z0-9._:-]{1,64}$"},
-      resultRevision: {type: "integer", minimum: 1, maximum: externalContributionLimits.maxRevision},
-      decision: {type: "string", enum: externalContributionDecisions},
-      requestId: idSchema(),
-      outcome: {type: "string", enum: reviewOutcomes},
-      reason: textSchema(reviewLimits.maxReasonLength),
-      applyOperationIds: {type: "array", minItems: 1, maxItems: reviewLimits.maxApplies, uniqueItems: true, items: idSchema()},
-      wait: {type: "object", additionalProperties: false, required: ["waitingOn", "resumesWhen"],
-        description: "With record_review: an explicit current wait when the main has stopped with agreed work unfinished: who must act (requester or external, never the operative's own unfinished action) and what resumes the work.",
-        properties: {waitingOn: {type: "string", enum: reviewWaitOwners}, resumesWhen: textSchema(reviewLimits.maxWaitTriggerLength),
-          messageId: {...idSchema(), description: "With waitingOn requester: the id of the human's own message (web, mobile or a runtime answer) in your own or the main conversation that the wait answers; an agent's, the service's or your own message is refused (wait_source_not_human)."}}},
+      ...writeActionProperties,
     },
     oneOf: [
-      {properties: {action: {const: "ensure_main"}}, required: ["operationId", "note"]},
-      {properties: {action: {const: "link_child"}}, required: ["operationId", "childThreadId", "note"]},
-      {properties: {action: {const: "apply"}}, required: ["input"]},
-      {properties: {action: {const: "assess_contribution"}},
-        required: ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]},
-      {properties: {action: {const: "record_review"}}, required: ["operationId", "requestId", "outcome"]},
+      writeAction("ensure_main", ["operationId", "note"]),
+      writeAction("link_child", ["operationId", "childThreadId", "note"]),
+      writeAction("apply", ["input"]),
+      writeAction("assess_contribution", ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]),
+      writeAction("record_review", ["operationId", "requestId", "outcome"], ["reason", "applyOperationIds", "wait"]),
     ],
   },
 } as const;
