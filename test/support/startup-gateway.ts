@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { join, posix } from "node:path";
 import { NodeFileSystem } from "@effect/platform-node";
-import { Effect, FileSystem, Schedule, type Scope } from "effect";
+import { Effect, Exit, FileSystem, Schedule, Scope } from "effect";
 import { defaultSupervisorModel, type TaskRecord } from "../../src/project-supervisor-store.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { appConfig, buildT3Client, readToken, runApp, type AppCatalog } from "./g8-app.js";
@@ -71,7 +71,14 @@ export type StartupSessionOptions = {
 
 export type StartupApp = {readonly origin: string; readonly dataDirectory: string};
 
-export type StartupSession = {readonly gateway: StartupGateway; readonly observe: StartupObservations; readonly app: StartupApp};
+export type StartupSession = {
+  readonly gateway: StartupGateway;
+  readonly observe: StartupObservations;
+  readonly app: StartupApp;
+  // stops the production application and starts it again over the same data directory and dashboard port while the scripted
+  // T3 and its native state stay up; the gateway follows the new process
+  readonly restart: Effect.Effect<void>;
+};
 
 const messageDispatch = (payload: Record<string, unknown>): StartupDispatch | null => payload.type === "message.dispatch"
   ? {threadId: String(payload.threadId), commandId: String(payload.commandId), text: String(payload.text)} : null;
@@ -198,13 +205,29 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
   const outage: PeerRoutes = {http: () => availability.up ? undefined : json(503, {error: "t3_unavailable"}), rpc: () => availability.up ? undefined : {fail: true}};
   const peer = yield* intPeer([outage, environment, nativeReadRoutes(state), operate]);
   const served: Partial<SupervisorConfig> = {...(options.uiAssetsDirectory === undefined ? {} : {uiAssetsDirectory: options.uiAssetsDirectory}),
-    ...(options.uiPort === undefined ? {} : {uiPort: options.uiPort}), ...(options.uiHost === undefined ? {} : {uiHost: options.uiHost})};
-  const config = yield* appConfig(directory, peer.baseUrl, {guidanceTokenFile: join(directory, "read-token"), ...served});
-  assert.equal(config.t3TokenFile.endsWith("read-token"), true);
-  const app = yield* runApp(config, yield* buildT3Client(peer.baseUrl), () => catalog);
-  yield* within(app.ready, 15_000, "application readiness");
-  const token = (yield* fs.readFileString(join(directory, "access", "workflow-mcp-token"))).trim();
-  const endpoint = {port: app.port, token};
+    ...(options.uiHost === undefined ? {} : {uiHost: options.uiHost})};
+  // each run of the production application owns a child scope of the session, so a restart ends exactly that process's
+  // listeners, databases and fibers while the peer, its native state and the data directory stay
+  const session = yield* Scope.Scope;
+  const start = (uiPort: number | undefined) => Effect.gen(function* () {
+    const scope = yield* Scope.fork(session);
+    const app = yield* Scope.provide(scope)(Effect.gen(function* () {
+      const config = yield* appConfig(directory, peer.baseUrl, {guidanceTokenFile: join(directory, "read-token"), ...served,
+        ...(uiPort === undefined ? {} : {uiPort})});
+      assert.equal(config.t3TokenFile.endsWith("read-token"), true);
+      const running = yield* runApp(config, yield* buildT3Client(peer.baseUrl), () => catalog);
+      yield* within(running.ready, 15_000, "application readiness");
+      return running;
+    }));
+    const token = (yield* fs.readFileString(join(directory, "access", "workflow-mcp-token"))).trim();
+    return {scope, app, endpoint: {port: app.port, token}};
+  });
+  let current = yield* start(options.uiPort);
+  const restart = Effect.gen(function* () {
+    const port = current.app.port;
+    yield* Scope.close(current.scope, Exit.void);
+    current = yield* start(port);
+  }).pipe(Effect.provide(NodeFileSystem.layer), Effect.orDie);
   const dispatches = (): StartupDispatch[] => commands.flatMap((payload) => {
     const dispatch = messageDispatch(payload);
     return dispatch ? [dispatch] : [];
@@ -219,8 +242,8 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
     dispatches: dispatches().map((item) => ({threadId: item.threadId, commandId: item.commandId, chars: item.text.length}))});
   const gateway: StartupGateway = {
     discover: () => Effect.gen(function* () {
-      const reply = yield* httpJson(`http://127.0.0.1:${endpoint.port}/mcp/workflows`, {method: "POST",
-        headers: {Authorization: `Bearer ${endpoint.token}`, Accept: "application/json, text/event-stream"},
+      const reply = yield* httpJson(`http://127.0.0.1:${current.endpoint.port}/mcp/workflows`, {method: "POST",
+        headers: {Authorization: `Bearer ${current.endpoint.token}`, Accept: "application/json, text/event-stream"},
         body: {jsonrpc: "2.0", id: 1, method: "tools/list", params: {}}});
       if (reply.status !== 200) return yield* Effect.die(new Error(`gateway discover http ${reply.status}: ${JSON.stringify(debug())}`));
       const tools = (reply.body as {result?: {tools?: Array<{name?: string}>}}).result?.tools ?? [];
@@ -242,7 +265,7 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
         const itemId = installSubmission(caller, task, args, {tool: "plan", runId: run.id});
         state.details.set(itemId, submissionDetail(caller, itemId));
       }
-      const reply = yield* mcpCall(endpoint, name, args);
+      const reply = yield* mcpCall(current.endpoint, name, args);
       if (reply.httpStatus !== 200) return yield* Effect.die(new Error(`gateway ${name} http ${reply.httpStatus}: ${JSON.stringify(reply.value)}`));
       return reply.value;
     }),
@@ -280,7 +303,7 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
         text: "I submitted the interpretation through the tool.", streaming: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()});
     },
   };
-  return {gateway, observe, app: {origin: app.origin, dataDirectory: directory}};
+  return {gateway, observe, app: {origin: current.app.origin, dataDirectory: directory}, restart};
 }).pipe(Effect.provide(NodeFileSystem.layer), Effect.orDie);
 
 /** The startup chain with its defaults, as the startup integration suite runs it. */

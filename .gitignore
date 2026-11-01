@@ -1,6 +1,7 @@
 node_modules
 dist/
 ui-dist/
+.e2e-artifacts/
 knowledge/
 .qmd/
 *.sqlite3*

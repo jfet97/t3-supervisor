@@ -36,6 +36,9 @@ records the product's navigation, terminology and evidence requirements.
 ```
 
 `pnpm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
+The [testing guide](docs/testing.md) says where a test belongs, what each kind of run can
+claim, how browser journeys (`./dev e2e`) are written and when a test is retired, and
+holds the test inventory.
 
 Ordinary PR CI runs lint, type checking and build once, the AMD64 and ARM64
 container artifacts each on a runner of that architecture, the runner harness once,

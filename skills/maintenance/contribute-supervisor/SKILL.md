@@ -36,7 +36,8 @@ Run autofix, both type checks, relevant focused regressions and build after a
 development batch. Choose cases that distinguish the actual failure. Leave the
 complete main and runner harness suites to GitHub, as the CI policy specifies.
 Counts of passing tests cannot establish that a rendered control exists or that
-a user can complete a journey.
+a user can complete a journey. The [testing guide](../../../docs/testing.md)
+owns where a test belongs, browser journeys, pruning and the test inventory.
 
 Prove live behavior only in the repository's Docker
 [development environment](../../../docs/local-stack.md): `./dev fixture` for

@@ -5,6 +5,7 @@ x-development: &development
   image: t3-supervisor-dev:local
   build:
     context: .
+    target: development
     args:
       DEV_UID: ${DEV_UID:-1000}
       DEV_GID: ${DEV_GID:-1000}
@@ -71,6 +72,37 @@ services:
     ports:
       - "127.0.0.1:${T3SUP_DEV_FIXTURE_PORT}:${T3SUP_DEV_FIXTURE_PORT}"
       - "127.0.0.1:${T3SUP_DEV_UI_FIXTURE_PORT}:${T3SUP_DEV_UI_FIXTURE_PORT}"
+
+  # the browser journeys (./dev e2e): the checkout, its dependencies and the shared caches only. Neither the credentials
+  # nor the data volume is mounted, so a journey never sees a sign-in, T3 data or Supervisor data of this environment; each
+  # one starts its own Supervisor and Chromium on ephemeral loopback ports inside this container and publishes nothing
+  e2e:
+    <<: *development
+    image: t3-supervisor-e2e:local
+    build:
+      context: .
+      target: e2e
+      args:
+        DEV_UID: ${DEV_UID:-1000}
+        DEV_GID: ${DEV_GID:-1000}
+    profiles: [e2e]
+    command: ["pnpm", "test:e2e"]
+    shm_size: 1gb
+    environment:
+      LANG: C.UTF-8
+      HOME: /tmp
+      XDG_CACHE_HOME: /cache/xdg
+      DISABLE_AUTOUPDATER: "1"
+    volumes:
+      - type: bind
+        source: ../..
+        target: /workspace
+      - type: volume
+        source: node_modules
+        target: /workspace/node_modules
+      - type: volume
+        source: cache
+        target: /cache
 
 volumes:
   node_modules:

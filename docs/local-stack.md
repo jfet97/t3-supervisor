@@ -26,6 +26,7 @@ directly. Images never contain source, credentials or state.
 | `./dev sign-in` | prints a one-time Supervisor dashboard sign-in token |
 | `./dev fixture`, `./dev ui-fixture` | the dashboard fixtures, below |
 | `./dev check` | the disposable published-T3 check, below |
+| `./dev e2e [ARGS]` | the browser journeys, below; ARGS go to vitest |
 | `./dev reset` | removes test data; provider sign-ins, T3 settings and T3 provider connections stay |
 | `./dev reset-auth` | signs out every provider; chats and all data stay |
 
@@ -157,6 +158,24 @@ folder. `./dev ui-fixture` serves the compiled dashboard over `test/ui-fixture/`
 story suites' synthetic API fixture ([its README](../test/ui-fixture/README.md)). Inside
 the container both listen on all of the container's interfaces; the host publishes them
 on loopback only, so the browser's address stays the loopback address the fixtures check.
+
+## Browser journeys
+
+```sh
+./dev e2e [vitest arguments]
+```
+
+`./dev e2e` builds the dashboard and runs the browser journeys of `test/e2e/`
+([testing](testing.md)) in the separate `e2e` image: the development toolchain plus the
+headless Chromium of the pinned `playwright-core`. That container mounts the checkout,
+its dependencies and the caches, never the credentials or data volume, and publishes no
+port. Each journey starts the production Supervisor over the scripted T3 peer, signs in
+with a real one-time token and drives the compiled dashboard in Chromium, all on
+ephemeral loopback ports inside the container. A failed journey keeps its Playwright
+trace, a screenshot and the page's errors under `.e2e-artifacts/`. Playwright's trace
+viewer opens a trace: `playwright-core show-trace <trace.zip>` where Node and a desktop
+browser are available, or trace.playwright.dev, which reads the file in the browser.
+They are fixture evidence: real Supervisor and dashboard, scripted T3.
 
 ## Disposable published-T3 check
 

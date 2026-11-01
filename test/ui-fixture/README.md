@@ -3,7 +3,13 @@
 A localhost test fixture for recording the mounted UI stories UI-STORY-01..08
 (`docs/effect-v4-migration.md`, section 7). It serves the **real compiled baseline UI**
 unchanged and answers its API calls with **synthetic API data**. Label every recording
-made against it `fixture`; recordings against a real deployment are labelled `native`.
+made against it `fixture`; observations of the development environment are labelled
+`local stack` or `provider` ([testing](../../docs/testing.md)).
+
+Its coverage is narrower than a journey's: client rendering and error handling against
+synthetic data with stand-in semantics. It is never an acceptance oracle for Supervisor
+server behavior; journey acceptance uses the real Supervisor graph (`./dev fixture`,
+`test/e2e/`). See [testing](../../docs/testing.md).
 
 It is test infrastructure: it is not a service and not a proxy. It never forwards a
 request, never opens a non-loopback connection, binds `127.0.0.1` only, and keeps every

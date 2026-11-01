@@ -8,7 +8,7 @@ export default defineConfig({
   plugins: [leakGate()],
   test: {
     include: ["test/**/*.test.ts"],
-    exclude: [...configDefaults.exclude, "dist/**", "test/harness/**"],
+    exclude: [...configDefaults.exclude, "dist/**", "test/harness/**", "test/e2e/**"],
     environment: "node",
     pool: "forks",
     isolate: true,
