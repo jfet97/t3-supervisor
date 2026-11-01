@@ -43,6 +43,19 @@ export type PeerRoutes = {
   rpc?: (entry: PeerRpcEntry) => RouteAnswer<RpcAnswer>;
 };
 
+/* A subscription a stream reply opened: its arrived frame, one more chunk on the same request, and the client's acknowledgements.
+ * The T3 client acknowledges a chunk only after it handled every item in it (src/t3.ts, the watch's ingest), so an acknowledged
+ * chunk is the native signal that the client's handling of it ended.
+ */
+export type PeerStream = {
+  readonly entry: PeerRpcEntry;
+  // sends one more chunk on this request and waits until the client acknowledged every chunk sent on it
+  readonly push: (values: ReadonlyArray<unknown>) => Effect.Effect<void>;
+  // waits until the client acknowledged every chunk sent on this request; a socket that closes first ends the wait with a defect
+  readonly acknowledged: Effect.Effect<void>;
+  readonly closed: () => boolean;
+};
+
 export type IntNativePeer = {
   baseUrl: string;
   log: PeerEntry[];
@@ -50,6 +63,10 @@ export type IntNativePeer = {
   unexpected: PeerEntry[];
   // the Authorization header of every accepted websocket connection, in order
   connections: Array<string | null>;
+  // the subscriptions stream replies opened, in arrival order
+  streams: PeerStream[];
+  // the latest open subscription `matches` accepts, or the next one opened
+  stream: (matches: (entry: PeerRpcEntry) => boolean) => Effect.Effect<PeerStream>;
 };
 
 const header = (request: IncomingMessage, name: string): string | null => {
@@ -105,6 +122,36 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
   const log: PeerEntry[] = [];
   const unexpected: PeerEntry[] = [];
   const connections: Array<string | null> = [];
+  const streams: PeerStream[] = [];
+  const streamWaiters: Array<{matches: (entry: PeerRpcEntry) => boolean; resume: (stream: PeerStream) => void}> = [];
+  // the subscriptions of one socket by request id: chunks sent and acknowledged, and the waits for the acknowledgements
+  type StreamState = {sent: number; acknowledged: number; closed: boolean; waiters: Array<(effect: Effect.Effect<void>) => void>};
+  const settle = (state: StreamState): void => {
+    if (state.closed) for (const resume of state.waiters.splice(0)) resume(Effect.die(new Error("the subscription closed before the client acknowledged its chunks")));
+    else if (state.acknowledged >= state.sent) for (const resume of state.waiters.splice(0)) resume(Effect.void);
+  };
+  const opened = (entry: PeerRpcEntry, state: StreamState, send: (values: ReadonlyArray<unknown>) => void): void => {
+    const acknowledged = Effect.callback<void>((resume) => {
+      state.waiters.push(resume);
+      settle(state);
+      return Effect.sync(() => {
+        const index = state.waiters.indexOf(resume);
+        if (index >= 0) state.waiters.splice(index, 1);
+      });
+    });
+    const stream: PeerStream = {entry, acknowledged, closed: () => state.closed,
+      push: (values) => Effect.suspend(() => {
+        if (state.closed) return Effect.die(new Error("the subscription closed before the chunk was sent"));
+        state.sent += 1;
+        send(values);
+        return acknowledged;
+      })};
+    streams.push(stream);
+    for (const waiter of streamWaiters.filter(value => value.matches(entry))) {
+      streamWaiters.splice(streamWaiters.indexOf(waiter), 1);
+      waiter.resume(stream);
+    }
+  };
   const http = createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -132,9 +179,24 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
   webSockets.on("connection", (socket, upgrade) => {
     const authorization = header(upgrade, "authorization");
     connections.push(authorization);
+    const subscriptions = new Map<string, StreamState>();
+    socket.on("close", () => {
+      for (const state of subscriptions.values()) {
+        state.closed = true;
+        settle(state);
+      }
+    });
     socket.on("message", (data) => {
-      const frame = JSON.parse(String(data)) as {_tag?: unknown; id?: unknown; tag?: unknown; payload?: unknown};
+      const frame = JSON.parse(String(data)) as {_tag?: unknown; id?: unknown; requestId?: unknown; tag?: unknown; payload?: unknown};
       if (frame._tag === "Ping") {socket.send(JSON.stringify({_tag: "Pong"}));return;}
+      if (frame._tag === "Ack") {
+        const state = subscriptions.get(String(frame.requestId));
+        if (state) {
+          state.acknowledged += 1;
+          settle(state);
+        }
+        return;
+      }
       if (frame._tag !== "Request" || typeof frame.tag !== "string") return;
       const entry: PeerRpcEntry = {kind: "rpc", tag: frame.tag, authorization,
         payload: typeof frame.payload === "object" && frame.payload !== null ? frame.payload as Record<string, unknown> : {}};
@@ -152,7 +214,11 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
             return;
           }
           if ("stream" in answer) {
-            socket.send(JSON.stringify({_tag: "Chunk", requestId: frame.id, values: answer.stream}));
+            const send = (values: ReadonlyArray<unknown>) => socket.send(JSON.stringify({_tag: "Chunk", requestId: frame.id, values}));
+            const state: StreamState = {sent: 1, acknowledged: 0, closed: false, waiters: []};
+            subscriptions.set(String(frame.id), state);
+            send(answer.stream);
+            opened(entry, state, send);
             return;
           }
           /* A failure value goes out in the Fail cause the native characterizations script (failureExit in
@@ -176,7 +242,20 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
   }));
   const address = http.address();
   if (address === null || typeof address === "string") return yield* Effect.die(new Error("peer did not bind a TCP port"));
-  return {baseUrl: `http://127.0.0.1:${address.port}`, log, unexpected, connections};
+  const stream = (matches: (entry: PeerRpcEntry) => boolean): Effect.Effect<PeerStream> => Effect.callback<PeerStream>((resume) => {
+    const found = streams.findLast(value => !value.closed() && matches(value.entry));
+    if (found) {
+      resume(Effect.succeed(found));
+      return;
+    }
+    const waiter = {matches, resume: (value: PeerStream) => resume(Effect.succeed(value))};
+    streamWaiters.push(waiter);
+    return Effect.sync(() => {
+      const index = streamWaiters.indexOf(waiter);
+      if (index >= 0) streamWaiters.splice(index, 1);
+    });
+  });
+  return {baseUrl: `http://127.0.0.1:${address.port}`, log, unexpected, connections, streams, stream};
 });
 
 export const httpRequests = (peer: Pick<IntNativePeer, "log">, path: string): PeerHttpEntry[] =>
