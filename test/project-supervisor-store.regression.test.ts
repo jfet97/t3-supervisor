@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { NodeServices } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Layer } from "effect";
+import { Effect, Exit } from "effect";
 import type { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
-import { GuidanceDb, guidanceDbLayer } from "../src/db.js";
-import { defaultSupervisorModel, prepareStopNotice, ProjectSupervisorStoreError, type BindingRecord, type SupervisionStartRecord, type TaskRecord } from "../src/project-supervisor-store.js";
+import { defaultSupervisorModel, prepareStopNotice, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { countingIds, failsWith, guidanceStoresFixture, reopenGuidanceStores, temporaryDataDirectory } from "./support/guidance-store-services.js";
 
-// target regressions of the ProjectSupervisorStore service (s6d step 1, manifest CT-PSS-01..08) on a temporary guidance
-// database through the real layers; the synchronous characterizations of the same cases stay in
-// test/project-supervisor.characterization.test.ts until the switch
+/* Target regressions of the ProjectSupervisorStore service (s6d step 1, manifest CT-PSS-01..08) on a temporary guidance
+ * database through the real layers. CT-PSS-04, CT-PSS-07 and CT-PSS-08 run once, in
+ * test/project-supervisor.characterization.test.ts, whose seam observes a commit from another connection inside a statement;
+ * that file's CT-PSS-01 and CT-PSS-05 pin the controller's replay of a crashed Start and the preload beside a live writer,
+ * which these store cases do not.
+ */
 
 const live = <A, E, R>(body: Effect.Effect<A, E, R>) => body.pipe(Effect.provide(NodeServices.layer));
 const interruptedStartReason = "Start intake was interrupted before permission was reserved. Submit a new explicit request.";
@@ -34,7 +36,7 @@ const queuedTask = (threadId: string, supervisorThreadId: string, dispatchedAt: 
   definitionContext: null, definitionReadAttempts: 1, revalidationAttempts: 1});
 
 const pssBoundary = {snapshotSequence: 7, threads: [{id: "main-a", latestRunId: "run-a"}]};
-// the pre-migration on-disk format (test/project-supervisor.characterization.test.ts CT-PSS-06), without the guidance store's own settings row
+// the pre-migration on-disk format of the supervision meta rows (CT-PSS-06); the guidance store's own settings row is checked apart
 const pssMetaGolden: Array<[string, string]> = [
   ["supervisor_activation_baseline", "{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}],\"version\":2}"],
   ["supervisor_activation_sequence", "7"],
@@ -150,57 +152,6 @@ it.live("CT-PSS-03: a stale binding copy keeps the stored stop and notice, and t
   assert.equal("supervisionStop" in (yield* store.binding("project-a", "main-a"))!, false, "a stale copy cannot restore a cleared stop");
 })), {timeout: 10_000});
 
-it.effect("CT-PSS-04: a stale global definitions generation changes nothing; a success stales inferred tasks and clears queued context in one commit", () => live(Effect.gen(function* () {
-  const {sql, supervisors: store} = yield* guidanceStoresFixture("pss-service-04-");
-  const binding = yield* store.reserve("project-a", "main-inferred", "Main", defaultSupervisorModel, 1, 100);
-  yield* store.saveTask(inferredTask(binding.threadId));
-  yield* store.saveTask(queuedTask("main-queued", binding.threadId, null));
-  yield* store.saveTask(queuedTask("main-dispatched", binding.threadId, 120));
-  const tasksBefore = yield* tableRows(sql, "supervisor_task_interpretations");
-  const controlKeys = Effect.map(metaRows(sql), (rows) => rows.filter(([key]) => key.startsWith("supervisor_global_definitions_")));
-
-  const conflict = yield* failsWith(store.saveGlobalDefinitionsControl(3, true, "~/.t3-supervisor", "global-1"), /global_definitions_control_conflict/u);
-  assert.ok(conflict instanceof ProjectSupervisorStoreError);
-  assert.deepEqual(yield* tableRows(sql, "supervisor_task_interpretations"), tasksBefore, "a stale generation leaves tasks untouched");
-  assert.deepEqual(yield* controlKeys, []);
-
-  // a failure on the second task update rolls back the first task update and the control rows of the same commit; the driver
-  // text stays out of the typed failure
-  yield* sql.unsafe(`CREATE TEMP TRIGGER pss_fail_queued BEFORE UPDATE ON main.supervisor_task_interpretations BEGIN
-    SELECT RAISE(ABORT, 'pss_task_update_failed') WHERE NEW.thread_id='main-queued'; END`);
-  const failed = yield* Effect.flip(store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"));
-  assert.deepEqual({tag: failed._tag, reason: failed.reason, message: failed.message},
-    {tag: "ProjectSupervisorStoreError", reason: "supervision_store_unavailable", message: "supervision_store_unavailable"});
-  assert.deepEqual(yield* tableRows(sql, "supervisor_task_interpretations"), tasksBefore, "the earlier task update rolled back");
-  assert.deepEqual(yield* controlKeys, [], "the control and event rows rolled back");
-  assert.equal((yield* store.globalDefinitionsControl()).generation, 0);
-  yield* sql.unsafe("DROP TRIGGER temp.pss_fail_queued");
-
-  const changedAt = 1_790_000_000_000;
-  yield* TestClock.setTime(changedAt);
-  const control = yield* store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1");
-  assert.equal(control.generation, 1);
-  assert.equal(control.enabled, true);
-  assert.deepEqual(yield* controlKeys, [
-    ["supervisor_global_definitions_control", JSON.stringify({generation: 1, enabled: true, manual: true})],
-    ["supervisor_global_definitions_event", JSON.stringify({generation: 1, enabled: true, changedAt, globalFingerprint: "global-1"})],
-  ]);
-  const inferred = (yield* store.task("main-inferred"))!;
-  const staleMessage = "The user changed whether global definitions are included. The old plan and agreement are retained as stale history.";
-  assert.deepEqual(inferred.workflow, {...inferredTask(binding.threadId).workflow!, status: "stale", message: staleMessage});
-  assert.deepEqual(inferred.agreement, {...inferredTask(binding.threadId).agreement!, status: "stale", message: staleMessage});
-  assert.deepEqual(inferred.definitionReview, {status: "checking", message: staleMessage, expectedRevision: "definitions-1", observedRevision: null,
-    supervisorMessageId: null, userMessageIds: [], updatedAt: changedAt});
-  assert.equal(inferred.updatedAt, changedAt);
-  const queued = (yield* store.task("main-queued"))!;
-  assert.equal(queued.status, "queued");
-  assert.equal(queued.requestText, "");
-  assert.equal(queued.reason, "Global definition inclusion changed; definitions will be refreshed before dispatch.");
-  assert.equal(queued.workflow?.status, "pending");
-  for (const key of ["definitionContext", "definitionSnapshot", "definitionReadAttempts", "revalidationAttempts"]) assert.equal(key in queued, false, `${key} is cleared`);
-  assert.deepEqual(yield* store.task("main-dispatched"), queuedTask("main-dispatched", binding.threadId, 120), "a dispatched queued task keeps its context");
-})), {timeout: 10_000});
-
 it.live("CT-PSS-05: the layer preloads committed ownership into the shared set before any call, and a reservation joins it only after the outermost commit", () => live(Effect.gen(function* () {
   const directory = yield* temporaryDataDirectory("pss-service-05-");
   const fresh = new Set<string>();
@@ -252,6 +203,8 @@ it.effect("CT-PSS-06: the supervision DDL and every meta key format are golden a
   assert.deepEqual(yield* supervisionMetaRows(writer.sql), pssMetaGolden);
   assert.deepEqual(yield* pssDdl(writer.sql), pssDdlGolden);
   const written = yield* metaRows(writer.sql);
+  // settings preserve their fields and values; harmless JSON key order is not a storage contract
+  assert.deepEqual(written.filter(([key]) => key === "settings").map(([key, value]) => [key, JSON.parse(value)]), [["settings", {generation: 1, evidenceHours: 24}]]);
   yield* writer.close;
 
   const {sql, supervisors: store} = yield* reopenGuidanceStores(directory);
@@ -280,89 +233,7 @@ it.effect("CT-PSS-06: the supervision DDL and every meta key format are golden a
   assert.deepEqual(yield* store.startOperation("main-a", "op-1"), {threadId: "main-a", operationId: "op-1", requestHash: "hash-1", status: "active",
     reason: "Supervision is enabled until explicit Stop. Settlement only parks the Supervisor."});
   assert.deepEqual(yield* store.chatStop("main-b"), {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 1_790_000_000_000});
-  assert.deepEqual(yield* supervisionMetaRows(sql), pssMetaGolden, "reads write nothing");
-})), {timeout: 10_000});
-
-it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with an empty default exactly once and keeps its rows", () => live(Effect.gen(function* () {
-  const directory = yield* temporaryDataDirectory("pss-service-07-");
-  // the legacy file, written before the supervision store added the column
-  yield* Effect.gen(function* () {
-    const sql = yield* GuidanceDb;
-    yield* sql.unsafe("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
-    yield* sql.unsafe("CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,PRIMARY KEY(project_id,workspace_root))");
-    yield* sql.unsafe("INSERT INTO supervisor_definition_user_saves VALUES('project-a','/work/a','signature-a',100)");
-    yield* sql.unsafe("INSERT INTO meta VALUES('supervisor_scope_version','main-v1')");
-  }).pipe(Effect.provide(Layer.fresh(guidanceDbLayer(directory))));
-  const columns = (sql: SqlClient.SqlClient) => Effect.map(sql.unsafe<Record<string, unknown>>("PRAGMA table_info(supervisor_definition_user_saves)"), (rows) => rows.map((row) => ({...row})));
-  const tableSql = (sql: SqlClient.SqlClient) => Effect.map(sql`SELECT sql FROM sqlite_master WHERE name='supervisor_definition_user_saves'`, ([row]) => row?.sql);
-  const expectedRow = {project_id: "project-a", workspace_root: "/work/a", signature: "signature-a", saved_at: 100, expected_revision: ""};
-
-  const first = yield* reopenGuidanceStores(directory);
-  const migratedColumns = yield* columns(first.sql);
-  assert.deepEqual(migratedColumns.filter((column) => column.name === "expected_revision"),
-    [{cid: 4, name: "expected_revision", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0}]);
-  assert.deepEqual(yield* tableRows(first.sql, "supervisor_definition_user_saves"), [expectedRow]);
-  const migratedSql = yield* tableSql(first.sql);
-  yield* first.close;
-
-  // a second ALTER would fail the layer (duplicate column); the second build succeeds and changes nothing
-  const second = yield* reopenGuidanceStores(directory);
-  assert.deepEqual(yield* columns(second.sql), migratedColumns);
-  assert.equal(yield* tableSql(second.sql), migratedSql);
-  assert.deepEqual(yield* tableRows(second.sql, "supervisor_definition_user_saves"), [expectedRow]);
-})), {timeout: 10_000});
-
-it.live("CT-PSS-08: a Start record and its receipt commit together, a reservation transfers an unbound stop atomically, and a concurrent reader never sees half of either", () => live(Effect.gen(function* () {
-  const {sql, supervisors: store, owned} = yield* guidanceStoresFixture("pss-service-08-");
-  const start: SupervisionStartRecord = {threadId: "main-a", projectId: "project-a", operationId: "op-1", requestHash: "hash-1", route: "agent", status: "pending",
-    reason: "Waiting for the Supervisor's first source-bound Start interpretation.", intentAt: 100, modeGeneration: 0, masterGeneration: 0, taskId: "task-1"};
-  const recordKey = "supervisor_start:main-a";
-  const receiptKey = 'supervisor_start_operation:["main-a","op-1"]';
-  const startKeys = Effect.map(sql`SELECT key FROM meta WHERE key IN (${recordKey},${receiptKey}) ORDER BY key`, (rows) => rows.map((row) => String(row.key)));
-
-  // target change (the baseline wrote the receipt in its own statement, test/project-supervisor.characterization.test.ts CT-PSS-08):
-  // a failed record now leaves no receipt either, so neither half exists without the other
-  yield* sql.unsafe(`CREATE TEMP TRIGGER pss_fail_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN
-    SELECT RAISE(ABORT, 'pss_record_failed'); END`);
-  yield* failsWith(store.saveStart(start), /supervision_store_unavailable/u);
-  assert.deepEqual(yield* startKeys, [], "the receipt rolled back with the failed record");
-  yield* sql.unsafe("DROP TRIGGER temp.pss_fail_record");
-
-  // a reader fiber racing the writes sees both halves or neither, in one statement's snapshot
-  const views: string[][] = [];
-  const writing = yield* Deferred.make<void>();
-  const reader = yield* Effect.forkChild(Effect.gen(function* () {
-    while (!(yield* Deferred.isDone(writing))) {
-      views.push(yield* startKeys);
-      yield* Effect.yieldNow;
-    }
-  }));
-  yield* store.saveStart(start);
-  yield* Deferred.succeed(writing, undefined);
-  yield* Fiber.join(reader);
-  views.push(yield* startKeys);
-  for (const view of views) assert.ok(view.length === 0 || view.length === 2, `a reader saw ${JSON.stringify(view)}`);
-  assert.deepEqual(views.at(-1), [recordKey, receiptKey].sort());
-
-  // reservation moves the unbound stop into the new binding inside one transaction
-  const stop: NonNullable<BindingRecord["supervisionStop"]> = {route: "chat", callerThreadId: "main-b", userMessageId: "message-1", stoppedAt: 150};
-  yield* store.saveUnboundStop("main-b", stop);
-  const metaBefore = yield* metaRows(sql);
-  yield* sql.unsafe("CREATE TEMP TRIGGER pss_fail_binding BEFORE INSERT ON main.supervisor_main_bindings BEGIN SELECT RAISE(ABORT, 'pss_binding_failed'); END");
-  yield* failsWith(store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 200), /supervision_store_unavailable/u);
-  assert.deepEqual(yield* metaRows(sql), metaBefore, "the unbound stop is still stored");
-  assert.deepEqual(yield* store.chatStop("main-b"), stop);
-  assert.deepEqual(yield* tableRows(sql, "supervisor_owned_threads"), [], "no owned root is recorded");
-  assert.deepEqual(yield* tableRows(sql, "supervisor_main_bindings"), []);
-  assert.deepEqual([...owned], [], "a rolled-back reservation adds no owned id");
-  yield* sql.unsafe("DROP TRIGGER temp.pss_fail_binding");
-
-  const binding = yield* store.reserve("project-a", "main-b", "Main B", defaultSupervisorModel, 1, 200);
-  assert.deepEqual(yield* sql`SELECT value FROM meta WHERE key=${"supervisor_unbound_stop:main-b"}`, []);
-  assert.deepEqual(JSON.parse(yield* documentOf(sql, "main-b")).supervisionStop, stop);
-  assert.deepEqual(binding.supervisionStop, stop);
-  assert.deepEqual(yield* store.chatStop("main-b"), stop, "the stop is read from the binding after the transfer");
-  assert.deepEqual([...owned], [binding.threadId]);
+  assert.deepEqual(yield* metaRows(sql), written, "reads write nothing, the guidance settings row included");
 })), {timeout: 10_000});
 
 it.live("CC-CONTROL and CC-NOPROJECT-DEFAULT: every control has its own generation CAS, No Project defaults to On request and shared definitions never activate it", () => live(Effect.gen(function* () {

@@ -378,17 +378,3 @@ export const openProjectSupervisor = (process: ConversationProcess, fake: FakeT3
       requests: process.requests, monitor: process.monitor,
     };
   });
-
-// ---- the conversation store alone ----
-
-export interface ConversationStoreFile {
-  readonly sql: GuidanceDb["Service"];
-  readonly store: SupervisorConversationStore["Service"];
-}
-
-/** The guidance client of `directory` with its guidance store and the conversation store over it, closed with the scope. */
-export const openConversationStore = (directory: string): Effect.Effect<ConversationStoreFile, never, Scope.Scope> => Effect.gen(function* () {
-  const context = yield* Layer.build(SupervisorConversationStore.layer.pipe(Layer.provideMerge(GuidanceStore.layer),
-    Layer.provideMerge(Layer.mergeAll(guidanceDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer)), supervisorIds)))).pipe(Effect.orDie);
-  return { sql: Context.get(context, GuidanceDb), store: Context.get(context, SupervisorConversationStore) };
-});

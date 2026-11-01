@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
-import type { Duplex } from "node:stream";
 import { it } from "@effect/vitest";
-import { Clock, Deferred, Effect, Fiber } from "effect";
-import { TestClock } from "effect/testing";
+import { Deferred, Effect, Fiber } from "effect";
 import { WebSocketServer, type WebSocket } from "ws";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { NativeRpc, SupervisorRpcError } from "../src/supervisor-native.js";
@@ -13,8 +10,9 @@ import { GitProbeError } from "../src/git-probe.js";
 import { fakeT3 } from "./support/c1-git-probe-peer.js";
 import { probeGuidance } from "./support/g10-probe-guidance.js";
 
-// every client here talks to a real loopback T3 peer (ws or http sockets), so the tests are it.live; the two CT-NATIVE-01
-// deadline tests are it.effect over the same real peers because they step the client's own deadlines on the TestClock
+/* Every client here talks to a real loopback T3 peer (ws or http sockets), so the tests are it.live; the request and
+ * handshake deadlines of CT-NATIVE-01 run on the TestClock in test/native-rpc.test.ts as NRPC-03.
+ */
 
 type Frame = { readonly data: string; readonly binary: boolean };
 
@@ -57,30 +55,6 @@ const startPeer = (onFrame: (socket: WebSocket, frame: Record<string, unknown>) 
   return new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }));
 
-// a loopback http server that holds every websocket upgrade unanswered and records the bytes sent after it, for the test's scope
-const startHungServer = Effect.acquireRelease(Effect.promise(async () => {
-  const held: Duplex[] = [];
-  let bytes = "";
-  const upgraded = Deferred.makeUnsafe<void>();
-  const server: Server = createServer(() => undefined);
-  server.on("upgrade", (_request, socket: Duplex) => {
-    held.push(socket);
-    socket.on("data", (data: Buffer) => { bytes += data.toString("latin1"); });
-    socket.on("error", () => undefined);
-    Deferred.doneUnsafe(upgraded, Effect.void);
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  return { server, held, url: `http://127.0.0.1:${address.port}`, bytes: () => bytes, upgraded: Deferred.await(upgraded) };
-}), ({ server, held }) => Effect.promise(() => {
-  for (const socket of held) socket.destroy();
-  return new Promise<void>((resolve) => server.close(() => resolve()));
-}));
-
 // the c1 git probe peer for the test's scope
 const gitProbePeer = (...args: Parameters<typeof fakeT3>) => Effect.acquireRelease(Effect.promise(() => fakeT3(...args)), (peer) => Effect.promise(() => peer.close()));
 
@@ -100,44 +74,6 @@ const rpcError = (outcome: { value?: unknown; error?: unknown }): SupervisorRpcE
 };
 
 const exit = (requestId: string, value: unknown) => ({ _tag: "Exit", requestId, exit: { _tag: "Success", value } });
-
-it.effect("CT-NATIVE-01: a received request frame left unanswered settles uncertain at exactly 20000 ms", () => Effect.gen(function* () {
-  const peer = yield* startPeer(() => {});
-  const rpc = yield* nativeRpc(peer.url, "timeout-token");
-  const call = yield* Effect.forkChild(outcomeOf(rpc.call("orchestration.dispatchCommand", { commandId: "command-a" })));
-  yield* peer.firstRequest;
-  yield* TestClock.adjust("19999 millis");
-  assert.equal(settled(call), false);
-  yield* TestClock.adjust("1 millis");
-  const error = rpcError(yield* Fiber.join(call));
-  assert.equal(error.outcome, "uncertain");
-  assert.equal(error.definiteRejection, false);
-  assert.equal(error.dispatchCommandFailure, false);
-  assert.equal(error.message.includes("timeout-token"), false);
-  yield* peer.clientClosed;
-  assert.equal(peer.requests.length, 1);
-  assert.equal(peer.frames.length, 1);
-  assert.equal(peer.connections(), 1);
-}), { timeout: 10_000 });
-
-it.effect("CT-NATIVE-01: a hung handshake is rejected before open by the 5 s handshake timeout and no frame is sent", () => Effect.gen(function* () {
-  const hung = yield* startHungServer;
-  const rpc = yield* nativeRpc(hung.url, "hung-token");
-  const started = yield* Clock.currentTimeMillis;
-  // the call's outcome with the clock reading at which it settled
-  const call = yield* Effect.forkChild(Effect.zip(outcomeOf(rpc.call("orchestration.dispatchCommand", { commandId: "command-a" })), Clock.currentTimeMillis));
-  // the server holds the upgrade before the clock moves, so the handshake is hung rather than never started
-  yield* hung.upgraded;
-  yield* TestClock.adjust("20 seconds");
-  const [outcome, settledAt] = yield* Fiber.join(call);
-  const error = rpcError(outcome);
-  const elapsed = settledAt - started;
-  assert.equal(error.outcome, "rejected");
-  assert.equal(error.definiteRejection, false);
-  assert.ok(elapsed >= 4_990 && elapsed < 20_000, `rejected after ${Math.round(elapsed)} ms`);
-  assert.equal(hung.held.length, 1);
-  assert.equal(hung.bytes(), "");
-}), { timeout: 60_000 });
 
 it.live("CT-NATIVE-02: aborting after the peer received the request frame is uncertain, not definite, with no second frame", () => Effect.gen(function* () {
   const peer = yield* startPeer(() => {});

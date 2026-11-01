@@ -3,9 +3,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { it } from "@effect/vitest";
-import { Cause, Context, Deferred, Effect, Exit, Fiber, Scope } from "effect";
-import { prepareStopNotice, defaultSupervisorModel, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
-import { SupervisorIds } from "../src/ids.js";
+import { Cause, Deferred, Effect, Exit, Fiber, Scope } from "effect";
+import { defaultSupervisorModel, ProjectSupervisorStoreError, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { failsWith, metaRows, readerRows, sqlText, tableRows, withMillis, type DbSeam } from "./support/psx-sql.js";
@@ -53,42 +52,6 @@ const queuedTask = (threadId: string, supervisorThreadId: string, dispatchedAt: 
   sourceRunId: "run-2", sourceMessageId: "message-2", sourceHash: "hash-2", status: "queued", objective: null, reason: "Queued for interpretation.", updatedAt: 110,
   requestText: "Interpret this request", supervisorThreadId, messageId: `notice-${threadId}`, dispatchedAt, replayCount: 0, supervisorRunId: null, sourceOrdinal: 2,
   definitionContext: null, definitionReadAttempts: 1, revalidationAttempts: 1});
-
-const pssBoundary = {snapshotSequence: 7, threads: [{id: "main-a", latestRunId: "run-a"}]};
-
-// written by the baseline writers below with the clock fixed; this is the pre-migration on-disk format
-const pssMetaGolden: Array<[string, string]> = [
-  ["settings", "{\"generation\":1,\"evidenceHours\":24}"],
-  ["supervisor_activation_baseline", "{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}],\"version\":2}"],
-  ["supervisor_activation_sequence", "7"],
-  ["supervisor_control:\"project-a\"", "{\"generation\":1,\"enabled\":true,\"manual\":true,\"baseline\":{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}]}}"],
-  ["supervisor_control:\"project-c\"", "{\"generation\":0,\"enabled\":false,\"manual\":false,\"baseline\":{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}]}}"],
-  ["supervisor_control:null", "{\"generation\":1,\"enabled\":true,\"manual\":true}"],
-  ["supervisor_control_auto:\"project-c\"", "{\"status\":\"present\",\"enabled\":true,\"checkedAt\":1790000000000}"],
-  ["supervisor_control_presence_unavailable:\"project-b\"", "{\"checkedAt\":1790000000000}"],
-  ["supervisor_global_definitions_control", "{\"generation\":1,\"enabled\":true,\"manual\":true}"],
-  ["supervisor_global_definitions_event", "{\"generation\":1,\"enabled\":true,\"changedAt\":1790000000000,\"globalFingerprint\":\"global-fingerprint\"}"],
-  ["supervisor_no_project", "{\"generation\":1,\"mode\":\"automatic\",\"baseline\":{\"snapshotSequence\":7,\"threads\":[{\"id\":\"main-a\",\"latestRunId\":\"run-a\"}]}}"],
-  ["supervisor_scope_version", "main-v1"],
-  ["supervisor_start:main-a", "{\"threadId\":\"main-a\",\"projectId\":\"project-a\",\"operationId\":\"op-1\",\"requestHash\":\"hash-1\",\"route\":\"ui\",\"status\":\"active\",\"reason\":\"Supervision is enabled until explicit Stop. Settlement only parks the Supervisor.\",\"intentAt\":1790000000000,\"modeGeneration\":1,\"masterGeneration\":1,\"taskId\":null}"],
-  ["supervisor_start_operation:[\"main-a\",\"op-1\"]", "{\"threadId\":\"main-a\",\"operationId\":\"op-1\",\"requestHash\":\"hash-1\",\"status\":\"active\",\"reason\":\"Supervision is enabled until explicit Stop. Settlement only parks the Supervisor.\"}"],
-  ["supervisor_unbound_stop:main-b", "{\"route\":\"ui\",\"callerThreadId\":null,\"userMessageId\":null,\"stoppedAt\":1790000000000}"],
-];
-
-const pssDdlGolden = [
-  ["supervisor_chat_enables", "CREATE TABLE supervisor_chat_enables(thread_id TEXT PRIMARY KEY,enabled_at INTEGER NOT NULL)"],
-  ["supervisor_definition_user_saves", "CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,expected_revision TEXT NOT NULL,PRIMARY KEY(project_id,workspace_root))"],
-  ["supervisor_main_bindings", "CREATE TABLE supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id))"],
-  ["supervisor_owned_threads", "CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY)"],
-  ["supervisor_project_settings", "CREATE TABLE supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL)"],
-  ["supervisor_task_interpretations", "CREATE TABLE supervisor_task_interpretations(thread_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,updated_at INTEGER NOT NULL)"],
-  ["supervisor_tasks_project", "CREATE INDEX supervisor_tasks_project ON supervisor_task_interpretations(project_id)"],
-  ["meta", "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)"],
-];
-
-// the project store's own DDL; the run's other stores open their tables beside it
-const pssDdl = (db: DbSeam) => Effect.map(db.prepare("SELECT name,sql FROM sqlite_master WHERE sql IS NOT NULL AND (name GLOB 'supervisor_*' OR name='meta') ORDER BY name='meta',name").all(),
-  (rows) => rows.map((row) => [String(row.name), String(row.sql)] as [string, string]).filter(([name]) => pssDdlGolden.some(([golden]) => golden === name)));
 
 const deadRpc = (native: string[], name: string): NativeRpcShape => ({
   call: () => Effect.sync(() => {native.push(name); throw new Error(`${name} must not be called`);}),
@@ -469,6 +432,10 @@ it.live("CT-PS-11: aborting runOnce during a hung Supervisor projection releases
   assert.equal(supervisor.queues.size, 0);
 }), {timeout: 10_000});
 
+/* The controller's side of CT-PSS-01: a Start the real intake left preparing at a crash is answered from its rejected receipt
+ * without native work or an Enable; the store's own reopen recovery, with the stored request hash, is CT-PSS-01 in
+ * test/project-supervisor-store.regression.test.ts.
+ */
 it.live("CT-PSS-01: a Start operation left preparing by a crash is rejected on reopen and startStatus reports it without native work", () => Effect.gen(function* () {
   const session = yield* pssSession("psx-pss-01-");
   const first = yield* session.open();
@@ -530,47 +497,9 @@ it.live("CT-PSS-01: a Start operation left preparing by a crash is rejected on r
   assert.deepEqual(native, [], "no catalog, projection, rpc or activation call");
 }), {timeout: 10_000});
 
-it.live("CT-PSS-03: a stale binding copy keeps the stored stop and notice, and the notice CAS honours the expected messageId", () => Effect.gen(function* () {
-  const session = yield* pssSession("psx-pss-03-");
-  const {db, store, stores} = yield* session.open();
-  const binding = yield* store.reserve("project-a", "main-a", "Main", defaultSupervisorModel, 1, 100);
-  const stale = (yield* store.binding("project-a", "main-a"))!;
-  yield* store.setBinding({...stale, manualKeepActive: true, stopObservedAt: 150});
-  const stop: NonNullable<BindingRecord["supervisionStop"]> = {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 200};
-  yield* store.setSupervisionStop(binding, stop);
-  const stopped = (yield* store.binding("project-a", "main-a"))!;
-  assert.deepEqual(stopped.supervisionStop, stop);
-  assert.equal("manualKeepActive" in stopped || "stopObservedAt" in stopped, false, "a Stop clears keep-active and the observed stop marker");
-
-  const notice = yield* prepareStopNotice(Context.get(stores.context, SupervisorIds), binding, 200, null);
-  yield* store.setStopNotice(binding, null, notice);
-  assert.deepEqual((yield* store.binding("project-a", "main-a"))!.stopNotice, notice, "expected null on an absent notice succeeds");
-  assert.equal((yield* store.binding("project-a", "main-a"))!.stopNotice!.enabledAt, null);
-
-  yield* store.setBinding({...stale, state: "ready", title: "Supervisor · Renamed"});
-  const merged = (yield* store.binding("project-a", "main-a"))!;
-  assert.equal(merged.state, "ready");
-  assert.equal(merged.title, "Supervisor · Renamed");
-  assert.deepEqual(merged.supervisionStop, stop, "the stale copy without a stop keeps the stored stop");
-  assert.deepEqual(merged.stopNotice, notice, "the stale copy without a notice keeps the stored notice");
-  yield* store.setBinding({...stale, supervisionStop: {...stop, stoppedAt: 1}, stopNotice: {...notice, messageId: "supervisor-notice:stop:other", state: "sent"}});
-  assert.deepEqual((yield* store.binding("project-a", "main-a"))!.supervisionStop, stop, "a stale copy cannot replace the stored stop");
-  assert.deepEqual((yield* store.binding("project-a", "main-a"))!.stopNotice, notice, "a stale copy cannot replace the stored notice");
-
-  const document = () => Effect.map(db.prepare("SELECT document FROM supervisor_main_bindings WHERE main_thread_id='main-a'").get(), (row) => String(row?.document));
-  const beforeWrongCas = yield* document();
-  yield* store.setStopNotice(binding, "supervisor-notice:stop:wrong", {...notice, state: "sent"});
-  assert.equal(yield* document(), beforeWrongCas, "a wrong expected messageId is a no-op");
-  yield* store.setStopNotice(binding, null, {...notice, messageId: "supervisor-notice:stop:replacement"});
-  assert.equal(yield* document(), beforeWrongCas, "expected null on a present notice is a no-op");
-  yield* store.setStopNotice(binding, notice.messageId, {...notice, state: "accepted"});
-  assert.deepEqual((yield* store.binding("project-a", "main-a"))!.stopNotice, {...notice, state: "accepted"}, "the matching expected messageId replaces the notice");
-
-  yield* store.setSupervisionStop(binding, null);
-  yield* store.setBinding({...stale, supervisionStop: stop});
-  assert.equal("supervisionStop" in (yield* store.binding("project-a", "main-a"))!, false, "a stale copy cannot restore a cleared stop");
-}), {timeout: 10_000});
-
+/* The one CT-PSS-04 case: the seam's outside reader inside the commit proves its atomicity, and the typed failures of the
+ * former post-port variant in test/project-supervisor-store.regression.test.ts are merged in.
+ */
 it.live("CT-PSS-04: a stale global definitions generation changes nothing; a success stales inferred tasks and clears queued context in one commit", () => Effect.gen(function* () {
   const session = yield* pssSession("psx-pss-04-");
   const {db, store} = yield* session.open();
@@ -581,16 +510,21 @@ it.live("CT-PSS-04: a stale global definitions generation changes nothing; a suc
   const tasksBefore = yield* tableRows(db, "supervisor_task_interpretations");
   const controlKeys = () => Effect.map(metaRows(db), (rows) => rows.filter(([key]) => key.startsWith("supervisor_global_definitions_")));
 
-  yield* failsWith(store.saveGlobalDefinitionsControl(3, true, "~/.t3-supervisor", "global-1"), /global_definitions_control_conflict/u);
+  const conflict = yield* failsWith(store.saveGlobalDefinitionsControl(3, true, "~/.t3-supervisor", "global-1"), /global_definitions_control_conflict/u);
+  assert.ok(conflict instanceof ProjectSupervisorStoreError);
   assert.deepEqual(yield* tableRows(db, "supervisor_task_interpretations"), tasksBefore, "a stale generation leaves tasks untouched");
   assert.deepEqual(yield* controlKeys(), []);
 
-  // a failure on the second task update rolls back the first task update and the control rows of the same commit
-  // the seam worker logs each update from the trigger as it runs, outside the transaction it is part of
+  /* A failure on the second task update rolls back the first task update and the control rows of the same commit, and the
+   * driver text stays out of the typed failure; the seam worker logs each update from the trigger as it runs, outside the
+   * transaction it is part of.
+   */
   yield* db.exec(`CREATE TEMP TRIGGER c2_fail_queued BEFORE UPDATE ON main.supervisor_task_interpretations BEGIN
     SELECT seam_log('c2_task_updated', NEW.thread_id);
     SELECT RAISE(ABORT, 'c2_task_update_failed') WHERE NEW.thread_id='main-queued'; END`);
-  yield* failsWith(store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"), /supervision_store_unavailable/u);
+  const failed = yield* failsWith(store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-1"), /supervision_store_unavailable/u);
+  assert.deepEqual({tag: failed._tag, reason: failed.reason, message: failed.message},
+    {tag: "ProjectSupervisorStoreError", reason: "supervision_store_unavailable", message: "supervision_store_unavailable"});
   const updated = db.logged("c2_task_updated").map(([threadId]) => String(threadId));
   assert.deepEqual(updated, ["main-inferred", "main-queued"], "the inferred task was rewritten before the failing update");
   assert.equal(yield* db.inTransaction, false);
@@ -633,6 +567,9 @@ it.live("CT-PSS-04: a stale global definitions generation changes nothing; a suc
   assert.deepEqual(readerRows(reader, "supervisor_task_interpretations"), yield* tableRows(db, "supervisor_task_interpretations"), "the reader sees the whole commit afterwards");
 }), {timeout: 10_000});
 
+/* The preload's robustness: absent state, a file without the ownership table and a live WAL writer beside it; the shared set's
+ * commit timing is CT-PSS-05 in test/project-supervisor-store.regression.test.ts.
+ */
 it.live("CT-PSS-05: ownership preload creates nothing for absent state, tolerates a table-less file and reads committed IDs beside a live WAL writer", () => Effect.gen(function* () {
   // target: the preload is the project store layer's own read when a run opens its stores (cc-ownership); the separate
   // read-only preload of an absent directory or under another connection's open write transaction is gone with it
@@ -657,53 +594,9 @@ it.live("CT-PSS-05: ownership preload creates nothing for absent state, tolerate
   assert.deepEqual(alongside.ownedIds, new Set([first.threadId, second.threadId]));
 }), {timeout: 10_000});
 
-it.live("CT-PSS-06: the supervision DDL and every meta key format are golden and read back unchanged after reopen", () => Effect.gen(function* () {
-  const session = yield* pssSession("psx-pss-06-");
-  const writer = yield* session.open();
-  yield* withMillis(1_790_000_000_000)(Effect.gen(function* () {
-    yield* writer.store.baseline(pssBoundary);
-    yield* writer.store.saveControl(null, 0, true, pssBoundary);
-    yield* writer.store.saveControl("project-a", 0, true, pssBoundary);
-    yield* writer.store.recordFolderPresence("project-b", {status: "unavailable", message: "denied"});
-    yield* writer.store.recordFolderPresence("project-c", {status: "present"}, pssBoundary);
-    yield* writer.store.saveNoProjectControl(0, "automatic", pssBoundary);
-    yield* writer.store.saveGlobalDefinitionsControl(0, true, "~/.t3-supervisor", "global-fingerprint");
-    yield* writer.store.saveStart({threadId: "main-a", projectId: "project-a", operationId: "op-1", requestHash: "hash-1", route: "ui", status: "active",
-      reason: "Supervision is enabled until explicit Stop. Settlement only parks the Supervisor.", intentAt: 1_790_000_000_000, modeGeneration: 1, masterGeneration: 1, taskId: null});
-    yield* writer.store.saveUnboundStop("main-b", {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 1_790_000_000_000});
-  }));
-  assert.deepEqual(yield* metaRows(writer.db), pssMetaGolden);
-  assert.deepEqual(yield* pssDdl(writer.db), pssDdlGolden);
-  yield* writer.close;
-
-  const {db, store} = yield* session.open();
-  assert.deepEqual(yield* metaRows(db), pssMetaGolden, "opening rewrites no meta row");
-  assert.deepEqual(yield* pssDdl(db), pssDdlGolden);
-  assert.equal(store.scopeCompatible, true);
-  assert.deepEqual(yield* store.control(null), {projectId: null, generation: 1, enabled: true, manual: true, globallyEnabled: true, effectiveEnabled: true,
-    detectionStatus: "not_checked", detectionError: null});
-  assert.deepEqual(yield* store.control("project-a"), {projectId: "project-a", generation: 1, enabled: true, manual: true, globallyEnabled: true, effectiveEnabled: true,
-    detectionStatus: "not_checked", detectionError: null});
-  assert.deepEqual(yield* store.projectBoundary("project-a"), pssBoundary);
-  assert.equal(yield* store.folderPresenceNeedsBoundary("project-b"), true);
-  assert.deepEqual(yield* store.control("project-b"), {projectId: "project-b", generation: 0, enabled: false, manual: false, globallyEnabled: true, effectiveEnabled: false,
-    detectionStatus: "not_checked", detectionError: null});
-  assert.equal(yield* store.autoControlInitialized("project-c"), true);
-  assert.deepEqual(yield* store.control("project-c"), {projectId: "project-c", generation: 0, enabled: true, manual: false, globallyEnabled: true, effectiveEnabled: true,
-    detectionStatus: "present", detectionError: null});
-  assert.deepEqual(yield* store.noProjectControl(), {generation: 1, mode: "automatic", baseline: pssBoundary, globallyEnabled: true});
-  assert.deepEqual(yield* store.globalDefinitionsControl(), {generation: 1, enabled: true, manual: true, effectiveEnabled: true, homePath: "~/.t3-supervisor",
-    detectionStatus: "not_checked", detectionError: null});
-  assert.equal(yield* store.hasGlobalDefinitionsEvent(), true);
-  assert.deepEqual(yield* store.baseline(), {...pssBoundary, version: 2});
-  assert.equal(yield* store.activation(), 7);
-  assert.deepEqual(yield* store.start("main-a"), JSON.parse(pssMetaGolden.find(([key]) => key === "supervisor_start:main-a")![1]));
-  assert.deepEqual(yield* store.startOperation("main-a", "op-1"), {threadId: "main-a", operationId: "op-1", requestHash: "hash-1", status: "active",
-    reason: "Supervision is enabled until explicit Stop. Settlement only parks the Supervisor."});
-  assert.deepEqual(yield* store.chatStop("main-b"), {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: 1_790_000_000_000});
-  assert.deepEqual(yield* metaRows(db), pssMetaGolden, "reads write nothing");
-}), {timeout: 10_000});
-
+/* The one CT-PSS-07 case: it counts the migration's ALTER statements through the seam, once and then never, which its former
+ * post-port variant could not.
+ */
 it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with an empty default exactly once and keeps its rows", () => Effect.gen(function* () {
   const session = yield* pssSession("psx-pss-07-");
   // the legacy file is written by the guidance store alone, before the supervision store added the column
@@ -735,6 +628,9 @@ it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with 
   assert.deepEqual(yield* tableRows(second.db, "supervisor_definition_user_saves"), [expectedRow]);
 }), {timeout: 10_000});
 
+/* The one CT-PSS-08 case: readers on another connection, inside the statements, and on the store's own client, racing the
+ * write, never see half of a Start record or a stop transfer; its former post-port variant's reader is merged in.
+ */
 it.live("CT-PSS-08: a start record never exists without its operation receipt and reservation transfers an unbound stop atomically", () => Effect.gen(function* () {
   const session = yield* pssSession("psx-pss-08-");
   const {db, store, ownedIds} = yield* session.open();
@@ -768,7 +664,23 @@ it.live("CT-PSS-08: a start record never exists without its operation receipt an
   yield* db.exec("DROP TRIGGER temp.c2_fail_receipt");
   yield* db.exec(`CREATE TEMP TRIGGER c2_view_record BEFORE INSERT ON main.meta WHEN NEW.key GLOB 'supervisor_start:*' BEGIN SELECT ${startView}; END`);
   const viewsFrom = views().length;
+  // a reader fiber on the store's own client races the write and sees both halves or neither, in one statement's snapshot
+  const startKeys = Effect.map(db.prepare("SELECT key FROM meta WHERE key IN (?,?) ORDER BY key").all(recordKey, receiptKey),
+    (rows) => rows.map((row) => String(row.key)));
+  const clientViews: string[][] = [];
+  const writing = yield* Deferred.make<void>();
+  const racing = yield* Effect.forkChild(Effect.gen(function* () {
+    while (!(yield* Deferred.isDone(writing))) {
+      clientViews.push(yield* startKeys);
+      yield* Effect.yieldNow;
+    }
+  }));
   yield* store.saveStart(start);
+  yield* Deferred.succeed(writing, undefined);
+  yield* Fiber.join(racing);
+  clientViews.push(yield* startKeys);
+  for (const view of clientViews) assert.ok(view.length === 0 || view.length === 2, `a reader on the client saw ${JSON.stringify(view)}`);
+  assert.deepEqual(clientViews.at(-1), [recordKey, receiptKey].sort());
   assert.deepEqual(views(viewsFrom), [{receipt: false, record: false}]);
   assert.deepEqual({receipt: readMeta(receiptKey) !== null, record: readMeta(recordKey) !== null}, {receipt: true, record: true});
   yield* db.exec("DROP TRIGGER temp.c2_view_record");

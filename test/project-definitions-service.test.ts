@@ -42,7 +42,7 @@ const heldWriter = (f: Fixture) => {
   return {writer, firstWrite: Deferred.await(firstWrite), release: Deferred.succeed(releaseFirst, undefined)};
 };
 
-it.effect("TR-PD-01: the 30 s load deadline runs on the Effect clock and ends a hung read with the incomplete unavailable snapshot", () => Effect.gen(function* () {
+it.effect("TR-PD-01: the 30 s load deadline runs on the Effect clock and ends a hung read with the incomplete unavailable snapshot (CT-PD-02's deadline case)", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({threadRoot: null});
   seedCheck(f);
   const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
@@ -164,7 +164,7 @@ it.effect("TR-PD-05: a cancel signal ends a load and a setup softly, so the serv
   assert.deepEqual(commits, []);
 }), {timeout: 10_000});
 
-it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued waits its turn, then the service reports the expired save and writes nothing", () => Effect.gen(function* () {
+it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued waits its turn, then the service reports the expired save and writes nothing (CT-EDITOR-02)", () => Effect.gen(function* () {
   const f = makeDefinitionFixture();
   f.addFile(f.root, ".t3-supervisor/project.yaml", "workflows:\n  - path: workflows/local-flow.yaml\n    summary: Run the local flow.\nsteps:\n  - path: steps/local-step.md\n    summary: Check the local behavior.\n");
   f.addFile(f.root, ".t3-supervisor/steps/local-step.md", "---\nid: local-step\nname: local-step\ndescription: Inspect the changed behavior.\n---\n");
@@ -185,6 +185,8 @@ it.effect("TR-EDITOR-02: a save whose cancel signal aborts while it is queued wa
   const cancel = yield* Deferred.make<void>();
   const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel));
   yield* Deferred.await(loaded);
+  // the second save's initial load completed; one yield later it waits behind the first save, where its cancel arrives
+  yield* Effect.yieldNow;
   yield* Deferred.succeed(cancel, undefined);
   yield* Effect.yieldNow;
   assert.equal(second.pollUnsafe(), undefined, "the cancelled save still waits for the save ahead of it");

@@ -3,14 +3,13 @@ import { it } from "@effect/vitest";
 import { createHash } from "node:crypto";
 import { Console, Context, Deferred, Effect, Fiber } from "effect";
 import type { SqlClient } from "effect/sql";
-import type { ConversationRequest, WorkflowAgreementCandidate } from "../src/supervisor-conversation-store.js";
+import type { ConversationRequest } from "../src/supervisor-conversation-store.js";
 import { SupervisorRpcError } from "../src/supervisor-native.js";
 import { workflowIntroductionText } from "../src/supervisor-conversation.js";
 import { SupervisionScopeService } from "../src/supervision-gate.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import type { Projection } from "../src/types.js";
-import { atWallTime, execute, openConversationStore, query, rejectionOf, temporaryDirectory, within } from "./support/g1b-conversation.js";
-import { seedAgreementCandidates, storedCandidateCounts } from "./support/agreement-candidates.js";
+import { atWallTime, execute, query, rejectionOf, within } from "./support/g1b-conversation.js";
 import { recordReview, rootNative } from "./support/review-record.js";
 import {
   addCommandActivity, appendMessageToRun, proceed, appendNoticeToOperative, appendOperativeAcceptance, appendSupervisorProposal, baseTime, completeRun,
@@ -364,94 +363,4 @@ it.effect("CT-CONV-08: an accepted but invisible introduction blocks only after 
   assert.deepEqual(yield* observeAt(start + 60_000), ["accepted", 3]);
   assert.deepEqual(yield* observeAt(start + 60_001), ["blocked", 4]);
   assert.equal(fixture.calls.filter(isIntroduction(fixture)).length, 1);
-}), {timeout: 10_000});
-
-// the conversation store of a temporary data directory, each open a client of its own with its stores
-const conversationStore = Effect.map(temporaryDirectory("c1-conversation-store-"), (directory) => ({open: openConversationStore(directory)}));
-const requestCount = (sql: SqlClient.SqlClient) => Effect.map(query(sql, "SELECT count(*) AS n FROM supervisor_conversation_requests"), ([row]) => Number(row?.n));
-const reviewInput = (supervisorThreadId: string) => ({projectId, supervisorThreadId, kind: "review" as const, taskId: null, text: "Review.", batch: null, completionMarker: "done"});
-
-it.effect("CT-CSTORE-01: prepare() beside a pending request throws supervisor_request_inflight before pruning or inserting", () => Effect.gen(function* () {
-  const {open} = yield* conversationStore;
-  const {sql, store} = yield* open;
-  const now = baseTime;
-  const row = (id: string, supervisorThreadId: string, state: ConversationRequest["state"], createdAt: number): ConversationRequest =>
-    ({...reviewInput(supervisorThreadId), id, messageId: `supervisor-review:${id}`, state, createdAt, sentAt: null, runId: null, error: null});
-  // an old completed request that a successful prepare prunes
-  yield* store.saveRequest(row("old-completed", "other-supervisor", "completed", now - 31 * 86_400_000));
-  for (const state of ["prepared", "sending", "waiting", "uncertain"] as const) {
-    yield* store.saveRequest(row(`pending-${state}`, "supervisor-a", state, now));
-    const count = yield* requestCount(sql);
-    assert.equal((yield* Effect.flip(store.prepare(reviewInput("supervisor-a"), now + 1))).message, "supervisor_request_inflight");
-    assert.equal(yield* requestCount(sql), count, state);
-    assert.equal((yield* store.requests(projectId, "other-supervisor")).length, 1, `${state}: nothing was pruned`);
-    yield* store.saveRequest(row(`pending-${state}`, "supervisor-a", "completed", now));
-  }
-  assert.equal(yield* requestCount(sql), 5);
-  const next = yield* store.prepare(reviewInput("supervisor-a"), now + 2);
-  assert.equal(next.state, "prepared");
-  assert.equal(yield* requestCount(sql), 5, "the successful prepare pruned the old completed request and inserted one");
-  assert.equal((yield* store.requests(projectId, "other-supervisor")).length, 0);
-}), {timeout: 10_000});
-
-const candidate = (taskId: string, proposalId: string, at: number): WorkflowAgreementCandidate => ({taskId, projectId, proposalId, planHash: `hash-${proposalId}`,
-  workflow: {status: "proposed", message: "Draft.", workspaceRoot: "/work", revision: "r1", globalRevision: null, definitionsStatus: "ready",
-    definitionsComplete: true, requirementsKnown: true, requirements: [], issues: [], plan: null},
-  evidence: {kind: "supervisor_message", messageId: `message-${proposalId}`, runId: "run", runOrdinal: 1, textHash: "text"}, proposedAt: at});
-
-it.effect("CT-CSTORE-04: agreement evidence is write-once and candidates are full at 50 per task and 5000 per project", () => Effect.gen(function* () {
-  const {open} = yield* conversationStore;
-  const {sql, store} = yield* open;
-  assert.equal(yield* store.saveAgreementCandidate(candidate("task-0", "p-0", 1)), "saved");
-  yield* store.saveAgreementEvidence("task-0", "p-0", "agent-1", "hash-1");
-  yield* store.saveAgreementEvidence("task-0", "p-0", "agent-2", "hash-2");
-  yield* store.saveAgreementEvidence("task-0", "p-0", "agent-1", "hash-other");
-  yield* store.saveAgreementEvidence("task-0", "p-0", "agent-1", "hash-1");
-  assert.deepEqual([(yield* store.agreementCandidate("task-0", "p-0"))?.agentMessageId, (yield* store.agreementCandidate("task-0", "p-0"))?.agentTextHash], ["agent-1", "hash-1"]);
-  yield* store.saveAgreementEvidence("task-0", "missing", "agent-1", "hash-1");
-  assert.equal(yield* store.agreementCandidate("task-0", "missing"), null);
-
-  for (let index = 1; index < 50; index++) assert.equal(yield* store.saveAgreementCandidate(candidate("task-0", `p-${index}`, index)), "saved");
-  assert.equal(yield* store.saveAgreementCandidate(candidate("task-0", "p-50", 50)), "full");
-  assert.equal(yield* store.saveAgreementCandidate(candidate("task-0", "p-1", 1)), "same");
-  assert.equal(yield* store.saveAgreementCandidate({...candidate("task-0", "p-1", 1), planHash: "changed"}), "conflict");
-  // tasks 1-98 are seeded as the store's rows, 50 each; the store reads a seeded task back as its candidates
-  yield* seedAgreementCandidates(sql, Array.from({length: 98}, (_, task) =>
-    Array.from({length: 50}, (_, index) => candidate(`task-${task + 1}`, `p-${index}`, index))).flat());
-  assert.deepEqual(yield* store.agreementCandidates("task-1"), Array.from({length: 50}, (_, index) => candidate("task-1", `p-${index}`, index)));
-  // task-99's saves bring the project from 4950 to exactly 5000 candidates; one transaction spares each its commit
-  yield* sql.withTransaction(Effect.gen(function* () {
-    for (let index = 0; index < 50; index++) assert.equal(yield* store.saveAgreementCandidate(candidate("task-99", `p-${index}`, index)), "saved");
-  }));
-  assert.equal((yield* store.agreementCandidates("task-99")).length, 50);
-  assert.equal(yield* store.saveAgreementCandidate(candidate("task-100", "p-0", 0)), "full");
-  assert.equal((yield* store.agreementCandidates("task-100")).length, 0);
-  assert.deepEqual(yield* storedCandidateCounts(sql),
-    {tasks: Object.fromEntries(Array.from({length: 100}, (_, task) => [`task-${task}`, 50])), projects: {[projectId]: 5000}});
-}), {timeout: 10_000});
-
-it.effect("CT-CSTORE-04: prune never deletes uncertain or unacknowledged failed review requests", () => Effect.gen(function* () {
-  const {open} = yield* conversationStore;
-  const {sql, store} = yield* open;
-  const now = baseTime;
-  const old = now - 31 * 86_400_000;
-  const save = (id: string, state: ConversationRequest["state"], kind: ConversationRequest["kind"], extra: Partial<ConversationRequest> = {}) =>
-    store.saveRequest({...reviewInput(`supervisor-${id}`), kind, id, messageId: `supervisor-review:${id}`, state, createdAt: old, sentAt: null, runId: null, error: null, ...extra});
-  yield* save("completed", "completed", "review");
-  yield* save("failed-context", "failed", "context");
-  yield* save("failed-review-acknowledged", "failed", "review", {failureAcknowledged: true});
-  yield* save("failed-review", "failed", "review");
-  yield* save("uncertain", "uncertain", "review");
-  yield* save("waiting", "waiting", "review");
-  // more than 100 terminal requests of one Supervisor keep only the newest 100 terminal ones
-  for (let index = 0; index < 101; index++)
-    yield* store.saveRequest({...reviewInput("supervisor-many"), id: `many-${String(index).padStart(3, "0")}`, messageId: `m-${index}`, state: "completed",
-      createdAt: now - 1_000 + index, sentAt: null, runId: null, error: null});
-  yield* store.saveRequest({...reviewInput("supervisor-many"), id: "many-uncertain", messageId: "m-uncertain", state: "uncertain", createdAt: now - 2_000, sentAt: null, runId: null, error: null});
-  yield* store.saveRequest({...reviewInput("supervisor-many"), id: "many-failed", messageId: "m-failed", state: "failed", createdAt: now - 2_000, sentAt: null, runId: null, error: null});
-  yield* store.prune(now);
-  const remaining = new Set((yield* query(sql, "SELECT id FROM supervisor_conversation_requests")).map(row => String(row.id)));
-  for (const id of ["failed-review", "uncertain", "waiting", "many-uncertain", "many-failed"]) assert.ok(remaining.has(id), id);
-  for (const id of ["completed", "failed-context", "failed-review-acknowledged", "many-000"]) assert.equal(remaining.has(id), false, id);
-  assert.equal([...remaining].filter(id => id.startsWith("many-") && /\d$/u.test(id)).length, 100);
 }), {timeout: 10_000});

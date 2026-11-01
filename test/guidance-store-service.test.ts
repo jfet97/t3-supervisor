@@ -4,13 +4,13 @@ import { Clock, Effect, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { GuidanceDb } from "../src/db.js";
 import type { GuidanceSettings } from "../src/guidance-contract.js";
-import { GuidanceStoreError } from "../src/guidance-sql.js";
+import { GuidanceStoreError, guidanceTransaction } from "../src/guidance-sql.js";
 import { GuidanceConflictError, GuidanceStore, type GuidanceStoreShape } from "../src/guidance-store.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
 /* Target regressions of the GuidanceStore effect service on a temporary guidance.sqlite3 through the production layers:
  * the open-time schema and the one-time recovery of committed notices on reopen (CT-GDB-01; the migration of a pre-migration
- * file, CT-GDB-02, stays in test/guidance.characterization.test.ts), transactions that join the caller's (CT-GDB-06's target),
+ * file, CT-GDB-02, stays in test/guidance.characterization.test.ts), transactions that join the caller's (CT-GDB-06),
  * the CC-GDB-IMPLICIT sequences in one transaction, typed row and sql failures and the synchronous store's method results.
  */
 
@@ -112,7 +112,7 @@ describe("GuidanceStore", () => {
     assert.deepEqual(JSON.parse(String(observed.stored[0]!.value)), { ...legacy, generation: 5 });
   }), { timeout: 10_000 });
 
-  it.live("CT-GDB-06 target: a store transaction inside the caller's transaction joins it, committing and rolling back with the caller", () => Effect.gen(function* () {
+  it.live("CT-GDB-06: a store transaction inside the caller's transaction joins it, committing and rolling back with the caller, and its own failure rolls back the caller's work", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const observed = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
       const settings = yield* store.settings();
@@ -130,8 +130,13 @@ describe("GuidanceStore", () => {
         yield* store.classify("project-a", "scratch", settings.generation);
       }));
       const saved = yield* store.settings();
-      // a joined conflict fails the caller without leaving the connection inside a transaction
-      const conflict = yield* Effect.flip(db.withTransaction(store.classify("project-a", "project", settings.generation)));
+      /* One controller's guidanceTransaction around the store's conflicting classification, nested in another's that wrote first:
+       * the store's typed error fails both, the outer write rolls back and no transaction stays open, so the store stays usable.
+       */
+      const conflict = yield* Effect.flip(guidanceTransaction(db)(Effect.gen(function* () {
+        yield* db`INSERT INTO meta VALUES('s6d-conflict','1')`;
+        return yield* guidanceTransaction(db)(store.classify("project-a", "project", settings.generation));
+      })));
       yield* store.classify("project-a", "project", saved.generation);
       return { failed, afterFailure, saved, conflict: conflictMessage(conflict), next: yield* store.settings(),
         classification: yield* store.classification("project-a"), outer: yield* rows(db, "SELECT key FROM meta WHERE key LIKE 's6d-%' ORDER BY key") };

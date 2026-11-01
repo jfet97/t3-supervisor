@@ -3,18 +3,20 @@ import {createServer, request as httpRequest, type IncomingMessage} from "node:h
 import {fileURLToPath} from "node:url";
 import { NodeHttpServer } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Context, Deferred, Effect, Exit, Fiber, Layer } from "effect";
+import { Context, Deferred, Effect, Exit, Layer } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpRouter, HttpServer, type HttpClientResponse } from "effect/http";
 import {WorkflowMcp, WorkflowMcpRoute} from "../src/workflow-mcp.js";
 import type {SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import type {WorkflowWriteController} from "../src/workflow-write-controller.js";
 import {workflowMcpLayer} from "./support/mcp-controllers.js";
-import {effectTeamController, effectWorkflowController, gateTool} from "./support/g8-mcp.js";
+import {effectTeamController, effectWorkflowController} from "./support/g8-mcp.js";
 import {nodePath, repositoryRoot} from "./support/cli-process.js";
 import {startProcess, within} from "./support/g8-process.js";
 
-// the workflow MCP route over a real loopback listener, and in one case a runner process: live (it.live), the 9 s call
-// deadline included, every awaited event bounded on the live clock
+/* The workflow MCP route over a real loopback listener, and in one case a runner process: live (it.live), every awaited
+ * event bounded on the live clock. CT-MCP-03 (a client disconnect and the 9 s deadline) and CT-MCP-04's answer after close()
+ * run in the route, services and lifecycle suites.
+ */
 
 // serves the endpoint's route through effect's node server on its own loopback port; each request is handled until its
 // server chain, answer write included, ends. the test's scope closes the endpoint, waits for every handling and then
@@ -39,7 +41,7 @@ const serve = (controller: WorkflowWriteController["Service"], team?: Supervisor
   // every handling still in flight
   const settled = Effect.suspend(() => Effect.forEach([...handled], Deferred.await, {discard: true}));
   yield* Effect.addFinalizer(() => Effect.andThen(mcp.close, settled));
-  return {url: `http://127.0.0.1:${address.port}/mcp/workflows`, port: address.port, handled, settled, endpoint: {close: mcp.close}};
+  return {url: `http://127.0.0.1:${address.port}/mcp/workflows`};
 });
 
 const postJson = (url: string, body: unknown, headers: Record<string, string> = {}) => Effect.gen(function* () {
@@ -97,83 +99,11 @@ const rawCall = (port: number, body: string) => Effect.acquireRelease(Effect.syn
   return client;
 }), (client) => Effect.sync(() => client.destroy()));
 
-it.live("CT-MCP-03: a client disconnect during a slow tool call aborts the controller signal", () => Effect.gen(function* () {
-  const gate = gateTool();
-  const controller = effectWorkflowController({readTool: gate.tool});
-  const {port, handled, settled} = yield* serve(controller);
-
-  const body = JSON.stringify({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
-  const client = yield* rawCall(port, body);
-  const clientClosed = Deferred.makeUnsafe<void>();
-  client.once("close", () => Deferred.doneUnsafe(clientClosed, Exit.void));
-  client.on("error", () => undefined);
-  client.end(body);
-
-  const enteredAt = yield* within(gate.entered, 5_000, "tool call entry");
-  assert.equal(yield* gate.aborted, false);
-  assert.equal(handled.size, 1);
-  client.destroy();
-  const aborted = yield* within(gate.ended, 5_000, "controller signal abort");
-  assert.equal(aborted.reason, "AbortError");
-  assert.ok(aborted.at - enteredAt < 5_000);
-  yield* within(Deferred.await(clientClosed), 5_000, "client close");
-  // the request handler settles once the aborted call returns
-  yield* within(settled, 5_000, "handler settlement");
-  assert.equal(handled.size, 0);
-}), {timeout: 10_000});
-
-it.live("CT-MCP-03: the hard-coded 9 s call deadline aborts the controller signal and the call returns its result", () => Effect.gen(function* () {
-  const gate = gateTool();
-  const controller = effectWorkflowController({readTool: gate.tool});
-  const {url} = yield* serve(controller);
-
-  const response = yield* Effect.forkScoped(postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}}));
-  const enteredAt = yield* within(gate.entered, 5_000, "tool call entry");
-  const aborted = yield* within(gate.ended, 20_000, "9 s call deadline");
-  assert.equal(aborted.reason, "TimeoutError");
-  const elapsed = aborted.at - enteredAt;
-  assert.ok(elapsed >= 8_900 && elapsed < 12_000, `deadline fired after ${Math.round(elapsed)} ms`);
-
-  const answered = yield* within(Fiber.join(response), 5_000, "response after deadline");
-  assert.equal(answered.status, 200);
-  const answeredBody = (yield* json(answered)) as {result?: {isError?: boolean; content?: Array<{text?: string}>}};
-  assert.equal(answeredBody.result?.isError, true);
-  assert.deepEqual(callText(answeredBody), {status: "unavailable", reason: "TimeoutError"});
-}).pipe(Effect.provide(FetchHttpClient.layer)), {timeout: 60_000});
-
-it.live("CT-MCP-04: after endpoint.close() every POST is answered 503 workflow_mcp_closed without reaching the controller", () => Effect.gen(function* () {
-  let calls = 0;
-  const controller = effectWorkflowController({readTool: () => Effect.sync(() => {calls++;return {status: "ok"};})});
-  const {url, handled, settled, endpoint} = yield* serve(controller);
-
-  const open = yield* postJson(url, {jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
-  assert.equal(open.status, 200);
-  yield* drained(open);
-  assert.equal(calls, 1);
-
-  yield* endpoint.close;
-  const closed = yield* postJson(url, {jsonrpc: "2.0", id: 2, method: "tools/list", params: {}});
-  assert.equal(closed.status, 503);
-  assert.match(header(closed, "content-type") ?? "", /^application\/json/u);
-  assert.equal(header(closed, "cache-control"), "no-store");
-  assert.equal(header(closed, "mcp-session-id"), null);
-  assert.deepEqual(yield* json(closed), {error: "workflow_mcp_closed"});
-  const closedCall = yield* postJson(url, {jsonrpc: "2.0", id: 3, method: "tools/call", params: {name: "workflow_read", arguments: {}}});
-  assert.equal(closedCall.status, 503);
-  assert.deepEqual(yield* json(closedCall), {error: "workflow_mcp_closed"});
-  // a second close is harmless and the endpoint stays closed
-  yield* endpoint.close;
-  const again = yield* postJson(url, {jsonrpc: "2.0", id: 4, method: "initialize", params: {}});
-  assert.equal(again.status, 503);
-  assert.deepEqual(yield* json(again), {error: "workflow_mcp_closed"});
-  assert.equal(calls, 1);
-  yield* within(settled, 5_000, "handler settlement");
-  assert.equal(handled.size, 0);
-}).pipe(Effect.provide(FetchHttpClient.layer)), {timeout: 10_000});
-
 type RunnerEvent = {event: string} & Record<string, unknown>;
 
-// real-process case: the runner process serves the route on its own node server and must still exit by itself
+/* Real-process case: the runner process serves the route on its own node server and must still exit by itself. It owns
+ * close() with a call in flight; MCP-ROUTE-02, the same close over an in-process listener, merged into it in increment 4.
+ */
 it.live("CT-MCP-04 (in-flight, route): close() aborts the controller signal and the pending call gets only an empty 503 answer, never the controller's result", () => Effect.gen(function* () {
   const runnerPath = fileURLToPath(new URL("./support/g8-mcp-inflight-close.ts", import.meta.url));
   const runner = yield* startProcess(process.execPath, ["--import", "tsx", runnerPath], {cwd: repositoryRoot, env: {PATH: nodePath()}, stdin: "pipe"});

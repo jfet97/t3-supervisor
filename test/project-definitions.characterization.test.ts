@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { Clock, Deferred, Effect, Fiber } from "effect";
-import { TestClock } from "effect/testing";
+import { Deferred, Effect, Fiber } from "effect";
 import type { ProjectDefinitionLoaderOptions, ProjectDefinitionSetupWriter } from "../src/project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { ProjectFileError, type FreshGitInfo, type ProjectFiles } from "../src/project-files.js";
@@ -73,16 +72,7 @@ const unavailableSnapshot = {status: "unavailable", complete: false, revision: n
 const summary = (snapshot: ProjectDefinitionSnapshot) =>
   ({status: snapshot.status, complete: snapshot.complete, revision: snapshot.revision, issues: snapshot.issues});
 
-// the effect clock advances in 100 ms steps, as real time passed for the baseline, until the fiber settles; past the bound it dies
-// naming the awaited event
-const settledWithin = <A>(fiber: Fiber.Fiber<A>, milliseconds: number, label: string): Effect.Effect<A> => Effect.gen(function* () {
-  for (let elapsed = 0; fiber.pollUnsafe() === undefined; elapsed += 100) {
-    if (elapsed >= milliseconds) return yield* Effect.die(new Error(`timed out waiting for ${label}`));
-    yield* TestClock.adjust("100 millis");
-  }
-  return yield* Fiber.join(fiber);
-});
-
+// the CT-PD-02's other half, the 30 s load deadline without a caller signal, runs in test/project-definitions-service.test.ts as TR-PD-01
 it.effect("CT-PD-02: a hung native read ends when the caller aborts, giving an incomplete unavailable snapshot without a revision", () => Effect.gen(function* () {
   const f = makeDefinitionFixture({threadRoot: null});
   seed(f);
@@ -96,20 +86,6 @@ it.effect("CT-PD-02: a hung native read ends when the caller aborts, giving an i
   assert.equal(yield* Deferred.isDone(trigger), false);
   yield* Deferred.succeed(cancel, undefined);
   assert.deepEqual(summary(yield* within(Fiber.join(pending), 5_000, "aborted load")), unavailableSnapshot);
-}), {timeout: 10_000});
-
-it.effect("CT-PD-02: without a caller signal the hard-coded 30 s load deadline ends a hung read with the same unavailable snapshot", () => Effect.gen(function* () {
-  const f = makeDefinitionFixture({threadRoot: null});
-  seed(f);
-  const {files, entered} = hangingRead(f, ".t3-supervisor/steps/check.md");
-  const definitions = yield* definitionsWith(f, {files});
-  const started = yield* Clock.currentTimeMillis;
-  const pending = yield* Effect.forkChild(definitions.load("project"));
-  yield* within(entered, 5_000, "hung read");
-  const snapshot = yield* settledWithin(pending, 45_000, "load deadline");
-  const elapsed = (yield* Clock.currentTimeMillis) - started;
-  assert.deepEqual(summary(snapshot), unavailableSnapshot);
-  assert.ok(elapsed >= 29_900 && elapsed < 40_000, `deadline after ${Math.round(elapsed)} ms`);
 }), {timeout: 10_000});
 
 it.effect("CT-PD-03: a fixture tree yields the golden revision, global revision and namespaced global IDs", () => Effect.gen(function* () {
