@@ -3,8 +3,9 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { toolRouteReminder } from "../src/supervisor-workflow.js";
+import { localThreadToolRules, stepEntryGuidance, toolRouteReminder } from "../src/supervisor-workflow.js";
 import { driveNeededWork, startStartupSession, type StartupDispatch } from "./support/startup-gateway.js";
+import { repeatedUnits } from "./support/exchange-audit.js";
 
 // one production startup: real launch, gateway reads, submitted then finalized interpretation.
 // an initial notice that lacks the discovery hint before workflow_read fails this test.
@@ -89,8 +90,7 @@ it.live("the production startup recovers once from an unread-source interpretati
   assert.ok(match?.[1]);
   const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
   const instructions = (yield* gateway.call("workflow_read", {...reader, view: "instructions"})) as InstructionView;
-  assert.match(instructions.core ?? "", /Try the native operation once before declaring it unavailable/u);
-  assert.match(instructions.core ?? "", /a connector search covers only that connector/u);
+  assert.ok((instructions.core ?? "").includes(localThreadToolRules), "the core served through the gateway carries the shared local tool rule");
   const initial = yield* waitFor(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map(contextView)),
     () => "initial submission pins missing");
   const empty = {...initial.submission!.arguments, objective: null, reason: "The source was not read.", sourceMessageIds: [], supervision: "needed", workflow: null,
@@ -125,12 +125,11 @@ it.live("a needed-work startup delivers a short notice and the operative reads i
   const {objective, tools, notice, proposal} = yield* driveNeededWork(session);
   assert.ok(hintBeforeRead(objective));
   assert.ok(tools.includes("supervision_plan"));
-  assert.doesNotMatch(notice.text, /Step entry:|Inspect checkout|Explain status/u, "the native notice remains a pointer");
+  assert.doesNotMatch(notice.text, /Inspect checkout|Explain status/u, "the native notice remains a pointer");
+  assert.deepEqual(repeatedUnits(notice.text, [stepEntryGuidance]), [], "and carries no step-entry manual");
   assert.equal(proposal.status, "ok", JSON.stringify(proposal));
   const text = proposal.proposal!;
-  assert.equal(text.split("Step entry:").length, 2);
-  assert.match(text, /Before substantive work there, read or refresh its contract and applicable references and skills/u);
-  assert.match(text, /Continue without waiting for routine confirmation/u);
+  assert.equal(text.split(stepEntryGuidance).length, 2, "the shared step-entry guidance is composed verbatim and once");
   assert.match(text, /Inspect checkout/u);
   assert.match(text, /Explain status/u);
   assert.match(text, /\.t3-supervisor\/project\.yaml/u);

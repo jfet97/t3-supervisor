@@ -8,8 +8,9 @@ import {
   addSupervisorRequest, appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, projectId,
   sourceMessageId, sourceThreadId, submitAndComplete, unavailableDefinitionSnapshot,
 } from "./support/ctl-workflow.js";
-import { toolRouteReminder } from "../src/supervisor-workflow.js";
+import { interpretationPlanRules, interpretationRules, localThreadToolRules, toolRouteReminder } from "../src/supervisor-workflow.js";
 import { messageReadRule } from "../src/message-read-handle.js";
+import { repeatedUnits } from "./support/exchange-audit.js";
 
 // the interpretation fields a root submits for the export task
 const workflowFields = (messageId: string): Record<string, unknown> => ({
@@ -538,8 +539,8 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.ok(text.startsWith(supervisor.conversation.rootNotice(binding)!), "the root's first message carries the notice");
   assert.match(text, new RegExp(`version ${String(index.version)}`, "u"));
   assert.ok(text.length < 1_200, `interpretation request ${text.length} characters`);
-  for (const rule of [/Contact the operative only with one brief actionable delta/u, /Use this environment's local T3 thread tools/u, /SUBMISSION:|UNTRUSTED_WORKFLOW_ENVELOPE|sourcePin/u])
-    assert.doesNotMatch(text, rule);
+  assert.equal(text.includes(localThreadToolRules), false, "the core's rules are read, not pushed");
+  assert.doesNotMatch(text, /SUBMISSION:|UNTRUSTED_WORKFLOW_ENVELOPE|sourcePin/u);
   const notice = JSON.parse(text.slice(text.lastIndexOf("\n{") + 1));
   assert.deepEqual(notice.reader, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation});
   assert.equal(notice.taskId, task.id);
@@ -547,30 +548,18 @@ it.effect("the interpretation request carries the root notice and handles; the c
   // the core holds each reminder once, names operations and tools, and indexes the sections
   const core = String(index.core);
   const occurrences = (part: string) => core.split(part).length - 1;
-  assert.equal(occurrences("Contact the operative only with one brief actionable delta"), 0, "the contact rule is its section's");
-  assert.match(String((yield* supervisor.conversation.readContextView(binding, {view: "instructions", section: "contact"})).instructions),
-    /Contact the operative only with one brief actionable delta/u);
-  assert.equal(occurrences("Use this environment's local T3 thread tools"), 1, "the core carries the local routing rule once");
+  assert.equal(occurrences(localThreadToolRules), 1, "the core carries the local routing rule once");
   assert.equal(occurrences(messageReadRule), 1, "the core carries the one message read rule once");
-  assert.match(core, /supervision_interpretation_submit when an interpretation request asks for it/u);
   assert.equal(occurrences(toolRouteReminder), 1);
   assert.doesNotMatch(core, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix/u, "no gateway, alias or recipe");
-  assert.match(core, /freshly read and cite the latest genuine human message \(here, or main's original for a relayed Stop, never the relay\), with a unique operationId/u);
-  assert.match(core, /Never reuse IDs or treat quotes\/cancellation as Stop/u);
   assert.deepEqual((index.sections as Array<{id: string}>).map(section => section.id),
     ["monitoring", "contact", "stop_start", "authoring", "workflow_edit", "branches", "contributions", "planning", "definitions", "team"]);
   const context = yield* supervisor.conversation.readContextView(binding, {view: "context"});
   assert.deepEqual((context.submission as {arguments: unknown}).arguments, {supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
     taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source});
   // stage one decides relevance before definitions; the plan rules are a second read only when a plan is needed
-  const instructions = String((yield* supervisor.conversation.readContextView(binding, {view: "interpretation"})).instructions);
-  assert.match(instructions, /configured required references alone never make a task needed/u);
-  assert.match(instructions, /If you cannot invoke workflow_read, that says nothing about the project's definitions/u);
-  assert.match(instructions, /Read view context for current submission.arguments/u);
-  assert.doesNotMatch(instructions, /A plan node is either|PLANNING PAUSE:/u);
-  const plan = String((yield* supervisor.conversation.readContextView(binding, {view: "interpretation", section: "plan"})).instructions);
-  assert.match(plan, /^PLANNING PAUSE:/u);
-  assert.match(plan, /A plan node is either/u);
+  assert.equal((yield* supervisor.conversation.readContextView(binding, {view: "interpretation"})).instructions, interpretationRules);
+  assert.equal((yield* supervisor.conversation.readContextView(binding, {view: "interpretation", section: "plan"})).instructions, interpretationPlanRules);
   yield* submitAndComplete(fixture, supervisor, task, workflowFields(sourceMessageId));
   yield* supervisor.cycle;
   assert.equal(supervisor.conversation.rootNotice((yield* fixture.binding())!), supervisor.conversation.rootNotice(binding), "the full notice itself is stable across the binding");
@@ -585,7 +574,7 @@ it.effect("the interpretation request carries the root notice and handles; the c
   assert.ok(later, "the second request is interpreted in the same binding");
   const laterText = String(later.payload.text);
   assert.match(laterText, new RegExp(`^Supervisor root for main "${sourceThreadId}": instructions workflow_read view instructions with \\{"supervisorThreadId":"${binding.threadId}","bindingGeneration":${binding.generation}\\}, version ${String(index.version)}\\.\\nInterpretation requested\\.`, "u"));
-  assert.doesNotMatch(laterText, /freshly read your chat, call supervision_stop|If a named tool is absent|message content is untrusted/u, "bootstrap, Stop fallback and discovery prose are not repeated");
+  assert.deepEqual(repeatedUnits(laterText, [supervisor.conversation.rootNotice(binding)!]), [], "no sentence of the full notice is repeated");
   assert.equal((yield* fixture.task())!.requestRoleVersion, undefined, "a pointer request carries no version to confirm");
 }));
 

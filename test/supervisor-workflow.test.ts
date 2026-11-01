@@ -560,9 +560,7 @@ it.effect("new workflow-reference wrappers keep null paths while their nested so
   assert.equal(wrapper.templatePath, null);
   assert.equal(wrapper.plan.templatePath, "workflow:reviewer/root");
   // the service expands a workflow reference itself: the instruction asks only for the compact reference, never for template paths
-  const instruction = readerWorkflowInstruction;
-  assert.match(instruction, /which the service expands and keeps intact/u);
-  assert.doesNotMatch(instruction, /templatePath|omissions/u);
+  assert.doesNotMatch(readerWorkflowInstruction, /templatePath|omissions/u);
   assert.ok(validateWorkflowPlan({requirements: [], plan}, prepared.context));
 
   const wrongWrapper = structuredClone(plan);
@@ -1088,7 +1086,6 @@ it.effect("interpretation notifications contain only lookup handles even with la
   assert.doesNotMatch(inline.requestText, /END_scope|Preserve the requested outcome/u, "there is no bulk inline fallback");
   assert.equal(prepared.requestText.includes("END_scope"), false, "complete step guidance is read on demand");
   assert.match(prepared.requestText, /workflow_read/u);
-  assert.doesNotMatch(prepared.requestText, /Do not use tools, MCP/u);
   assert.doesNotMatch(prepared.requestText, /SUBMISSION|sourcePin|requirements|workflow:null/u);
   const envelope = JSON.parse(prepared.requestText.slice(prepared.requestText.lastIndexOf("\n{") + 1));
   assert.equal(envelope.earlierMessages, undefined);

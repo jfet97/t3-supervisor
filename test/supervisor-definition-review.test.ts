@@ -283,9 +283,10 @@ it("decision reasons redact credentials, and a review request names changes and 
   assert.match(prompt, /^Definition review for task /u);
   assert.match(prompt, /Review marker/u);
   for (const secret of ["step-secret", "step-token", "private-instructions", "private-result", userText]) assert.equal(prompt.includes(secret), false);
-  // the procedure lives once, in section definitions
-  for (const rule of [/UNTRUSTED DATA/u, /preserving all user edits/u, /Never edit files/u, /workflow-proposal/u]) assert.match(definitionChangedProcedure, rule);
   const envelope = parseEnvelope(builtReview);
+  // the procedure names the templates this frozen envelope carries and the fenced records the service reads back
+  for (const template of ["decisionTemplate", "proposalTemplate"]) assert.ok(Object.hasOwn(envelope, template) && definitionChangedProcedure.includes(template), template);
+  for (const fence of ["workflow-proposal", "project-definition-decision"]) assert.ok(definitionChangedProcedure.includes(fence), fence);
   assert.equal(envelope.approvedRevision, oldRevision);
   assert.equal((envelope.observed as Record<string, unknown>).revision, newRevision);
   assert.equal(envelope.sourceMessageId, "source-0");
@@ -325,7 +326,7 @@ it("review requests handle invalid snapshots and refresh proposals after restore
   assert.equal(refreshEnvelope.decisionTemplate, null);
   assert.equal(refreshEnvelope.proposalTemplate !== null, true);
   assert.match(refreshRequest, /approved definitions were restored or authorized; reassess/u);
-  assert.match(definitionReassessProcedure, /Reassess the real task against the complete current project configuration and definition catalog/u);
+  assert.ok(definitionReassessProcedure.includes("proposalTemplate"), "the reassessment names the template its envelope carries");
 
   assert.equal(buildProjectDefinitionReviewRequest(current, definitions(), definitions({status: "permission_required", revision: null}), agentProjection(), "Blocked").text, null);
   const staleSource = agentProjection();

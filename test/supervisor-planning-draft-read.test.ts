@@ -83,7 +83,9 @@ const draftingWith = (prepare: (task: TaskRecord) => TaskRecord = task => task, 
   const call = (input: Record<string, unknown>) => Effect.map(f.controller.call(input), result => result as Result);
   return {f, now, attempt, read, stored, call};
 });
-const drafting = draftingWith();
+/* Settle the service's observation of the paused actors before taking a snapshot.
+ * A later background pass must not be mistaken for a write by the drafter. */
+const drafting = Effect.tap(draftingWith(), ({f}) => f.controller.reconcile(f.binding));
 
 it.effect("a drafter reads the context, definitions and plan grammar its task names through its own calls, before and after it is attached, changing nothing", () => Effect.gen(function* () {
   const {f, attempt, read, stored, call} = yield* drafting;

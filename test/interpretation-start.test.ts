@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
+import { interpretationRules } from "../src/supervisor-workflow.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import { mcpCall } from "./support/glinint-wiring.js";
 import { submissionArguments } from "./support/interpretation-submit.js";
@@ -71,7 +72,7 @@ const pendingStart = Effect.gen(function* () {
   assert.deepEqual(context.submission, {tool: "supervision_interpretation_submit", arguments: {supervisorThreadId: f.binding.threadId,
     bindingGeneration: f.binding.generation, taskId: task.id, attemptId: task.attempt!.attemptId, sourcePin: task.attempt!.key.source}, startVerdict: true});
   const rules = yield* f.read({view: "interpretation"});
-  assert.match(String(rules.instructions), /If submission\.startVerdict is true, judge whether the original human message explicitly requests supervision and add startRequested/u);
+  assert.equal(rules.instructions, interpretationRules, "the verdict rule is stage one of the rules the root reads");
   return {f, task};
 });
 

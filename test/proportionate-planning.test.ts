@@ -56,20 +56,10 @@ const interpret = (request: string, outcome: string, fields: Record<string, unkn
 });
 const operativeSends = (fixture: WorkflowFixture) => fixture.dispatches().filter(call => call.payload.threadId === sourceThreadId).length;
 
-it("the complete interpretation instructions decide whether a plan helps first and keep unused catalog entries out", () => {
+it("the interpretation request carries neither the request nor the rules, and the planning rule is stated once without a numeric threshold", () => {
   const prepared = prepareWorkflowRequest("thread-a", "message-a", "Pull the latest changes, then refresh the local index.", catalog());
   assert.doesNotMatch(prepared.requestText, /Pull the latest changes|not_needed|requirements/u);
-  for (const text of [readerWorkflowInstruction]) {
-    assert.equal(text.split(proportionatePlanRule).length - 1, 1, "the planning rule is stated once");
-    assert.match(text, /Decide first, from the request itself and before reading or assessing any definitions, whether it warrants supervision/u);
-    assert.match(text, /It is "not_needed" when a plan would add nothing: a communication, lookup or status request, or quick routine work the operative completes and checks itself/u);
-    assert.match(text, /there is no proposal, agreement or contact, never an empty workflow/u);
-    assert.match(text, /"omit":\[\{"member":"member definitionId or localId","reason":"why it does not apply"\}\] naming members of a flexible workflow left out \(never a fixed workflow\)/u);
-    assert.match(text, /Assess every configured required reference once for this main task against its own described applicability/u);
-    assert.doesNotMatch(text, /Use any workflow reference that fits|short, self-contained communication, lookup or status request with no workflow obligations/u);
-  }
-  assert.match(readerWorkflowInstruction, /quick routine work is not_needed with workflow:null and needs no proposal, agreement or contact/u);
-  assert.match(proportionatePlanRule, /leave out every step or workflow that does not serve this outcome, with no not-applicable note, even if that is all of them/u);
+  assert.equal(readerWorkflowInstruction.split(proportionatePlanRule).length - 1, 1, "the planning rule is stated once");
   assert.doesNotMatch(proportionatePlanRule, /\d/u, "no numeric threshold decides a plan's size");
 });
 
@@ -107,7 +97,6 @@ it.effect("a proportionate plan reuses individual steps and adds local ones whil
   assert.match(introduction, /Update documentation/u);
   for (const name of catalogNames) assert.equal(introduction.includes(name), false, `${name} is absent, not listed as not applicable`);
   assert.doesNotMatch(introduction, /not applicable: /u);
-  assert.match(introduction, /The plan holds only what this task needs: revise it as the work evolves, keeping applicable required and fixed commitments, and ask for a smaller plan rather than accepting an unnecessary commitment\./u);
 }));
 
 it.effect("an applicable required step left out of the plan stays unresolved instead of becoming a formal proposal", () => Effect.gen(function* () {

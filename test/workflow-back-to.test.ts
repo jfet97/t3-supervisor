@@ -10,7 +10,7 @@ import {preparedAcceptanceRecord} from "../src/supervisor-conversation.js";
 import {parseDefinitionWorkflow} from "../src/project-definitions.js";
 import type {DefinitionNode, ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
-import {canonicalizeProposalDraft, manifestMembers, prepareWorkflowRequest, proposalContextFromDefinitions, seededNodeIds, validateWorkflowApplyAgainstPinnedContext,
+import {canonicalizeProposalDraft, manifestMembers, prepareWorkflowRequest, proposalContextFromDefinitions, seededNodeIds, stepEntryGuidance, validateWorkflowApplyAgainstPinnedContext,
   validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {preserveOccurrenceIds} from "../src/supervision-conversation.js";
 import {workflowAssessment} from "../src/workflow-assessment.js";
@@ -439,7 +439,7 @@ it("a child's scoped workflow text names each occurrence with its status, attemp
   const document = {workflowId: "child-workflow", revision: 4, status: "underway", parentWorkflowId: "main-workflow", objective: "Build the client.", plan: progressed.plan,
     branchSelections: [], evidence: [], sourceBinding: null, returns: [returnEntry("applied", 1), returnEntry("pending", 2)]} as unknown as WorkflowStateDocument;
   const text = scopedWorkflowText(document);
-  assert.ok(text.startsWith("Your scoped workflow child-workflow, revision 4, status underway, inside parent workflow main-workflow.\nObjective: Build the client.\nStep entry:"), text);
+  assert.ok(text.startsWith(`Your scoped workflow child-workflow, revision 4, status underway, inside parent workflow main-workflow.\nObjective: Build the client.\n${stepEntryGuidance}`), text);
   assert.ok(text.includes(`- implement [local:implement; ${ids.implement}] completed`), text);
   assert.ok(text.includes(`- review [local:review; ${ids.review}] planned, attempt 2`), text);
   assert.ok(text.includes(`- branch [${loop.nodeId}] if: Findings remain. — decision pending\n`), text);

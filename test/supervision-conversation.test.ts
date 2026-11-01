@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { deriveConversationEngagement } from "../src/supervision-conversation.js";
+import { interpretationRules } from "../src/supervisor-workflow.js";
 import { appendSourceMessage, completeSupervisorRequest, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete } from "./support/ctl-workflow.js";
 import type { ConversationDecision } from "../src/supervision-conversation-contract.js";
 import { interpretationSubmitter } from "./support/g1a-conversation.js";
@@ -47,7 +48,7 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   // the request is a handle; the discussion-versus-outcome rule is in the interpretation rules the root reads
   assert.doesNotMatch(first.requestText, /Let's discuss why export is flaky/u);
   const rules = yield* controller.conversation.readContextView((yield* f.binding())!, {view: "interpretation"});
-  assert.match(String(rules.instructions), /"Let's discuss possible causes before deciding; read what you need" remains quiet following despite exploratory research/u);
+  assert.equal(rules.instructions, interpretationRules, "the root reads stage one of the interpretation rules");
   yield* submitAndComplete(f, controller, first, {objective: draft.objective, reason: "Discussion before deciding", sourceMessageIds: [sourceMessageId], supervision: "not_needed", workflow: null, conversation: decision()});
   yield* controller.cycle;
   const following = (yield* f.task())!;

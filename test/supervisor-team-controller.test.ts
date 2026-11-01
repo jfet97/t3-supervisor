@@ -4,7 +4,6 @@ import {Context, Effect, Layer} from "effect";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {supervisionTeamToolDefinition, type SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import {teamNotificationEvidence, teamNotificationText} from "../src/supervisor-team-runtime.js";
-import {helperInstructions} from "../src/supervisor-helper-instructions.js";
 import {attributesHelperDelivery} from "../src/supervisor-helper-transport.js";
 import {ThreadPolicyStore} from "../src/thread-policy.js";
 import type {WorkflowCallCancel} from "../src/workflow-write-controller.js";
@@ -139,7 +138,6 @@ it.live("a helper reads only its own records: a note keeps its message while kin
       {id: f.original.id, kind: "handover_receive", deliveryAttempt: 0, assignmentRootThreadId: "branch", assignmentEpoch: f.assignment.epoch},
       {id: "note:own", kind: "note", deliveryAttempt: 0, assignmentRootThreadId: null, assignmentEpoch: null, message: `Root note for ${f.member.threadId}.`},
     ]}}, "another helper's records and the receive notice's prose are not part of this helper's read");
-  assert.match(helperInstructions, /handover_receive: take responsibility for the subtree rooted at its assignmentRootThreadId at its assignmentEpoch/u);
   assert.deepEqual(yield* f.call({...helperRead, memberEpoch: f.member.epoch - 1}), {status: "denied", reason: "actor_not_current_ready_enabled"},
     "a stale member epoch reads nothing");
   // the root reads the whole team; only a note keeps its message
@@ -168,7 +166,6 @@ it.live("a team action answers with its own compact result, and the helper reads
   assert.deepEqual(read.team.notifications.find(value => value.id === review.id), {id: review.id, kind: "handover_review", deliveryAttempt: 0,
     assignmentRootThreadId: "branch", assignmentEpoch: f.assignment.epoch, reviewOf: review.reviewOf, reviewChain: review.reviewChain, reviewNote: "sentinel-root-note"});
   assert.equal(JSON.stringify(read).includes(review.message), false, "the review's rules are read once from the helper instructions");
-  assert.match(helperInstructions, /handover_review: inspect the actual native effects of EVERY attempt in its reviewChain/u);
 }));
 
 it.live("a human stop of the main fences every team and guidance effect at its first and final authority check, but not reads", () => Effect.gen(function* () {

@@ -10,10 +10,11 @@ import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection } from "../src/types.js";
 import { effectiveIndex, projectIndex, testSummary } from "./project-definitions-fixture.js";
 import { appendSourceMessage, completeSupervisorRequest, definitionSnapshot, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete, type WorkflowFixture } from "./support/ctl-workflow.js";
-import { proposalContextFromDefinitions } from "../src/supervisor-workflow.js";
+import { proposalContextFromDefinitions, stepEntryGuidance } from "../src/supervisor-workflow.js";
 import { verifyWorkflowToolEvidence, workflowEvidenceCandidates } from "../src/workflow-write-evidence.js";
 import { writeController } from "./support/g1a-conversation.js";
 import { installSubmission, submissionDetail } from "./support/interpretation-submit.js";
+import { repeatedUnits } from "./support/exchange-audit.js";
 
 // a catalog with a flexible change workflow, a required step and a branch the operative will decide
 const step = (id: string) => ({id, name: `Step ${id}`, description: `Do ${id}.`, summary: testSummary(id), origin: "project" as const,
@@ -81,10 +82,8 @@ it.effect("the operative gets a short pinned notice, reads its own complete prop
   assert.match(read.proposal, /```branch-selection\n/u);
   assert.match(read.proposal, /Limits: \["Do not deploy"\]/u);
   assert.ok(read.proposal.includes(`\`\`\`workflow-acceptance\n${JSON.stringify(acceptance)}\n\`\`\``), "and the exact acceptance record");
-  assert.equal(read.proposal.split("Step entry:").length, 2, "one step-entry instruction reaches the verified reader");
-  assert.match(read.proposal, /Before substantive work there, read or refresh its contract and applicable references and skills/u);
-  assert.match(read.proposal, /Continue without waiting for routine confirmation; do not end the turn just to announce/u);
-  assert.doesNotMatch(text, /Step entry:/u, "the short notice carries no step-entry manual");
+  assert.equal(read.proposal.split(stepEntryGuidance).length, 2, "the shared step-entry guidance reaches the verified reader verbatim and once");
+  assert.deepEqual(repeatedUnits(text, [stepEntryGuidance]), [], "the short notice carries no step-entry manual");
   console.log(`MEASURE notice ${text.length} chars ${Buffer.byteLength(text)} bytes; proposal read ${read.proposal.length} chars ${Buffer.byteLength(read.proposal)} bytes`);
 
   // the operative copies the record from what it read into its own reply after the notice
@@ -97,7 +96,7 @@ it.effect("the operative gets a short pinned notice, reads its own complete prop
   const later = yield* readAs(fixture, controller, operative, args);
   assert.equal(later.status, "ok", JSON.stringify(later));
   assert.match(later.status === "ok" ? later.proposal : "", /- branch \[branch:[0-9a-f-]{36}\] if: The change is contained\./u);
-  assert.equal(later.status === "ok" ? later.proposal.split("Step entry:").length : 0, 2, "the duty remains readable after agreement");
+  assert.equal(later.status === "ok" ? later.proposal.split(stepEntryGuidance).length : 0, 2, "the duty remains readable after agreement");
   assert.deepEqual(preparedAcceptanceRecord((yield* fixture.task())!), acceptance, "the reader instruction changes no agreement identity");
   yield* fixture.stores.requests.saveAgreementCandidate({...(yield* fixture.stores.requests.agreementCandidate(task.id, proposalId))!, proposalId: `${proposalId}:earlier`});
   const earlier = yield* readAs(fixture, controller, operative, {...args, proposalId: `${proposalId}:earlier`});
@@ -111,8 +110,7 @@ it.effect("a provisional own-plan read carries step-entry guidance without offer
   const read = yield* readAs(fixture, controller, fixture.projections.get(sourceThreadId)!, args);
   assert.equal(read.status, "ok", JSON.stringify(read));
   if (read.status !== "ok") return;
-  assert.equal(read.proposal.split("Step entry:").length, 2);
-  assert.match(read.proposal, /On resuming, recover the current assigned step and outstanding obligations/u);
+  assert.equal(read.proposal.split(stepEntryGuidance).length, 2);
   assert.doesNotMatch(read.proposal, /```workflow-acceptance/u);
 }));
 
@@ -226,13 +224,11 @@ it.effect("a verified child reads its own bound scoped workflow with every recor
   const read = yield* readAs(fixture, controller, child, args);
   assert.equal(read.status, "ok", JSON.stringify(read));
   const text = read.status === "ok" ? read.proposal : "";
-  assert.ok(text.startsWith(`Your scoped workflow ${scoped.workflowId}, revision ${bound.revision}, status planned, inside parent workflow ${scoped.parentWorkflowId}.\nObjective: Build the export client.\nStep entry:`), text);
+  assert.ok(text.startsWith(`Your scoped workflow ${scoped.workflowId}, revision ${bound.revision}, status planned, inside parent workflow ${scoped.parentWorkflowId}.\nObjective: Build the export client.\n${stepEntryGuidance}`), text);
   // the task-local duty is only in the plan, so the read carries its whole description, references and skills, as it does each defined step's duty
   assert.match(text, /\n- Build the client \[local:client; [0-9a-f-]{36}\] planned\n  Duty: Retry each failed export with capped backoff\.\n    Keep every export request idempotent\.\n  Reference: docs\/export\.md\n  Skill: effect-v4-development\n- Step implement \[step:implement; [0-9a-f-]{36}\] planned\n  Duty: Do implement\.\n/u);
   assert.ok(text.includes(`References and skill paths are relative to the checkout root ${task.workflow!.workspaceRoot};`), text);
-  assert.equal(text.split("Step entry:").length, 2, "the child receives the shared duty once within its own workflow");
-  assert.match(text, /current material already in context may be reused/u);
-  assert.match(text, /State missing material as a gap/u);
+  assert.equal(text.split(stepEntryGuidance).length, 2, "the child receives the shared step-entry guidance verbatim and once within its own workflow");
   assert.deepEqual(read.status === "ok" ? [read.taskId, read.proposalId] : null, [task.id, scoped.workflowId]);
 
   assert.deepEqual(yield* readAs(fixture, controller, child, {...args, proposalId: task.workflowProposalId ?? task.id}), denied, "the main's proposal is not the child's to read");
