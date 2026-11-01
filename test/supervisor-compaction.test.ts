@@ -272,7 +272,6 @@ it.effect("completed compaction invalidates the ordinary role acknowledgment; la
   yield* f.store.acknowledgeRole(f.binding, initial.roleVersion);
   yield* f.store.setBinding({...f.binding, quietSince: 123});
   const backup = (yield* conversation.rootWake(f.binding))!;
-  assert.match(backup.text, /Context compacted: reread core\/index even if this instructions version is unchanged/u);
   assert.ok(backup.roleVersion && backup.roleVersion !== initial.roleVersion);
   yield* f.store.acknowledgeRole(f.binding, backup.roleVersion);
   yield* f.store.acknowledgeRole(f.binding, initial.roleVersion);

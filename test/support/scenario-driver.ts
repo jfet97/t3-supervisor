@@ -19,14 +19,20 @@ import {
   type IntRunInput, type McpReply,
 } from "./glinint-wiring.js";
 import { recordInterpretationSubmission } from "./interpretation-evidence-fixture.js";
-import { hookRuntime, intPeer, json, type HttpAnswer, type IntNativePeer, type PeerHttpEntry, type PeerRoutes, type PeerRpcEntry, type RpcAnswer } from "./int-native-peer.js";
+import {
+  hookRuntime, intPeer, json, type HttpAnswer, type IntNativePeer, type PeerHttpEntry, type PeerRoutes, type PeerRpcEntry, type PeerStream, type RpcAnswer,
+} from "./int-native-peer.js";
 
 /* The replay scenario driver (docs/testing.md, execution type 2): the production-wired run of glinint-wiring.ts over temporary files,
  * its dashboard and workflow MCP endpoint, and the loopback T3 peer of int-native-peer.ts, all in the caller's scope. A case orders
- * native events through the peer's arrival hooks, which commit before the peer replies; holds, drops or fails a reply; calls a workflow
- * MCP tool as the root or a helper whose own native tool call carries the arguments; restarts the run over the same files while the
- * peer and its native state stay; and observes the stored rows, the native traffic per route and the identities sent. The peer's
- * event shapes are the ones the suites already used; none is new.
+ * native events through the peer's arrival hooks, which commit before the peer replies; holds, drops or fails a reply; publishes an
+ * orchestration event on a thread's open subscription and waits for the client's acknowledgement of it; calls a workflow MCP tool as
+ * the root or a helper whose own native tool call carries the arguments; restarts the run over the same files while the peer and its
+ * native state stay; and observes the stored rows, the native traffic per route and the identities sent. Its native records follow the
+ * pinned T3 where its sanitized projection capture shows them (T3 0.1.7-nightly.20261101.4016): a served projection's thread has no
+ * activeRunId, which only the shell carries; a message dispatched over T3's WebSocket RPC is recorded createdBy user with the sender's
+ * server source; a tool call's node is a tool_call. Shapes the capture holds none of stay scripted from the suites: subscription
+ * frames and their Ack, compaction items, steering evidence, a turn item's full record, a launch's thread, and the catalog's activeRunId.
  */
 
 export { once } from "./glinint-wiring.js";
@@ -61,6 +67,10 @@ export type ScenarioPeer = IntNativePeer & {
   projections: Map<string, Projection>;
   details: Map<string, unknown>;
   tasks: Record<string, unknown>[];
+  /* T3's latest orchestration sequence, which the shell, the archived shell, every projection read and a subscription's snapshot
+   * report; an event emitThreadEvent publishes takes the next one.
+   */
+  sequence: number;
   /* Hooks that run when the request arrived and before the peer replies, on the arrival turn until they suspend; `read` counts that
    * thread's projection reads from 1. An rpc hook answering undefined leaves the frame to the default replies.
    */
@@ -84,7 +94,16 @@ const projectionPrefix = "/api/orchestration/threads/";
 
 type PeerState = Omit<ScenarioPeer, keyof IntNativePeer>;
 
-// the peer's replies: the shell and projection reads, the webhook POSTs, then the case's rpc hook and the default rpc replies
+/* The peer's replies: the shell and projection reads, the webhook POSTs, then the case's rpc hook and the default rpc replies
+ * a projection as T3 serves it: its thread carries no activeRunId (packages/contracts/src/orchestrationV2.ts, OrchestrationV2AppThread, and
+ * the pinned capture), so the catalog's scripted activeRunId never reaches it, and Supervisor reads activity from the published runs.
+ */
+const served = (projection: Projection): Projection => {
+  const thread = {...projection.thread};
+  delete thread.activeRunId;
+  return {...projection, thread};
+};
+
 const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
   let sequence = 100;
   const reads = new Map<string, number>();
@@ -94,10 +113,10 @@ const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
     const input = entry.payload;
     if (entry.tag === "orchestration.subscribeThread") {
       const projection = peer.projections.get(String(input.threadId));
-      return projection ? {stream: [{kind: "snapshot", snapshotSequence: 20, projection: structuredClone(projection)}]} : {fail: true};
+      return projection ? {stream: [{kind: "snapshot", snapshotSequence: peer.sequence, projection: structuredClone(served(projection))}]} : {fail: true};
     }
     if (entry.tag === "server.getConfig") return {value: modelConfig};
-    if (entry.tag === "orchestration.getArchivedShellSnapshot") return {value: {schemaVersion: 2, snapshotSequence: 20, threads: []}};
+    if (entry.tag === "orchestration.getArchivedShellSnapshot") return {value: {schemaVersion: 2, snapshotSequence: peer.sequence, threads: []}};
     if (entry.tag === "orchestration.getTurnItem") return {value: {item: peer.details.get(String(input.itemId)) ?? null}};
     if (entry.tag === "orchestration.dispatchCommand" && input.type === "thread.settle") {
       const settled = peer.projections.get(String(input.threadId));
@@ -121,7 +140,7 @@ const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
     http: (entry) => {
       if (entry.method === "GET" && entry.path === "/api/orchestration/shell") {
         const threads = [...peer.projections.values()].map(projection => ({...projection.thread, latestRunId: projection.runs.at(-1)?.id ?? null}));
-        return json(200, {schemaVersion: 2, snapshotSequence: 20, threads, archivedThreads: []});
+        return json(200, {schemaVersion: 2, snapshotSequence: peer.sequence, threads, archivedThreads: []});
       }
       if (entry.method === "GET" && entry.path.startsWith(projectionPrefix)) {
         const threadId = decodeURIComponent(entry.path.slice(projectionPrefix.length));
@@ -129,7 +148,7 @@ const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
         reads.set(threadId, read);
         return Effect.andThen(peer.onProjection?.(threadId, read) ?? Effect.void, Effect.sync(() => {
           const projection = peer.projections.get(threadId);
-          return projection ? json(200, {snapshotSequence: 20, projection}) : json(404, {error: "thread_not_found"});
+          return projection ? json(200, {snapshotSequence: peer.sequence, projection: served(projection)}) : json(404, {error: "thread_not_found"});
         }));
       }
       // a POST is logged as T3 records an accepted webhook delivery, with the rendering T3 publishes, before the case's reply
@@ -174,7 +193,10 @@ export const addTurn = (projection: Projection, turn: Turn): void => {
     status, providerThreadId: `provider-${threadId}`});
 };
 
-// the native record T3 keeps for a server-dispatched message.dispatch: the message starts its own run
+/* The native record T3 keeps for a server-dispatched message.dispatch: the message starts its own run. T3's WebSocket RPC stamps
+ * createdBy user on every dispatched message and keeps the sender's server source (apps/server/src/ws.ts, withCreationProvenance), as
+ * the pinned capture records Supervisor's own messages.
+ */
 export const addDispatchedMessage = (projection: Projection, payload: Record<string, unknown>, status: RunInfo["status"] = "running"): string => {
   const threadId = projection.thread.id;
   const ordinal = projection.runs.length + 1;
@@ -184,7 +206,7 @@ export const addDispatchedMessage = (projection: Projection, payload: Record<str
   projection.runs.push({id: runId, threadId, ordinal, status, requestedAt: now, startedAt: now, completedAt: status === "completed" ? now : null,
     rootNodeId: rootId, userMessageId: String(payload.messageId), providerThreadId: `provider-${threadId}`});
   projection.messages.push({id: String(payload.messageId), threadId, runId, nodeId: rootId, role: "user", text: String(payload.text), streaming: false,
-    createdAt: now, updatedAt: now, createdBy: "system", creationSource: "server"} as MessageInfo);
+    createdAt: now, updatedAt: now, createdBy: "user", creationSource: "server"} as MessageInfo);
   (projection.nodes as Array<Record<string, unknown>>).push({id: rootId, threadId, runId, parentNodeId: null, rootNodeId: rootId, kind: "root_turn", status,
     providerThreadId: `provider-${threadId}`});
   return runId;
@@ -230,8 +252,8 @@ export type Scenario = {
 // a project scope "p" with global and project supervision enabled, a recorded activation boundary and an unstopped main chat
 export const startScenario = (options: ScenarioOptions = {}): Effect.Effect<Scenario, never, Scope.Scope> => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("replay-scenario-");
-  const state: PeerState = {projections: new Map(), details: new Map(), tasks: [], onProjection: null, onRpc: null, onUpsert: null, webhook: acceptWebhook,
-    onFetch: null};
+  const state: PeerState = {projections: new Map(), details: new Map(), tasks: [], sequence: 20, onProjection: null, onRpc: null, onUpsert: null,
+    webhook: acceptWebhook, onFetch: null};
   // the routes read the hooks of the peer object the case changes
   const peer: ScenarioPeer = Object.assign(state, yield* intPeer(scenarioRoutes(state)));
   /* The platform fetch of the webhook POSTs, with the case's hook started inside each call and the request sent when it ends (the
@@ -361,6 +383,7 @@ export const seedTeam = (f: Scenario, options: {branchParent?: string} = {}) => 
     f.peer.projections.set(branchParent, middle);
     f.threads.push(middle.thread);
   }
+  // the catalog's activeRunId, as T3's shell publishes it for the running child (scripted: no capture holds a shell); served projections omit it
   const branch = projectionOf({...thread("branch", branchParent, "subagent"), creationSource: "mcp", activeRunId: "branch-run"});
   branch.runs.push({id: "branch-run", threadId: "branch", ordinal: 1, status: "running", requestedAt: baseTime, startedAt: baseTime, completedAt: null,
     rootNodeId: "branch-root", activeAttemptId: "branch-attempt", userMessageId: null});
@@ -384,25 +407,57 @@ export const seedTeam = (f: Scenario, options: {branchParent?: string} = {}) => 
   return {helper, branch, member, assignment};
 }).pipe(Effect.orDie);
 
-// the actor's own completed native tool call carrying exactly these arguments: the proof a workflow MCP call as that actor needs
-export const installToolCall = (f: Scenario, actor: Projection, toolName: string, input: Record<string, unknown>): string => {
+/* The actor's own completed native tool call carrying exactly these arguments: the proof a workflow MCP call as that actor needs. The
+ * call runs in a completed run of its own, or in the actor's existing run `runId` (a root's review outcome is proven only by a call in
+ * the review's own run).
+ */
+export const installToolCall = (f: Scenario, actor: Projection, toolName: string, input: Record<string, unknown>, options: {runId?: string} = {}): string => {
   const actorId = actor.thread.id;
   const itemId = `native-tool-${f.peer.details.size + 1}`;
-  const runId = `caller-run-${itemId}`;
-  const rootNodeId = `root-${itemId}`;
+  const existing = options.runId === undefined ? undefined : actor.runs.find(run => run.id === options.runId);
+  const own = existing && typeof existing.rootNodeId === "string" && typeof existing.providerThreadId === "string"
+    ? {runId: existing.id, rootNodeId: existing.rootNodeId, providerThreadId: existing.providerThreadId} : undefined;
+  if (options.runId !== undefined && !own) throw new Error(`test_actor_run_missing: ${options.runId}`);
+  const runId = own?.runId ?? `caller-run-${itemId}`;
+  const rootNodeId = own?.rootNodeId ?? `root-${itemId}`;
   const nodeId = `tool-node-${itemId}`;
-  const providerThreadId = `provider-${actorId}`;
+  const providerThreadId = own?.providerThreadId ?? `provider-${actorId}`;
   const detail = {id: itemId, type: "dynamic_tool", threadId: actorId, runId, nodeId, providerThreadId, providerTurnId: `turn-${itemId}`,
     nativeItemRef: {driver: "codex", nativeId: itemId, strength: "strong"}, parentItemId: null, ordinal: f.peer.details.size + 1, status: "completed",
     toolNonExecutionKind: null, toolName, input};
   f.peer.details.set(itemId, detail);
-  actor.runs.push({id: runId, threadId: actorId, ordinal: actor.runs.length + 1, status: "completed", requestedAt: baseTime, startedAt: null, completedAt: null,
-    rootNodeId, providerThreadId});
-  (actor.nodes as unknown[]).push({id: rootNodeId, kind: "root_turn", threadId: actorId, runId, rootNodeId, providerThreadId, status: "completed"},
-    {id: nodeId, kind: "dynamic_tool", threadId: actorId, runId, rootNodeId, providerThreadId, parentNodeId: rootNodeId, status: "completed"});
+  if (!own) {
+    actor.runs.push({id: runId, threadId: actorId, ordinal: actor.runs.length + 1, status: "completed", requestedAt: baseTime, startedAt: null, completedAt: null,
+      rootNodeId, providerThreadId});
+    (actor.nodes as unknown[]).push({id: rootNodeId, kind: "root_turn", threadId: actorId, runId, rootNodeId, providerThreadId, status: "completed"});
+  }
+  // a dynamic_tool turn item hangs on a tool_call node, as the pinned capture records a workflow tool call
+  (actor.nodes as unknown[]).push({id: nodeId, kind: "tool_call", threadId: actorId, runId, rootNodeId, providerThreadId, parentNodeId: rootNodeId,
+    status: "completed"});
   actor.turnItems!.push({...detail, input: "snapshot-summary"});
   return itemId;
 };
+
+// ---- orchestration events on an open subscription ----
+
+/** The thread's latest open subscription, once its client acknowledged every chunk sent on it (the snapshot first). */
+export const threadSubscription = (f: Scenario, threadId: string): Effect.Effect<PeerStream> => Effect.gen(function* () {
+  const stream = yield* f.peer.stream(entry => entry.tag === "orchestration.subscribeThread" && entry.payload.threadId === threadId);
+  yield* stream.acknowledged;
+  return stream;
+});
+
+/**
+ * T3 publishes one orchestration event of `threadId` on the thread's open subscription, in the item shape the suites use
+ * (`{kind: "event", sequence, event: {type, payload}}`): the event takes the next native sequence, which the shell and projection reads
+ * report from then on, and the call returns its sequence once the client acknowledged the chunk, which it does after handling the event.
+ */
+export const emitThreadEvent = (f: Scenario, threadId: string, event: {type: string; payload: unknown}): Effect.Effect<number> => Effect.gen(function* () {
+  const stream = yield* threadSubscription(f, threadId);
+  const sequence = ++f.peer.sequence;
+  yield* stream.push([{kind: "event", sequence, event}]);
+  return sequence;
+});
 
 // one helper monitoring batch for the assigned child
 export const helperBatch = (threadId: string): SupervisorMonitorBatch => {
