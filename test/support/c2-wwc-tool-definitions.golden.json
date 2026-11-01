@@ -1163,40 +1163,76 @@
           "properties": {
             "action": {
               "const": "ensure_main"
-            }
+            },
+            "memberEpoch": {},
+            "assignmentRootThreadId": {},
+            "assignmentEpoch": {},
+            "supervisorThreadId": {},
+            "bindingGeneration": {},
+            "operationId": {},
+            "note": {}
           },
           "required": [
             "operationId",
             "note"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "properties": {
             "action": {
               "const": "link_child"
-            }
+            },
+            "memberEpoch": {},
+            "assignmentRootThreadId": {},
+            "assignmentEpoch": {},
+            "supervisorThreadId": {},
+            "bindingGeneration": {},
+            "operationId": {},
+            "childThreadId": {},
+            "note": {}
           },
           "required": [
             "operationId",
             "childThreadId",
             "note"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "properties": {
             "action": {
               "const": "apply"
-            }
+            },
+            "memberEpoch": {},
+            "assignmentRootThreadId": {},
+            "assignmentEpoch": {},
+            "supervisorThreadId": {},
+            "bindingGeneration": {},
+            "input": {}
           },
           "required": [
             "input"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "properties": {
             "action": {
               "const": "assess_contribution"
-            }
+            },
+            "memberEpoch": {},
+            "assignmentRootThreadId": {},
+            "assignmentEpoch": {},
+            "supervisorThreadId": {},
+            "bindingGeneration": {},
+            "operationId": {},
+            "workflowId": {},
+            "expectedRevision": {},
+            "contributionId": {},
+            "resultRevision": {},
+            "decision": {},
+            "note": {}
           },
           "required": [
             "operationId",
@@ -1206,19 +1242,32 @@
             "resultRevision",
             "decision",
             "note"
-          ]
+          ],
+          "additionalProperties": false
         },
         {
           "properties": {
             "action": {
               "const": "record_review"
-            }
+            },
+            "memberEpoch": {},
+            "assignmentRootThreadId": {},
+            "assignmentEpoch": {},
+            "supervisorThreadId": {},
+            "bindingGeneration": {},
+            "operationId": {},
+            "requestId": {},
+            "outcome": {},
+            "reason": {},
+            "applyOperationIds": {},
+            "wait": {}
           },
           "required": [
             "operationId",
             "requestId",
             "outcome"
-          ]
+          ],
+          "additionalProperties": false
         }
       ]
     }

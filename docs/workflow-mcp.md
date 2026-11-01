@@ -592,7 +592,10 @@ enable supervision again. After a stop the chat's Supervisor and its helpers can
 read, but `workflow_write`, `supervision_team` actions and `supervision_guide` are refused
 at their first and their final authority check.
 
-`workflow_write` supports five actions:
+`workflow_write` supports five actions. Its advertised input schema gives each action
+exactly its own fields beside the shared locator and authority fields, as the service's
+parser accepts them: a field of another action, such as a `note` on `record_review`,
+fails a client's check against the schema and is refused as `invalid_<action>`.
 
 - `ensure_main` creates an unaccepted main draft.
 - `link_child` creates a live child's workflow under its verified native parent.

@@ -1,5 +1,6 @@
 import { SUPERVISOR_SETTLE_QUIET_MS } from "../src/supervisor-lifecycle.js";
 import { SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS } from "../src/supervisor-monitor.js";
+import { normalizeLifecycle } from "../src/supervisor-observation.js";
 
 /*
   The oracles of the provider trials that share a substantive workload (scripts/provider-trial.ts): negotiation, message volume,
@@ -34,6 +35,26 @@ export interface NativeRun {
   readonly startedAt: string | null;
   readonly completedAt: string | null;
   readonly userMessageId: string | null;
+}
+/** A timed item of a thread's own work (a command, a reply, a file change or a tool call), as its own projection showed it. */
+export interface NativeExecution {
+  readonly itemId: string;
+  readonly type: string;
+  readonly status: string | null;
+  readonly startedAt: string;
+  readonly completedAt: string | null;
+}
+/**
+ * A child's lifecycle as its direct parent's projection records it, through Supervisor's own reconciliation of the parent's subagent
+ * record and subagent turn item (src/supervisor-observation.ts, directParentChildLifecycle: one status, the turn item preferred).
+ */
+export interface ChildLifecycle {
+  readonly status: string;
+  readonly source: "parent_subagents" | "parent_turn_item";
+  readonly recordId: string | null;
+  readonly parentRunId: string | null;
+  readonly startedAt: string | null;
+  readonly completedAt: string | null;
 }
 // a run's open statuses as Supervisor reads them (src/supervisor-lifecycle.ts, activeDetachedChildWork; src/supervisor-conversation.ts,
 // reconcile ends a request only on completed, failed, interrupted, cancelled or rolled_back)
@@ -217,6 +238,16 @@ export interface WorkloadObservation {
   readonly task: {readonly id: string | null; readonly supervision: "needed" | "not_needed" | null} | null;
   readonly traffic: ReadonlyArray<TrafficMessage>;
   readonly runs: Readonly<Record<string, ReadonlyArray<NativeRun>>>;
+  /**
+   * Each descendant's own timed work, kept apart from its runs: a provider-native child can work while T3 records no run of it, and
+   * these items show that it ran, never when it worked or rested.
+   */
+  readonly executions: Readonly<Record<string, ReadonlyArray<NativeExecution>>>;
+  /**
+   * Each descendant's lifecycle as its direct parent's last read recorded it, kept apart from its runs; null where that parent showed
+   * none, or conflicting statuses.
+   */
+  readonly childLifecycles: Readonly<Record<string, ChildLifecycle | null>>;
   readonly stopPresses: number;
   /** The first agreement Supervisor recorded for the task, and its message as T3 showed it in the operative chat. */
   readonly agreement: {readonly proposalId: string; readonly agentMessageId: string;
@@ -238,7 +269,7 @@ export interface WorkloadObservation {
   /** Each Supervisor root's latest native start of a run or turn item. */
   readonly rootLatestStart: Readonly<Record<string, string | null>>;
   /** Each root's recognised workflow_read calls for its instructions, which a compaction reminder asks for. */
-  readonly instructionReads: ReadonlyArray<{readonly threadId: string; readonly startedAt: string | null}>;
+  readonly instructionReads: ReadonlyArray<{readonly threadId: string; readonly startedAt: string | null; readonly status: string}>;
   readonly writes: ReadonlyArray<WriteCall>;
   /** The workflow history events that name the operation that wrote them, at Supervisor's recorded time. */
   readonly history: ReadonlyArray<{readonly operationId: string; readonly recordedAt: number}>;
@@ -264,8 +295,46 @@ const undecided = (seen: WorkloadObservation): OracleVerdict | null =>
   : reached(seen, "proposal").length === 0 ? inconclusive(seen.task?.supervision === "needed" ? "no proposal reached the operative within the budget"
     : "Supervisor decided nothing within the budget")
   : null;
+/**
+ * A child's lifecycle bounded by its direct parent's record: running since its native start, or ended with both native times, and no
+ * item of the child's own work outside it. An unknown status, a missing time, or an own item outside it, which shows the record stale
+ * or contradicted, bounds nothing; an item of the child's own work never shows that the whole child ended.
+ */
+export const boundedLifecycle = (seen: Pick<WorkloadObservation, "childLifecycles" | "executions">, threadId: string):
+  {readonly startedAt: number; readonly completedAt: number | null} | null => {
+  const record = seen.childLifecycles[threadId] ?? null;
+  const startedAt = nativeTime(record?.startedAt);
+  if (record === null || startedAt === null) return null;
+  const lifecycle = normalizeLifecycle(record.status).lifecycle;
+  const completedAt = lifecycle === "running" ? null : nativeTime(record.completedAt);
+  if (lifecycle === "unknown" || lifecycle !== "running" && completedAt === null) return null;
+  const outside = (seen.executions[threadId] ?? []).some((item) => (nativeTime(item.startedAt) ?? -Infinity) < startedAt ||
+    completedAt !== null && (nativeTime(item.completedAt) ?? nativeTime(item.startedAt) ?? Infinity) > completedAt);
+  return outside ? null : {startedAt, completedAt};
+};
+/** A thread's activity: each of T3's runs of it or, for a child T3 recorded no run of, its parent's bounded record of it. */
+interface Activity {readonly startedAt: number | null; readonly completedAt: number | null; readonly open: boolean; readonly runId: string | null}
+const activityOf = (seen: WorkloadObservation, threadId: string): ReadonlyArray<Activity> => {
+  const runs = seen.runs[threadId] ?? [];
+  if (runs.length > 0) return runs.map((run) => ({startedAt: nativeTime(run.startedAt), completedAt: nativeTime(run.completedAt), open: runOpen(run), runId: run.id}));
+  const lifecycle = boundedLifecycle(seen, threadId);
+  return lifecycle === null ? [] : [{startedAt: lifecycle.startedAt, completedAt: lifecycle.completedAt, open: lifecycle.completedAt === null, runId: null}];
+};
+const activeAt = (activity: Activity, time: number): boolean => activity.startedAt !== null && activity.startedAt <= time &&
+  (activity.completedAt === null ? activity.open : activity.completedAt > time);
 const stillWorking = (seen: WorkloadObservation, threadIds: ReadonlyArray<string>): string | null =>
-  threadIds.find((threadId) => (seen.runs[threadId] ?? []).some(runOpen)) ?? null;
+  threadIds.find((threadId) => activityOf(seen, threadId).some((activity) => activity.open)) ?? null;
+/**
+ * The verified children whose lifecycle nothing bounds: T3 recorded no run of them and their direct parent no bounded record. A
+ * provider-native child can work with no run in T3's history, so its own items may show that it ran but not when it worked or
+ * rested: a verdict that needs it quiet, or running at a moment, is not given.
+ */
+export const unboundedChildren = (seen: Pick<WorkloadObservation, "children" | "runs" | "childLifecycles" | "executions">): ReadonlyArray<string> =>
+  seen.children.filter((child) => child.lineageVerified && (seen.runs[child.threadId] ?? []).length === 0 && boundedLifecycle(seen, child.threadId) === null)
+    .map((child) => child.threadId);
+const unboundedGap = (threadIds: ReadonlyArray<string>, what: string): OracleVerdict =>
+  inconclusive(`neither T3's runs nor a bounded record of its parent show when the operative's ${threadIds.length === 1 ? "child" : "children"} `
+    + `${threadIds.join(", ")} worked, so ${what} cannot be told`);
 
 /** The first contradiction a workload trial shows of the rules every one of them shares, or null. */
 export const workloadContradiction = (seen: WorkloadObservation): string | null => {
@@ -278,8 +347,9 @@ export const workloadContradiction = (seen: WorkloadObservation): string | null 
     const settledAt = nativeTime(settlement.settledAt);
     if (settledAt === null) continue;
     for (const threadId of [seen.operativeThreadId, ...verifiedChildren(seen)]) {
-      const open = (seen.runs[threadId] ?? []).find((run) => openAt(run, settledAt));
-      if (open !== undefined) return `Supervisor parked its root ${settlement.threadId} at ${settlement.settledAt} while run ${open.id} of ${threadId} was open`;
+      const open = activityOf(seen, threadId).find((activity) => activeAt(activity, settledAt));
+      if (open !== undefined) return `Supervisor parked its root ${settlement.threadId} at ${settlement.settledAt} while ${open.runId === null
+        ? `${threadId}, by its parent's record,` : `run ${open.runId} of ${threadId}`} was open`;
     }
   }
   return null;
@@ -311,6 +381,8 @@ const messageVolume = (seen: WorkloadObservation): OracleVerdict => {
   if (open !== null) return open;
   const working = stillWorking(seen, [seen.operativeThreadId, ...verifiedChildren(seen)]);
   if (working !== null) return inconclusive(`${working} was still working when the budget ended, so the whole traffic was not observed`);
+  const unbounded = unboundedChildren(seen);
+  if (unbounded.length > 0) return unboundedGap(unbounded, "whether the supervised work had ended when the budget ended");
   const busy = stillWorking(seen, [...supervisorIds(seen), ...seen.helpers.threadIds]);
   if (busy !== null || seen.monitor?.state !== "idle")
     return inconclusive(`Supervisor was still working when the budget ended (${busy ?? `monitor ${seen.monitor?.state ?? "unread"}`}), so its whole traffic was not observed`);
@@ -327,15 +399,25 @@ const activeChildren = (seen: WorkloadObservation): OracleVerdict => {
   const children = verifiedChildren(seen);
   if (children.length === 0) return inconclusive(seen.children.length > 0 ? "no child's own projection verified it as a subagent of the operative within the budget"
     : "the operative delegated no child within the budget");
+  /* A child ran when T3 shows a run of it started, or an item of its own work with its native start (NativeExecution): a provider-native
+   * child can have such items while T3 records no run of it. Supervisor's read or assessment must come at or after that first start.
+   */
   const ran = children.flatMap((threadId) => {
-    const started = (seen.runs[threadId] ?? []).flatMap((run) => {const time = nativeTime(run.startedAt); return time === null ? [] : [time];});
-    return started.length > 0 ? [{threadId, startedAt: Math.min(...started)}] : [];
+    const runStart = earliest((seen.runs[threadId] ?? []).map((run) => nativeTime(run.startedAt)));
+    const parentStart = (seen.runs[threadId] ?? []).length > 0 ? null : boundedLifecycle(seen, threadId)?.startedAt ?? null;
+    const firstItem = [...(seen.executions[threadId] ?? [])].sort((left, right) => (nativeTime(left.startedAt) ?? Infinity) - (nativeTime(right.startedAt) ?? Infinity))[0];
+    const itemStart = nativeTime(firstItem?.startedAt);
+    const startedAt = earliest([runStart, parentStart, itemStart]);
+    if (startedAt === null) return [];
+    return [{threadId, startedAt, shown: runStart === startedAt ? "a run" : parentStart === startedAt || firstItem === undefined ? "its parent's record of it"
+      : `its own ${firstItem.type} ${firstItem.itemId}`}];
   });
-  if (ran.length === 0) return inconclusive(`the operative's children (${children.join(", ")}) never ran within the budget`);
+  if (ran.length === 0) return inconclusive(`the operative's children (${children.join(", ")}) showed neither a run nor a timed item of their own work within the budget`);
   const watchers = new Set([...supervisorIds(seen), ...seen.helpers.threadIds]);
   for (const child of ran) {
     const watched = seen.monitoring.find((item) => item.targetThreadId === child.threadId && watchers.has(item.actorThreadId) && item.at >= child.startedAt);
-    if (watched !== undefined) return pass(`the operative's child ${child.threadId} ran and Supervisor's ${watched.actorThreadId} ${watched.kind === "read" ? "read" : "assessed"} it`);
+    if (watched !== undefined) return pass(`the operative's child ${child.threadId} ran (${child.shown}) and Supervisor's ${watched.actorThreadId} `
+      + `${watched.kind === "read" ? "read" : "assessed"} it afterwards`);
   }
   return inconclusive(`the operative's children ${ran.map((child) => child.threadId).join(", ")} ran, but Supervisor recorded no read or assessment of them within the budget`);
 };
@@ -370,6 +452,8 @@ const sustainedMonitoring = (seen: WorkloadObservation): OracleVerdict => {
   if (seen.agreement === null) return inconclusive("no agreement was recorded, so no agreed work was watched");
   if (introducedAt === null) return inconclusive("T3 did not record when the proposal reached the operative");
   if (stillWorking(seen, [seen.operativeThreadId, ...verifiedChildren(seen)]) !== null) return inconclusive("the supervised work was still running when the budget ended");
+  const unbounded = unboundedChildren(seen);
+  if (unbounded.length > 0) return unboundedGap(unbounded, "whether the supervised work had ended");
   if (lastDone === null || lastDone <= introducedAt) return inconclusive("the operative completed no run after the proposal reached it");
   const watchers = new Set([...supervisorIds(seen), ...seen.helpers.threadIds]);
   const watched = seen.monitoring.filter((item) => item.targetThreadId === seen.operativeThreadId && watchers.has(item.actorThreadId) && item.at >= introducedAt);
@@ -414,7 +498,8 @@ const compaction = (seen: WorkloadObservation): OracleVerdict => {
   if (completed.length === 0) return inconclusive("no compaction of the Supervisor's root happened within the budget");
   const recoveries = completed.map((item) => {
     const compactedAt = nativeTime(item.completedAt)!;
-    return {item, reread: seen.instructionReads.some((call) => call.threadId === item.threadId && (nativeTime(call.startedAt) ?? -Infinity) > compactedAt),
+    return {item, reread: seen.instructionReads.some((call) => call.threadId === item.threadId && call.status === "completed" &&
+      (nativeTime(call.startedAt) ?? -Infinity) > compactedAt),
       continuation: rootContinuedAfter(seen, item.threadId, compactedAt)};
   });
   const recovered = recoveries.find((entry) => entry.reread && entry.continuation !== null);
@@ -442,7 +527,7 @@ const idleParking = (seen: WorkloadObservation): OracleVerdict => {
   const untimed = scope.flatMap((threadId) => (seen.runs[threadId] ?? []).filter((run) => !runOpen(run) && nativeTime(run.completedAt) === null)
     .map((run) => `${run.id} of ${threadId}`));
   if (untimed.length > 0) return inconclusive(`T3 showed no completion time for ${untimed.join(", ")}, so the scope's last activity is unknown`);
-  const lastActivity = latest(scope.flatMap((threadId) => (seen.runs[threadId] ?? []).map((run) => nativeTime(run.completedAt))
+  const lastActivity = latest(scope.flatMap((threadId) => activityOf(seen, threadId).map((activity) => activity.completedAt)
     .filter((time) => time !== null && time <= settledAt)));
   if (lastActivity === null) return inconclusive("no run of the scope completed before the settlement, so its quiet window cannot be judged");
   if (settledAt < lastActivity + SUPERVISOR_SETTLE_QUIET_MS)
@@ -461,6 +546,9 @@ const idleParking = (seen: WorkloadObservation): OracleVerdict => {
     + `${parking.threadId} generation ${parking.generation}`);
   const resumed = (seen.runs[parking.threadId] ?? []).some((run) => (nativeTime(run.requestedAt) ?? nativeTime(run.startedAt) ?? -Infinity) >= followedAt);
   if (!resumed) return inconclusive("the parked Supervisor did not run again within the follow-up budget");
+  // a child with no run in T3's history may have worked after the runs above, so the quiet window is not shown to have held
+  const unbounded = unboundedChildren(seen);
+  if (unbounded.length > 0) return unboundedGap(unbounded, "when the scope's activity last changed before the settlement");
   return pass(`Supervisor parked ${Math.round((settledAt - lastActivity) / 1000)} s after the scope's last run ended, stayed parked through the hold, `
     + `and the follow-up woke the same Supervisor ${parking.threadId}`);
 };
@@ -500,10 +588,17 @@ const guides = (seen: WorkloadObservation): OracleVerdict => {
   if (sent.length === 0) return inconclusive("no guide was sent within the budget");
   const steered = sent.find((message) => {
     const created = nativeTime(message.createdAt);
-    return message.threadId !== seen.operativeThreadId && created !== null &&
-      (seen.runs[message.threadId] ?? []).some((run) => run.id === message.runId && openAt(run, created));
+    if (message.threadId === seen.operativeThreadId || created === null) return false;
+    const runs = seen.runs[message.threadId] ?? [];
+    return runs.length > 0 ? runs.some((run) => run.id === message.runId && openAt(run, created))
+      : activityOf(seen, message.threadId).some((activity) => activeAt(activity, created));
   });
-  if (steered === undefined) return inconclusive("a guide was sent, but none was seen steered into a running delegated child");
+  if (steered === undefined) {
+    const unbounded = new Set(unboundedChildren(seen));
+    const guided = [...new Set(sent.map((message) => message.threadId))].filter((threadId) => unbounded.has(threadId));
+    return guided.length > 0 ? unboundedGap(guided, "whether a guide reached it while it was running")
+      : inconclusive("a guide was sent, but none was seen steered into a running delegated child");
+  }
   return pass(`guide ${steered.id} was steered once into the running child ${steered.threadId}`);
 };
 

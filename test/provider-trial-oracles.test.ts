@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import {it} from "@effect/vitest";
 import {Effect} from "effect";
-import {classifyWorkload, quietTailMs, repeatedContent, trafficContradictions, trafficKind, type NativeRun, type TrafficMessage, type WorkloadObservation,
-  type WorkloadScenario} from "../scripts/provider-trial-oracles.js";
+import {classifyWorkload, quietTailMs, repeatedContent, trafficContradictions, trafficKind, type ChildLifecycle, type NativeExecution, type NativeRun, type TrafficMessage,
+  type WorkloadObservation, type WorkloadScenario} from "../scripts/provider-trial-oracles.js";
 
 /* The oracles of the provider trials that share a substantive workload (scripts/provider-trial-oracles.ts) are pure over everything a
  * trial observed for its budget; the trials themselves run only locally in the signed-in environment (docs/testing.md, execution type 6).
@@ -16,6 +16,12 @@ const run = (id: string, status: string, started: number, completed: number | nu
 const message = (id: string, threadId: string, minute: number, runId: string | null = null, textHash: string | null = id): TrafficMessage =>
   ({id, threadId, kind: trafficKind(id, !id.startsWith("supervisor-") && !id.startsWith("guide:"))!, runId, createdAt: at(minute), textHash});
 const proposal = message("supervisor-notice:workflow:task-a:rev", op, 2);
+// a child's lifecycle as its direct parent records it (parentChildLifecycle)
+const lifecycle = (status: string, started: number, completed: number | null, completedSecond = 0): ChildLifecycle =>
+  ({status, source: "parent_turn_item", recordId: null, parentRunId: "op-1", startedAt: at(started), completedAt: completed === null ? null : at(completed, completedSecond)});
+// an item of a thread's own work, as ownExecutions keeps it
+const nativeWork = (itemId: string, type: string, started: number, completed: number | null = null): NativeExecution =>
+  ({itemId, type, status: completed === null ? "running" : "completed", startedAt: at(started), completedAt: completed === null ? null : at(completed)});
 const base: WorkloadObservation = {
   operativeThreadId: op,
   supervisors: [{threadId: root, generation: 1, firstSeenAt: ms(1)}],
@@ -23,6 +29,8 @@ const base: WorkloadObservation = {
   task: {id: "task-a", supervision: "needed"},
   traffic: [proposal],
   runs: {[op]: [run("op-1", "completed", 0, 10)], [root]: [run("root-1", "completed", 1, 11)]},
+  executions: {},
+  childLifecycles: {},
   stopPresses: 0,
   agreement: null,
   children: [],
@@ -112,6 +120,22 @@ it.live("message volume passes only once the whole supervised work ended within 
   assert.equal(outcome("message-volume", {runs: {...base.runs, [op]: [run("op-1", "running", 0, null)]}}), "inconclusive", "the operative still working");
   assert.equal(outcome("message-volume", {runs: {...base.runs, [root]: [run("root-1", "running", 1, null)]}}), "inconclusive", "Supervisor still working");
   assert.equal(outcome("message-volume", {monitor: {state: "busy", pendingItems: 2}}), "inconclusive", "a check-in outstanding");
+  // a verified child T3 recorded no run of: its own items cannot show that it had stopped, so the traffic may not be complete
+  const verified = [{threadId: child, lineageVerified: true, lineageKnown: true}];
+  const native = judge("message-volume", {children: verified, executions: {[child]: [nativeWork("exec-1", "command_execution", 3)]}});
+  assert.equal(native.outcome, "inconclusive", "a provider-native child without runs");
+  assert.equal(outcome("message-volume", {children: verified, runs: {...base.runs, [child]: [run("child-1", "completed", 3, 6)]}}), "pass", "a child with its runs");
+  // the parent's own bounded record of a run-less child bounds it as a run does; a stale, untimed or running record does not
+  const executions = {[child]: [nativeWork("exec-1", "command_execution", 3, 3)]};
+  assert.equal(outcome("message-volume", {children: verified, executions, childLifecycles: {[child]: lifecycle("completed", 2, 6)}}), "pass",
+    "a child its parent records ended");
+  assert.equal(outcome("message-volume", {children: verified, executions, childLifecycles: {[child]: lifecycle("running", 2, null)}}), "inconclusive",
+    "a child its parent records still running");
+  assert.equal(outcome("message-volume", {children: verified, executions, childLifecycles: {[child]: lifecycle("completed", 2, null)}}), "inconclusive",
+    "a record ended without its completion time");
+  assert.equal(outcome("message-volume", {children: verified, executions: {[child]: [nativeWork("exec-1", "command_execution", 7, 7)]},
+    childLifecycles: {[child]: lifecycle("completed", 2, 6)}}), "inconclusive", "an item of its own work after the recorded end: the record is stale");
+  assert.equal(outcome("message-volume", {children: verified, executions, childLifecycles: {[child]: null}}), "inconclusive", "conflicting or no record");
   // a model's plain contact repeated with the same text cannot be told from a deliberate repeat without its operation's identity
   const repeated = [proposal, message("m1", op, 5, null, "x"), message("m2", op, 6, null, "x")];
   assert.equal(outcome("message-volume", {traffic: repeated}), "inconclusive", "a repeated plain contact");
@@ -143,6 +167,19 @@ it.live("active children passes on a delegated child that ran and that Superviso
   for (const [why, overrides] of open) assert.equal(outcome("active-children", overrides), "inconclusive", why);
   assert.equal(outcome("active-children", {children, runs: {...runs, [op]: [run("op-1", "completed", 0, 2)]}, settlements: [{threadId: root, settledAt: at(4)}]}),
     "fail", "parked while the child ran");
+  // the observed provider-native child: no run in T3's history, but completed items of its own work
+  const executions = {[child]: [nativeWork("exec-e0e7", "command_execution", 3, 3), nativeWork("reply-1", "assistant_message", 4, 4)]};
+  const proven = judge("active-children", {children, executions, monitoring: [{actorThreadId: root, targetThreadId: child, at: ms(5), kind: "read"}]});
+  assert.equal(proven.outcome, "pass", "its own timed item shows that it ran");
+  assert.equal(outcome("active-children", {children, executions, monitoring: [{actorThreadId: root, targetThreadId: child, at: ms(2), kind: "read"}]}),
+    "inconclusive", "a read before its first item");
+  assert.equal(outcome("active-children", {children, executions, monitoring: [{actorThreadId: op, targetThreadId: child, at: ms(5), kind: "read"}]}),
+    "inconclusive", "a read by a thread that is not Supervisor's");
+  assert.equal(outcome("active-children", {children, executions: {[child]: []}, monitoring: [{actorThreadId: root, targetThreadId: child, at: ms(5), kind: "read"}]}),
+    "inconclusive", "neither a run nor an item of its own");
+  const recorded = judge("active-children", {children, childLifecycles: {[child]: lifecycle("completed", 3, 4)},
+    monitoring: [{actorThreadId: root, targetThreadId: child, at: ms(5), kind: "read"}]});
+  assert.equal(recorded.outcome, "pass", "its parent's bounded record shows that it ran");
 }));
 
 it.live("sustained monitoring passes on the agreed work watched to its end, then a parked Supervisor quiet for the rest of the budget", () => Effect.sync(() => {
@@ -163,6 +200,8 @@ it.live("sustained monitoring passes on the agreed work watched to its end, then
     ["a quiet tail too short", {...watched, endedAt: ms(12) + quietTailMs - 1}],
     ["activity still pending", {...watched, monitor: {state: "idle", pendingItems: 1}}],
     ["still working", {...watched, runs: {...base.runs, [op]: [run("op-1", "running", 0, null)]}, settlements: []}],
+    ["a verified child T3 recorded no run of", {...watched, children: [{threadId: child, lineageVerified: true, lineageKnown: true}],
+      executions: {[child]: [nativeWork("exec-1", "command_execution", 6)]}}],
   ];
   for (const [why, overrides] of open) assert.equal(outcome("sustained-monitoring", overrides), "inconclusive", why);
 }));
@@ -170,19 +209,22 @@ it.live("sustained monitoring passes on the agreed work watched to its end, then
 it.live("compaction passes only on a root compaction its root recovered from: its instructions read again and its own watch going on", () => Effect.sync(() => {
   const compacted: Partial<WorkloadObservation> = {compactions: [{threadId: root, itemId: "item-c", runId: "root-1", status: "completed", completedAt: at(8)}],
     rootLatestStart: {[root]: at(9)}};
-  const reread = {instructionReads: [{threadId: root, startedAt: at(9)}]};
+  const reread = {instructionReads: [{threadId: root, startedAt: at(9), status: "completed"}]};
   const watch = (actorThreadId: string, minute: number) => ({monitoring: [{actorThreadId, targetThreadId: op, at: ms(minute), kind: "read" as const}]});
   // a completed compaction and a later start, with no reread and no watch after it, is no recovery
   assert.equal(outcome("compaction", compacted), "inconclusive", "a later start alone");
   assert.equal(outcome("compaction", {...compacted, ...reread}), "inconclusive", "the instructions read again, the watch not seen going on");
   assert.equal(outcome("compaction", {...compacted, ...watch(root, 10)}), "inconclusive", "the watch going on, the instructions not read again");
-  assert.equal(outcome("compaction", {...compacted, instructionReads: [{threadId: root, startedAt: at(7)}], ...watch(root, 10)}), "inconclusive",
+  assert.equal(outcome("compaction", {...compacted, instructionReads: [{threadId: root, startedAt: at(7), status: "completed"}], ...watch(root, 10)}), "inconclusive",
     "the instructions read only before the compaction");
   assert.equal(outcome("compaction", {...compacted, ...reread, ...watch(root, 7)}), "inconclusive", "a read only before the compaction");
   assert.equal(outcome("compaction", {...compacted, ...reread, helpers: {...base.helpers, threadIds: [helper]}, ...watch(helper, 10)}), "inconclusive",
     "a helper's read is not the compacted root going on");
   // recovered: the reread and the root's own read, completed check-in or workflow progress after the compaction
   assert.equal(outcome("compaction", {...compacted, ...reread, ...watch(root, 10)}), "pass");
+  for (const status of ["failed", "running", "cancelled"])
+    assert.equal(outcome("compaction", {...compacted, instructionReads: reread.instructionReads.map(call => ({...call, status})), ...watch(root, 10)}),
+      "inconclusive", `an instruction read that is ${status}`);
   const checkIn = {traffic: [proposal, message("supervisor-review:r2", root, 10)]};
   assert.equal(outcome("compaction", {...compacted, ...reread, ...checkIn,
     runs: {...base.runs, [root]: [run("root-1", "completed", 1, 8), run("root-2", "completed", 10, 11, "supervisor-review:r2")]}}), "pass", "a check-in it completed");
@@ -225,8 +267,18 @@ it.live("idle parking passes on a settlement after the quiet window, a parked Su
     ["no settlement time", {parking: {...parking, settledAt: "not a time"}, runs: resumed}],
     ["a descendant whose lineage is unknown", {parking, runs: resumed, children: [{threadId: child, lineageVerified: false, lineageKnown: false}]}],
     ["a finished run without its completion time", {parking, runs: {...resumed, [op]: [{...run("op-1", "completed", 0, 10), completedAt: null}]}}],
+    ["a verified child T3 recorded no run of", {parking, runs: resumed, children: [{threadId: child, lineageVerified: true, lineageKnown: true}],
+      executions: {[child]: [nativeWork("exec-1", "command_execution", 5, 5)]}}],
   ];
   for (const [why, overrides] of open) assert.equal(outcome("idle-parking", overrides), "inconclusive", why);
+  // a run-less child its parent records ended in time keeps the pass; one it records ending inside the quiet window fails it
+  const verified = [{threadId: child, lineageVerified: true, lineageKnown: true}];
+  assert.equal(outcome("idle-parking", {parking, runs: resumed, children: verified, childLifecycles: {[child]: lifecycle("completed", 5, 10)}}), "pass");
+  assert.equal(outcome("idle-parking", {parking, runs: resumed, children: verified, childLifecycles: {[child]: lifecycle("completed", 5, 12, 20)}}), "fail",
+    "settled 5 s after the child's recorded end");
+  // what the bounded runs show still fails: the root's own run ended 20 s before the settlement, whatever the child did
+  assert.equal(outcome("idle-parking", {parking: {...parking, after: ms(11, 10), seenAt: ms(12, 30), settledAt: at(11, 20)}, runs: resumed,
+    children: [{threadId: child, lineageVerified: true, lineageKnown: true}]}), "fail", "inside the quiet window of the bounded runs");
 }));
 
 it.live("helpers pass on one recruited within the limit, ready with an assignment and checked in", () => Effect.sync(() => {
@@ -259,6 +311,15 @@ it.live("guides pass on one guide steered into a running delegated child, never 
   assert.equal(outcome("guides"), "inconclusive", "no guide");
   assert.equal(outcome("guides", {children, runs: {...runs, [child]: [run("child-1", "completed", 3, 4)]},
     traffic: [proposal, message("guide:g1:message:0", child, 5, "child-1")]}), "inconclusive", "the child's run had ended");
+  // a child T3 recorded no run of: whether the guide reached it while it ran cannot be told, and the verdict says so
+  const unbounded = judge("guides", {children, executions: {[child]: [nativeWork("exec-1", "command_execution", 4)]},
+    traffic: [proposal, message("guide:g1:message:0", child, 5, "provider-run")]});
+  assert.equal(unbounded.outcome, "inconclusive");
+  // its parent's bounded record shows whether it was running when the guide arrived
+  const native = (record: ReturnType<typeof lifecycle>) => outcome("guides", {children, childLifecycles: {[child]: record},
+    traffic: [proposal, message("guide:g1:message:0", child, 5, "provider-run")]});
+  assert.equal(native(lifecycle("running", 3, null)), "pass", "running by its parent's record");
+  assert.equal(native(lifecycle("completed", 3, 4)), "inconclusive", "ended by its parent's record before the guide");
 }));
 
 it.live("a root's workflow_write passes when applied within its own native call, and one operation never has two receipts", () => Effect.sync(() => {

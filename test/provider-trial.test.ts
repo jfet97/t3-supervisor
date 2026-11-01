@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {it} from "@effect/vitest";
 import {Effect, Redacted} from "effect";
 import {actorGaps, budgetRefusal, classifyTrial, combinedOutcome, detailReceipt, evidenceGaps, finalVerdict, followUpRequest, interpretationPhaseAtPress,
-  isTrialScenario, observingScenarios, planTrial, projectFiles, readBound, runPhaseAtPress, scenarioActors, scenarioVerdicts, scratchDeletions, selectionShown,
+  isTrialScenario, observingScenarios, ownExecutions, parentChildLifecycle, planTrial, projectFiles, readBound, runPhaseAtPress, scenarioActors, scenarioVerdicts, scratchDeletions, selectionShown,
   stopPressReady, stopTime, successfulReceipt, trialScenarios, workflowMcpAlias, workflowMcpRegistration, type ActorProvenance, type FullRecordProblem,
   type RunPhase, type InterpretationPhase, type StopTime, type TaskReading, type TrialEvidence, type TrialObservation, type TrialVerdict}
   from "../scripts/provider-trial.js";
@@ -262,6 +262,17 @@ it.live("a workflow tool's successful receipt is read from its MCP result, and a
   assert.equal(successfulReceipt({isError: true, structuredContent: receipt}), null, "an error result");
   assert.equal(successfulReceipt({structuredContent: {status: "pending", reason: "evidence_pending"}}), null, "a pending write");
   assert.equal(successfulReceipt(undefined), null);
+  // T3's full record of a Codex dynamic_tool call holds the content blocks alone: one text block of JSON is the result itself
+  const blocks = (...texts: ReadonlyArray<string>) => texts.map((text) => ({type: "text", text}));
+  assert.deepEqual(successfulReceipt(blocks(JSON.stringify(receipt))), structured, "one text block: the same status and digest");
+  assert.deepEqual(successfulReceipt(JSON.stringify(blocks(JSON.stringify(receipt)))), structured, "the blocks recorded as JSON text");
+  assert.equal(successfulReceipt(blocks("{\"status\":\"invalid\",\"reason\":\"invalid_apply\"}")), null, "the refusal Codex recorded for a malformed apply");
+  assert.equal(successfulReceipt(blocks(JSON.stringify(receipt), JSON.stringify(receipt))), null, "two text blocks are ambiguous, even when equal");
+  assert.equal(successfulReceipt([{type: "image", data: "", mimeType: "image/png"}]), null, "a block that is not text");
+  assert.equal(successfulReceipt([...blocks(JSON.stringify(receipt)), {type: "image", data: "", mimeType: "image/png"}]), null, "more than one block");
+  assert.equal(successfulReceipt([]), null, "no block");
+  assert.equal(successfulReceipt(blocks("applied")), null, "a text that is no JSON result");
+  assert.equal(successfulReceipt({content: blocks(JSON.stringify(receipt), JSON.stringify(receipt))}), null, "an envelope with two text blocks");
 }));
 
 it.live("a workflow_write receipt the projection omitted is read from T3's full record of that same completed call, and nothing else", () => Effect.sync(() => {
@@ -275,6 +286,9 @@ it.live("a workflow_write receipt the projection omitted is read from T3's full 
   assert.deepEqual(read.receipt, successfulReceipt({structuredContent: receipt}), "the same status and digest as a projection receipt");
   assert.deepEqual(detailReceipt(item({output: JSON.stringify({content: [{type: "text", text: JSON.stringify(receipt)}]})}), call).receipt, read.receipt,
     "an output recorded as JSON text");
+  // the shape a Codex dynamic_tool call actually has in T3's full record: its content blocks alone
+  assert.deepEqual(detailReceipt(item({output: [{type: "text", text: JSON.stringify(receipt)}]}), call), {receipt: read.receipt, problem: null},
+    "one text block of the receipt");
   const refused: ReadonlyArray<readonly [string, unknown, FullRecordProblem]> = [
     ["an unexpected shape", {items: []}, "unexpected-shape"],
     ["no record", {item: null}, "no-record"],
@@ -286,6 +300,10 @@ it.live("a workflow_write receipt the projection omitted is read from T3's full 
     ["an output omitted again", item({}), "output-omitted"],
     ["an error result", item({output: {isError: true, structuredContent: receipt}}), "no-successful-receipt"],
     ["a pending write", item({output: {structuredContent: {status: "pending", reason: "evidence_pending"}}}), "no-successful-receipt"],
+    ["a refusal in Codex's content blocks", item({output: [{type: "text", text: "{\"status\":\"invalid\",\"reason\":\"invalid_apply\"}"}]}), "no-successful-receipt"],
+    ["two content blocks", item({output: [{type: "text", text: JSON.stringify(receipt)}, {type: "text", text: JSON.stringify(receipt)}]}), "no-successful-receipt"],
+    ["content blocks of another item", item({id: "item-2", output: [{type: "text", text: JSON.stringify(receipt)}]}), "another-item"],
+    ["content blocks of a call still running", item({status: "running", output: [{type: "text", text: JSON.stringify(receipt)}]}), "not-completed"],
   ];
   for (const [why, reply, problem] of refused) {
     const answer = detailReceipt(reply, call);
@@ -315,6 +333,44 @@ it.live("a No Project trial deletes only its own chat and the threads proven its
   assert.deepEqual(scratchDeletions({...confirmed, launchUncertain: true, reservedExists: null, children: [], owned: []}).deletes, ["reserved"]);
   // an unconfirmed identity that is proven the trial's apart from the reply, as a verified descendant or Supervisor's own thread, is deleted
   assert.deepEqual(scratchDeletions({...confirmed, unconfirmedChats: ["root-a"]}).left.map((entry) => entry.threadId), ["child-out", "child-unknown"]);
+}));
+
+it.live("a child's own timed work is read from its own projection, apart from T3's runs and never from another thread's items", () => Effect.sync(() => {
+  // the observed provider-native Codex child: its own selection and subagent lineage, projection.runs [] and two completed items of its own
+  const child = "child-native";
+  const item = (fields: Record<string, unknown>) => ({threadId: child, runId: null, status: "completed", ...fields});
+  const turnItems = [
+    item({id: "user-1", type: "user_message", startedAt: "2026-11-01T22:01:17.900Z", completedAt: "2026-11-01T22:01:17.901Z"}),
+    item({id: "exec-e0e7", type: "command_execution", startedAt: "2026-11-01T22:01:18.462Z", completedAt: "2026-11-01T22:01:18.465Z", exitCode: 0}),
+    item({id: "reply-1", type: "assistant_message", startedAt: "2026-11-01T22:01:24.701Z", completedAt: "2026-11-01T22:01:24.893Z"}),
+    item({id: "checkpoint-1", type: "checkpoint", startedAt: "2026-11-01T22:01:25.000Z", completedAt: "2026-11-01T22:01:25.001Z"}),
+    item({id: "nested", type: "subagent", childThreadId: "grandchild", startedAt: "2026-11-01T22:01:26.000Z"}),
+    item({id: "elsewhere", type: "command_execution", threadId: "operative", startedAt: "2026-11-01T22:01:27.000Z", completedAt: null}),
+    item({id: "untimed", type: "file_change", startedAt: null, completedAt: null}),
+  ];
+  assert.deepEqual(ownExecutions(child, turnItems), [
+    {itemId: "exec-e0e7", type: "command_execution", status: "completed", startedAt: "2026-11-01T22:01:18.462Z", completedAt: "2026-11-01T22:01:18.465Z"},
+    {itemId: "reply-1", type: "assistant_message", status: "completed", startedAt: "2026-11-01T22:01:24.701Z", completedAt: "2026-11-01T22:01:24.893Z"},
+  ]);
+  assert.deepEqual(ownExecutions(child, []), []);
+  assert.deepEqual(selectionShown({instanceId: "codex", model: "gpt-6.1-sol"}), {instanceId: "codex", model: "gpt-6.1-sol"}, "its own model selection");
+}));
+
+it.live("a run-less native child's lifecycle is its direct parent's own record, reconciled as Supervisor reconciles it", () => Effect.sync(() => {
+  // the observed parent of a provider-native Codex child with projection.runs []: its subagent record and the matching subagent turn item
+  const child = "thread:provider:codex:native-thread:01a19921-8f85-7752-9d67-373ed4ced895";
+  const times = {startedAt: "2026-11-01T22:01:15.000Z", completedAt: "2026-11-01T22:01:24.904Z", updatedAt: "2026-11-01T22:01:24.907Z",
+    runId: "run:thread:568a1f41-c319-4a62-a727-ff071dc1f0db:ordinal:3"};
+  const record = {id: "node:provider:codex:native-item:call_f3a5e507c813493ba4fa64da4aaa0cc2%3A01a19921-8f85-7752-9d67-373ed4ced895", childThreadId: child,
+    status: "completed", ...times};
+  const item = {type: "subagent", childThreadId: child, status: "completed", ...times};
+  const completed = {status: "completed", parentRunId: times.runId, startedAt: times.startedAt, completedAt: times.completedAt};
+  assert.deepEqual(parentChildLifecycle({subagents: [record], turnItems: [item]}, child), {...completed, source: "parent_turn_item", recordId: null},
+    "both sources agree; the turn item is preferred");
+  assert.deepEqual(parentChildLifecycle({subagents: [record]}, child), {...completed, source: "parent_subagents", recordId: record.id});
+  assert.equal(parentChildLifecycle({subagents: [record], turnItems: [{...item, status: "running"}]}, child), null, "conflicting statuses");
+  assert.equal(parentChildLifecycle({}, child), null, "no record of the child");
+  assert.equal(parentChildLifecycle({subagents: [{...record, childThreadId: "another-child"}]}, child), null, "another child's record");
 }));
 
 it.live("a look reads a bounded number of helpers and descendants and reports the rest unread, which keeps the trial from a pass", () => Effect.sync(() => {
@@ -420,7 +476,8 @@ it.live("each actor's own model selection and runtime are evidence of the scenar
   const workload: WorkloadObservation = {operativeThreadId: "operative", supervisors: [{threadId: "root-a", generation: 1, firstSeenAt: 0}],
     helpers: {threadIds: ["helper-a"], ready: ["helper-a"], assigned: ["helper-a"], mostAtOnce: 1, limit: 5}, task: {id: "task-a", supervision: "needed"},
     traffic: [sent(proposal, "operative"), sent("supervisor-review:r1", "helper-a"), sent("guide:abc:message:0", "child-a")],
-    runs: {operative: [ended("op-1")], "root-a": [ended("root-1")], "helper-a": [ended("helper-1")]}, stopPresses: 0, agreement: null,
+    runs: {operative: [ended("op-1")], "root-a": [ended("root-1")], "helper-a": [ended("helper-1")], "child-a": [ended("child-1")]}, executions: {}, childLifecycles: {},
+    stopPresses: 0, agreement: null,
     children: [{threadId: "child-a", lineageVerified: true, lineageKnown: true}, {threadId: "child-b", lineageVerified: false, lineageKnown: true}],
     monitoring: [], monitor: {state: "idle", pendingItems: 0}, settlements: [], compactions: [], rootLatestStart: {}, instructionReads: [], writes: [],
     history: [], parking: null, start: null, endedAt: 0};

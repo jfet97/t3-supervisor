@@ -207,8 +207,12 @@ export const commitInterpretationSubmission = (input: {
   if (decoded.payload.kind === "interpretation" && decoded.payload.conversation) {
     const policy = yield* checks.requesterPolicy(task.projectId);
     const rawFloor = yield* checks.sourceFloor(task.threadId, intake.main);
-    const floor = intake.startVerdict ? Math.min(rawFloor ?? task.sourceOrdinal, task.sourceOrdinal - 1) : rawFloor;
-    const enabledAt = intake.startVerdict ? null : yield* store.chatEnabledAt(task.threadId);
+    /* The Start this task answers, pending or active since its own intent (pinnedStart), pins a request that may precede that intent.
+     * Read its sources from that request on, using the existing matched Start authority.
+     */
+    const startPinned = intake.startVerdict || (yield* checks.pinnedStart(task)) !== null;
+    const floor = startPinned ? Math.min(rawFloor ?? task.sourceOrdinal, task.sourceOrdinal - 1) : rawFloor;
+    const enabledAt = startPinned ? null : yield* store.chatEnabledAt(task.threadId);
     const watermark = requesterSources(intake.main, policy, floor ?? Infinity, enabledAt).find(source => source.messageId === task.sourceMessageId);
     const resolved = watermark && floor !== null ? resolveConversationDecision({previous: task.conversation, decision: decoded.payload.conversation,
       main: intake.main, policy, floor, enabledAt, watermark, attemptId: attempt.attemptId, now: input.now, initialRevision: task.sourceHash}) : null;

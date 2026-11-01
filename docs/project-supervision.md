@@ -35,7 +35,9 @@ Normal projects retain automatic folder/manual activation.
 
 Home offers eight recent/search results or an exact native T3 link. Dashboard Start
 is authenticated human intent. It pins the latest genuine request only while that
-request's native run is unfinished; otherwise it starts with the next request.
+request's native run is unfinished; otherwise it starts with the next request. A pinned
+request belongs to the Start although it was written just before it: it is interpreted
+and its proposal introduced until a later Stop, Enable, mode change or edit ends the pin.
 The agent's supervision_start tool instead cites its own current genuine human
 message. Exact native caller/tool/run proof is mandatory. The Supervisor's first
 interpretation returns an independent startRequested verdict before any operative

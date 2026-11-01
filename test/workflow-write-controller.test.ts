@@ -17,6 +17,7 @@ import {WebSocketServer} from "ws";
 import {NodeHttpServer} from "@effect/platform-node";
 import {Effect, Layer} from "effect";
 import {HttpRouter} from "effect/http";
+import {AjvJsonSchemaValidator} from "@modelcontextprotocol/sdk/validation/ajv";
 import {WorkflowMcpRoute} from "../src/workflow-mcp.js";
 import {workflowMcpLayer} from "./support/mcp-controllers.js";
 import {SupervisorRpcError} from "../src/supervisor-native.js";
@@ -3054,19 +3055,75 @@ it.effect("a main contribution import and Supervisor writes race only through re
 it.effect("workflow_write advertises the root-only contribution assessment action", () => Effect.sync(() => {
   const schema = workflowWriteToolDefinition.inputSchema;
   assert.ok(schema.properties.action.enum.includes("assess_contribution"));
-  assert.deepEqual(schema.oneOf.find(entry => entry.properties.action.const === "assess_contribution"), {properties: {action: {const: "assess_contribution"}},
-    required: ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]});
+  const variant = schema.oneOf.find(entry => entry.properties.action.const === "assess_contribution");
+  assert.deepEqual(variant?.required, ["operationId", "workflowId", "expectedRevision", "contributionId", "resultRevision", "decision", "note"]);
+  assert.equal(variant?.additionalProperties, false);
   assert.match(workflowWriteToolDefinition.description, /never changes any status/u);
 }));
 
 it.effect("workflow_write advertises the root-only review outcome record, which sends nothing", () => Effect.sync(() => {
   const schema = workflowWriteToolDefinition.inputSchema;
   assert.ok(schema.properties.action.enum.includes("record_review"));
-  assert.deepEqual(schema.oneOf.find(entry => entry.properties.action.const === "record_review"),
-    {properties: {action: {const: "record_review"}}, required: ["operationId", "requestId", "outcome"]});
+  const variant = schema.oneOf.find(entry => entry.properties.action.const === "record_review");
+  assert.deepEqual(variant?.required, ["operationId", "requestId", "outcome"]);
+  assert.equal(variant?.additionalProperties, false);
+  assert.equal(Object.hasOwn(variant?.properties ?? {}, "note"), false, "a review outcome carries no note");
   assert.deepEqual(schema.properties.outcome.enum, ["progress_updated", "no_change", "needs_attention", "insufficient_evidence"]);
   assert.match(workflowWriteToolDefinition.description, /record_review is root-only/u);
   assert.match(workflowWriteToolDefinition.description, /It sends nothing; messaging the operative is a separate decision/u);
+}));
+
+it.effect("workflow_write's advertised schema accepts each action's own fields and refuses another action's, as its parser does", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture();
+  try {
+    // the MCP SDK's own validator over the advertised schema, as a client checks a call against it
+    const schema = workflowWriteToolDefinition.inputSchema;
+    const advertised = new AjvJsonSchemaValidator().getValidator(schema as unknown as Parameters<AjvJsonSchemaValidator["getValidator"]>[0]);
+    const pins = {...locator(fixture), memberEpoch: 1, assignmentRootThreadId: fixture.mainThreadId, assignmentEpoch: 1};
+    const ensure = ensureArgs(fixture, "schema-ensure", "Create the main workflow.");
+    // each action's legitimate shapes, together naming every field its parser accepts
+    const own: ReadonlyArray<readonly [string, ReadonlyArray<Record<string, unknown>>]> = [
+      ["ensure_main", [ensure, {...ensureArgs(fixture, "schema-ensure-pinned", "Create it with a helper's pins."), ...pins}]],
+      ["link_child", [{action: "link_child", ...locator(fixture), operationId: "schema-link", childThreadId: "child-a", note: "Link the delegated child."}]],
+      ["apply", [{action: "apply", ...pins, input: {operationId: "schema-apply", workflowId: "workflow-a", expectedRevision: 1, note: "Plan the work."}}]],
+      ["assess_contribution", [{action: "assess_contribution", ...locator(fixture), operationId: "schema-assess", workflowId: "workflow-a",
+        expectedRevision: 1, contributionId: "contribution-1", resultRevision: 1, decision: schema.properties.decision.enum[0], note: "The result answers it."}]],
+      ["record_review", [{action: "record_review", ...locator(fixture), operationId: "schema-review", requestId: "monitor:1", outcome: "no_change"},
+        {action: "record_review", ...pins, operationId: "schema-review-wait", requestId: "monitor:2", outcome: "needs_attention", reason: "The main stopped.",
+          wait: {waitingOn: "external", resumesWhen: "The external review answers."}},
+        {action: "record_review", ...locator(fixture), operationId: "schema-review-progress", requestId: "monitor:3", outcome: "progress_updated",
+          applyOperationIds: ["schema-apply"]}]],
+    ];
+    const refusals = (action: string) => [`invalid_${action}`, "invalid_apply_input", "invalid_owner_locator", "unknown_action"];
+    for (const [action, shapes] of own) for (const args of shapes) {
+      const checked = advertised(args);
+      assert.equal(checked.valid, true, `${action}: ${checked.errorMessage ?? ""}`);
+      const written = yield* fixture.controller.write(args);
+      assert.ok(!("reason" in written) || !refusals(action).includes(String(written.reason)), `${action}: the parser accepts it (${JSON.stringify(written)})`);
+    }
+    // the reported mismatch: a review outcome carrying a note, which the schema accepted and the parser refused
+    const reads = () => [fixture.projectionCalls.length, fixture.detailCalls.length, fixture.calls.listThreads];
+    const before = reads();
+    const noted = {...own[4]![1][0]!, note: ensure.note};
+    assert.equal(advertised(noted).valid, false, "the schema refuses a note on record_review");
+    assert.deepEqual(yield* fixture.controller.write(noted), {status: "invalid", operationId: "schema-review", reason: "invalid_record_review"});
+    // every field of another action, on each action: refused by the schema and by the parser alike, before any native read
+    const shared = new Set(["action", ...Object.keys(pins)]);
+    for (const [action, shapes] of own) {
+      const allowed = new Set(shapes.flatMap((args) => Object.keys(args)));
+      const foreign = new Map(own.filter(([other]) => other !== action).flatMap(([, others]) => others.flatMap((args) => Object.entries(args)))
+        .filter(([key]) => !allowed.has(key) && !shared.has(key)));
+      assert.ok(foreign.size > 0, action);
+      for (const [key, value] of foreign) {
+        const args = {...shapes[0]!, [key]: value};
+        assert.equal(advertised(args).valid, false, `${action} with ${key}`);
+        const written = yield* fixture.controller.write(args);
+        assert.equal(written.status, "invalid", `${action} with ${key}`);
+        assert.equal("reason" in written ? written.reason : null, `invalid_${action}`, `${action} with ${key}`);
+      }
+    }
+    assert.deepEqual(reads(), before, "a refused field reads no native evidence");
+  } finally {yield* fixture.close;}
 }));
 
 it.live("workflow_read returns compact progress by default and complete records only when requested through MCP", () => Effect.gen(function* () {

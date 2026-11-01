@@ -154,10 +154,14 @@ const assertAdvertisedInput = (definition: {inputSchema: unknown}, input: Record
     additionalProperties?: boolean;
     properties: Record<string, unknown>;
     required?: string[];
-    oneOf?: Array<{properties?: {action?: {const?: unknown}}; required?: string[]}>;
+    oneOf?: Array<{properties?: {action?: {const?: unknown}}; required?: string[]; additionalProperties?: boolean}>;
   };
   assert.equal(schema.additionalProperties, false);
   assert.deepEqual(Object.keys(input).filter(key => !Object.prototype.hasOwnProperty.call(schema.properties, key)), []);
+  // an action variant that closes its keys names every key the action carries, as the action's parser does
+  const variant = schema.oneOf?.find(item => item.properties?.action?.const === input.action);
+  if (variant?.additionalProperties === false)
+    assert.deepEqual(Object.keys(input).filter(key => !Object.prototype.hasOwnProperty.call(variant.properties ?? {}, key)), [], `fields outside ${String(input.action)}`);
   if (!complete) return;
   for (const key of schema.required ?? []) assert.ok(Object.prototype.hasOwnProperty.call(input, key), `missing schema-required field ${key}`);
   if (schema.oneOf) {

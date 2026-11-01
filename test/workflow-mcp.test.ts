@@ -4,6 +4,7 @@ import { NodeHttpServer } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Context, Effect, Layer } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
+import {AjvJsonSchemaValidator} from "@modelcontextprotocol/sdk/validation/ajv";
 import {WorkflowMcpRoute} from "../src/workflow-mcp.js";
 import { buildInfo } from "../src/version.js";
 import type {WorkflowWriteController, WorkflowWriteResult, WorkflowReadResult} from "../src/workflow-write-controller.js";
@@ -70,6 +71,12 @@ it.live("workflow MCP exposes read, write and the scoped stop tool and serves st
   assert.deepEqual(listBody.result?.tools?.map(tool => tool.name), ["workflow_read", "workflow_write", "supervision_start", "supervision_stop", "supervision_plan", "supervision_interpretation_submit"]);
   const writeSchema = listBody.result?.tools?.find(tool => tool.name === "workflow_write")?.inputSchema;
   assert.deepEqual(writeSchema?.properties?.input?.required, ["operationId", "workflowId", "expectedRevision", "note"]);
+  // the served schema, under the MCP SDK's own validator: each action takes only its own fields, as the write parser does
+  assert.ok(writeSchema);
+  const servedWrite = new AjvJsonSchemaValidator().getValidator(writeSchema as unknown as Parameters<AjvJsonSchemaValidator["getValidator"]>[0]);
+  const review = {action: "record_review", supervisorThreadId: "sx-current", bindingGeneration: 7, operationId: "review-1", requestId: "monitor:1", outcome: "no_change"};
+  assert.equal(servedWrite(review).valid, true);
+  assert.equal(servedWrite({...review, note: "A note belongs to ensure_main."}).valid, false, "a note on record_review");
   assert.ok(writeSchema?.$defs?.group, "recursive plan definitions are attached to the write schema root");
   assert.ok(writeSchema?.properties?.input?.properties?.plan?.anyOf?.some(item => item.$ref === "#/$defs/group"));
   const sourceBindingSchema = writeSchema?.properties?.input?.properties?.sourceBinding;
