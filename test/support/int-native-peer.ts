@@ -29,8 +29,11 @@ export type PeerEntry = PeerHttpEntry | PeerRpcEntry;
 // a reply to an HTTP request: a JSON body with its status, or a raw write on the native response (a lost, stalled, cut or
 // redirected reply)
 export type HttpAnswer = {readonly status: number; readonly value: unknown} | {readonly raw: (request: IncomingMessage, response: ServerResponse) => void};
-// a reply to an rpc frame: a unary exit, an open subscription chunk, or a lost reply after arrival
-export type RpcAnswer = {readonly value: unknown} | {readonly stream: ReadonlyArray<unknown>} | {readonly fail: true} | {readonly drop: true};
+/* A reply to an rpc frame: a unary exit, a failure exit carrying a native failure value, an open subscription chunk, or a lost
+ * reply after arrival.
+ */
+export type RpcAnswer = {readonly value: unknown} | {readonly failure: unknown} | {readonly stream: ReadonlyArray<unknown>} | {readonly fail: true} |
+  {readonly drop: true};
 // a route's reply, undefined when it does not handle the request, or an effect of either
 export type RouteAnswer<A> = A | undefined | Effect.Effect<A | undefined, unknown>;
 
@@ -152,7 +155,11 @@ export const intPeer = (routes: ReadonlyArray<PeerRoutes> = []): Effect.Effect<I
             socket.send(JSON.stringify({_tag: "Chunk", requestId: frame.id, values: answer.stream}));
             return;
           }
-          socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: "value" in answer ? {_tag: "Success", value: answer.value} : failure}));
+          /* A failure value goes out in the Fail cause the native characterizations script (failureExit in
+           * test/supervisor-native.characterization.test.ts).
+           */
+          socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: "value" in answer ? {_tag: "Success", value: answer.value}
+            : "failure" in answer ? {_tag: "Failure", cause: {_tag: "Fail", failure: answer.failure}} : failure}));
         })),
       ));
     });

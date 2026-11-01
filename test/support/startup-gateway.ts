@@ -37,6 +37,9 @@ export type StartupGateway = {
 
 export type StartupTaskView = {readonly status?: string; readonly supervision?: string | undefined; readonly workflow?: unknown};
 
+/** One launch of a Supervisor conversation T3 received, accepted or not. */
+export type StartupLaunch = {readonly threadId: string; readonly commandId: string};
+
 export type StartupObservations = {
   readonly dispatches: () => ReadonlyArray<StartupDispatch>;
   readonly objectiveDispatches: () => ReadonlyArray<StartupDispatch>;
@@ -45,13 +48,20 @@ export type StartupObservations = {
   readonly interpretationReceipts: () => number;
   readonly requestRunStatus: () => string | null;
   readonly completeRequestRun: () => void;
+  // every path T3 wrote in the startup checkout, in order, and every Supervisor launch it received
+  readonly checkoutWrites: () => ReadonlyArray<string>;
+  readonly launches: () => ReadonlyArray<StartupLaunch>;
   readonly debug: () => unknown;
 };
 
 /** A plain native conversation beside the startup main: the user's request and the operative's completed reply. */
 export type ExtraConversation = {readonly id: string; readonly title: string; readonly request: string; readonly reply: string};
-/** Another catalog project; an unavailable one is listed by T3 but its folder is not readable. */
-export type ExtraProject = {readonly id: string; readonly title: string; readonly available: boolean; readonly conversations: ReadonlyArray<ExtraConversation>};
+/**
+ * Another catalog project; an unavailable one is listed by T3 but its folder is not readable. A scratch project is the T3
+ * managed scratch root (T3_MANAGED_SCRATCH_ROOT), so its chats are No Project chats.
+ */
+export type ExtraProject = {readonly id: string; readonly title: string; readonly available: boolean; readonly conversations: ReadonlyArray<ExtraConversation>;
+  readonly scratch?: boolean};
 
 export type StartupSessionOptions = {
   // the data directory; a scoped temporary directory when absent
@@ -67,9 +77,18 @@ export type StartupSessionOptions = {
   readonly projects?: ReadonlyArray<ExtraProject>;
   // while `up` is false the scripted T3 answers like an unreachable server: 503 over HTTP and a failure for every request
   readonly availability?: {up: boolean};
+  /* The startup project's checkout: its files by path below the workspace root, which T3 lists and reads, and writes through
+   * the dedicated project-write credential the application is then given (T3_PROJECT_WRITE_TOKEN_FILE). Absent keeps the
+   * fixed empty index and no write credential; no files is a checkout without a .t3-supervisor folder.
+   */
+  readonly checkout?: Readonly<Record<string, string>>;
+  /* While `accepted` is false, T3 rejects every launch of a Supervisor conversation as it does when the Supervisor's provider
+   * instance is disabled, a definite rejection.
+   */
+  readonly launch?: {accepted: boolean};
 };
 
-export type StartupApp = {readonly origin: string; readonly dataDirectory: string};
+export type StartupApp = {readonly origin: string; readonly dataDirectory: string; readonly workspaceRoot: string};
 
 export type StartupSession = {
   readonly gateway: StartupGateway;
@@ -141,10 +160,35 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
       state.projections.set(thread.id, completedConversation(thread, {id: `${thread.id}-request`, text: conversation.request}, conversation.reply));
     }
   }
-  const knownDirectory = (path: string): boolean => {
+  // the startup checkout's files by path below its workspace root; a directory exists while a file lies below it
+  const checkout = new Map<string, string>(Object.entries(options.checkout ?? {".t3-supervisor/project.yaml": projectYaml}));
+  const writes: Array<string> = [];
+  const launches: Array<StartupLaunch> = [];
+  const inCheckout = (cwd: unknown) => posix.normalize(String(cwd)) === workspaceRoot;
+  // a native path as a path below the workspace root, "" for the root itself, or null outside the checkout
+  const below = (path: unknown): string | null => {
+    if (typeof path !== "string") return null;
     const normalized = posix.normalize(path);
-    return normalized === workspaceRoot || normalized === posix.join(workspaceRoot, ".t3-supervisor");
+    return normalized === workspaceRoot ? "" : normalized.startsWith(`${workspaceRoot}/`) ? normalized.slice(workspaceRoot.length + 1) : null;
   };
+  const isDirectory = (path: string) => path === "" || [...checkout.keys()].some((file) => file.startsWith(`${path}/`));
+  // the direct entries of a checkout directory, by their path below the workspace root as T3 lists them
+  const entriesOf = (path: string) => {
+    const entries = new Map<string, "file" | "directory">();
+    for (const file of checkout.keys()) {
+      if (path !== "" && !file.startsWith(`${path}/`)) continue;
+      const rest = path === "" ? file : file.slice(path.length + 1);
+      const name = rest.split("/")[0]!;
+      entries.set(path === "" ? name : `${path}/${name}`, rest.includes("/") ? "directory" : "file");
+    }
+    return [...entries].sort(([a], [b]) => a.localeCompare(b)).map(([entry, kind]) => ({path: entry, kind}));
+  };
+  // the dedicated project-write credential of a case that gives its checkout; T3 writes only through it
+  const writeToken = options.checkout === undefined ? null : "startup-project-write-token";
+  const writeTokenFile = writeToken === null ? null : join(directory, "project-write-token");
+  if (writeTokenFile !== null) yield* fs.writeFileString(writeTokenFile, `${writeToken}\n`, {mode: 0o600});
+  const scratch = (options.projects ?? []).filter((project) => project.scratch === true);
+  assert.ok(scratch.length <= 1, "T3 has one managed scratch root");
   const guidance = join(directory, "guidance.sqlite3");
   const readTask = (): TaskRecord | null => readSqlite(guidance, (db) => {
     const row = db.prepare("SELECT document FROM supervisor_task_interpretations").get() as {document?: string} | undefined;
@@ -155,20 +199,41 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
     // empty answers so a stray list does not hold the cycle; this harness does not exercise those paths
     if (entry.tag === "scheduledTasks.list") return {value: {tasks: []}};
     if (entry.tag === "vcs.listRefs") return {value: {isRepo: false, refs: []}};
+    /* The checkout as T3 serves it: a missing path has no metadata entry (as test/project-definition-initialization.test.ts
+     * scripts it), and listing or reading a missing path fails with ENOENT (failureExit in
+     * test/supervisor-native.characterization.test.ts); paths outside the checkout stay unanswered.
+     */
     if (entry.tag === "filesystem.getMetadata") {
-      const paths = Array.isArray(entry.payload.paths) ? entry.payload.paths : [];
-      if (paths.length === 0 || paths.some((path) => typeof path !== "string" || !knownDirectory(path))) return undefined;
-      return {value: {entries: paths.map(() => ({kind: "directory"}))}};
+      const paths = (Array.isArray(entry.payload.paths) ? entry.payload.paths : []).map(below);
+      if (paths.length === 0 || paths.some((path) => path === null)) return undefined;
+      return {value: {entries: paths.map((path) => isDirectory(path!) ? {kind: "directory"} : checkout.has(path!) ? {kind: "file"} : null)}};
     }
     if (entry.tag === "projects.listEntries") {
-      if (posix.normalize(String(entry.payload.cwd)) !== workspaceRoot || entry.payload.directoryPath !== ".t3-supervisor") return undefined;
-      return {value: {truncated: false, entries: [{path: ".t3-supervisor/project.yaml", kind: "file"}]}};
+      if (!inCheckout(entry.payload.cwd)) return undefined;
+      const path = String(entry.payload.directoryPath);
+      return isDirectory(path) ? {value: {truncated: false, entries: entriesOf(path)}} : {failure: {code: "ENOENT"}};
     }
     if (entry.tag === "projects.readFile") {
-      if (posix.normalize(String(entry.payload.cwd)) !== workspaceRoot || entry.payload.relativePath !== ".t3-supervisor/project.yaml") return undefined;
-      return {value: {contents: projectYaml, byteLength: Buffer.byteLength(projectYaml), truncated: false}};
+      if (!inCheckout(entry.payload.cwd)) return undefined;
+      const contents = checkout.get(String(entry.payload.relativePath));
+      return contents === undefined ? {failure: {code: "ENOENT"}} : {value: {contents, byteLength: Buffer.byteLength(contents), truncated: false}};
+    }
+    /* A write below .t3-supervisor through the project-write credential only; T3 creates its folders and echoes the path the
+     * native writer verifies (src/project-files.ts).
+     */
+    if (entry.tag === "projects.writeFile") {
+      const path = String(entry.payload.relativePath);
+      const contents = entry.payload.contents;
+      if (writeToken === null || entry.authorization !== `Bearer ${writeToken}` || !inCheckout(entry.payload.cwd) || !path.startsWith(".t3-supervisor/") ||
+        typeof contents !== "string") return undefined;
+      checkout.set(path, contents);
+      writes.push(path);
+      return {value: {relativePath: path}};
     }
     if (entry.tag === "orchestration.launchThread") {
+      launches.push({threadId: String(entry.payload.threadId), commandId: String(entry.payload.commandId)});
+      // the definite rejection of a disabled provider instance, as test/supervisor-native.test.ts scripts it
+      if (options.launch?.accepted === false) return {failure: {name: "ThreadManagementProviderInstanceDisabledError"}};
       const threadId = String(entry.payload.threadId);
       const thread: ThreadInfo = {id: threadId, title: String(entry.payload.title ?? "Supervisor"), projectId: String(entry.payload.projectId),
         archivedAt: null, deletedAt: null, createdBy: "system", creationSource: "server", lineage: {parentThreadId: null, relationshipToParent: null},
@@ -205,7 +270,9 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
   const outage: PeerRoutes = {http: () => availability.up ? undefined : json(503, {error: "t3_unavailable"}), rpc: () => availability.up ? undefined : {fail: true}};
   const peer = yield* intPeer([outage, environment, nativeReadRoutes(state), operate]);
   const served: Partial<SupervisorConfig> = {...(options.uiAssetsDirectory === undefined ? {} : {uiAssetsDirectory: options.uiAssetsDirectory}),
-    ...(options.uiHost === undefined ? {} : {uiHost: options.uiHost})};
+    ...(options.uiHost === undefined ? {} : {uiHost: options.uiHost}),
+    ...(writeTokenFile === null ? {} : {projectWriteTokenFile: writeTokenFile}),
+    ...(scratch[0] === undefined ? {} : {managedScratchRoot: posix.join(directory, "projects", scratch[0].id)})};
   // each run of the production application owns a child scope of the session, so a restart ends exactly that process's
   // listeners, databases and fibers while the peer, its native state and the data directory stay
   const session = yield* Scope.Scope;
@@ -272,6 +339,8 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
   };
   const observe: StartupObservations = {
     dispatches, debug,
+    checkoutWrites: () => [...writes],
+    launches: () => [...launches],
     objectiveDispatches: () => dispatches().filter((item) => item.commandId.startsWith("supervisor-objective:")),
     mainDispatches: () => dispatches().filter((item) => item.threadId === startupMainThreadId),
     taskDocument: () => {
@@ -303,7 +372,7 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
         text: "I submitted the interpretation through the tool.", streaming: false, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()});
     },
   };
-  return {gateway, observe, app: {origin: current.app.origin, dataDirectory: directory}, restart};
+  return {gateway, observe, app: {origin: current.app.origin, dataDirectory: directory, workspaceRoot}, restart};
 }).pipe(Effect.provide(NodeFileSystem.layer), Effect.orDie);
 
 /** The startup chain with its defaults, as the startup integration suite runs it. */

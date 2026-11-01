@@ -32,16 +32,16 @@ it("definition folder help names what was checked and explains unavailable or un
   }
 });
 
-it("setup keeps the two creation actions for a selected checkout with no definitions", () => {
+/* Create waiting for a chosen checkout and offered once one is chosen is asserted on the real dashboard by
+ * test/e2e/project-setup.test.ts.
+ */
+it("setup offers Create + commit and explains both creation actions for a selected Git checkout with no definitions", () => {
   const checkout = {threadId: "main-a", workspaceRoot: "/work/feature-a", branch: "feature-a", isGitRepository: true, folderStatus: "missing" as const, origin: "project" as const};
   const options = {projectId: "p", generation: 1, available: true, message: "Choose where to create definitions.", checkouts: [checkout]};
   const handlers = {options, busy: false, blocked: false, message: "", onSelect: () => {}, onSetup: () => {}, onReload: () => {}};
-  const unselected = renderToStaticMarkup(createElement(SupervisionSetupView, {...handlers, selected: ""}));
-  assert.match(unselected, /disabled="">Create<\/button>/);
   const selected = renderToStaticMarkup(createElement(SupervisionSetupView, {...handlers, selected: JSON.stringify([checkout.threadId, checkout.workspaceRoot])}));
   assert.match(selected, /\/work\/feature-a\/.t3-supervisor/);
   assert.match(selected, /<strong>Branch feature-a/);
-  assert.match(selected, />Create<\/button>/);
   assert.match(selected, />Create \+ commit<\/button>/);
   assert.match(selected, /Create leaves files uncommitted/);
   assert.match(selected, /Repository hooks and signing apply/);

@@ -761,7 +761,10 @@ it("unavailable saved models remain visible and disabled while an available mode
   assert.match(html, /disabled=""/);
 });
 
-it("an uncertain result from another project thread exposes retry only after the draft is resolved", () => {
+/* The Retry offer, the draft that disables it and its explanation are asserted on the real dashboard by
+ * test/e2e/native-access-retry.test.ts.
+ */
+it("an uncertain task of another project thread leaves the selected chat's task interpretation shown", () => {
   const uncertainTask = {...snapshot.tasks[0]!, threadId: "other-thread", status: "uncertain" as const};
   const html = renderToStaticMarkup(createElement(ProjectSupervisorView, {
   ...viewDefaults,
@@ -770,9 +773,6 @@ it("an uncertain result from another project thread exposes retry only after the
     retryButtonLabel: "Retry native access", canRetry: false, onSelectionChange: () => {}, onMonitoringChange: () => {}, onDiscard: () => {}, onRetry: () => {},
     onSubmit: event => event.preventDefault(),
   }));
-  assert.match(html, /Retry native access/);
-  assert.match(html, /Save or discard your settings draft before retrying native access/);
-  assert.match(html, /<button type="button" disabled="">Retry native access<\/button>/);
   assert.match(html, /class="disclosure-title">Task interpretation<\/span>/);
 });
 
