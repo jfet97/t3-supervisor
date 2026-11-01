@@ -41,6 +41,17 @@ includes the dashboard fixture and the local stack's guard rails; the published-
 path itself downloads T3, so run it locally with `./dev check`
 ([development environment](local-stack.md)).
 
+## Extended runs
+
+The `extended` workflow runs only when dispatched by hand; nothing else starts it, it
+is not part of the `check` aggregate and it gates no release. Its `runs` input selects
+the scripted soaks (`./dev soak`), the published-T3 compatibility check (`./dev setup`,
+`./dev pnpm build`, `./dev check`) or both, on the x64 runner, through the same `./dev`
+commands contributors run locally. It holds no credentials and only reads the
+repository. Dispatch it before a release whose inputs it covers, or when one of those
+inputs changes ([where tests run](testing.md#where-tests-run)). Its step summary names
+the commit each run tested; the checks print their own inputs.
+
 ## Release metadata fast track
 
 The `changeset-release/main` version PR may reuse full validation of its parent

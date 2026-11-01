@@ -47,8 +47,11 @@ export interface FakeT3 {
   close(): Promise<void>;
 }
 
+/* A shell thread as T3's shell lists it, with its latest run (none here); Supervisor's enable boundary reads it
+ * (ShellAnchor in src/supervisor-native.ts), as test/support/startup-gateway.ts scripts it.
+ */
 const thread = (id: string) => ({
-  id, title: `Fixture ${id}`, projectId: null,
+  id, title: `Fixture ${id}`, projectId: null, latestRunId: null,
   lineage: { parentThreadId: null, relationshipToParent: null },
 });
 

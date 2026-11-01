@@ -179,7 +179,7 @@ it.live("the host entry validates its input before it needs Docker", () => Effec
     cwd: repositoryRoot, timeoutMs: 10_000});
   const help = yield* run("--help");
   assert.equal(help.code, 0);
-  for (const command of ["setup", "up", "down", "recreate", "rebuild", "reset", "reset-auth", "login codex|claude", "fixture", "ui-fixture", "check"]) {
+  for (const command of ["setup", "up", "down", "recreate", "rebuild", "reset", "reset-auth", "login codex|claude", "fixture", "ui-fixture", "check", "soak", "trial"]) {
     assert.match(help.stdout, new RegExp(`^  ${command.replace("|", "\\|")}\\b`, "mu"), command);
   }
   const badName = yield* run("--env", "Daily_Profile", "status");

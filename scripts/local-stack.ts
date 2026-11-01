@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Console, Data, Effect, FileSystem, Layer, Option, Schema, Stream } from "effect";
+import { Console, Data, Effect, Exit, FileSystem, Layer, Option, Schema, Scope, Stream } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { groupAlive, tsxLoader } from "../test/support/cli-process.js";
 import { freePort, httpGet, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "../test/support/g8-process.js";
-import { cacheHome, cleanRuns, createRun, isolatedEnv, repositoryRoot, toolPath, type RunFolder } from "./local-run.js";
+import { cacheHome, checkoutInputs, cleanRuns, createRun, isolatedEnv, repositoryRoot, toolPath, type RunFolder } from "./local-run.js";
 
 /*
   `pnpm dev:stack`: an unmodified published T3 at a pinned version beside Supervisor from this checkout, each with its own
@@ -193,7 +193,16 @@ const stop = (child: RunningProcess) => Effect.gen(function* () {
 export interface RunningStack {
   readonly run: RunFolder;
   readonly cli: T3Cli;
-  readonly t3: {readonly url: string; readonly port: number; readonly version: string; readonly protocol: number; readonly process: RunningProcess};
+  readonly t3: {
+    readonly url: string; readonly port: number; readonly version: string; readonly protocol: number;
+    // the current T3 process: a restart replaces it
+    readonly process: RunningProcess;
+    /* Stops T3 as a crash or an upgrade restart would, then starts it again over the same data directory and port, where the
+     * sessions it issued stay valid.
+     */
+    readonly stop: Effect.Effect<void>;
+    readonly start: Effect.Effect<void>;
+  };
   readonly supervisor: {readonly url: string; readonly healthUrl: string; readonly ports: readonly [number, number]; readonly process: RunningProcess};
   readonly sessions: ReadonlyArray<IssuedSession>;
   readonly project: {readonly id: string; readonly path: string};
@@ -219,10 +228,15 @@ export const startStack = (options: {readonly cacheRoot: string; readonly keep: 
   yield* fs.chmod(run.dir("secrets"), 0o700);
   const cli: T3Cli = {executable, baseDir: run.dir("t3"), env: t3Environment(run), cwd: run.dir("projects")};
   const t3Port = yield* freePort;
-  const server = yield* startProcess(executable, serveArguments(run, t3Port), {env: cli.env, cwd: cli.cwd});
-  yield* Effect.addFinalizer(() => stop(server));
+  // T3's processes live in a scope of their own, closed where the first one's was, so a restarted T3 keeps the teardown order
+  const t3Scope = yield* Scope.make();
+  yield* Effect.addFinalizer(() => Scope.close(t3Scope, Exit.void));
+  const startT3 = startProcess(executable, serveArguments(run, t3Port), {env: cli.env, cwd: cli.cwd}).pipe(Scope.provide(t3Scope));
+  const server = {current: yield* startT3};
+  yield* Effect.addFinalizer(() => stop(server.current));
   const t3Url = `http://127.0.0.1:${t3Port}`;
-  const reply = yield* waitForHttp(`${t3Url}/.well-known/t3/environment`, (status) => status === 200, 90_000, () => server.child.exitCode === null);
+  const t3Ready = waitForHttp(`${t3Url}/.well-known/t3/environment`, (status) => status === 200, 90_000, () => server.current.child.exitCode === null);
+  const reply = yield* t3Ready;
   const descriptor = yield* decodeDescriptor(reply.body);
   if (descriptor.orchestrationProtocolVersion !== orchestrationProtocol)
     return yield* failure(`T3 ${descriptor.serverVersion} serves orchestration protocol ${descriptor.orchestrationProtocolVersion}; Supervisor reads protocol ${orchestrationProtocol}`);
@@ -241,7 +255,13 @@ export const startStack = (options: {readonly cacheRoot: string; readonly keep: 
   yield* Effect.addFinalizer(() => stop(supervisor));
   const healthUrl = `http://127.0.0.1:${healthPort}/health`;
   yield* waitForHttp(healthUrl, (status) => status === 200, 90_000, () => supervisor.child.exitCode === null);
-  return {run, cli, t3: {url: t3Url, port: t3Port, version: descriptor.serverVersion, protocol: descriptor.orchestrationProtocolVersion, process: server},
+  return {run, cli, t3: {url: t3Url, port: t3Port, version: descriptor.serverVersion, protocol: descriptor.orchestrationProtocolVersion,
+    get process() {return server.current;},
+    stop: Effect.suspend(() => stop(server.current)),
+    start: Effect.gen(function* () {
+      server.current = yield* startT3;
+      yield* t3Ready;
+    })},
     supervisor: {url: `http://127.0.0.1:${uiPort}`, healthUrl, ports: [uiPort, healthPort], process: supervisor}, sessions, project} satisfies RunningStack;
 });
 
@@ -339,7 +359,8 @@ const ThreadShown = Schema.Struct({messages: Schema.Array(Schema.Struct({role: S
 
 /**
  * The early risky path against the running stack: the published descriptor, Supervisor's native reads, the authenticated
- * workflow MCP route and its refusals, a trivial no-contact conversation, scope refusals and a revoked credential.
+ * workflow MCP route and its refusals, a trivial no-contact conversation, recovery after a T3 restart, scope refusals and a
+ * revoked credential.
  * The no-contact conversation is created through T3's thread CLI and has no provider to run it.
  */
 export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
@@ -388,8 +409,31 @@ export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
   yield* check("trivial no-contact conversation stays untouched", untouched,
     `T3 messages [${shown.messages.map((message) => message.role).join(",")}], T3 threads ${threads.length}; Supervisor records ${JSON.stringify(records)}`);
 
-  // each refusal is T3's own 401 or 403 on the native shell route, between positive controls on the same route
+  /* A T3 restart: while T3 is down Supervisor reports itself degraded and disconnected; once the same T3 serves again it
+   * reconnects its watch with the sessions it holds and is ready again, and a conversation started after the restart reaches its
+   * catalog once, still without contact, as the watch resumes from its cursor.
+   */
   const readBearer = (yield* fs.readFileString(read.file)).trim();
+  const supervisorAlive = () => stack.supervisor.process.child.exitCode === null;
+  const healthWhere = (accept: (status: number, health: typeof Health.Type) => boolean, timeoutMs: number) => Effect.exit(waitForHttp(stack.supervisor.healthUrl,
+    (status, body) => Option.exists(Schema.decodeUnknownOption(Schema.fromJsonString(Health))(body), (health) => accept(status, health)), timeoutMs, supervisorAlive));
+  yield* stack.t3.stop;
+  const degraded = yield* healthWhere((status, health) => status === 503 && !health.t3Connected, 60_000);
+  yield* stack.t3.start;
+  const recovered = yield* healthWhere((status, health) => status === 200 && health.t3Connected, 60_000);
+  const resumed = yield* t3Command(stack.cli, ["thread", "start", "--json", "--provider", "codex", "--model", Option.getOrElse(model, () => "gpt-6.1-sol"),
+    "--title", "Conversation after the T3 restart", stack.project.path, "Please list the files in this folder."]).pipe(
+    Effect.flatMap((stdout) => Schema.decodeUnknownEffect(Schema.fromJsonString(ThreadStarted))(stdout.trim())));
+  const ingested = yield* healthWhere((status, health) => status === 200 && health.t3Connected && health.store.threads === 2, 75_000);
+  const afterRestart = yield* shellThreads(stack, readBearer);
+  const recordsAfterRestart = contactRecords(stack.run.dir("supervisor"));
+  const seen = (exit: Exit.Exit<unknown>) => Exit.isSuccess(exit) ? "yes" : "no";
+  yield* check("Supervisor recovers after a T3 restart", Exit.isSuccess(degraded) && Exit.isSuccess(recovered) && Exit.isSuccess(ingested) &&
+    afterRestart.length === 2 && afterRestart.includes(resumed.threadId) && Object.values(recordsAfterRestart).every((count) => count === 0),
+  `degraded while T3 was down: ${seen(degraded)}; ready again: ${seen(recovered)}; the later conversation ingested once: ${seen(ingested)}; ` +
+    `T3 threads ${afterRestart.length}; Supervisor records ${JSON.stringify(recordsAfterRestart)}`);
+
+  // each refusal is T3's own 401 or 403 on the native shell route, between positive controls on the same route
   const refusal = (name: string, bearer: string, detail: string) => Effect.gen(function* () {
     const control = yield* nativeAccess(stack.t3.url, readBearer);
     const access = yield* nativeAccess(stack.t3.url, bearer);
@@ -441,7 +485,8 @@ const main = Effect.gen(function* () {
   }));
   const results = [...outcome.results, yield* released(outcome.stack, keep)];
   for (const result of results) yield* Console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}: ${result.detail}`);
-  yield* Console.log(JSON.stringify({t3: t3Release.version, passed: results.every((result) => result.ok), results}));
+  // the outcome with its inputs: the T3 pin and this checkout's commit and whether its tree was clean
+  yield* Console.log(JSON.stringify({t3: t3Release.version, supervisor: yield* checkoutInputs, passed: results.every((result) => result.ok), results}));
   if (!results.every((result) => result.ok)) return yield* failure("the local stack check failed");
 });
 

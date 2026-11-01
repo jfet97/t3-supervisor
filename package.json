@@ -20,8 +20,8 @@
     "t3-supervisor": "dist/cli.js"
   },
   "scripts": {
-    "autofix": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.e2e.config.ts --fix",
-    "lint": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.e2e.config.ts",
+    "autofix": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.e2e.config.ts vitest.soak.config.ts --fix",
+    "lint": "eslint src test ui/src scripts vite.config.ts vitest.config.ts vitest.harness.config.ts vitest.e2e.config.ts vitest.soak.config.ts",
     "typecheck": "tsc --noEmit && tsc -p ui/tsconfig.json",
     "build": "tsc -p tsconfig.build.json && vite build",
     "prepack": "pnpm build",
@@ -30,6 +30,7 @@
     "test": "node --import tsx scripts/run-tests.ts --watchdog-phase=main:vitest.config.ts",
     "test:harness": "node --import tsx scripts/run-tests.ts --config vitest.harness.config.ts",
     "test:e2e": "node --import tsx scripts/run-tests.ts --config vitest.e2e.config.ts",
+    "test:soak": "node --import tsx scripts/run-tests.ts --config vitest.soak.config.ts",
     "start": "node dist/main.js",
     "dev:ui": "vite build --watch",
     "dev:fixture": "node --import tsx scripts/dev-fixture.ts",
