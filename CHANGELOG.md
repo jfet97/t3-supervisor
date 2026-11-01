@@ -1,5 +1,13 @@
 # T3 Supervisor
 
+## 0.0.24
+
+### Patch Changes
+
+- ee2683b: Fix Start supervision for No Project chats so the request pinned by Start can be interpreted and, when needed, receive a workflow proposal. A Stop still waits for an earlier admitted proposal from the same activation.
+
+  Make the `workflow_write` schema match each action's accepted arguments, so clients can reject invalid field combinations before sending them.
+
 ## 0.0.23
 
 ### Patch Changes
