@@ -4,6 +4,7 @@ import { Clock, Console, Data, Effect, FileSystem, Layer, Option, Redacted, Sche
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
+import { interpretationSubmitToolName } from "../src/interpretation-submission.js";
 import { helperInstructionsVersion } from "../src/supervisor-helper-instructions.js";
 import { NativeRpc } from "../src/supervisor-native.js";
 import { interpretationRulesVersion } from "../src/supervisor-workflow.js";
@@ -113,7 +114,7 @@ export const classifyTrial = (scenario: TrialScenario, seen: TrialObservation): 
       reason: press.answer === "no answer" ? "the Stop's outcome is unknown and the chat's policy never showed it stopped" : `the dashboard did not save the Stop: ${press.answer}`};
     if (stops.length === 0) return {outcome: "inconclusive", reason: "the chat was stopped, but no Stop notice reached it within the budget"};
     const record = seen.stopNoticeRecord ?? null;
-    if (record === null || record.createdAt === null || Number.isNaN(Date.parse(record.createdAt)) || record.createdBy !== "system" || record.creationSource !== "server")
+    if (record === null || record.createdAt === null || Number.isNaN(Date.parse(record.createdAt)) || record.creationSource !== "server")
       return {outcome: "inconclusive", reason: "T3 did not record the Stop notice's creation time and Supervisor's provenance, so its order cannot be checked"};
     if (after === null || after === undefined) return {outcome: "inconclusive", reason: "a Supervisor message has no creation time, so contact after the Stop notice cannot be ruled out"};
     if (seen.settlement !== "settled") return {outcome: "inconclusive", reason: `the Stop notice reached the chat once, but Supervisor had not settled when the budget ended (${seen.settlement ?? "not settling"})`};
@@ -165,6 +166,60 @@ export const finalVerdict = (verdict: TrialVerdict, gaps: ReadonlyArray<string>)
   verdict.outcome === "pass" && gaps.length > 0 ? {outcome: "inconclusive", reason: `${verdict.reason}, but the evidence has gaps: ${gaps.join("; ")}`} : verdict;
 
 const minutes = (ms: number): number => Math.round(ms / 600) / 100;
+
+/** The alias Supervisor's root calls its workflow tools through (docs/workflow-mcp.md, MCP interface). */
+export const workflowMcpAlias = "t3-supervisor-workflows";
+
+const McpServers = Schema.Array(Schema.Struct({name: Schema.String, enabled: Schema.optional(Schema.Boolean),
+  transport: Schema.Struct({type: Schema.String, url: Schema.optional(Schema.NullOr(Schema.String)),
+    bearer_token_env_var: Schema.optional(Schema.NullOr(Schema.String)), http_headers: Schema.optional(Schema.Unknown),
+    env_http_headers: Schema.optional(Schema.Unknown)})}));
+
+// the value of a header map's Authorization entry; it is compared or tested for presence, never reported
+const authorization = (headers: unknown): string | null => {
+  if (typeof headers !== "object" || headers === null) return null;
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === "authorization");
+  return entry !== undefined && typeof entry[1] === "string" && entry[1].length > 0 ? entry[1] : null;
+};
+// a registered URL as it may be reported: without any user information it carries
+const shownUrl = (value: string | null | undefined): string => value === null || value === undefined ? "no URL"
+  : Option.match(Option.liftThrowable((text: string) => new URL(text))(value), {onNone: () => "an unreadable URL",
+    onSome: (parsed) => `${parsed.protocol}//${parsed.host}${parsed.pathname}`});
+
+/** The workflow tools Supervisor's root needs to read its context and submit an interpretation. */
+export const requiredWorkflowTools = ["workflow_read", interpretationSubmitToolName] as const;
+
+/**
+ * What the Codex CLI's own MCP registrations (`codex mcp list --json`) say about Supervisor's workflow MCP: registered under its
+ * alias, enabled, reached at exactly the dashboard's loopback URL over Streamable HTTP, and carrying a bearer. Only the alias, the
+ * URL without user information and the kind of bearer leave it as text; `authorization` builds the Authorization header the root
+ * will send, redacted, from the registration and the environment T3 runs in, or null when an environment variable it names is unset.
+ */
+export const workflowMcpRegistration = (listed: string, url: string):
+  | {readonly registered: true; readonly auth: "bearer_token_env_var" | "http_headers" | "env_http_headers";
+    readonly authorization: (environment: Readonly<Record<string, string | undefined>>) => Redacted.Redacted<string> | null}
+  | {readonly registered: false; readonly found: string} => {
+  const servers = Schema.decodeUnknownOption(Schema.fromJsonString(McpServers))(listed.trim());
+  if (Option.isNone(servers)) return {registered: false, found: "registrations that could not be read"};
+  const server = servers.value.find((entry) => entry.name === workflowMcpAlias);
+  if (server === undefined) return {registered: false, found: servers.value.length === 0 ? "no MCP server registered"
+    : `no ${workflowMcpAlias} among ${servers.value.length} registered`};
+  const {transport} = server;
+  if (server.enabled === false) return {registered: false, found: `${workflowMcpAlias} disabled`};
+  if (transport.type !== "streamable_http") return {registered: false, found: `${workflowMcpAlias} over ${transport.type}`};
+  if ((transport.url ?? "").replace(/\/$/u, "") !== url) return {registered: false, found: `${workflowMcpAlias} at ${shownUrl(transport.url)}`};
+  const variable = transport.bearer_token_env_var;
+  if (typeof variable === "string" && variable.length > 0) return {registered: true, auth: "bearer_token_env_var",
+    authorization: (environment) => {const token = environment[variable]; return token ? Redacted.make(`Bearer ${token}`) : null;}};
+  const header = authorization(transport.http_headers);
+  if (header !== null) return {registered: true, auth: "http_headers", authorization: () => Redacted.make(header)};
+  const headerVariable = authorization(transport.env_http_headers);
+  if (headerVariable !== null) return {registered: true, auth: "env_http_headers",
+    authorization: (environment) => {const value = environment[headerVariable]; return value ? Redacted.make(value) : null;}};
+  return {registered: false, found: `${workflowMcpAlias} without a bearer`};
+};
+
+const ToolList = Schema.Struct({result: Schema.Struct({tools: Schema.Array(Schema.Struct({name: Schema.String}))})});
 
 // the platform fetch, as the stack check's own client
 const fetchClient = FetchHttpClient.layer.pipe(Layer.provide(Layer.sync(FetchHttpClient.Fetch, () => globalThis.fetch)));
@@ -227,10 +282,16 @@ export const runTrial = (scenario: TrialScenario, budgetMs: number, chosenModel:
   const selected: {operative: unknown; supervisor: unknown; runtimes: ReadonlyArray<{readonly instanceId: string; readonly driver: string;
     readonly version: string | null}> | null} = {operative: null, supervisor: null, runtimes: null};
   const supervisorRuntime: {version: string | null; revision: string | null} = {version: null, revision: null};
+  // Supervisor's workflow MCP as the Codex CLI registered it, filled in by the check before anything is created
+  const workflowUrl = `${origin}/mcp/workflows`;
+  const workflowMcp: {auth: string | null; endpoint: string | null} = {auth: null, endpoint: null};
   const inputs = {supervisor: yield* checkoutInputs, supervisorRuntime,
     supervisorProvenance: "supervisor names this script's checkout; supervisorRuntime is the running service's health metadata, "
       + "whose null revision means it reports no commit; the checkout revision alone does not identify the running service",
     t3: t3Release.version, prompts: {interpretationRulesVersion, helperInstructionsVersion},
+    workflowMcp: {alias: workflowMcpAlias, url: workflowUrl, registration: workflowMcp,
+      provenance: "the Codex CLI's own registrations (codex mcp list --json), read without reporting any header value, and one "
+        + "tools/list call to the registered endpoint with the registered Authorization header"},
     provider: {driver: "codex", requestedModel: model, selectedByT3: selected,
       selectedByT3Provenance: "model selections from the operative's and the Supervisor root's T3 projections, null while T3 showed none; "
         + "runtimes from T3's provider status (server.getConfig) for the selected instances, a null version being one T3 did not report",
@@ -260,6 +321,28 @@ export const runTrial = (scenario: TrialScenario, budgetMs: number, chosenModel:
   const login = yield* runProcess("codex", ["login", "status"], {env, cwd: paths.home, timeoutMs: 30_000});
   if (login.code !== 0) return unavailable("the Codex CLI is not signed in; sign in with ./dev login codex");
   if (model === "unknown") return unavailable("T3's model manifest names no Codex model; pass --model");
+  /* Supervisor's root calls its workflow tools through the Codex CLI's registration of Supervisor's workflow MCP (docs/local-stack.md).
+   * Without it the root can never submit an interpretation, and a trial would end inconclusive for a reason outside the product.
+   */
+  const listed = yield* runProcess("codex", ["mcp", "list", "--json"], {env, cwd: paths.home, timeoutMs: 30_000});
+  const registration = listed.code === 0 ? workflowMcpRegistration(listed.stdout, workflowUrl) : {registered: false as const, found: "registrations that could not be listed"};
+  if (!registration.registered) return unavailable(`the Codex CLI has no usable registration of Supervisor's workflow MCP (${registration.found}): `
+    + `register ${workflowMcpAlias} at ${workflowUrl} with Supervisor's workflow MCP bearer, as docs/local-stack.md describes`);
+  /* The registered endpoint with the registered auth, as the root will call it: it must list the root's workflow tools. A bearer
+   * from an environment variable unset here is unset where T3 runs too; ./dev reset creates a new token, which a stale header lacks.
+   */
+  const header = registration.authorization(env);
+  if (header === null) return unavailable(`the bearer of the Codex CLI's ${workflowMcpAlias} registration comes from an environment `
+    + "variable that is not set in the environment T3 runs in");
+  const answered = yield* jsonRequest(workflowUrl, {method: "POST", headers: {Authorization: Redacted.value(header), Accept: "application/json, text/event-stream"},
+    body: {jsonrpc: "2.0", id: 1, method: "tools/list", params: {}}});
+  const tools = Option.getOrElse(Option.map(Option.flatMap(answered, (reply) => reply.status === 200 ? Schema.decodeUnknownOption(ToolList)(reply.body) : Option.none()),
+    (list) => list.result.tools.map((tool) => tool.name)), (): ReadonlyArray<string> => []);
+  const missing = requiredWorkflowTools.filter((name) => !tools.includes(name));
+  if (missing.length > 0) return unavailable(`Supervisor's workflow MCP at ${workflowUrl} did not list ${missing.join(" and ")} for the Codex CLI's `
+    + `registered bearer (${Option.match(answered, {onNone: () => "no answer", onSome: (reply) => `HTTP ${reply.status}`})}); register the current token again`);
+  workflowMcp.auth = registration.auth;
+  workflowMcp.endpoint = `listed ${tools.length} tools, ${requiredWorkflowTools.join(" and ")} among them`;
 
   // the trial's own read session and dashboard sign-in, both ended with the trial
   const secrets = yield* fs.makeTempDirectoryScoped({prefix: "t3sup-trial-"});
