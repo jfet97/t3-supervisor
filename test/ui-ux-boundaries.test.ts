@@ -10,7 +10,6 @@ import {branchLabel, CheckoutChooser, orphanedConversations} from "../ui/src/che
 import {HelpDisclosure, EntityDetails} from "../ui/src/disclosure.js";
 import {DefinitionsContent, ProjectBackLink} from "../ui/src/project-definitions.js";
 import {configurationDrafts, configurationScope} from "../ui/src/project-configuration-editor.js";
-import {GlobalSupervisionStatus, ProjectSupervisionStatus} from "../ui/src/supervision-status.js";
 import {conversationLabel} from "../ui/src/conversation-status.js";
 import {makeDefinitionFixture} from "./project-definitions-fixture.js";
 import {FixtureModel, fixtureIds} from "./ui-fixture/scenarios.js";
@@ -78,12 +77,8 @@ it("help and entity disclosures preserve native semantics with a compact explici
   }
 });
 
-it("global, project and conversation labels keep independent truth and explicit disable semantics", () => {
-  const global = renderToStaticMarkup(createElement(GlobalSupervisionStatus, {enabled: true}));
-  const project = renderToStaticMarkup(createElement(ProjectSupervisionStatus, {enabled: false, effectiveEnabled: false, globallyEnabled: true, available: true}));
-  assert.match(global, /Global supervision: On/); assert.match(project, /Project supervision: Off/);
-  const blocked = renderToStaticMarkup(createElement(ProjectSupervisionStatus, {enabled: true, effectiveEnabled: false, globallyEnabled: false, available: true}));
-  assert.match(blocked, /global supervision is off/);
+// the global and project switch labels are asserted on the real dashboard by test/e2e/supervision-switches.test.ts
+it("conversation labels name engagement and keep explicit stop and disable semantics", () => {
   assert.match(conversationLabel({mode: "engaged", availability: "current", consideredAt: null})!, /Engaged/);
   assert.match(conversationLabel({mode: "following", availability: "stopped", consideredAt: null})!, /disabled/);
   assert.match(conversationLabel({mode: "following", availability: "stopped", consideredAt: null}, true, true)!, /stopped/);

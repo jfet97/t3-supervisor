@@ -115,9 +115,9 @@ it.effect("a failed snapshot keeps the latest successful read with the drafts-ke
   registry.dispose();
 }), { timeout: 10_000 });
 
-it("Sign out is disabled while a draft or pending change exists", { timeout: 10_000 }, () => {
+// that a draft or pending change disables Sign out is asserted on the real dashboard by test/e2e/session-ends-during-save.test.ts
+it("a blocked Sign out is described by the pending changes notice, and an open one carries no blocking description", { timeout: 10_000 }, () => {
   const blocked = renderToStaticMarkup(createElement(shell.SignOutButton, { blocked: true, onSignOut: () => undefined }));
-  assert.match(blocked, /disabled=""/u);
   assert.match(blocked, /aria-describedby="pending-changes"/u);
   assert.match(blocked, /title="Save drafts and resolve pending changes before signing out."/u);
   const open = renderToStaticMarkup(createElement(shell.SignOutButton, { blocked: false, onSignOut: () => undefined }));
