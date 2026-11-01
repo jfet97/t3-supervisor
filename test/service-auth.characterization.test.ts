@@ -17,9 +17,10 @@ import { guidanceUi } from "./support/service-auth-harness.js";
 import { childFailure, privately } from "./support/private-assert.js";
 import type { SupervisorConfig } from "../src/types.js";
 
-// the Effect service auth on real files: CT-AUTH-03 sets the service clock and runs under TestClock (it.effect); the
-// others run live (it.live) for the real auth files, the `auth forge` child processes and the dashboard's loopback HTTP
-// server. the auth database is observed and edited through node:sqlite, independent of the service's own client
+/* The Effect service auth on real files, live (it.live) for the real auth files, the `auth forge` child processes and the
+ * dashboard's loopback HTTP server; the clock rollback and grant expiry of CT-AUTH-03 run in test/service-auth-layer.test.ts.
+ * the auth database is observed and edited through node:sqlite, independent of the service's own client.
+ */
 
 const temporary = temporaryDirectory("t3-service-auth-characterization-");
 
@@ -113,32 +114,6 @@ it.live("CT-AUTH-02: an access path that is a symlink to a directory fails close
   assert.equal((yield* fs.lstat(accessPath(target))).mode & 0o777, 0o750);
   assert.deepEqual((yield* fs.readDirectory(accessPath(target))).sort(), targetListing);
   assert.ok(Buffer.from(yield* fs.readFile(databasePath(target))).equals(targetBytes));
-}).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
-
-it.effect("CT-AUTH-03: sessions tolerate a 60 s clock rollback and a grant is rejected exactly at its expiry", () => Effect.gen(function* () {
-  const directory = yield* temporary;
-  const issuedAt = 1_000_000;
-  yield* TestClock.setTime(issuedAt);
-  const auth = yield* openServiceAuth(directory);
-  const grant = yield* forge(directory);
-  const session = yield* auth.login(grant.token);
-  assert.ok(session);
-  for (const [offset, accepted] of [[0, true], [-60_000, true], [-60_001, false], [-59_999, true]] as const) {
-    yield* TestClock.setTime(issuedAt + offset);
-    assert.equal(yield* auth.authenticated(session), accepted, `session at issued_at${offset}`);
-  }
-
-  yield* TestClock.setTime(issuedAt);
-  const expiring = yield* forge(directory);
-  const lastMoment = yield* forge(directory);
-  assert.equal(expiring.expiresAt, issuedAt + 5 * 60 * 1_000);
-  yield* TestClock.setTime(expiring.expiresAt);
-  assert.equal(yield* auth.login(expiring.token), null);
-  // the rejected grant is not consumed; it stays until a later forge prunes it
-  assert.deepEqual(rows(directory, "SELECT token_hash FROM dashboard_login_grants ORDER BY token_hash"),
-    [sha256(expiring.token), sha256(lastMoment.token)].sort().map((token_hash) => ({ token_hash })));
-  yield* TestClock.setTime(lastMoment.expiresAt - 1);
-  assert.equal(typeof (yield* auth.login(lastMoment.token)), "string");
 }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });
 
 it.live("CT-AUTH-04: service open and forge failures never carry token, session or hash values", () => Effect.gen(function* () {

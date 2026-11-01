@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { inspect } from "node:util";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
@@ -9,16 +11,30 @@ import { forgeDashboardToken, ServiceAuth } from "../src/service-auth.js";
 import { openDescriptors } from "./support/g11-http.js";
 import { privately } from "./support/private-assert.js";
 
-// target regressions of the Effect service auth: the wall clock comes from Clock, the layer's scope bounds its one
-// access client, and tokens leave the service only as redacted values
+/* Target regressions of the Effect service auth: the wall clock comes from Clock (the TestClock case owns the clock rollback
+ * and grant expiry of CT-AUTH-03), the layer's scope bounds its one access client, and tokens leave the service only as
+ * redacted values.
+ */
 
 const temporaryDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   return yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-service-auth-" });
 });
 
+const sha256 = (value: string): string => createHash("sha256").update(value, "utf8").digest("hex");
+
+// the stored grant hashes, read through node:sqlite beside the service's own client
+const grantHashes = (directory: string): Array<string> => {
+  const database = new DatabaseSync(join(directory, "access", "login.sqlite3"));
+  try {
+    return database.prepare("SELECT token_hash FROM dashboard_login_grants ORDER BY token_hash").all().map((row) => String(row.token_hash));
+  } finally {
+    database.close();
+  }
+};
+
 describe("ServiceAuth", () => {
-  it.effect("TestClock drives the service: a session is accepted 60000 ms before its issue time, rejected 60001 ms before it, and a grant is rejected exactly at its expiry", () =>
+  it.effect("TestClock drives the service: a session is accepted 60000 ms before its issue time, rejected 60001 ms before it, and a grant is rejected exactly at its expiry without being consumed (CT-AUTH-03)", () =>
     Effect.gen(function* () {
       const directory = yield* temporaryDirectory;
       const issuedAt = 1_000_000;
@@ -37,14 +53,18 @@ describe("ServiceAuth", () => {
         const expiring = yield* forgeDashboardToken(directory);
         yield* TestClock.setTime(expiring.expiresAt);
         const atExpiry = yield* auth.login(Redacted.value(expiring.token));
+        // the rejected grant is not consumed: its row stays until a later forge prunes it, so it still logs in a moment earlier
+        const stored = grantHashes(directory);
+        const keptAfterRejection = stored.length === 1 && stored[0] === sha256(Redacted.value(expiring.token));
         yield* TestClock.setTime(expiring.expiresAt - 1);
         const beforeExpiry = yield* auth.login(Redacted.value(expiring.token));
-        return { grantExpiresAt: grant.expiresAt, window, atExpiry, beforeExpiry: beforeExpiry !== null };
+        return { grantExpiresAt: grant.expiresAt, window, atExpiry, keptAfterRejection, beforeExpiry: beforeExpiry !== null };
       }).pipe(Effect.provide(ServiceAuth.layer(directory)));
       assert.deepEqual(observed, {
         grantExpiresAt: issuedAt + 5 * 60 * 1_000,
         window: [[0, true], [-60_000, true], [-60_001, false], [30 * 24 * 60 * 60 * 1_000 - 1, true], [30 * 24 * 60 * 60 * 1_000, false]],
         atExpiry: null,
+        keptAfterRejection: true,
         beforeExpiry: true,
       });
     }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 10_000 });

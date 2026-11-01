@@ -103,6 +103,7 @@ export const envelopePeer = (
 
 export interface HungPeer {
   readonly baseUrl: string;
+  readonly connections: () => number;
   // the upgrade request arrived and is never answered
   readonly accepted: Effect.Effect<void>;
   // the client ended or closed that connection
@@ -115,9 +116,11 @@ export const hungPeer: Effect.Effect<HungPeer, never, Scope.Scope> = Effect.gen(
   const accepted = Deferred.makeUnsafe<void>();
   const gone = Deferred.makeUnsafe<void>();
   const held = new Set<Duplex>();
+  let connections = 0;
   let received = "";
   const http = createServer();
   http.on("upgrade", (_request, socket: Duplex) => {
+    connections += 1;
     held.add(socket);
     socket.on("data", (data: Buffer) => {received += data.toString("latin1");});
     socket.on("error", () => undefined);
@@ -132,7 +135,7 @@ export const hungPeer: Effect.Effect<HungPeer, never, Scope.Scope> = Effect.gen(
     for (const socket of held) socket.destroy();
     return closeServer(http);
   }));
-  return { baseUrl, accepted: Deferred.await(accepted), gone: Deferred.await(gone), received: () => received };
+  return { baseUrl, connections: () => connections, accepted: Deferred.await(accepted), gone: Deferred.await(gone), received: () => received };
 });
 
 // completes the handshake by hand so a test chooses every byte the client reads

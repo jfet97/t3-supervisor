@@ -42,22 +42,33 @@ const writeController = (tools: Record<string, (args: unknown, cancel?: Workflow
   tools as unknown as WorkflowWriteController["Service"];
 
 describe("workflow MCP route over the controller services", () => {
-  it.effect("MCP-SVC-01: the 9 s deadline completes the call's soft cancel and the controller's own answer within the grace is the result", () => Effect.gen(function* () {
+  it.effect("MCP-SVC-01: the 9 s deadline completes the call's soft cancel and the controller's own answer within the grace is the result, an MCP error when its status is one (MCP-ROUTE-03, CT-MCP-03's deadline case)", () => Effect.gen(function* () {
     const entered = yield* Deferred.make<WorkflowCallCancel>();
+    const readEntered = yield* Deferred.make<WorkflowCallCancel>();
     const pending = {status: "pending", operationId: "op-svc-1", reason: "native_evidence_wait_interrupted", retryable: true};
+    const unavailable = {status: "unavailable", reason: "deadline"};
     const write = (_args: unknown, cancel?: WorkflowCallCancel) => Effect.andThen(Deferred.succeed(entered, cancel!),
       Effect.as(Deferred.await(cancel!), pending));
-    const mcp = yield* WorkflowMcp.make(writeController({write}));
+    // a read beside the write, started at the same instant, that answers an error status once its soft cancel completes
+    const readTool = (_args: unknown, cancel?: WorkflowCallCancel) => Effect.andThen(Deferred.succeed(readEntered, cancel!),
+      Effect.as(Deferred.await(cancel!), unavailable));
+    const mcp = yield* WorkflowMcp.make(writeController({write, readTool}));
     const answer = yield* Effect.forkChild(respond(mcp, post(toolCall("workflow_write", {input: {operationId: "op-svc-1"}}))));
+    const readAnswer = yield* Effect.forkChild(respond(mcp, post(toolCall("workflow_read", {}))));
     const cancel = yield* Deferred.await(entered);
+    const readCancel = yield* Deferred.await(readEntered);
     yield* TestClock.adjust("8999 millis");
-    assert.equal(yield* Deferred.isDone(cancel), false);
+    assert.deepEqual([yield* Deferred.isDone(cancel), yield* Deferred.isDone(readCancel)], [false, false]);
     yield* TestClock.adjust("1 millis");
-    assert.equal(yield* Deferred.isDone(cancel), true);
+    assert.deepEqual([yield* Deferred.isDone(cancel), yield* Deferred.isDone(readCancel)], [true, true]);
     const response = yield* Fiber.join(answer);
     assert.equal(response.status, 200);
     assert.equal(response.body.result?.isError, undefined);
     assert.deepEqual(callResult(response.body), pending);
+    const read = yield* Fiber.join(readAnswer);
+    assert.equal(read.status, 200);
+    assert.equal(read.body.result?.isError, true);
+    assert.deepEqual(callResult(read.body), unavailable);
   }), {timeout: 10_000});
 
   it.effect("MCP-SVC-02: a call that ignores its soft cancel answers outcome-unknown with its operation id after the grace, stays running, and close() interrupts it", () => Effect.gen(function* () {

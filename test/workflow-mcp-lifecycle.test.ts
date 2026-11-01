@@ -51,7 +51,7 @@ type CallBody = {result?: {isError?: boolean; content?: Array<{text?: string}>};
 const callResult = (body: CallBody): unknown => JSON.parse(body.result?.content?.[0]?.text ?? "null");
 
 // a write controller that ignores its signal until the test settles it, and replays its receipt for a repeated operation id
-const noncooperative = () => {
+const noncooperative = Effect.gen(function* () {
   const receipts = new Map<string, unknown>();
   const invocations: Array<{signal: AbortSignal; settle: (value: unknown) => void}> = [];
   let entered!: () => void;
@@ -65,8 +65,13 @@ const noncooperative = () => {
       entered();
     });
   };
+  // the scope also completes unexpected duplicate calls when an assertion fails
+  yield* Effect.addFinalizer(() => Effect.sync(() => {
+    entered();
+    for (const invocation of invocations) invocation.settle({status: "unavailable", reason: "test_finished"});
+  }));
   return {controller: promiseWorkflowController({write}), invocations, entry};
-};
+});
 
 describe("workflow MCP request and call ownership", () => {
   it.live("MCP-LIFE-01: a tools/call body held across close() starts no controller call, and the request ends with its body read cancelled", () => Effect.gen(function* () {
@@ -121,19 +126,22 @@ describe("workflow MCP request and call ownership", () => {
     assert.deepEqual(yield* Effect.promise(() => later.json()), {error: "workflow_mcp_closed"});
   }), { timeout: 10_000 });
 
-  it.live("MCP-LIFE-04: a request arriving after close() is answered 503 without its body being read or a controller call", () => Effect.gen(function* () {
+  it.live("MCP-LIFE-04: a request arriving after close() is answered 503 without its body being read or a controller call (CT-MCP-04)", () => Effect.gen(function* () {
     let calls = 0;
     const mcp = yield* WorkflowMcp.make(promiseWorkflowController({write: async () => {calls++;return {status: "created"};}}));
     yield* mcp.close;
+    // the endpoint is closed before the request's body or method is read, so every request gets the same json answer
     const body = heldBody();
+    yield* Effect.addFinalizer(() => Effect.sync(() => body.finish(writeCall({input: {operationId: "op-closed"}}))));
     const response = yield* respond(mcp, body.request);
     assert.equal(response.status, 503);
+    assert.match(response.headers.get("content-type") ?? "", /^application\/json/u);
     assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("mcp-session-id"), null);
     assert.deepEqual(yield* Effect.promise(() => response.json()), {error: "workflow_mcp_closed"});
     assert.equal(body.request.bodyUsed, false);
     assert.equal(body.request.body?.locked, false);
     assert.equal(calls, 0);
-    body.finish(writeCall({input: {operationId: "op-closed"}}));
   }), { timeout: 10_000 });
 
   it.live("MCP-LIFE-05: interrupting the caller (a client disconnect) ends a request whose body is still arriving and cancels its body read", () => Effect.gen(function* () {
@@ -152,7 +160,7 @@ describe("workflow MCP request and call ownership", () => {
   }), { timeout: 10_000 });
 
   it.effect("MCP-LIFE-06: a controller that ignores its deadline abort gets an outcome-unknown answer with its operation id, and its later receipt answers the retry", () => Effect.gen(function* () {
-    const tool = noncooperative();
+    const tool = yield* noncooperative;
     const mcp = yield* WorkflowMcp.make(tool.controller);
     const args = {supervisorThreadId: "sx", bindingGeneration: 1, input: {operationId: "op-write-1"}};
     const answer = yield* Effect.forkChild(respond(mcp, post(writeCall(args))));
@@ -178,7 +186,7 @@ describe("workflow MCP request and call ownership", () => {
   }), { timeout: 10_000 });
 
   it.effect("MCP-LIFE-07: close() ends the request of a controller that ignores its abort, stops owning the call and answers nothing", () => Effect.gen(function* () {
-    const tool = noncooperative();
+    const tool = yield* noncooperative;
     const mcp = yield* WorkflowMcp.make(tool.controller);
     const answer = yield* Effect.forkChild(respond(mcp, post(writeCall({input: {operationId: "op-write-2"}}))));
     yield* Effect.promise(() => tool.entry);

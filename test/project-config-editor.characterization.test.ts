@@ -83,26 +83,3 @@ it.effect("CT-EDITOR-01: two concurrent saves of one checkout with the same revi
   assert.equal(f.writes.length, 1);
   assert.match(f.trees.get(f.root)?.get(".t3-supervisor/project.yaml") ?? "", /First draft\./u);
 }), {timeout: 10_000});
-
-it.effect("CT-EDITOR-02: a save cancelled while queued behind another save waits its turn, reports the expired save and never writes", () => Effect.gen(function* () {
-  const {f, definitions, editor, events, loads, firstWrite, release} = yield* queuedEditor;
-  const revision = (yield* definitions.load("project")).revision!;
-  const first = yield* Effect.forkChild(editor.save(input(revision, "First draft.")));
-  yield* within(firstWrite, 5_000, "first write");
-  // the caller's cancel trigger is the editor's soft cancellation: a cancelled save reports the expired save in its turn
-  const cancel = yield* Deferred.make<void>();
-  let secondSettled = false;
-  const second = yield* Effect.forkChild(editor.save(input(revision, "Cancelled draft."), cancel).pipe(Effect.ensuring(Effect.sync(() => {secondSettled = true;}))));
-  yield* within(loads(3), 5_000, "second initial load");
-  yield* Effect.yieldNow;
-  yield* Deferred.succeed(cancel, undefined);
-  yield* Effect.yieldNow;
-  assert.equal(secondSettled, false, "the cancelled save still waits for the save ahead of it");
-  yield* release;
-  const [saved, expired] = yield* within(Effect.all([Fiber.join(first), Fiber.join(second)]), 5_000, "both saves");
-  assert.equal(saved.status, "saved", saved.message);
-  assert.deepEqual(expired, {status: "unavailable", message: "The save expired before writing. Refresh the project configuration.", definitions: null});
-  assert.deepEqual(events, ["load", "load", "write:1:start", "load", "write:1:end", "load"], "the cancelled save loaded nothing more and wrote nothing");
-  assert.equal(f.writes.length, 1);
-  assert.doesNotMatch(f.trees.get(f.root)?.get(".t3-supervisor/project.yaml") ?? "", /Cancelled draft/u);
-}), {timeout: 10_000});

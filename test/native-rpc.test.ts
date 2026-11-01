@@ -82,7 +82,7 @@ describe("NativeRpc", () => {
     assert.deepEqual(cancelled.texts(), [requestText]);
   }).pipe(provided), { timeout: 10_000 });
 
-  it.effect("NRPC-03: on the effect clock an unanswered sent call is uncertain at exactly 20 s and a hung handshake rejected at exactly 5 s", () => Effect.gen(function* () {
+  it.effect("NRPC-03: on the effect clock an unanswered sent call is uncertain at exactly 20 s and a hung handshake rejected at exactly 5 s (CT-NATIVE-01)", () => Effect.gen(function* () {
     const silent = yield* envelopePeer();
     const late = yield* Effect.forkChild(Effect.flip(dispatch(silent.baseUrl)));
     yield* silent.frame(isRequest);
@@ -93,7 +93,9 @@ describe("NativeRpc", () => {
     assert.deepEqual(classification(timedOut), ["uncertain", false, false, false]);
     assert.equal(timedOut.message, "T3 Supervisor access is unavailable.");
     yield* silent.closed;
+    // the one request frame on the one connection: nothing reconnects or sends it again
     assert.deepEqual(silent.texts(), [requestText]);
+    assert.equal(silent.upgrades.length, 1);
 
     const hung = yield* hungPeer;
     const early = yield* Effect.forkChild(Effect.flip(dispatch(hung.baseUrl)));
@@ -104,6 +106,7 @@ describe("NativeRpc", () => {
     assert.deepEqual(classification(yield* Fiber.join(early)), ["rejected", false, false, false]);
     yield* hung.gone;
     assert.equal(hung.received(), "");
+    assert.equal(hung.connections(), 1, "a rejected handshake is never retried");
   }).pipe(provided), { timeout: 10_000 });
 
   it.live("NRPC-04: the operate client is a separate service over the same envelope and its own credential", () => Effect.gen(function* () {

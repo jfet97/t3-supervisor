@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { vi } from "vitest";
-import { Clock, Context, Data, Deferred, Effect, Exit, FileSystem, Layer, Scope } from "effect";
+import { Clock, Context, Deferred, Effect, Exit, FileSystem, Layer, Scope } from "effect";
 import { HttpApi } from "effect/http-api";
 import type { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
@@ -13,7 +13,6 @@ import { GuidanceDb } from "../src/db.js";
 import { ListenerUnavailable } from "../src/errors.js";
 import { GuidanceRuntime } from "../src/guidance.js";
 import { SupervisorApi } from "../src/guidance-contract.js";
-import { guidanceTransaction } from "../src/guidance-sql.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import type { ProjectConfigEditorService } from "../src/project-config-editor.js";
 import type { ProjectInfo } from "../src/types.js";
@@ -255,42 +254,6 @@ it.live("CT-GDB-02: opening a pre-migration database adds the episode and notice
   yield* withStore(directory, (_again, sql) => Effect.gen(function* () {
     assert.equal((yield* rows(sql, "PRAGMA table_info(notices)")).length, 12);
     assert.equal((yield* rows(sql, "PRAGMA table_info(episodes)")).length, 5);
-  }));
-}), {timeout: 10_000});
-
-// the nested block's own failure
-class NestedFailure extends Data.TaggedError("NestedFailure") {}
-
-// whether the client's connection holds an open transaction: a top-level BEGIN fails inside one; a probe that began rolls back
-const inTransaction = (sql: SqlClient.SqlClient) => Effect.flatMap(Effect.exit(sql.unsafe("BEGIN")), (exit) =>
-  Exit.isSuccess(exit) ? Effect.as(execute(sql, "ROLLBACK"), false) : Effect.succeed(true));
-
-// target change (S6d contract, transactions: a method called inside a caller's withTransaction joins it as a SAVEPOINT,
-// CC-NESTTX): the baseline store's transaction() refused a nested call at its BEGIN, so the nested block never ran. A nested
-// guidance transaction now runs as a savepoint of the outer one; when it fails, the outer work is still rolled back, nothing
-// is committed, no transaction stays open and the store stays usable. The name keeps the baseline's characterization
-it.live("CT-GDB-06: a nested transaction() joins the caller's transaction as a savepoint, and its failure rolls back the outer work and leaves the store usable", () => Effect.gen(function* () {
-  const directory = yield* temporaryDirectory("c3b-gdb-nested-");
-  yield* withStore(directory, (_store, sql) => Effect.gen(function* () {
-    const transaction = guidanceTransaction(sql);
-    let innerRan = false;
-    const failure = yield* Effect.flip(transaction(Effect.gen(function* () {
-      yield* execute(sql, "INSERT INTO meta VALUES('c3b-outer','1')");
-      return yield* transaction(Effect.gen(function* () {
-        innerRan = true;
-        yield* execute(sql, "INSERT INTO meta VALUES('c3b-inner','1')");
-        return yield* new NestedFailure();
-      }));
-    })));
-    assert.ok(failure instanceof NestedFailure, "the nested block's failure fails the outer transaction");
-    assert.equal(innerRan, true);
-    assert.equal(yield* inTransaction(sql), false);
-    yield* withClient(directory, (observer) => Effect.gen(function* () {
-      assert.equal((yield* row(observer, "SELECT COUNT(*) AS count FROM meta WHERE key LIKE 'c3b-%'"))?.count, 0);
-    }));
-    // the store stays usable for the next top-level transaction
-    assert.equal(yield* transaction(Effect.as(execute(sql, "INSERT INTO meta VALUES('c3b-after','1')"), "committed")), "committed");
-    assert.equal((yield* row(sql, "SELECT value FROM meta WHERE key='c3b-after'"))?.value, "1");
   }));
 }), {timeout: 10_000});
 
