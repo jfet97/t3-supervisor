@@ -144,6 +144,8 @@ it.effect("the project folder and Git-reported trunk checkout are distinct, dedu
   assert.match(chosen, /<details class="disclosure disclosure-entity compact"><summary data-route-return="checkout">.*Change working folder/);
 }));
 
+// a conversation's Back to conversations link and the list it returns to are clicked on the real dashboard by
+// test/e2e/draft-navigation.test.ts
 it("every workspace level renders one explicit parent link while retaining conversation and checkout context", () => {
   const list = {page: "projects" as const, projectId: "p", main: null, section: "conversations" as const, q: "needle", listPage: 3, showOrphaned: true};
   for (const section of ["conversations", "definitions", "settings"] as const) {
@@ -152,7 +154,6 @@ it("every workspace level renders one explicit parent link while retaining conve
     assert.match(html, />Back to Projects</);
   }
   const chat = renderToStaticMarkup(createElement(ProjectBackLink, {route: {...list, main: "chat", section: "task"}, listRoute: list, navigate: () => {}}));
-  assert.match(chat, /Back to conversations/);
   assert.match(chat, /orphaned=show&amp;q=needle&amp;page=3/);
   const editor = renderToStaticMarkup(createElement(ProjectBackLink, {route: {...list, section: "editor", checkout: "/folder"}, listRoute: list, navigate: () => {}}));
   assert.match(editor, /Back to Definitions/);

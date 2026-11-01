@@ -1,23 +1,26 @@
 import { Effect, Redacted, type Scope } from "effect";
-import type { APIResponse, BrowserContext, Page, Request, Route } from "playwright-core";
+import type { APIResponse, BrowserContext, Dialog, Page, Request, Route } from "playwright-core";
 
 /*
   The dashboard's page primitives for the browser journeys (docs/testing.md): what one person sees and does on a page, found
   by role and accessible name. Scenarios and their oracles stay in the specs. Waiting is Playwright's own: a click waits until
-  its control is actionable, `waitFor` until its element is visible. Network faults act only between this browser and the
-  dashboard, on the chat supervision change route or a held Supervisor settings save. Every call into the library runs as an
-  effect of the journey's fiber, and the request listeners, a held save and another tab belong to the caller's scope like the
-  adapter's (test/support/browser.ts).
+  its control is actionable, `waitFor` until its element is visible, `waitForURL` until the address bar shows a route.
+  Network faults act only between this browser and the dashboard, on one change route (the chat supervision change by
+  default, or the chat settings save) or a held Supervisor settings save. Back, Forward and an address typed into the bar are
+  the browser's own history traversals; the page's confirm dialogs are recorded and answered as the journey chose. Every call
+  into the library runs as an effect of the journey's fiber, and the request and dialog listeners, a held save and another
+  tab belong to the caller's scope like the adapter's (test/support/browser.ts).
 */
 
 export const chatSupervisionPath = "/api/guidance/project-supervisor/chat-supervision";
 export const supervisionControlPath = "/api/guidance/supervision-control";
 export const projectSupervisorPath = "/api/guidance/project-supervisor";
+export const threadPolicyPath = "/api/guidance/thread-policy";
 
 /** The body of one chat supervision change the page sent, as the request carried it. */
 export type ChatSupervisionChange = {readonly enabled: boolean};
 
-/** How the network treats the page's next chat supervision changes: lost before the server, answered and then lost, or sent
+/** How the network treats the page's next changes on one route: lost before the server, answered and then lost, or sent
  * with a CSRF token the dashboard's process never issued. */
 export type ChangeFault = "lost-before-server" | "reply-lost-after-apply" | "unissued-csrf-token";
 
@@ -38,6 +41,12 @@ export type SwitchChange = {readonly projectId: string | null; readonly enabled:
  * limit. */
 export type SettingsSave = {readonly expectedGeneration: number | null; readonly maxHelpersPerRoot: number | null};
 
+/** The body of one chat settings save the page sent: the policy generation it was edited against and the excluded chats. */
+export type PolicySave = {readonly generation: number | null; readonly excludedThreadIds: ReadonlyArray<string>};
+
+/** A dialog the page opened: its kind (`confirm`, `beforeunload`, ...) and its message. */
+export type ShownDialog = {readonly type: string; readonly message: string};
+
 /** A change the page sent that waits before the dashboard until `forward` sends it on. */
 export type HeldChange = {readonly forward: Effect.Effect<void>};
 
@@ -47,7 +56,13 @@ export type OtherTab = {readonly signOut: Effect.Effect<void>};
 // a POST the page sent below /api/guidance/, by path, with its body as the request carried it
 type SentChange = {readonly path: string; readonly body: unknown};
 
+// the dialogs the page opened, in order, and whether the journey accepts the next confirm dialogs
+type Prompts = {accept: boolean; readonly shown: Array<ShownDialog>};
+
 const browser = <A>(run: () => Promise<A>): Effect.Effect<A> => Effect.promise(run);
+
+// a pattern that matches `text` literally at the start of an accessible name
+const startingWith = (text: string) => new RegExp(`^${text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u");
 
 const jsonBody = (text: string | null): unknown => {
   try {
@@ -57,10 +72,11 @@ const jsonBody = (text: string | null): unknown => {
   }
 };
 
-// the operations on one page; `changes`, `answers` and `sent` are the records the scoped listeners and the faults keep
+/* The operations on one page; `changes`, `answers`, `sent` and `prompts` are the records the scoped listeners and the faults
+ * keep.
+ */
 const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSupervisionChange>, answers: Array<ServerAnswer>,
-  sent: ReadonlyArray<SentChange>) => {
-  const changeRoute = `${origin}${chatSupervisionPath}`;
+  sent: ReadonlyArray<SentChange>, prompts: Prompts) => {
   // each forwarded change carries the dashboard's own Origin explicitly, so only the fault itself can make the dashboard refuse it
   const forward = async (route: Route, headers: Record<string, string> = {}): Promise<APIResponse> => {
     const reply = await route.fetch({headers: {...route.request().headers(), origin, ...headers}});
@@ -87,6 +103,13 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
   const enable = (threadId: string) => page.getByRole("button", {name: `Enable supervision for ${threadId}`, exact: true});
   const button = (name: string) => page.getByRole("button", {name, exact: true});
   const field = (label: string) => page.getByLabel(label, {exact: true});
+  /* A link by its exact accessible name, or one matching a pattern, anywhere on the page or within the navigation landmark
+   * named `within`.
+   */
+  const link = (name: string | RegExp, within?: string) => {
+    const options: {name: string | RegExp; exact?: boolean} = typeof name === "string" ? {name, exact: true} : {name};
+    return within === undefined ? page.getByRole("link", options) : page.getByRole("navigation", {name: within, exact: true}).getByRole("link", options);
+  };
   // each supervision switch is a region named for its scope, with its own switch button and status
   const switchRegion = (scope: SwitchScope) => page.getByRole("region", {name: scope === "global" ? "Global supervision" : "Project supervision", exact: true});
   const switchButton = (scope: SwitchScope, action: SwitchAction) => switchRegion(scope).getByRole("button", {name: action, exact: true});
@@ -104,6 +127,18 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
       const team = body.teamSettings;
       const limit = typeof team === "object" && team !== null && "maxHelpersPerRoot" in team && typeof team.maxHelpersPerRoot === "number" ? team.maxHelpersPerRoot : null;
       return {expectedGeneration: typeof body.expectedGeneration === "number" ? body.expectedGeneration : null, maxHelpersPerRoot: limit};
+    }),
+    // every chat settings save the page sent, in order, including attempts the network then lost
+    policySaves: (): ReadonlyArray<PolicySave> => bodies(threadPolicyPath).map((body) => ({
+      generation: typeof body.generation === "number" ? body.generation : null,
+      excludedThreadIds: Array.isArray(body.excludedThreadIds) ? body.excludedThreadIds.filter((id): id is string => typeof id === "string") : [],
+    })),
+    /* Every dialog the page opened, in order, and how the next confirm dialogs are answered: dismissed unless the journey
+     * chose to accept them.
+     */
+    dialogs: (): ReadonlyArray<ShownDialog> => [...prompts.shown],
+    answerDialogs: (accept: boolean) => Effect.sync(() => {
+      prompts.accept = accept;
     }),
     signIn: (token: Redacted.Redacted<string>) => browser(async () => {
       await page.goto(`${origin}/`);
@@ -138,14 +173,30 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
     reload: browser(async () => {
       await page.reload();
     }),
+    // the browser's own Back and Forward, and an address typed into the bar: `hash` is the dashboard route after its origin
+    goBack: browser(async () => {
+      await page.goBack();
+    }),
+    goForward: browser(async () => {
+      await page.goForward();
+    }),
+    editAddress: (hash: string) => browser(async () => {
+      await page.goto(`${origin}/${hash}`);
+    }),
+    // the address bar shows exactly the route `hash`
+    addressShown: (hash: string) => browser(() => page.waitForURL((url) => url.hash === hash)),
+    // a link by its exact name, or matching a pattern, optionally within the navigation landmark named `within`
+    clickLink: (name: string | RegExp, within?: string) => browser(() => link(name, within).click()),
+    // a listed entry, such as a project card or a conversation row, whose link names `title` first
+    openEntry: (title: string) => browser(() => link(startingWith(title)).click()),
     clickStop: browser(() => stop.click()),
     clickEnable: (threadId: string) => browser(() => enable(threadId).click()),
     // the durable states: a stopped chat offers its stop notice's Enable, an enabled chat offers Stop supervision
     stoppedShown: (threadId: string) => browser(() => enable(threadId).waitFor()),
     enabledShown: browser(() => stop.waitFor()),
     unconfirmedShown: browser(() => unconfirmed.waitFor()),
-    // the page's next chat supervision change meets `fault`; `times` changes in all
-    injectFault: (fault: ChangeFault, times = 1) => browser(() => page.route(changeRoute, faults[fault], {times})),
+    // the page's next change on `path`, the chat supervision change route unless named, meets `fault`; `times` changes in all
+    injectFault: (fault: ChangeFault, times = 1, path = chatSupervisionPath) => browser(() => page.route(`${origin}${path}`, faults[fault], {times})),
     // the durable state of a supervision switch is the action it offers for its own setting
     switchOffered: (scope: SwitchScope, action: SwitchAction) => browser(() => switchButton(scope, action).waitFor()),
     clickSwitch: (scope: SwitchScope, action: SwitchAction) => browser(() => switchButton(scope, action).click()),
@@ -157,6 +208,7 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
       return await field(label).inputValue();
     }),
     clickButton: (name: string) => browser(() => button(name).click()),
+    buttonShown: (name: string) => browser(() => button(name).waitFor()),
     buttonDisabled: (name: string) => browser(() => button(name).isDisabled()),
     headingShown: (name: string) => browser(() => page.getByRole("heading", {name, exact: true}).waitFor()),
     textShown: (text: string) => browser(() => page.getByText(text, {exact: true}).waitFor()),
@@ -211,9 +263,18 @@ export const dashboard = (page: Page, origin: string): Effect.Effect<Dashboard, 
     sent.push({path, body: jsonBody(request.postData())});
   };
   yield* Effect.acquireRelease(Effect.sync(() => page.on("request", recordSent)), () => Effect.sync(() => page.off("request", recordSent)));
+  /* Record dialogs and preserve Playwright's default dismissal, including beforeunload.
+   * A journey can explicitly accept confirmation dialogs. */
+  const prompts: Prompts = {accept: false, shown: []};
+  const answerDialog = (dialog: Dialog) => {
+    prompts.shown.push({type: dialog.type(), message: dialog.message()});
+    const accept = dialog.type() === "confirm" && prompts.accept;
+    (accept ? dialog.accept() : dialog.dismiss()).catch(() => undefined);
+  };
+  yield* Effect.acquireRelease(Effect.sync(() => page.on("dialog", answerDialog)), () => Effect.sync(() => page.off("dialog", answerDialog)));
   // what the dashboard answered to each change this browser forwarded itself
   const answers: Array<ServerAnswer> = [];
-  return operations(page, origin, changes, answers, sent);
+  return operations(page, origin, changes, answers, sent, prompts);
 });
 
 /** Another tab of the same browser `context`, on the dashboard at `origin` and owned by the caller's scope: it shares the stored
