@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import {it} from "@effect/vitest";
-import {Effect} from "effect";
-import {classifyTrial, evidenceGaps, finalVerdict, isTrialScenario, trialScenarios, type TrialEvidence, type TrialObservation, type TrialVerdict}
+import {Effect, Redacted} from "effect";
+import {classifyTrial, evidenceGaps, finalVerdict, isTrialScenario, trialScenarios, workflowMcpAlias, workflowMcpRegistration, type TrialEvidence,
+  type TrialObservation, type TrialVerdict}
   from "../scripts/provider-trial.js";
 
 /* The provider trials' verdicts (scripts/provider-trial.ts) are pure over what the trial observed when its budget ended; the trials
@@ -34,7 +35,7 @@ it.live("an introduction trial passes only when the needed request's proposal re
 
 it.live("a stop trial passes only on one saved Stop during a running turn, one recorded Stop notice, nothing after it and settlement", () => Effect.sync(() => {
   const stopped = "supervisor-notice:stop:s1";
-  const record = {createdAt: "2026-11-01T18:00:00.000Z", createdBy: "system", creationSource: "server"};
+  const record = {createdAt: "2026-11-01T18:00:00.000Z", createdBy: "user", creationSource: "server"};
   const after = (ids: ReadonlyArray<string>, observed: Partial<TrialObservation>): TrialObservation => ({...seen(ids, task("needed")), ...observed});
   const pressed = {answer: "saved", runActiveAtPress: true};
   const clean: Partial<TrialObservation> = {stop: pressed, policyStopped: true, stopNoticeRecord: record, afterStopNotice: [], settlement: "settled"};
@@ -107,4 +108,44 @@ it.live("a Stop notice that nobody asked for fails every trial", () => Effect.sy
 it.live("the trial requests are uncoached: none names Supervisor, its tools or the agreement it should reach", () => Effect.sync(() => {
   for (const request of Object.values(trialScenarios)) assert.doesNotMatch(request, /supervis|workflow|proposal|agree|accept|plan\b/iu, request);
   assert.equal(isTrialScenario("unknown"), false);
+}));
+
+it.live("a trial starts only with the Codex CLI's registration of Supervisor's workflow MCP, whose bearer stays redacted", () => Effect.sync(() => {
+  const url = "http://127.0.0.1:9008/mcp/workflows";
+  const secret = "Bearer fixture-only-secret";
+  const entry = (overrides: Record<string, unknown> = {}, transport: Record<string, unknown> = {}) => ({name: workflowMcpAlias, enabled: true,
+    transport: {type: "streamable_http", url, bearer_token_env_var: null, http_headers: {Authorization: secret}, env_http_headers: null, ...transport},
+    ...overrides});
+  const check = (servers: unknown) => workflowMcpRegistration(JSON.stringify(servers), url);
+  const header = check([entry()]);
+  assert.ok(header.registered && header.auth === "http_headers");
+  const sent = header.registered ? header.authorization({}) : null;
+  assert.ok(sent !== null && Redacted.value(sent) === secret, "a header bearer is sent as registered");
+  assert.doesNotMatch(String(sent), /fixture-only-secret/u, "and stays redacted as text");
+  assert.equal(check([entry({}, {url: `${url}/`})]).registered, true, "a trailing slash is the same URL");
+  const variable = check([entry({}, {bearer_token_env_var: "T3_SUPERVISOR_WORKFLOW_TOKEN", http_headers: null})]);
+  assert.ok(variable.registered && variable.auth === "bearer_token_env_var");
+  const fromVariable = variable.registered ? variable.authorization({T3_SUPERVISOR_WORKFLOW_TOKEN: "fixture-only-secret"}) : null;
+  assert.ok(fromVariable !== null && Redacted.value(fromVariable) === secret, "a variable's token becomes a bearer header");
+  assert.equal(variable.registered ? variable.authorization({}) : "", null, "an unset variable gives no header");
+  const headerVariable = check([entry({}, {http_headers: null, env_http_headers: {authorization: "T3_SUPERVISOR_WORKFLOW_HEADER"}})]);
+  assert.ok(headerVariable.registered && headerVariable.auth === "env_http_headers");
+  const fromHeaderVariable = headerVariable.registered ? headerVariable.authorization({T3_SUPERVISOR_WORKFLOW_HEADER: secret}) : null;
+  assert.ok(fromHeaderVariable !== null && Redacted.value(fromHeaderVariable) === secret, "a header variable's value is the header");
+  const refused: ReadonlyArray<readonly [string, unknown, RegExp]> = [
+    ["nothing registered", [], /no MCP server registered/u],
+    ["another server only", [{...entry(), name: "other"}], /no t3-supervisor-workflows among 1 registered/u],
+    ["disabled", [entry({enabled: false})], /disabled/u],
+    ["over stdio", [entry({}, {type: "stdio"})], /over stdio/u],
+    ["another port", [entry({}, {url: "http://user:fixture-only-secret@127.0.0.1:9009/mcp/workflows"})], /at http:\/\/127\.0\.0\.1:9009\/mcp\/workflows/u],
+    ["localhost, which Supervisor's host check refuses", [entry({}, {url: "http://localhost:9008/mcp/workflows"})], /at http:\/\/localhost:9008/u],
+    ["no bearer", [entry({}, {http_headers: {"X-Other": "value"}})], /without a bearer/u],
+  ];
+  for (const [why, servers, found] of refused) {
+    const result = check(servers);
+    assert.equal(result.registered, false, why);
+    assert.match(result.registered ? "" : result.found, found, why);
+    assert.doesNotMatch(JSON.stringify(result), /fixture-only-secret/u, `${why}: no header value or URL credential is reported`);
+  }
+  assert.equal(workflowMcpRegistration("not json", url).registered, false, "unreadable registrations are not a registration");
 }));

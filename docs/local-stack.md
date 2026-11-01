@@ -109,11 +109,56 @@ Only Codex and Claude are set up and checked by this environment. Other provider
 their logins wherever their own tools do; as long as that is under the container's home
 or T3's data, they are kept too.
 
-For agents to call Supervisor directly, register the workflow MCP URL
-`http://127.0.0.1:<dashboard port>/mcp/workflows` with the bearer in
-`/data/supervisor/access/workflow-mcp-token` under the alias `t3-supervisor-workflows`
-in the provider's configuration inside the environment ([workflow MCP](workflow-mcp.md)).
-`./dev reset` creates a new bearer.
+For agents to call Supervisor's own root works through this registration, so provider trials need it for
+the Codex CLI. In `./dev shell`, where `CODEX_HOME`, `/data` and `T3SUP_DEV_UI_PORT` are
+the environment's, run this setup. It backs up the current configuration for recovery
+and replaces only the owned server entry, preserving other settings and MCP servers.
+The bearer is read privately and never passed as a command argument or printed:
+
+```sh
+node --input-type=module <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
+import {execFileSync} from 'node:child_process';
+try {
+  const alias = 't3-supervisor-workflows';
+  const config = path.join(process.env.CODEX_HOME, 'config.toml');
+  const port = Number(process.env.T3SUP_DEV_UI_PORT);
+  const token = fs.readFileSync('/data/supervisor/access/workflow-mcp-token', 'utf8').trim();
+  if (!Number.isInteger(port) || port < 1 || port > 65535 || !token) throw new Error();
+  const url = 'http://127.0.0.1:' + port + '/mcp/workflows';
+  const call = (args) => execFileSync('codex', args, {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']});
+  const servers = JSON.parse(call(['mcp', 'list', '--json']));
+  if (!Array.isArray(servers)) throw new Error();
+  if (fs.existsSync(config)) {
+    const backup = config + '.before-workflow-mcp-' + new Date().toISOString().replaceAll(/[:.]/g, '-');
+    fs.copyFileSync(config, backup, fs.constants.COPYFILE_EXCL);
+    fs.chmodSync(backup, 0o600);
+  }
+  if (servers.some((server) => server.name === alias)) call(['mcp', 'remove', alias]);
+  call(['mcp', 'add', alias, '--url', url]);
+  fs.appendFileSync(config, '\n[mcp_servers.' + JSON.stringify(alias) + '.http_headers]\nAuthorization = ' + JSON.stringify('Bearer ' + token) + '\n');
+  fs.chmodSync(config, 0o600);
+  console.log('Registered ' + alias + ' at ' + url);
+} catch {
+  console.error('Workflow MCP setup failed. Configuration backups, if created, remain in CODEX_HOME.');
+  process.exitCode = 1;
+}
+JS
+```
+
+The configuration and any backup have mode 0600. After `./dev reset`, run the setup
+again with the new bearer. Keep backups for recovery; restoring an old backup during a
+routine update would discard later configuration changes.
+
+A bearer may instead come from an environment variable
+(`bearer_token_env_var`, or `env_http_headers` for the whole header), which must then be
+set in the environment T3 runs in. A provider trial changes nothing here: before
+creating anything it reads the registrations (`codex mcp list --json`, never reporting a
+header value) and calls the registered endpoint once with the registered Authorization
+header (`tools/list`). It ends `unavailable` unless `t3-supervisor-workflows` is enabled
+at exactly that loopback URL over Streamable HTTP with a bearer and the endpoint lists
+`workflow_read` and `supervision_interpretation_submit`.
 
 ## Resets
 
@@ -192,12 +237,19 @@ ports and no credentials. The idle-watch soak keeps the watch idle for longer th
 minute and passes only when the one subscription survived, the heartbeats continued and
 health stayed ready throughout; `SOAK_IDLE_MS` asks for a longer window. The
 concurrent-writes soak keeps several writers saving the master switch through the
-dashboard beside the supervision cycle and passes only when every save committed or met a
-newer generation, the generation advanced by exactly the saves and no statement met a
-busy database; `SOAK_WRITE_MS` asks for a longer window. Each soak prints
-its outcome with this checkout's commit and whether the tree was clean. Soaks are
-extended runs: started by hand or by the manually dispatched `extended` workflow, never
-by the ordinary suites or a schedule.
+dashboard beside the supervision cycle and passes only when every save committed or met
+a newer generation, the generation advanced by exactly the saves and no statement met a
+busy database; `SOAK_WRITE_MS` asks for a longer window. The resource-use soak keeps
+four loops of dashboard snapshot reads, workflow MCP `tools/list` calls with
+Supervisor's own bearer, dashboard event streams opened and dropped, and health reads
+running for at least three minutes, and passes only when every request was answered and,
+once the process idled past its keep-alive timeout, its open file descriptors (from
+`/proc`) are at most four above the warmed-up baseline. Resident memory and its peak are
+reported; growth above 512 MiB fails as runaway retention. This does not establish the
+absence of smaller or slower memory leaks. `SOAK_RESOURCE_MS` asks for a longer window. Each soak prints its outcome
+with this checkout's commit and whether the tree was clean. Soaks are extended runs:
+started by hand or by the manually dispatched `extended` workflow, never by the ordinary
+suites or a schedule.
 
 ## Provider trials
 
@@ -207,20 +259,22 @@ by the ordinary suites or a schedule.
 
 A provider trial ([testing](testing.md), execution type 6) runs in the running
 environment with its signed-in Codex CLI and never in CI. It uses that sign-in as it is
-and never signs in or out. It creates a disposable project of its own in the development
-workspaces, which detection supervises, and starts one operative chat there with an
-uncoached request: `no-contact` asks a quick question, `introduction` asks for a small
-change to tracked content, and `stop` makes the same request and stops the chat once
-with its own Stop in the dashboard, as a person does, at the first look after the
-proposal reached the operative that shows the operative's run running, so the Stop falls
-during model work. It never presses again: a refused press, such as a conflict with a
-newer policy, ends the trial `inconclusive`, and an unanswered one counts only once the
-chat's policy shows it stopped from the dashboard under a newer generation. It passes
-only when one Stop notice, recorded by T3 with its creation time as Supervisor's,
-reached the operative, T3 created no Supervisor message after it, and Supervisor settled
-within the budget; without the creation times that order needs, it is `inconclusive`.
-The chat is launched automatically, with the call T3's web app makes: one
-`orchestration.launchThread` call over T3's WebSocket RPC, which T3 records as the
+and never signs in or out. It also needs the Codex CLI's registration of Supervisor's
+workflow MCP described above, through which Supervisor's root works, and ends
+`unavailable` before creating anything without it. It creates a disposable project of
+its own in the development workspaces, which detection supervises, and starts one
+operative chat there with an uncoached request: `no-contact` asks a quick question,
+`introduction` asks for a small change to tracked content, and `stop` makes the same
+request and stops the chat once with its own Stop in the dashboard, as a person does, at
+the first look after the proposal reached the operative that shows the operative's run
+running, so the Stop falls during model work. It never presses again: a refused press,
+such as a conflict with a newer policy, ends the trial `inconclusive`, and an unanswered
+one counts only once the chat's policy shows it stopped from the dashboard under a newer
+generation. It passes only when one Stop notice, recorded by T3 with its creation time
+as Supervisor's, reached the operative, T3 created no Supervisor message after it, and
+Supervisor settled within the budget; without the creation times that order needs, it is
+`inconclusive`. The chat is launched automatically, with the call T3's web app makes:
+one `orchestration.launchThread` call over T3's WebSocket RPC, which T3 records as the
 user's request from the web although no person typed it, as the report says. It is made
 with an `orchestration:operate` session that exists only for that launch. `t3 thread
 start` is not used, because T3 records a chat started through its MCP server as an
