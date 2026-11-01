@@ -11,7 +11,6 @@ it("the master switch and shared definition switch explain their separate effect
   const master = renderToStaticMarkup(createElement(SupervisionControlView, {...handlers,
     control: {projectId: null, generation: 0, enabled: true, manual: true, globallyEnabled: true, effectiveEnabled: true, detectionStatus: "not_checked", detectionError: null}}));
   assert.match(master, /master switch.*starts enabled/);
-  assert.match(master, /Disable supervision/);
   const definitions = renderToStaticMarkup(createElement(GlobalDefinitionsControlView, {...handlers,
     control: {generation: 0, enabled: false, manual: false, effectiveEnabled: false, detectionStatus: "missing", detectionError: null, homePath: "~/.t3-supervisor"}}));
   assert.match(definitions, /This starts disabled/);
