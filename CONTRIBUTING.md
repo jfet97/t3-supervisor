@@ -1,31 +1,19 @@
 # Development
 
+Development runs in Docker: the host needs Docker with the Compose plugin and nothing
+else. `./dev` builds the development image (Node 24.22.1, pnpm 12.14.0, Git and the
+provider CLIs) and runs every command in containers over the mounted checkout; the
+[development environment](docs/local-stack.md) describes it. Dependency installation
+uses the committed `pnpm-lock.yaml` with `pnpm install --frozen-lockfile` and keeps
+pnpm's package store in the environment's cache volume. Build-script approval is
+explicit in `pnpm-workspace.yaml`; script commands never install dependencies
+implicitly.
 
-The Nix development shell pins Node 24.22.1 (the October 2026 security release)
-and pnpm 12.14.0, and supports Apple Silicon macOS and x86_64/aarch64 Linux.
-Run `nix develop` in the checkout to enter it, or prefix a command with
-`nix develop --command`. The project's `packageManager` field pins pnpm 12.14.0;
-dependency installation uses the committed `pnpm-lock.yaml` with
-`pnpm install --frozen-lockfile`. When the host's Nix configuration does not enable
-flakes, use `nix --extra-experimental-features "nix-command flakes" develop`; the
-setup script below passes that option itself.
-
-New worktrees reuse pnpm's shared package store with `--prefer-offline` and
-hardlinks, fetching packages that are missing while keeping each worktree's
-installed `node_modules` separate. Build-script approval is explicit in
-`pnpm-workspace.yaml`; script commands never install dependencies implicitly.
-
-T3's **Setup Worktree** action runs `sh scripts/setup-worktree.sh`. The launcher
-approves this checkout's `.envrc` when direnv is installed, then installs dependencies
-inside the pinned Nix shell. It works without an interactive shell hook.
-An existing T3 project may need its saved action set to the same command because
-saved actions override `t3.json`.
-
-For automatic loading in interactive terminals, enable direnv's shell hook once.
-The tracked `.envrc` loads the flake when entering the checkout and unloads it
-when leaving. T3's setup launcher handles approval for worktrees it creates;
-for a checkout created manually, run `direnv allow` from its root after reviewing
-`.envrc`. Run it again if `.envrc` changes. Nix alone does not need this approval.
+T3's **Setup Worktree** action runs `sh dev setup` (`t3.json`). On the host it builds the
+image and installs dependencies; inside the development container, where the
+environment's own T3 creates worktrees, it installs with the container's toolchain.
+An existing T3 project may need its saved action set to the same command because saved
+actions override `t3.json`.
 
 The [usage skill](skills/usage/use-t3-supervisor/SKILL.md) describes ordinary dashboard workflows for agent sessions.
 The [workflow-authoring skill](skills/usage/author-supervisor-workflows/SKILL.md) derives
@@ -40,16 +28,17 @@ contains contribution standards and is never propagated globally. The
 records the product's navigation, terminology and evidence requirements.
 
 ```sh
-pnpm install --frozen-lockfile
-pnpm autofix
-pnpm typecheck
-pnpm test
-pnpm build
+./dev setup
+./dev pnpm autofix
+./dev pnpm typecheck
+./dev pnpm test
+./dev pnpm build
 ```
 
 `pnpm test` runs the [Vitest](https://vitest.dev) suites; Effect code is tested with `@effect/vitest`.
 
-Ordinary PR CI runs lint, type checking and build once, the runner harness once,
+Ordinary PR CI runs lint, type checking and build once, the AMD64 and ARM64
+container artifacts each on a runner of that architecture, the runner harness once,
 the production startup integration once, and the complete main suite across four
 native Vitest shards on separate runners.
 Each shard uses one test worker so database worker startup does not compete with
@@ -69,47 +58,29 @@ New runs cancel older runs of this workflow for the same branch or pull request,
 including `main`; unrelated branches and pull requests run independently.
 
 While editing, run focused files through the watchdog, for example
-`pnpm test test/config.test.ts`. Leave the final complete main and harness
+`./dev pnpm test test/config.test.ts`. Leave the final complete main and harness
 suites to GitHub CI. To reproduce one CI shard locally, use
-`pnpm test --shard=1/4 --maxWorkers=1`. Native sharding assigns complete files
+`./dev pnpm test --shard=1/4 --maxWorkers=1`. Native sharding assigns complete files
 deterministically, so all four shard indices are required for full coverage.
 
 Read [AGENTS.md](AGENTS.md) and the local knowledge base before changing the project.
 
-## Local stack
+## Development environment
 
-Develop and test against the repository-owned local setup only; it needs no
-personal host or existing installation and never connects to one. After `pnpm build`:
+Develop and test against the repository-owned environment only; it needs no personal
+host or existing installation and never connects to one.
 
 ```sh
-pnpm dev:fixture            # dashboard over the production application, scripted T3 states
-pnpm dev:stack              # pinned unmodified published T3 + Supervisor from this checkout
-pnpm dev:stack --check      # the early risky path end to end, then a full cleanup
+./dev up           # pinned unmodified published T3 nightly + Supervisor from this checkout, kept across restarts
+./dev fixture      # dashboard over the production application, scripted T3 states
+./dev check        # the published-T3 boundary end to end in a disposable run
+./dev reset        # remove test data; provider sign-ins stay
+./dev reset-auth   # sign out every provider; data stays
 ```
 
-Each run uses a fresh private folder, its own ports and scoped T3 credentials, and
-removes everything when it stops. See [local development stack](docs/local-stack.md)
-for scenarios, credentials, provider sign-in and evidence labels.
+See the [development environment](docs/local-stack.md) for the volumes, provider
+sign-in, resets and evidence labels.
 
 ## Releases
 
 Add a changeset for user-visible changes. See [RELEASING.md](RELEASING.md).
-
-## Run from source
-
-After entering the development shell:
-
-```sh
-pnpm install --frozen-lockfile
-pnpm build
-pnpm start
-```
-
-This connects to the T3 named by `T3_URL` and `T3_TOKEN_FILE`, as described in
-[installation](docs/installation.md); for development and tests, use the
-[local stack](docs/local-stack.md) instead. To register the CLI globally, use
-`pnpm add --global .`. `pnpm pack` builds a complete archive, including the dashboard.
-
-To build a development container, set the Compose variables from the README and
-run `docker compose -f compose.yaml -f compose.build.yaml up --build -d`.
-Production installation uses the published image without the build override.

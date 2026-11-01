@@ -1,0 +1,186 @@
+#!/bin/sh
+# The host entry point of the Docker development environment (docs/local-stack.md). The host needs Docker with the
+# Compose plugin and nothing else; every command runs inside the development containers.
+set -eu
+
+repo=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+
+usage() {
+  cat <<'USAGE'
+usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
+
+  setup               build the image and install dependencies (T3's Setup Worktree action)
+  up                  setup, build the dashboard, then start T3 and Supervisor and wait until healthy
+  stop | start        stop or start the containers; nothing is removed
+  down                remove the containers and their network; every volume stays
+  restart             restart T3 and Supervisor in their container
+  recreate            recreate the container from the current image; every volume stays
+  rebuild             rebuild the image from its pinned base, then recreate; every volume stays
+  status              containers, health and the provider CLIs' sign-in status
+  logs [ARGS]         the T3 and Supervisor log (docker compose logs)
+  shell               an interactive shell in the toolchain container
+  pnpm ARGS           pnpm in the toolchain container, for example ./dev pnpm test test/config.test.ts
+  login codex|claude [ARGS]   sign in to a provider CLI; the login stays in the credentials volume
+  pair                a one-time link that opens this environment's T3 in the browser
+  sign-in             a one-time Supervisor dashboard sign-in token
+  fixture [ARGS]      the dashboard fixture: production Supervisor over scripted T3 states
+  ui-fixture [ARGS]   the synthetic dashboard API fixture
+  check [ARGS]        a disposable published-T3 stack check, removed when it ends
+  reset               remove test data: the workspaces' T3 projects with their chats, Supervisor data and the
+                      workspaces; provider sign-ins, T3 settings and T3 provider connections stay
+  reset-auth          sign out every provider: T3's own sign-out for each instance it offers one for, including
+                      T3-managed connections, then the Codex and Claude CLI logins; T3 chats and all data stay
+
+NAME selects an independent environment with its own volumes (default: default, or T3SUP_DEV_ENV). Port N+73 serves T3,
+N+8 the dashboard, N+7 health, N+1 the dashboard fixture and N+10 the UI fixture (default 47700, or T3SUP_DEV_PORT_BASE).
+USAGE
+}
+
+die() {
+  printf '%s\n' "$*" >&2
+  exit 1
+}
+
+install='pnpm install --frozen-lockfile --prefer-offline --store-dir /cache/pnpm-store'
+
+# inside the development container, for example T3's Setup Worktree action, the container's own toolchain runs directly;
+# managing containers stays a host command, so there is never a Docker client or socket in here
+if [ "${T3SUP_DEV_CONTAINER:-}" = 1 ]; then
+  case ${1:-} in
+    setup) cd "$repo" && exec $install ;;
+    pnpm) shift; cd "$repo" && exec pnpm "$@" ;;
+    -h|--help|help) usage; exit 0 ;;
+    *) die "./dev ${1:-} manages the development containers from the host; inside the container run pnpm directly" ;;
+  esac
+fi
+
+name=${T3SUP_DEV_ENV:-default}
+base=${T3SUP_DEV_PORT_BASE:-47700}
+while [ $# -gt 0 ]; do
+  case $1 in
+    --env) [ $# -ge 2 ] || die "--env needs a name"; name=$2; shift 2 ;;
+    --port-base) [ $# -ge 2 ] || die "--port-base needs a number"; base=$2; shift 2 ;;
+    -h|--help|help) usage; exit 0 ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || { usage >&2; exit 2; }
+command=$1
+shift
+
+case $name in ''|-*|*[!a-z0-9-]*) die "environment names use the characters a-z, 0-9 and -" ;; esac
+case $base in ''|*[!0-9]*) die "--port-base needs a number" ;; esac
+{ [ "$base" -ge 1025 ] && [ "$base" -le 65400 ]; } || die "--port-base must be between 1025 and 65400"
+command -v docker >/dev/null 2>&1 || die "Docker is required: https://docs.docker.com/get-started/get-docker/"
+docker compose version >/dev/null 2>&1 || die "the Docker Compose plugin is required: https://docs.docker.com/compose/install/"
+
+project="t3sup-dev-$name"
+uid=$(id -u)
+gid=$(id -g)
+# the development user never runs as root, also when the host user is root
+if [ "$uid" -eq 0 ]; then uid=1000; gid=1000; fi
+export DEV_UID="$uid" DEV_GID="$gid"
+export T3SUP_DEV_T3_PORT=$((base + 73)) T3SUP_DEV_UI_PORT=$((base + 8)) T3SUP_DEV_HEALTH_PORT=$((base + 7))
+export T3SUP_DEV_FIXTURE_PORT=$((base + 1)) T3SUP_DEV_UI_FIXTURE_PORT=$((base + 10))
+
+compose() {
+  docker compose --project-name "$project" --file "$repo/docker/dev/compose.yaml" "$@"
+}
+tools() {
+  compose run --rm tools "$@"
+}
+running() {
+  [ -n "$(compose ps --status running --quiet env 2>/dev/null)" ]
+}
+# the container-side commands of the running environment (scripts/dev-environment.ts)
+in_environment() {
+  compose exec env node --import tsx scripts/dev-environment.ts "$@"
+}
+prepare='node --import tsx scripts/dev-environment.ts prepare'
+flag=''
+[ "$name" = default ] || flag=" --env $name"
+
+setup() {
+  compose build
+  tools sh -c "$install"
+}
+
+summary() {
+  cat <<SUMMARY
+environment $name (Compose project $project)
+  T3          http://127.0.0.1:$T3SUP_DEV_T3_PORT   ./dev$flag pair opens it in this browser
+  Supervisor  http://127.0.0.1:$T3SUP_DEV_UI_PORT   ./dev$flag sign-in prints a one-time token
+  health      http://127.0.0.1:$T3SUP_DEV_HEALTH_PORT/health
+SUMMARY
+}
+
+up() {
+  setup
+  tools pnpm build
+  compose up --detach --wait --wait-timeout 900 env
+  summary
+}
+
+# removes this environment's data volume after checking that Compose created it for this project
+remove_data() {
+  volume="${project}_data"
+  if docker volume inspect "$volume" >/dev/null 2>&1; then
+    owner=$(docker volume inspect --format '{{index .Labels "com.docker.compose.project"}}/{{index .Labels "com.docker.compose.volume"}}' "$volume")
+    [ "$owner" = "$project/data" ] || die "volume $volume does not belong to $project; nothing was removed"
+    docker volume rm "$volume" >/dev/null
+  fi
+}
+
+case $command in
+  setup) setup ;;
+  up) up ;;
+  stop) compose stop ;;
+  start) compose start env ;;
+  down) compose down ;;
+  restart) compose restart env ;;
+  recreate) compose up --detach --wait --wait-timeout 900 --force-recreate env; summary ;;
+  rebuild) compose build --pull --no-cache; up ;;
+  status)
+    compose ps --all
+    tools sh -c 'printf "codex: "; codex login status 2>&1 || true; printf "claude: "; claude auth status --text 2>&1 || true'
+    ;;
+  logs) compose logs "$@" env ;;
+  shell) compose run --rm tools bash ;;
+  pnpm) tools pnpm "$@" ;;
+  login)
+    provider=${1:-}
+    [ $# -gt 0 ] && shift
+    case $provider in
+      codex) tools sh -c "$install >/dev/null && $prepare && exec codex login --device-auth \"\$@\"" sh "$@" ;;
+      claude) tools sh -c "$install >/dev/null && $prepare && exec claude auth login \"\$@\"" sh "$@" ;;
+      *) die "usage: ./dev login codex|claude [ARGS]" ;;
+    esac
+    ;;
+  pair) running || die "the environment is not running; start it with ./dev$flag up"; in_environment pair ;;
+  sign-in)
+    running || die "the environment is not running; start it with ./dev$flag up"
+    compose exec env node --import tsx src/cli.ts auth forge --data-dir /data/supervisor
+    ;;
+  fixture) compose run --rm --service-ports tools pnpm dev:fixture --host 0.0.0.0 --port "$T3SUP_DEV_FIXTURE_PORT" "$@" ;;
+  ui-fixture)
+    compose run --rm --service-ports tools node --import tsx test/ui-fixture/run.ts --assets ui-dist --host 0.0.0.0 \
+      --port "$T3SUP_DEV_UI_FIXTURE_PORT" "$@"
+    ;;
+  check) tools pnpm dev:stack --check --cache-dir /cache/t3-runtime "$@" ;;
+  reset)
+    running || compose up --detach --wait --wait-timeout 900 env
+    in_environment reset-projects
+    compose down
+    remove_data
+    printf '%s\n' "Test data removed. Provider sign-ins, T3 settings and T3 provider connections stay; start again with ./dev$flag up."
+    ;;
+  reset-auth)
+    running || compose up --detach --wait --wait-timeout 900 env
+    complete=yes
+    in_environment logout-providers || complete=no
+    in_environment logout-clis || complete=no
+    [ "$complete" = yes ] || die "provider sign-out is incomplete; see the messages above and Settings > Providers (./dev$flag pair)"
+    printf '%s\n' "Provider sign-ins of this environment are removed; T3 chats, settings and all data stay."
+    ;;
+  *) usage >&2; exit 2 ;;
+esac

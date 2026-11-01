@@ -4,16 +4,19 @@ import { parseArgs } from "node:util";
 import { isScenarioName, scenarioCatalog, scenarioNames } from "./scenarios.js";
 import { startUiFixture } from "./server.js";
 
-const usage = "usage: pnpm exec tsx test/ui-fixture/run.ts --assets <dir> [--port N] [--scenario <name>]";
+const usage = "usage: pnpm exec tsx test/ui-fixture/run.ts --assets <dir> [--port N] [--host 127.0.0.1|0.0.0.0] [--scenario <name>]";
 
 const options = () => {
-  const {values} = parseArgs({options: {assets: {type: "string"}, port: {type: "string"}, scenario: {type: "string"}}, strict: true});
+  const {values} = parseArgs({options: {assets: {type: "string"}, port: {type: "string"}, host: {type: "string"}, scenario: {type: "string"}}, strict: true});
   if (!values.assets) throw new Error(`--assets is required\n${usage}`);
   const port = values.port === undefined ? 0 : Number(values.port);
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error(`--port must be an integer from 0 to 65535\n${usage}`);
+  // 0.0.0.0 is for the development container, which publishes the port on the host's loopback only
+  const host = values.host ?? "127.0.0.1";
+  if (host !== "127.0.0.1" && host !== "0.0.0.0") throw new Error(`--host must be 127.0.0.1 or 0.0.0.0\n${usage}`);
   const scenario = values.scenario ?? "baseline";
   if (!isScenarioName(scenario)) throw new Error(`unknown scenario ${scenario}; one of: ${scenarioNames.join(", ")}`);
-  return {assets: values.assets, port, scenario};
+  return {assets: values.assets, port, host, scenario} as const;
 };
 
 const program = Effect.scoped(Effect.gen(function*() {

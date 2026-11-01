@@ -28,8 +28,14 @@ serves the files as they are, so its CSP allows `script-src 'self'` instead of t
 ## Start and stop
 
 ```sh
-pnpm exec tsx test/ui-fixture/run.ts --assets ui-dist [--port N] [--scenario <name>]
+./dev ui-fixture [--scenario <name>]
 ```
+
+`./dev ui-fixture` runs `test/ui-fixture/run.ts --assets ui-dist` in the development
+container ([development environment](../../docs/local-stack.md)). There it listens on
+all of the container's interfaces (`--host 0.0.0.0`) on the same port the host
+publishes on loopback only, so the browser's Host stays the loopback address the
+fixture checks. Without `--host` it binds `127.0.0.1`, as the suites do.
 
 The default port is an ephemeral port, printed as `url:`. Open exactly
 `http://127.0.0.1:<port>/`. Like the baseline, any other Host (for example `localhost`)
@@ -344,7 +350,7 @@ again after switching back to `a`:
 
 ## Bounded Operate UI fixture
 
-Run `pnpm exec tsx test/ui-fixture/run.ts --assets ui-dist --port 18127 --scenario large-interface` after `pnpm build`. This is synthetic data: 149 project conversations, 48 catalog entries, a shared project folder, a separate working copy and a Git folder with no branch name reported. Search precedes paging; Home queries the complete available supervised collection at the typed server boundary. Activity pages the retained events.
+Run `./dev ui-fixture --scenario large-interface` after `./dev pnpm build`. This is synthetic data: 149 project conversations, 48 catalog entries, a shared project folder, a separate working copy and a Git folder with no branch name reported. Search precedes paging; Home queries the complete available supervised collection at the typed server boundary. Activity pages the retained events.
 
 For the long Task and Connected work views, POST `/__fixture/scenario/journey-nested-attention` and reload. With `large-interface` already initialized it includes a separately recorded child contribution. Other `journey-*` scenarios cover Following, catching up, paused discussion, proposal, agreement, refinement, completion and stale acceptance. These are rendered examples, not evidence of real operative execution.
 

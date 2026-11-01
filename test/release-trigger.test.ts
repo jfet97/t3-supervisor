@@ -102,11 +102,14 @@ it("preserves explicit manual channels and exact-source checks", async () => {
 });
 
 it("rejects mismatched provenance before a new immutable image or npm publication", () => {
-  const steps = workflow.jobs.release.steps as Array<{ name?: string; run?: string; if?: string; with?: { push?: boolean } }>;
+  const steps = workflow.jobs.release.steps as Array<{ name?: string; run?: string; if?: string; with?: { push?: boolean; outputs?: string } }>;
   const index = steps.findIndex(step => step.name === "Require source-bound provenance for new publications");
   const guard = steps[index];
   assert.ok(guard?.run);
-  assert.ok(index < steps.findIndex(step => step.with?.push === true));
+  // every push, by the push input or by an image output such as a push by digest, comes after the guard
+  const pushes = steps.flatMap((step, position) => step.with?.push === true || String(step.with?.outputs ?? "").split(",").includes("push=true") ? [position] : []);
+  assert.ok(pushes.length > 0);
+  for (const position of pushes) assert.ok(index < position);
   assert.match(guard.if!, /env.PUBLISH == 'true'/u);
   assert.match(guard.if!, /steps.registry.outputs.exists != 'true'/u);
   const check = (revision: string) => execFileSync("bash", ["-e", "-c", guard.run!], {

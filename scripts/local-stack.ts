@@ -6,7 +6,7 @@ import { Console, Data, Effect, FileSystem, Layer, Option, Schema, Stream } from
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { groupAlive, tsxLoader } from "../test/support/cli-process.js";
 import { freePort, httpGet, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "../test/support/g8-process.js";
-import { cacheHome, cleanRuns, createRun, isolatedEnv, repositoryRoot, shellQuote, toolPath, type RunFolder } from "./local-run.js";
+import { cacheHome, cleanRuns, createRun, isolatedEnv, repositoryRoot, toolPath, type RunFolder } from "./local-run.js";
 
 /*
   `pnpm dev:stack`: an unmodified published T3 at a pinned version beside Supervisor from this checkout, each with its own
@@ -16,22 +16,22 @@ import { cacheHome, cleanRuns, createRun, isolatedEnv, repositoryRoot, shellQuot
 */
 
 /**
- * The pinned published T3 release. To move the pin, set the version and copy each platform's archive digest from the
- * release's SHA256SUMS; the archive is the one the `t3` npm launcher itself downloads.
+ * The pinned published T3 release: one exact nightly, never a channel or a stable fallback. To move the pin, set the version
+ * and copy the Linux archive digests from the release's SHA256SUMS; the archive is the one the `t3` npm launcher itself
+ * downloads. The development container is Linux on the host's architecture, so no other platform is needed.
  */
 export const t3Release = {
-  version: "0.1.6",
+  version: "0.1.7-nightly.20261101.4016",
   baseUrl: "https://github.com/pingdotgg/t3code/releases/download",
   archives: {
-    "darwin-arm64": "50c5dfd3e83787c182299a37db3553968346904e7dc7936b2a01061dbfcf90eb",
-    "linux-arm64": "b708f059200776f50623a766854841e40eda0bb67614211cf8b6909295ce20da",
-    "linux-x64": "7cf31da90dee41f524dd5b679ebb6d404637ca5d9dc6fd8bc019511d57bb77e6",
+    "linux-arm64": "89d73a21f14f0e645f7d584ce3185b5f35ff41297ccae108961be906b86dc405",
+    "linux-x64": "fc3fe3abaa1aff2284e9f3144df150d4d16ef284134d247cefdd0e248ff7972d",
   } as Readonly<Record<string, string>>,
 };
 export type T3Release = typeof t3Release;
 
 /**
- * Supervisor's credentials, one T3 session each, scoped to the calls that credential carries as T3 0.1.6 authorizes them:
+ * Supervisor's credentials, one T3 session each, scoped to the calls that credential carries as the pinned T3 authorizes them:
  * shell, thread and turn reads, server config and project file reads; dispatch and launch; file writes; setup commits
  * (`git.runStackedAction`); the terminal Git probe.
  */
@@ -110,7 +110,7 @@ export interface T3Cli {
   readonly cwd: string;
 }
 
-const t3Command = (cli: T3Cli, args: ReadonlyArray<string>, timeoutMs = 60_000) => Effect.gen(function* () {
+export const t3Command = (cli: T3Cli, args: ReadonlyArray<string>, timeoutMs = 60_000) => Effect.gen(function* () {
   const result = yield* runProcess(cli.executable, [...args, "--base-dir", cli.baseDir], {env: cli.env, cwd: cli.cwd, timeoutMs});
   if (result.code !== 0) return yield* failure(`t3 ${args.slice(0, 3).join(" ")} exited ${String(result.code)}: ${result.stderr.trim().slice(0, 400)}`);
   return result.stdout;
@@ -128,24 +128,41 @@ export const serveArguments = (run: RunFolder, port: number): ReadonlyArray<stri
 const Issued = Schema.Struct({sessionId: Schema.String, token: Schema.String, scopes: Schema.Array(Schema.String), expiresAt: Schema.String});
 const decodeIssued = Schema.decodeUnknownEffect(Schema.fromJsonString(Issued));
 
-export interface IssuedSession {
-  readonly credential: Credential;
+/** A credential T3 can issue: its name, the variable that names its token file, and its scopes. */
+export interface SessionCredential {
+  readonly name: string;
+  readonly variable: string;
+  readonly scopes: ReadonlyArray<string>;
+}
+
+export interface IssuedSession<C extends SessionCredential = Credential> {
+  readonly credential: C;
   readonly sessionId: string;
   readonly expiresAt: string;
   readonly file: string;
 }
 
-// one bounded, scoped session through T3's own auth CLI; its bearer goes only to a 0600 file in the run's secrets folder
-const issueSession = (cli: T3Cli, run: RunFolder, credential: Credential) => Effect.gen(function* () {
+/** Where one issued session's bearer goes and how T3 records the session. */
+export interface SessionTarget {
+  readonly file: string;
+  readonly ttl: string;
+  readonly label: string;
+  readonly subject?: string;
+}
+
+// one bounded, scoped session through T3's own auth CLI; its bearer goes only to a 0600 file
+export const issueSession = <C extends SessionCredential>(cli: T3Cli, credential: C, target: SessionTarget) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const stdout = yield* t3Command(cli, ["auth", "session", "issue", ...credential.scopes.flatMap((scope) => ["--scope", scope]),
-    "--ttl", sessionTtl, "--label", `t3-supervisor-local-${credential.name}`, "--json"]);
+    "--ttl", target.ttl, "--label", target.label, ...(target.subject === undefined ? [] : ["--subject", target.subject]), "--json"]);
   const issued = yield* decodeIssued(stdout.trim()).pipe(Effect.mapError(() => failure(`t3 issued an unreadable ${credential.name} session`)));
-  if ([...issued.scopes].sort().join(" ") !== [...credential.scopes].sort().join(" "))
-    return yield* failure(`t3 issued the ${credential.name} session with scopes ${issued.scopes.join(", ")}`);
-  const file = run.dir("secrets", `t3-${credential.name}-token`);
-  yield* fs.writeFileString(file, `${issued.token}\n`, {mode: 0o600});
-  return {credential, sessionId: issued.sessionId, expiresAt: issued.expiresAt, file} satisfies IssuedSession;
+  // a session whose scopes or file go wrong is revoked before the failure is reported
+  yield* Effect.gen(function* () {
+    if ([...issued.scopes].sort().join(" ") !== [...credential.scopes].sort().join(" "))
+      return yield* failure(`t3 issued the ${credential.name} session with scopes ${issued.scopes.join(", ")}`);
+    yield* fs.writeFileString(target.file, `${issued.token}\n`, {mode: 0o600});
+  }).pipe(Effect.onError(() => Effect.ignore(t3Command(cli, ["auth", "session", "revoke", issued.sessionId]))));
+  return {credential, sessionId: issued.sessionId, expiresAt: issued.expiresAt, file: target.file} satisfies IssuedSession<C>;
 });
 
 // a disposable Git project in the run folder, added to the run's T3 through its project CLI
@@ -185,6 +202,8 @@ export interface RunningStack {
 // the native orchestration protocol Supervisor reads (src/t3.ts)
 export const orchestrationProtocol = 2;
 const Descriptor = Schema.Struct({environmentId: Schema.String, orchestrationProtocolVersion: Schema.Number, serverVersion: Schema.String});
+export const decodeDescriptor = (body: string) => Schema.decodeUnknownEffect(Schema.fromJsonString(Descriptor))(body)
+  .pipe(Effect.mapError(() => failure("the T3 descriptor has an unexpected shape")));
 
 /**
  * Starts the stack in the caller's scope. Closing the scope stops Supervisor, revokes every issued session, stops T3 and
@@ -204,12 +223,13 @@ export const startStack = (options: {readonly cacheRoot: string; readonly keep: 
   yield* Effect.addFinalizer(() => stop(server));
   const t3Url = `http://127.0.0.1:${t3Port}`;
   const reply = yield* waitForHttp(`${t3Url}/.well-known/t3/environment`, (status) => status === 200, 90_000, () => server.child.exitCode === null);
-  const descriptor = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Descriptor))(reply.body)
-    .pipe(Effect.mapError(() => failure("the T3 descriptor has an unexpected shape")));
+  const descriptor = yield* decodeDescriptor(reply.body);
   if (descriptor.orchestrationProtocolVersion !== orchestrationProtocol)
     return yield* failure(`T3 ${descriptor.serverVersion} serves orchestration protocol ${descriptor.orchestrationProtocolVersion}; Supervisor reads protocol ${orchestrationProtocol}`);
-  const sessions = yield* Effect.forEach(credentials, (credential) => issueSession(cli, run, credential));
-  yield* Effect.addFinalizer(() => Effect.forEach(sessions, (session) => Effect.ignore(t3Command(cli, ["auth", "session", "revoke", session.sessionId]))));
+  // each session's revocation is registered as soon as it exists, so a failure halfway through issuing revokes the earlier ones
+  const sessions = yield* Effect.forEach(credentials, (credential) => issueSession(cli, credential,
+    {file: run.dir("secrets", `t3-${credential.name}-token`), ttl: sessionTtl, label: `t3-supervisor-local-${credential.name}`}).pipe(
+    Effect.tap((session) => Effect.addFinalizer(() => Effect.ignore(t3Command(cli, ["auth", "session", "revoke", session.sessionId]))))));
   const project = yield* disposableProject(cli, run);
   const [uiPort, healthPort] = [yield* freePort, yield* freePort];
   const env = isolatedEnv(run.path, ["git"], process.env, {
@@ -225,26 +245,16 @@ export const startStack = (options: {readonly cacheRoot: string; readonly keep: 
     supervisor: {url: `http://127.0.0.1:${uiPort}`, healthUrl, ports: [uiPort, healthPort], process: supervisor}, sessions, project} satisfies RunningStack;
 });
 
-export const summary = (stack: RunningStack): string => {
-  const env = (vars: Record<string, string>) => Object.entries(vars).map(([key, value]) => `${key}=${shellQuote(value)}`).join(" ");
-  const t3Env = env({HOME: stack.cli.env.HOME!, PATH: stack.cli.env.PATH!, T3CODE_HOME: stack.cli.baseDir, T3CODE_TELEMETRY_ENABLED: "false"});
-  return [
-    `Local stack running from run folder ${stack.run.path}`,
-    `  T3 ${stack.t3.version} (published, unmodified)  ${stack.t3.url}  data ${stack.cli.baseDir}`,
-    `  Supervisor (this checkout)        ${stack.supervisor.url}  data ${stack.run.dir("supervisor")}`,
-    `  health                            ${stack.supervisor.healthUrl}`,
-    `  workflow MCP                      ${stack.supervisor.url}/mcp/workflows  bearer file ${stack.run.dir("supervisor", "access", "workflow-mcp-token")}`,
-    `  T3 credentials                    ${stack.sessions.map((session) => `${session.credential.name}=${session.credential.scopes.join("+")}`).join(", ")}`,
-    `                                    files in ${stack.run.dir("secrets")}, expire ${stack.sessions[0]?.expiresAt ?? "unknown"}`,
-    `  disposable project                ${stack.project.id} at ${stack.project.path}`,
-    "",
-    "Sign in to the dashboard with a one-time token:",
-    `  node --import tsx src/cli.ts auth forge --data-dir ${shellQuote(stack.run.dir("supervisor"))}`,
-    "Open the isolated T3 (for example to sign in to a provider on purpose; the login stays in this run folder):",
-    `  env -i ${t3Env} ${shellQuote(stack.cli.executable)} auth pairing create --base-dir ${shellQuote(stack.cli.baseDir)} --ttl 15m --base-url ${stack.t3.url}`,
-    "Stop with Ctrl-C: Supervisor stops, the sessions are revoked, T3 stops and the run folder is removed.",
-  ].join("\n");
-};
+export const summary = (stack: RunningStack): string => [
+  `Local stack check running from run folder ${stack.run.path}`,
+  `  T3 ${stack.t3.version} (published, unmodified)  ${stack.t3.url}  data ${stack.cli.baseDir}`,
+  `  Supervisor (this checkout)        ${stack.supervisor.url}  data ${stack.run.dir("supervisor")}`,
+  `  health                            ${stack.supervisor.healthUrl}`,
+  `  workflow MCP                      ${stack.supervisor.url}/mcp/workflows  bearer file ${stack.run.dir("supervisor", "access", "workflow-mcp-token")}`,
+  `  T3 credentials                    ${stack.sessions.map((session) => `${session.credential.name}=${session.credential.scopes.join("+")}`).join(", ")}`,
+  `                                    files in ${stack.run.dir("secrets")}, expire ${stack.sessions[0]?.expiresAt ?? "unknown"}`,
+  `  disposable project                ${stack.project.id} at ${stack.project.path}`,
+].join("\n");
 
 export interface CheckResult {
   readonly name: string;
@@ -394,7 +404,7 @@ export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
   yield* check("revoked read session is refused for new requests", beforeRevoke.kind === "granted" && revoked.kind === "refused" &&
     Option.isSome(descriptor) && descriptor.value.status === 200,
   `before ${describeAccess(beforeRevoke)}, after ${describeAccess(revoked)}, T3 descriptor ${Option.match(descriptor, {onNone: () => "unreachable",
-    onSome: (value) => `HTTP ${value.status}`})}; T3 0.1.6 keeps an already open subscription, so Supervisor stops before revocation`);
+    onSome: (value) => `HTTP ${value.status}`})}; T3 0.1.6 kept an already open subscription, so Supervisor stops before revocation`);
   return results;
 });
 
@@ -408,34 +418,27 @@ const released = (stack: RunningStack, keep: boolean) => Effect.gen(function* ()
     detail: `ports ${ports.join(",")}, live process groups ${processes.length}, run folder ${folder ? "kept" : "removed"}`} satisfies CheckResult;
 });
 
-const usage = "usage: pnpm dev:stack [--check] [--keep] [--for <seconds>] [--cache-dir <path>] | pnpm dev:stack clean";
+// the persistent environment (scripts/dev-environment.ts) is where T3 and Supervisor run for development; this disposable
+// stack exists only for its end-to-end check, which `./dev check` runs inside the development container
+const usage = "usage: pnpm dev:stack --check [--keep] [--cache-dir <path>] | pnpm dev:stack clean";
 
 const main = Effect.gen(function* () {
   const args = process.argv.slice(2);
-  if (args[0] === "clean") {
+  if (args[0] === "clean" && args.length === 1) {
     const {removed, live} = yield* cleanRuns();
     return yield* Console.log(`removed ${removed.length} finished run folder(s)${removed.map((path) => `\n  ${path}`).join("")}` +
       `${live.length ? `\nkept ${live.length} run folder(s) of running processes` : ""}`);
   }
   const flag = (name: string) => args.includes(name);
   const value = (name: string) => {const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined;};
-  const unknown = args.filter((arg, index) => !["--check", "--keep", "--for", "--cache-dir"].includes(arg) && !["--for", "--cache-dir"].includes(args[index - 1] ?? ""));
-  if (unknown.length) return yield* failure(`unknown argument ${unknown[0]}\n${usage}`);
-  const seconds = value("--for") === undefined ? undefined : Number(value("--for"));
-  if (seconds !== undefined && !(seconds > 0)) return yield* failure(`--for needs a positive number of seconds\n${usage}`);
+  const unknown = args.filter((arg, index) => !["--check", "--keep", "--cache-dir"].includes(arg) && args[index - 1] !== "--cache-dir");
+  if (unknown.length || !flag("--check")) return yield* failure(`${unknown.length ? `unknown argument ${unknown[0]}\n` : ""}${usage}`);
   const keep = flag("--keep");
   const outcome = yield* Effect.scoped(Effect.gen(function* () {
     const stack = yield* startStack({cacheRoot: value("--cache-dir") ?? defaultCacheRoot(), keep});
     yield* Console.log(summary(stack));
-    if (flag("--check")) return {stack, results: yield* runChecks(stack)};
-    // the stack runs until interrupted or for the bound; a child that stops on its own ends it with that child's last output
-    const exited = (name: string, child: RunningProcess) => Effect.flatMap(child.closed(), (result) =>
-      failure(`${name} stopped on its own (exit ${String(result.code ?? result.signal)}): ${result.stderr.trim().split("\n").slice(-5).join("\n")}`));
-    yield* Effect.raceFirst(seconds === undefined ? Effect.never : Effect.sleep(`${seconds} seconds`),
-      Effect.raceFirst(exited("T3", stack.t3.process), exited("Supervisor", stack.supervisor.process)));
-    return {stack, results: [] as CheckResult[]};
+    return {stack, results: yield* runChecks(stack)};
   }));
-  if (!flag("--check")) return;
   const results = [...outcome.results, yield* released(outcome.stack, keep)];
   for (const result of results) yield* Console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}: ${result.detail}`);
   yield* Console.log(JSON.stringify({t3: t3Release.version, passed: results.every((result) => result.ok), results}));

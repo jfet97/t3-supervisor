@@ -13,7 +13,7 @@ const repository = "jfet97/t3-supervisor";
 const manifest = '{\n  "name": "@jfet97/t3-supervisor",\n  "version": "0.0.4"\n}\n';
 const run = (id: number, head_sha: string, event: string, branch: string): typeof policy.CiRun.Type => ({id, workflow_id: 42, head_sha, head_branch: branch, event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
 const full = (id: number) => policy.requiredFullJobs.map(name => ({name, run_id: id, conclusion: "success"}));
-const release = (id: number) => ["plan", "static", "startup", "check", "harness", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "startup", "check"].includes(name) ? "success" : "skipped"}));
+const release = (id: number) => ["plan", "static", "arm64", "startup", "check", "harness", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "arm64", "startup", "check"].includes(name) ? "success" : "skipped"}));
 const pr = (merge: string | null, head: string, branch: string) => ({merged_at: merge ? "2026-10-25T00:00:00Z" : null, merge_commit_sha: merge, base: {ref: "main"}, head: {sha: head, ref: branch, repo: {full_name: repository}}});
 const rawChange = (path: string, status = "M") => `:100644 ${status === "D" ? "000000" : "100644"} ${B} ${status === "D" ? "0".repeat(40) : H} ${status}\0${path}\0`;
 
@@ -80,6 +80,33 @@ it.effect("source changes, bad manifest inputs, incomplete API responses, reruns
   }
 }));
 
+// a baseline policy from before the native ARM64 job: it proves the same jobs but never asks for arm64
+const withoutArm64Requirement = (input: {jobs: ReadonlyArray<{name: string; run_id: number; conclusion: string | null}>}) =>
+  ({...input, jobs: input.jobs.some(job => job.name === "arm64") ? input.jobs : [...input.jobs, {name: "arm64", run_id: input.jobs[0]?.run_id ?? 1, conclusion: "success"}]});
+const olderPolicy = {...policy,
+  proveMergedValidation: (input: unknown) => policy.proveMergedValidation(withoutArm64Requirement(input as Parameters<typeof withoutArm64Requirement>[0])),
+  provePushValidation: (input: unknown) => policy.provePushValidation(withoutArm64Requirement(input as Parameters<typeof withoutArm64Requirement>[0]))};
+
+it.effect("evidence from before the native ARM64 job never counts as a full release baseline, also under the baseline's own older policy", () => Effect.gen(function*() {
+  const withoutArm64 = (id: number) => full(id).filter(job => job.name !== "arm64");
+  // through the baseline's directly checked PR
+  const viaPr = fixture();
+  viaPr.jobs.set(10, withoutArm64(10));
+  assert.deepEqual(yield* planCi({...viaPr, loadPolicy: () => Effect.succeed(olderPolicy)}), {mode: "full"});
+  // through the baseline's own full push run
+  const viaPush = fixture();
+  viaPush.jobs.set(20, withoutArm64(20));
+  assert.deepEqual(yield* planCi({...viaPush, loadPolicy: () => Effect.succeed(olderPolicy)}), {mode: "full"});
+  // the same evidence with the native job still qualifies under that older policy
+  const complete = fixture();
+  complete.jobs.set(20, full(20));
+  assert.equal((yield* planCi({...complete, loadPolicy: () => Effect.succeed(olderPolicy)})).baselineRunId, 20);
+  // and a full PR proof for main never reuses a run without it
+  const merged = fixture();
+  merged.jobs.set(30, withoutArm64(30));
+  assert.deepEqual(yield* planCi({...merged, context: {...merged.context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}}}), {mode: "full"});
+}));
+
 it.effect("missing baseline policy never lets the implementing PR approve its own shortcut", () => Effect.gen(function*() {
   const f = fixture();
   assert.deepEqual(yield* planCi({...f, loadPolicy: () => Effect.fail(new Error("old policy has no release proof"))}), {mode: "full"});
@@ -133,25 +160,32 @@ it.effect("the actual scope adapter preserves default full dispatch and selects 
   assert.equal(workflow.on.workflow_dispatch.inputs.validation.default, "full");
 }));
 
-it.live("the actual aggregate shell rejects missing proof, skipped static, failed suites, a skipped or failed startup and unknown modes", () => Effect.sync(() => {
+it.live("the actual aggregate shell rejects missing proof, a skipped or failed static or native ARM64 check, failed suites, a skipped or failed startup and unknown modes", () => Effect.sync(() => {
   const script = workflow.jobs.check.steps[0].run as string;
-  for (const [mode, plan, stat, main, harness, startup, succeeds] of [
-    ["full", "success", "success", "success", "success", "success", true],
-    ["release", "success", "success", "skipped", "skipped", "success", true],
-    ["reuse", "success", "skipped", "skipped", "skipped", "success", true],
-    ["release", "success", "skipped", "skipped", "skipped", "success", false],
-    ["release", "success", "success", "failure", "skipped", "success", false],
-    ["reuse", "failure", "skipped", "skipped", "skipped", "success", false],
-    ["full", "success", "success", "skipped", "success", "success", false],
-    ["", "success", "success", "success", "success", "success", false],
-    ["full", "success", "success", "success", "success", "skipped", false],
-    ["full", "success", "success", "success", "success", "failure", false],
-    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", false],
-    ["reuse", "success", "skipped", "skipped", "skipped", "failure", false],
-    ["release", "success", "success", "skipped", "skipped", "skipped", false],
-    ["release", "success", "success", "skipped", "skipped", "failure", false],
+  for (const [mode, plan, stat, arm64, main, harness, startup, succeeds] of [
+    ["full", "success", "success", "success", "success", "success", "success", true],
+    ["release", "success", "success", "success", "skipped", "skipped", "success", true],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "success", true],
+    ["release", "success", "skipped", "success", "skipped", "skipped", "success", false],
+    ["release", "success", "success", "success", "failure", "skipped", "success", false],
+    ["reuse", "failure", "skipped", "skipped", "skipped", "skipped", "success", false],
+    ["full", "success", "success", "success", "skipped", "success", "success", false],
+    ["", "success", "success", "success", "success", "success", "success", false],
+    ["full", "success", "success", "success", "success", "success", "skipped", false],
+    ["full", "success", "success", "success", "success", "success", "failure", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "skipped", false],
+    ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "failure", false],
+    ["release", "success", "success", "success", "skipped", "skipped", "skipped", false],
+    ["release", "success", "success", "success", "skipped", "skipped", "failure", false],
+    ["full", "success", "success", "skipped", "success", "success", "success", false],
+    ["full", "success", "success", "failure", "success", "success", "success", false],
+    ["full", "success", "success", "cancelled", "success", "success", "success", false],
+    ["release", "success", "success", "skipped", "skipped", "skipped", "success", false],
+    ["release", "success", "success", "failure", "skipped", "skipped", "success", false],
+    ["reuse", "success", "skipped", "success", "skipped", "skipped", "success", false],
   ] as const) {
-    const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup}});
-    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, main, harness, startup}));
+    const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, ARM64_RESULT: arm64,
+      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup}});
+    assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, arm64, main, harness, startup}));
   }
 }));

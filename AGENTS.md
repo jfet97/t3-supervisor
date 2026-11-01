@@ -31,11 +31,14 @@ harness suites to GitHub CI rather than duplicating them locally.
 - Define the requested behavior and observable acceptance cases before editing.
   Fix demonstrated failures in the existing path. Remove superseded code and
   instructions instead of layering workarounds, stores, parsers or compatibility.
-- Develop and test only on the repository-owned local setup
-  ([local development stack](docs/local-stack.md)): `pnpm dev:fixture` for dashboard
-  states and `pnpm dev:stack` for a pinned published T3. Never use or connect to a
-  personal host, an existing T3 or Supervisor instance, or another installation's
-  credentials, provider logins or MCP registrations for development or tests.
+- Develop and test only in the repository-owned Docker environment
+  ([development environment](docs/local-stack.md)), entered through `./dev`:
+  `./dev fixture` for dashboard states, `./dev up` for a pinned published T3 nightly
+  with Supervisor from the checkout, `./dev check` for that boundary end to end. The
+  host needs only Docker. Never use or connect to a personal host, an existing T3 or
+  Supervisor instance, or another installation's credentials, provider logins or MCP
+  registrations for development or tests; sign providers in afresh inside the
+  environment.
 - Test the riskiest user journey early on the local stack, before a long implementation or
   review campaign. For negotiation and flooding, inspect actual rendered prompts,
   total traffic, repeated messages, tool arguments and native event timestamps.

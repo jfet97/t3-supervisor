@@ -24,8 +24,8 @@ export const MergeProof = Schema.Struct({
   jobs: Schema.Array(Schema.Struct({ name: Schema.String, run_id: Id, conclusion: Schema.NullOr(Schema.String) })),
 });
 
-// these are the full jobs in check.yml; a lightweight main run can never supply this proof
-export const requiredFullJobs = ["static", "main (1/4)", "main (2/4)", "main (3/4)", "main (4/4)", "harness", "startup", "check"] as const;
+// these are the full jobs in check.yml, including the native ARM64 artifact check; a lightweight main run can never supply this proof
+export const requiredFullJobs = ["static", "arm64", "main (1/4)", "main (2/4)", "main (3/4)", "main (4/4)", "harness", "startup", "check"] as const;
 
 export const newestPrRun = (runs: ReadonlyArray<typeof CiRun.Type>, expected: typeof MergeProof.Type.expected) =>
   runs.filter((run) => run.workflow_id === expected.workflowId && run.head_sha === expected.head &&
@@ -91,6 +91,18 @@ export const releaseOnlyChange = (input: unknown): {readonly baseline: string; r
   return {baseline: parents[0]!, from, to};
 };
 
+/**
+ * A baseline proven under its own commit's policy must also have run every job the current policy requires, so evidence
+ * from before a newly required job, such as the native ARM64 check, never counts as a full baseline.
+ */
+export const proveCurrentFullJobs = (input: unknown): void => {
+  const {runId, jobs} = Schema.decodeUnknownSync(Schema.Struct({runId: Id, jobs: MergeProof.fields.jobs}))(input);
+  for (const name of requiredFullJobs) {
+    const matches = jobs.filter((job) => job.name === name);
+    if (matches.length !== 1 || matches[0]!.run_id !== runId || matches[0]!.conclusion !== "success") throw new Error("baseline lacks a currently required full job");
+  }
+};
+
 const PushProof = Schema.Struct({
   expected: Schema.Struct({repository: Schema.String, workflowId: Id, commit: Sha}),
   runs: Schema.Array(CiRun), jobs: MergeProof.fields.jobs,
@@ -119,7 +131,7 @@ export const proveReleaseRun = (input: unknown): {readonly runId: number; readon
   if (headTree !== expected.tree) throw new Error("merged files differ from the checked release head");
   const run = newestPrRun(runs, expected);
   if (!run || run.status !== "completed" || run.conclusion !== "success") throw new Error("latest release validation is not successful");
-  const releaseJobs = ["plan", "static", "startup", "check"];
+  const releaseJobs = ["plan", "static", "arm64", "startup", "check"];
   for (const name of releaseJobs) {
     const matches = jobs.filter(job => job.name === name);
     if (matches.length !== 1 || matches[0]!.run_id !== run.id || matches[0]!.conclusion !== "success") throw new Error("release validation job is missing or unsuccessful");
