@@ -92,8 +92,188 @@ jobs:
             core.setOutput('channel', channel);
             core.setOutput('commitTime', commit.commit.committer.date);
 
-  release:
+  # the ARM64 variant is built, pushed by digest and run on a native ARM64 runner; nothing is emulated. Before its push it
+  # runs the release job's own registry, channel, image and Git tag reconciliation and provenance gate, verbatim. The
+  # release job assembles the immutable version only from this natively verified variant and its own AMD64 variant
+  arm64:
     needs: gate
+    if: ${{ needs.gate.outputs.sha != '' }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+      PUBLISH: ${{ vars.RELEASE_PUBLISH_ENABLED == 'true' && (github.event_name == 'workflow_run' || github.event_name == 'schedule' || inputs.publish) }}
+    outputs:
+      pushed: ${{ steps.pushed.outputs.digest }}
+      variant: ${{ steps.verify.outputs.variant }}
+    steps:
+      - name: Require a native ARM64 runner
+        run: test "$(uname -m)" = aarch64
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-dependencies
+      - name: Plan and stamp the checked source
+        id: plan
+        env:
+          CHANNEL: ${{ needs.gate.outputs.channel }}
+          REVISION: ${{ needs.gate.outputs.sha }}
+          COMMIT_TIME: ${{ needs.gate.outputs.commitTime }}
+        run: |
+          node -e 'require("node:fs").writeFileSync("release-input.json", JSON.stringify({channel:process.env.CHANNEL,revision:process.env.REVISION,commitTime:process.env.COMMIT_TIME}))'
+          git update-ref refs/heads/main HEAD
+          pnpm changeset status --output release-status.json
+          node --import tsx scripts/release.ts prepare
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: ${{ env.PUBLISH == 'true' }}
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reconcile immutable package and channel
+        id: registry
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          NPM_TAG: ${{ steps.plan.outputs.npmTag }}
+        run: |
+          set -euo pipefail
+          for selector in "$VERSION" "$NPM_TAG"; do
+            code=$(curl --silent --show-error --connect-timeout 10 --max-time 30 --output release/registry-response.json --write-out '%{http_code}' "https://registry.npmjs.org/@jfet97%2Ft3-supervisor/$selector")
+            case "$code" in
+              200)
+                if [ "$selector" = "$VERSION" ]; then
+                  cp release/registry-response.json release/registry-version.json
+                  node --import tsx scripts/release.ts verify-registry
+                  url=$(jq -er '.dist.tarball | select(startswith("https://registry.npmjs.org/@jfet97/t3-supervisor/-/"))' release/registry-version.json)
+                  curl --fail --silent --show-error --connect-timeout 10 --max-time 120 "$url" --output "release/t3-supervisor-$VERSION.tgz"
+                  node --import tsx scripts/release.ts verify-archive
+                  echo 'exists=true' >> "$GITHUB_OUTPUT"
+                else
+                  cp release/registry-response.json release/registry-alias.json
+                  node --import tsx scripts/release.ts verify-alias
+                fi
+                ;;
+              404) ;;
+              *) echo "Registry lookup failed with HTTP $code" >&2; exit 1 ;;
+            esac
+          done
+      - name: Check whether the image package exists
+        if: ${{ env.PUBLISH == 'true' }}
+        id: image-package
+        uses: actions/github-script@v8
+        with:
+          script: |
+            try {
+              await github.rest.packages.getPackageForUser({ username: context.repo.owner, package_type: 'container', package_name: context.repo.repo });
+              core.setOutput('exists', 'true');
+            } catch (error) { if (error.status !== 404) throw error; }
+      - name: Reconcile immutable image
+        id: image
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          REVISION: ${{ steps.plan.outputs.revision }}
+          NPM_TAG: ${{ steps.plan.outputs.npmTag }}
+          IMAGE_PACKAGE_EXISTS: ${{ steps.image-package.outputs.exists }}
+        run: |
+          set -euo pipefail
+          echo 'smoke=t3-supervisor:release-check' >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" != true ] || [ "$IMAGE_PACKAGE_EXISTS" != true ]; then exit 0; fi
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' > release/image-manifest.json 2> release/image-lookup.txt; then
+            jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | index("amd64") != null and index("arm64") != null' release/image-manifest.json
+            docker pull "$IMAGE:$VERSION"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE:$VERSION")" = "$REVISION"
+            test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$IMAGE:$VERSION")" = "$VERSION"
+            echo 'exists=true' >> "$GITHUB_OUTPUT"
+            echo "smoke=$IMAGE:$VERSION" >> "$GITHUB_OUTPUT"
+          else
+            if ! grep -Eqi 'not found|manifest unknown' release/image-lookup.txt; then cat release/image-lookup.txt >&2; exit 1; fi
+            echo 'smoke=t3-supervisor:release-check' >> "$GITHUB_OUTPUT"
+          fi
+          if docker pull "$IMAGE:$NPM_TAG" 2> release/alias-lookup.txt; then
+            docker inspect --format '{{json .Config.Labels}}' "$IMAGE:$NPM_TAG" | jq '{version: .["org.opencontainers.image.version"]}' > release/registry-alias.json
+            node --import tsx scripts/release.ts verify-alias
+          elif ! grep -Eqi 'not found|manifest unknown' release/alias-lookup.txt; then cat release/alias-lookup.txt >&2; exit 1; fi
+      - name: Verify the immutable Git tag
+        uses: actions/github-script@v8
+        env:
+          TAG: ${{ steps.plan.outputs.tag }}
+          REVISION: ${{ steps.plan.outputs.revision }}
+        with:
+          script: |
+            try {
+              const { data } = await github.rest.git.getRef({ ...context.repo, ref: `tags/${process.env.TAG}` });
+              if (data.object.type !== 'commit' || data.object.sha !== process.env.REVISION) throw new Error('tag belongs to a different source revision');
+            } catch (error) { if (error.status !== 404) throw error; }
+      - name: Require source-bound provenance for new publications
+        if: ${{ env.PUBLISH == 'true' && steps.registry.outputs.exists != 'true' }}
+        env:
+          REVISION: ${{ steps.plan.outputs.revision }}
+        run: test "$GITHUB_SHA" = "$REVISION"
+      - uses: docker/build-push-action@v6
+        if: ${{ env.PUBLISH != 'true' }}
+        with:
+          context: .
+          platforms: linux/arm64
+          load: true
+          tags: t3-supervisor:release-check-arm64
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            REVISION=${{ steps.plan.outputs.revision }}
+          # the published ARM64 build owns this cache scope; the dry-run check only reads it
+          cache-from: type=gha,scope=release-image-arm64
+      - uses: docker/build-push-action@v6
+        id: pushed
+        if: ${{ env.PUBLISH == 'true' && steps.image.outputs.exists != 'true' }}
+        with:
+          context: .
+          platforms: linux/arm64
+          tags: ${{ env.IMAGE }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ steps.plan.outputs.version }}
+            REVISION=${{ steps.plan.outputs.revision }}
+          cache-from: type=gha,scope=release-image-arm64
+          # a failed cache write stays in the log and never fails or cancels the build or push
+          cache-to: type=gha,mode=max,scope=release-image-arm64,ignore-error=true
+      - name: Verify the ARM64 variant natively by immutable digest
+        id: verify
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          REVISION: ${{ steps.plan.outputs.revision }}
+          EXISTS: ${{ steps.image.outputs.exists }}
+          PUSHED: ${{ steps.pushed.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$PUBLISH" = true ]; then
+            if [ "$EXISTS" = true ]; then
+              variant=$(jq -er '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest]
+                | if length == 1 then .[0] else error("expected exactly one ARM64 image variant") end
+                | select(test("^sha256:[a-f0-9]{64}$"))' release/image-manifest.json)
+            else
+              docker buildx imagetools inspect "$IMAGE@$PUSHED" --format '{{json .Manifest}}' > release/pushed-manifest.json
+              variant=$(jq -er 'if has("manifests") then ([.manifests[] | select(.platform.os == "linux" and .platform.architecture == "arm64") | .digest]
+                | if length == 1 then .[0] else error("expected exactly one ARM64 image variant") end) else .digest end
+                | select(test("^sha256:[a-f0-9]{64}$"))' release/pushed-manifest.json)
+            fi
+            target="$IMAGE@$variant"
+            docker pull --platform linux/arm64 "$target"
+            echo "variant=$variant" >> "$GITHUB_OUTPUT"
+          else
+            target=t3-supervisor:release-check-arm64
+          fi
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$target")" = linux/arm64
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$target")" = "$REVISION"
+          test "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$target")" = "$VERSION"
+          SMOKE_PLATFORM=linux/arm64 node --import tsx scripts/smoke-release.ts image "$target"
+
+  release:
+    needs: [gate, arm64]
     if: ${{ needs.gate.outputs.sha != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -127,7 +307,6 @@ jobs:
         env:
           VERSION: ${{ steps.plan.outputs.version }}
         run: pnpm pack --out "release/t3-supervisor-$VERSION.tgz"
-      - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         if: ${{ env.PUBLISH == 'true' }}
@@ -242,20 +421,32 @@ jobs:
         if: ${{ env.PUBLISH == 'true' && steps.image.outputs.exists != 'true' }}
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ env.IMAGE }}:${{ steps.plan.outputs.version }}
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
           build-args: |
             VERSION=${{ steps.plan.outputs.version }}
             REVISION=${{ steps.plan.outputs.revision }}
           cache-from: type=gha,scope=release-image
           # BuildKit runs this export alongside the push; a failed cache write stays in the log and never fails or cancels the build or push
           cache-to: type=gha,mode=max,scope=release-image,ignore-error=true
+      - name: Assemble the immutable version from both pushed variants
+        if: ${{ env.PUBLISH == 'true' && steps.image.outputs.exists != 'true' }}
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+          AMD64: ${{ steps.pushed.outputs.digest }}
+          ARM64: ${{ needs.arm64.outputs.pushed }}
+        run: |
+          set -euo pipefail
+          for digest in "$AMD64" "$ARM64"; do [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]]; done
+          docker buildx imagetools create --tag "$IMAGE:$VERSION" "$IMAGE@$AMD64" "$IMAGE@$ARM64"
       - name: Verify both published image variants by immutable digest
         if: ${{ env.PUBLISH == 'true' }}
         env:
           VERSION: ${{ steps.plan.outputs.version }}
+          ARM64_VARIANT: ${{ needs.arm64.outputs.variant }}
         run: |
+          set -euo pipefail
           docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' > release/image-manifest.json
           jq -e '.digest | test("^sha256:[a-f0-9]{64}$")' release/image-manifest.json > /dev/null
           for platform in linux/amd64 linux/arm64; do
@@ -263,7 +454,13 @@ jobs:
               [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $architecture) | .digest]
               | if length == 1 then .[0] else error("expected exactly one image variant") end
               | select(test("^sha256:[a-f0-9]{64}$"))' release/image-manifest.json)
+            if [ "$platform" = linux/arm64 ]; then
+              # the ARM64 variant ran natively in the arm64 job; this version must name exactly that variant
+              test "$variant" = "$ARM64_VARIANT"
+              continue
+            fi
             docker pull --platform "$platform" "$IMAGE@$variant"
+            test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE@$variant")" = "$platform"
             SMOKE_PLATFORM="$platform" node --import tsx scripts/smoke-release.ts image "$IMAGE@$variant"
           done
       - name: Publish the immutable package with provenance

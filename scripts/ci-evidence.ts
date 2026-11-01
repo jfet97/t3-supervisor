@@ -118,7 +118,8 @@ export const planCi = (options: CiEvidenceOptions): Effect.Effect<CiPlan> => Eff
     if (!run) return yield* refuse("no matching PR validation");
     const jobs = yield* jobsOf(run.id);
     const fresh = yield* currentRun(pr.head.sha, run);
-    return yield* Effect.try(() => policy.proveMergedValidation({expected, headTree, runs: fresh, jobs}));
+    const proof = yield* Effect.try(() => policy.proveMergedValidation({expected, headTree, runs: fresh, jobs}));
+    return {...proof, jobs};
   });
   const releaseProof = (head: string) => Effect.gen(function* () {
     yield* fetch(head);
@@ -139,7 +140,9 @@ export const planCi = (options: CiEvidenceOptions): Effect.Effect<CiPlan> => Eff
     const latest = policy.newestPushRun(fresh, expected);
     if (!latest || latest.id !== run.id || latest.status !== "completed" || latest.conclusion !== "success") return yield* refuse("baseline main validation changed");
     const direct = yield* Effect.result(Effect.try(() => policy.provePushValidation({expected, runs: fresh, jobs})));
-    const proof = direct._tag === "Success" ? direct.success : yield* fullPrProof(baseline, policy);
+    const proof = direct._tag === "Success" ? {...direct.success, jobs} : yield* fullPrProof(baseline, policy);
+    // the baseline's own policy may predate a job the current policy requires, such as the native ARM64 check
+    yield* Effect.try(() => currentPolicy.proveCurrentFullJobs({runId: proof.runId, jobs: proof.jobs}));
     return {...release, baselineRunId: proof.runId};
   });
 

@@ -1,4 +1,0 @@
-services:
-  t3-supervisor:
-    build: .
-    image: t3-supervisor:development

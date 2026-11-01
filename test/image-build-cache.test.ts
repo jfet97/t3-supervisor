@@ -28,15 +28,21 @@ it("gives every image cache scope exactly one writer whose failed export is igno
     assert.deepEqual({ type, scope, ignoreError }, { type: "gha", scope: from.scope, ignoreError: "true" });
     writers.push(scope);
   }
-  assert.deepEqual(writers.sort(), ["ci-image", "ci-image-arm64", "release-image"]);
+  assert.deepEqual(writers.sort(), ["ci-image", "ci-image-arm64", "release-image", "release-image-arm64"]);
 });
 
-it("lets the published release build own the cache that the local smoke build only reads", () => {
+// a push is either the push input or an image output that pushes, such as a push by digest
+const pushes = (step: Step) => step.with?.push === true || String(step.with?.outputs ?? "").split(",").map(part => part.trim()).includes("push=true");
+
+it("lets each published release variant own its architecture's cache, which that architecture's local check only reads", () => {
   const release = builds.filter(build => build.file === "release.yml");
-  const pushed = release.find(build => build.step.with?.push === true);
-  const smoke = release.find(build => build.step.with?.load === true);
-  assert.ok(pushed?.to && smoke?.from);
-  assert.equal(pushed.to.scope, "release-image");
-  assert.equal(smoke.to, undefined);
-  assert.equal(smoke.from.scope, pushed.to.scope);
+  for (const [platform, scope] of [["linux/amd64", "release-image"], ["linux/arm64", "release-image-arm64"]] as const) {
+    const pushed = release.filter(build => build.step.with?.platforms === platform && pushes(build.step));
+    const local = release.filter(build => build.step.with?.platforms === platform && build.step.with?.load === true);
+    assert.equal(pushed.length, 1, platform);
+    assert.equal(local.length, 1, platform);
+    assert.equal(pushed[0]!.to?.scope, scope);
+    assert.equal(local[0]!.to, undefined);
+    assert.equal(local[0]!.from?.scope, scope);
+  }
 });

@@ -32,7 +32,9 @@ export type LogEntry = {
   status: number | null;
   completedAt: number | null;
 };
-export type UiFixtureOptions = {assets: string; port?: number; scenario?: ScenarioName; params?: ScenarioParams; now?: () => number};
+// `host` is the listening address: loopback by default; a container listens on all of its interfaces and publishes the port on
+// the host's loopback only, so the browser's Host header stays the loopback address the fixture checks
+export type UiFixtureOptions = {assets: string; port?: number; host?: "127.0.0.1" | "0.0.0.0"; scenario?: ScenarioName; params?: ScenarioParams; now?: () => number};
 export type UiFixture = {url: string; port: number; assetsDirectory: string; assets: readonly AssetInfo[]; token: string; controller: FixtureController};
 
 const loopback = "127.0.0.1";
@@ -482,9 +484,10 @@ export const startUiFixture = (options: UiFixtureOptions) => Effect.gen(function
   yield* Effect.addFinalizer(() => Effect.sync(() => controller.close()));
   const app = yield* HttpRouter.toHttpEffect(appLayer(controller, assetsDirectory));
   const server = createServer();
-  const http = yield* NodeHttpServer.make(() => server, {host: loopback, port: options.port ?? 0});
+  const host = options.host ?? loopback;
+  const http = yield* NodeHttpServer.make(() => server, {host, port: options.port ?? 0});
   const address = server.address();
-  if (typeof address !== "object" || address === null || address.address !== loopback) return yield* Effect.fail(new Error("ui fixture is not bound to 127.0.0.1"));
+  if (typeof address !== "object" || address === null || address.address !== host) return yield* Effect.fail(new Error(`ui fixture is not bound to ${host}`));
   controller.port = address.port;
   yield* http.serve(gate(controller, app));
   yield* Effect.addFinalizer(() => Effect.sync(() => server.closeAllConnections()));

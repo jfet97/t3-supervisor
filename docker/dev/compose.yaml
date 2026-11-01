@@ -1,0 +1,79 @@
+# The Docker development environment (docs/local-stack.md). Run it through ./dev, which sets the project name, the
+# development user's IDs and the ports; every named volume belongs to that project alone, and every published port
+# listens on the host's loopback only.
+x-development: &development
+  image: t3-supervisor-dev:local
+  build:
+    context: .
+    args:
+      DEV_UID: ${DEV_UID:-1000}
+      DEV_GID: ${DEV_GID:-1000}
+  init: true
+  working_dir: /workspace
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
+  environment:
+    LANG: C.UTF-8
+    HOME: /credentials/home
+    XDG_CONFIG_HOME: /credentials/home/.config
+    XDG_DATA_HOME: /credentials/home/.local/share
+    XDG_STATE_HOME: /credentials/home/.local/state
+    XDG_CACHE_HOME: /cache/xdg
+    CODEX_HOME: /credentials/codex
+    CLAUDE_CONFIG_DIR: /credentials/claude
+    T3CODE_HOME: /credentials/t3
+    DISABLE_AUTOUPDATER: "1"
+    T3SUP_DEV_CREDENTIALS: /credentials
+    T3SUP_DEV_DATA: /data
+    T3SUP_DEV_CACHE: /cache
+    T3SUP_DEV_T3_PORT: ${T3SUP_DEV_T3_PORT:?run the environment through ./dev}
+    T3SUP_DEV_UI_PORT: ${T3SUP_DEV_UI_PORT:?run the environment through ./dev}
+    T3SUP_DEV_HEALTH_PORT: ${T3SUP_DEV_HEALTH_PORT:?run the environment through ./dev}
+    T3SUP_DEV_FIXTURE_PORT: ${T3SUP_DEV_FIXTURE_PORT:?run the environment through ./dev}
+    T3SUP_DEV_UI_FIXTURE_PORT: ${T3SUP_DEV_UI_FIXTURE_PORT:?run the environment through ./dev}
+  volumes:
+    - type: bind
+      source: ../..
+      target: /workspace
+    - type: volume
+      source: node_modules
+      target: /workspace/node_modules
+    - type: volume
+      source: credentials
+      target: /credentials
+    - type: volume
+      source: data
+      target: /data
+    - type: volume
+      source: cache
+      target: /cache
+
+services:
+  env:
+    <<: *development
+    command: ["node", "--import", "tsx", "scripts/dev-environment.ts", "serve"]
+    ports:
+      - "127.0.0.1:${T3SUP_DEV_T3_PORT}:${T3SUP_DEV_T3_PORT}"
+      - "127.0.0.1:${T3SUP_DEV_UI_PORT}:${T3SUP_DEV_UI_PORT}"
+      - "127.0.0.1:${T3SUP_DEV_HEALTH_PORT}:${T3SUP_DEV_HEALTH_PORT}"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+process.env.T3SUP_DEV_HEALTH_PORT+'/health').then((r)=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 300s
+    stop_grace_period: 60s
+
+  tools:
+    <<: *development
+    profiles: [tools]
+    command: ["bash"]
+    ports:
+      - "127.0.0.1:${T3SUP_DEV_FIXTURE_PORT}:${T3SUP_DEV_FIXTURE_PORT}"
+      - "127.0.0.1:${T3SUP_DEV_UI_FIXTURE_PORT}:${T3SUP_DEV_UI_FIXTURE_PORT}"
+
+volumes:
+  node_modules:
+  credentials:
+  data:
+  cache:

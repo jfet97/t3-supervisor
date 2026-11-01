@@ -35,7 +35,7 @@ export const cacheHome = (env: NodeJS.ProcessEnv = process.env): string =>
 
 /**
  * The one root of every run folder, so `pnpm dev:stack clean` finds runs that `--keep`, a crash or a forced kill left in
- * another invocation. It never depends on TMPDIR, which `nix develop` sets differently for each command.
+ * another invocation. It never depends on TMPDIR, which can differ between invocations.
  */
 export const runRoot = (env: NodeJS.ProcessEnv = process.env): string => join(cacheHome(env), "t3-supervisor", "local-runs");
 

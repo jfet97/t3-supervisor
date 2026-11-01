@@ -4,7 +4,6 @@ ui-dist
 .git
 knowledge
 .qmd
-.direnv
 test
 *.sqlite3*
 *.env*

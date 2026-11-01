@@ -59,6 +59,8 @@ export type StartupSessionOptions = {
   // the compiled dashboard the production app serves, and its port; the suites need neither
   readonly uiAssetsDirectory?: string;
   readonly uiPort?: number;
+  // the dashboard's listening address: loopback unless a container publishes the port to the host's loopback
+  readonly uiHost?: string;
   // "empty" lists no project and no conversation
   readonly catalog?: "startup" | "empty";
   readonly titles?: {readonly project: string; readonly main: string};
@@ -196,7 +198,7 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
   const outage: PeerRoutes = {http: () => availability.up ? undefined : json(503, {error: "t3_unavailable"}), rpc: () => availability.up ? undefined : {fail: true}};
   const peer = yield* intPeer([outage, environment, nativeReadRoutes(state), operate]);
   const served: Partial<SupervisorConfig> = {...(options.uiAssetsDirectory === undefined ? {} : {uiAssetsDirectory: options.uiAssetsDirectory}),
-    ...(options.uiPort === undefined ? {} : {uiPort: options.uiPort})};
+    ...(options.uiPort === undefined ? {} : {uiPort: options.uiPort}), ...(options.uiHost === undefined ? {} : {uiHost: options.uiHost})};
   const config = yield* appConfig(directory, peer.baseUrl, {guidanceTokenFile: join(directory, "read-token"), ...served});
   assert.equal(config.t3TokenFile.endsWith("read-token"), true);
   const app = yield* runApp(config, yield* buildT3Client(peer.baseUrl), () => catalog);

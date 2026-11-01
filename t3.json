@@ -3,7 +3,7 @@
   "scripts": [
     {
       "name": "Setup Worktree",
-      "command": "sh scripts/setup-worktree.sh",
+      "command": "sh dev setup",
       "runOnWorktreeCreate": true
     }
   ]

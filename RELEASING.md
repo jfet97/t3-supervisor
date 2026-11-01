@@ -90,9 +90,21 @@ exact archive outside the checkout, and starts it against a bounded native T3
 fixture. It checks health metadata, CLI version, dashboard HTML, its hashed asset
 and clean cancellation. It checks a local container before pushing, then exercises
 both published image variants by their immutable index digest before moving an
-image channel or publishing the package. ARM64 runs under QEMU on the hosted runner.
-Pull-request static checks also build and smoke-test ARM64 under QEMU without
-publishing, so this readiness boundary is checked before a release. A failed
+image channel or publishing the package. Each architecture is built and run on a runner
+of its own: the `arm64` job on a native `ubuntu-24.04-arm` runner builds the ARM64
+variant, pushes it by digest and runs it by that digest; the release job builds and
+pushes the AMD64 variant and assembles the immutable version from the two pushed
+variants. Neither job pushes before the same pre-write gate, the release job's steps
+run verbatim in both: an existing npm version must carry this source revision and
+archive, neither channel may move backwards, an existing image must carry this
+revision and version, an existing Git tag must name this commit, and a new
+publication must come from this workflow's own commit. Before the npm package, the
+channel tag or the GitHub release, the release job checks that the version names
+exactly the natively verified ARM64 variant and runs its AMD64 variant by digest. A
+retry of an existing version verifies its published variants the same way. Nothing is
+emulated.
+Pull-request checks also build and run the ARM64 container natively without publishing,
+so this readiness boundary is checked before a release. A failed
 readiness check retains the last classified health state and bounded, redacted
 startup output; its HTTP 200 requirement and 30-second deadline remain unchanged.
 It reuses the successful exact-source CI verdict, including any independently

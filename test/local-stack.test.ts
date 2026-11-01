@@ -24,9 +24,11 @@ it("each Supervisor credential is a separate T3 session with exactly the scopes 
   ]);
 });
 
-it("the pinned release names one exact version and a SHA-256 per supported platform", () => {
-  assert.match(t3Release.version, /^\d+\.\d+\.\d+$/u);
-  assert.deepEqual(Object.keys(t3Release.archives).sort(), ["darwin-arm64", "linux-arm64", "linux-x64"]);
+it("the pinned release names one exact published nightly and a SHA-256 per supported platform", () => {
+  // an exact nightly build, never a channel tag such as `nightly` or `latest` and never a stable fallback
+  assert.match(t3Release.version, /^\d+\.\d+\.\d+-nightly\.\d{8}\.\d+$/u);
+  // the development container runs Linux on the host's own architecture
+  assert.deepEqual(Object.keys(t3Release.archives).sort(), ["linux-arm64", "linux-x64"]);
   for (const digest of Object.values(t3Release.archives)) assert.match(digest, /^[0-9a-f]{64}$/u);
   assert.equal(archiveName(t3Release, "linux-x64"), `t3-${t3Release.version}-linux-x64.tar.gz`);
 });

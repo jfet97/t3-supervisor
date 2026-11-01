@@ -50,18 +50,9 @@ Supervisor's ports on loopback. For a T3 server elsewhere, set `T3_URL` before
 starting Compose. State lives in `SUPERVISOR_DATA_DIR`; keep it when upgrading.
 See [container setup](docs/installation.md#docker) for permissions and networking.
 
-The repository has two Compose files for the same service. `compose.yaml` is the
-base configuration and runs the published image. `compose.build.yaml` is an
-optional override for contributors building from this checkout; it is used only
-when explicitly included:
-
-```sh
-docker compose -f compose.yaml -f compose.build.yaml up --build -d
-```
-
-The override reuses the base ports, state and security settings. Ordinary image
-installs use `compose.yaml` alone. Keep private credentials and local deployment
-configuration outside the repository.
+`compose.yaml` runs the published image. Contributors develop in the repository's
+own Docker environment instead ([development environment](docs/local-stack.md)). Keep
+private credentials and local deployment configuration outside the repository.
 
 ## Open the dashboard
 
