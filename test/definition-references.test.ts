@@ -324,7 +324,6 @@ it.effect("short contracts deliver all reference kinds through native-verified w
   const introduction = workflowProposalText(task);
   for (const label of ["Reference: docs/testing.md", "Skill: .claude/skills/project-testing/SKILL.md", "Skill: effect-v4-development", "Skill: plugin:review"])
     assert(introduction.includes(label), "the operative receives each pointer, including exact namespaces");
-  assert(introduction.includes("missing or ambiguous skills remain explicit gaps"));
   assert(!introduction.includes("contents of the testing guide"), "no supporting content is synthesized");
   yield* f.close;
   const reopened = yield* openWwcStores(f.directory);

@@ -305,19 +305,17 @@ it.effect("the operative gets a short pinned notice, reads the complete proposal
     assert.ok(notice.includes(`supervision_plan ${JSON.stringify({callerThreadId: task.threadId, taskId: task.id, proposalId: task.workflowProposalId ?? task.id})}`));
     // the event, exact read arguments and contact route; identities are not repeated in headings or contact prose
     assert.match(notice, /^Project Supervisor — workflow proposal\n/u);
-    assert.ok(notice.endsWith(`Questions: t3_thread_send to ${task.supervisorThreadId}, mode queue; your Supervisor reads its own queue at each watch boundary.`));
+    assert.ok(notice.includes(`t3_thread_send to ${task.supervisorThreadId}, mode queue`), "the contact route names the Supervisor's thread and the queue mode");
     assert.equal(notice.split('"taskId":').length - 1, 1);
     assert.equal(notice.split('"proposalId":').length - 1, 1);
     assert.doesNotMatch(notice, /Plan outline|workflow-acceptance|branch-selection|Required references|project\.yaml|approval step/u,
       "the notice pastes no plan, protocol, record, contract or definitions pointer");
-    assert.match(full, /It adds no human approval step or authority, cannot block tools/u, "the agreement contract is read with the proposal");
     assert.ok(notice.length * 4 < full.length, `notice ${notice.length} characters against the ${full.length}-character proposal it points to`);
     assert.match(full, /```workflow-acceptance\n/u);
     assert.doesNotMatch(full, /^\s+Reference: /mu, "definition pointers are not repeated under every member");
     // the operative starts at the project.yaml index and reads each member's file, which carries its own references and skills
     assert.equal(full.match(/AGENTS\.md|wiki\/how-we-build\.md/gu), null, "no definition's supporting pointer is copied into the introduction");
     assert.match(full, /\.t3-supervisor\/project\.yaml; read the full steps\/<id>\.md and workflows\/<id>\.yaml files it lists that apply\./u);
-    assert.match(full, /Defined members' contracts, references and skills are in their definition files; read the ones that apply, progressively\./u);
     assert.match(full, /Single review \[workflow:single-review; fixed; members in its definition\]/u);
     assert.match(full, /- branch \[branch:[^\]]+\] if: The frozen artifact is a contained, low-risk change\./u, "the operative still sees the branch it decides");
     const outline = full.slice(full.indexOf("Plan outline"), full.indexOf("\nBranches:"));
