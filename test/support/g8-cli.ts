@@ -164,10 +164,12 @@ export class InstalledBin extends Context.Service<InstalledBin, {
 
 const stepTimeoutMs = 90_000;
 
-// keep the shared package store, without inheriting the test command's project-specific npm_config_* values
+/* Keep the shared package store and selected Corepack installation, without inheriting project-specific pnpm_config_* values.
+ * Corepack must use its installed default when the packed package no longer carries the checkout's packageManager field.
+ */
 const pnpmEnvironment = (): NodeJS.ProcessEnv => {
-  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir() };
-  for (const key of ["PNPM_HOME", "XDG_DATA_HOME", "npm_config_store_dir"] as const) {
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? tmpdir(), COREPACK_DEFAULT_TO_LATEST: "0" };
+  for (const key of ["PNPM_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "PNPM_CONFIG_STORE_DIR", "COREPACK_HOME", "COREPACK_ENABLE_DOWNLOAD_PROMPT"] as const) {
     if (process.env[key]) env[key] = process.env[key];
   }
   return env;

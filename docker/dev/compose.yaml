@@ -24,6 +24,7 @@ x-development: &development
     CLAUDE_CONFIG_DIR: /credentials/claude
     T3CODE_HOME: /credentials/t3
     DISABLE_AUTOUPDATER: "1"
+    PNPM_CONFIG_STORE_DIR: /cache/pnpm-store
     T3SUP_DEV_CREDENTIALS: /credentials
     T3SUP_DEV_DATA: /data
     T3SUP_DEV_CACHE: /cache

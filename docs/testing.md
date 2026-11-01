@@ -42,8 +42,8 @@ duplicate.
 | 1. Unit and controller logic | the main suite, with `TestClock` where time is policy | calculations, decoding, state transitions, ordering, timing policy and the atomicity of one store |
 | 2. Replays and real boundaries | the main suite: short deterministic runs over the real Supervisor graph (`test/support/startup-gateway.ts`) or the production-wired run with its dashboard and workflow MCP endpoint (`test/support/scenario-driver.ts`), with real sockets, processes and SQLite files and the scripted native peer | how Supervisor answers a given native event sequence: authority, receipts, uncertain effects, no duplicate sends, races committed at a peer hook and the native traffic per route |
 | 3. Browser journeys | `./dev e2e`; CI job `browser` | that a user completes the workflow through the rendered controls, and the durable state it leaves |
-| 4. Scripted soaks | wall clock over the scripted peer, no model; from increment 5 | service, resource and disconnect behavior over time |
-| 5. Published-T3 compatibility | the pinned published T3 with Supervisor (`./dev check`, `./dev up`); no provider | startup, native access and scopes, credentials, MCP transport, persistence, no-contact and cleanup against the pinned T3 |
+| 4. Scripted soaks | `./dev soak`: the Supervisor process against a fake T3 on the wall clock, no model | service, resource and disconnect behavior over time |
+| 5. Published-T3 compatibility | the pinned published T3 with Supervisor (`./dev check`, `./dev up`); no provider | startup, native access and scopes, credentials, MCP transport, persistence, no-contact, recovery after a T3 restart and cleanup against the pinned T3 |
 | 6. Provider trials | the signed-in local Docker profile | actual model behavior |
 
 Types 1 to 4 never reach a real T3 or a model, so they prove nothing about either; type
@@ -82,10 +82,13 @@ personal credentials, so provider runs never happen there.
 | --- | --- | --- | --- |
 | Required PR CI | every ordinary PR, through the `check` aggregate | types 1 and 2 in the main shards, the startup integration, and the browser journeys (type 3) in the `browser` job | none |
 | Extended runs | explicitly invoked before a release whose inputs they cover, or when one of those inputs changes; never scheduled | the scripted soaks (type 4) and the published-T3 compatibility runs (type 5), as a manually dispatched CI run or the same `./dev` commands locally | none |
-| Provider acceptance | locally, when a change touches what a provider trial covers | provider trials (type 6) in the signed-in Docker profile, through a `./dev` command where one exists | that profile's private volume, never exported |
+| Provider acceptance | locally, when a change touches what a provider trial covers | provider trials (type 6) in the signed-in Docker profile through `./dev trial`, each with a disposable project and chat of its own | that profile's private volume, never exported |
 
-Extended runs and provider trials arrive with the long-run tier (increment 5). Neither
-gates ordinary PRs, and neither becomes a release gate without an explicit decision.
+Extended runs start through `./dev soak` and `./dev check` or the manually dispatched
+`extended` workflow ([CI](ci.md#extended-runs)); provider trials start through
+`./dev trial` in the running environment ([development environment](local-stack.md#provider-trials)).
+Neither gates ordinary PRs, and neither becomes a release gate without an explicit
+decision.
 
 - Inputs that call for extended runs: the T3 pin; the native adapter, envelope and
   protocol reads; restart, reconnect and credential renewal.
@@ -118,8 +121,10 @@ profile, but each trial owns disposable projects and actors; it never reuses, ed
 resets a person's everyday conversations.
 
 Record the exact inputs with every live observation: the Supervisor commit and whether
-the tree was clean, the T3 pin, the provider CLI version, the model and its settings,
-the prompt version and, for a browser, the dashboard asset hashes. Evidence expires
+the tree was clean, the T3 pin, the provider and model T3 selected and their settings,
+the prompt version and, for a browser, the dashboard asset hashes. A provider CLI found
+in the environment need not be the runtime T3 runs: record the runtime version T3
+reports, and any CLI version found apart, labelled unverified. Evidence expires
 when one of these inputs changes; run it again rather than carrying it forward.
 
 ## Browser journeys
@@ -314,8 +319,8 @@ holds older testing reports, whose scenarios are classified the same way.
 | `auth forge` in an installation | Forge prints only the token, exits with fixed codes, and the token signs in. | `src/cli.ts` | 2 | `auth-cli.characterization.test.ts`, `cli-bin.test.ts`, `dev-fixture.test.ts` | automated |
 | Listeners after the S2 port | The deployed configuration yields the same listeners as before the port. | `src/config.ts` | none | `config.characterization.test.ts` keeps the configuration golden | retired one-off migration |
 | Startup with real credentials | Supervisor starts with least-scope credentials, ingests the T3 catalog and serves the workflow MCP route. | `src/guidance-application.ts` | 5 | `startup-integration.test.ts`, `supervision-live.test.ts` | automated: `./dev check` |
-| Recovery after a T3 restart | The service degrades, reconnects its watch with cursor continuity and becomes ready again. | `src/guidance-application.ts`, `src/supervisor.ts`, `src/t3.ts` | 5 | `supervisor.characterization.test.ts` (CT-MAIN-04), `t3-client-port.test.ts`, `supervisor.test.ts` | manual gap (increment 5) |
-| Idle watch heartbeat | A watch idle for over a minute keeps its heartbeat. | `src/t3.ts` | 4 | `t3-client-port.test.ts` (heartbeat on the Effect clock) | manual gap (increment 5) |
+| Recovery after a T3 restart | The service degrades, reconnects its watch with cursor continuity and becomes ready again. | `src/guidance-application.ts`, `src/supervisor.ts`, `src/t3.ts` | 5 | `supervisor.characterization.test.ts` (CT-MAIN-04), `t3-client-port.test.ts`, `supervisor.test.ts` | automated: `./dev check` restarts the pinned T3 |
+| Idle watch heartbeat | A watch idle for over a minute keeps its heartbeat. | `src/t3.ts` | 4 | `t3-client-port.test.ts` (heartbeat on the Effect clock), `soak/idle-watch-heartbeat.test.ts` | automated: `./dev soak` |
 | Production-size projection | A projection of tens of MiB is read within the HTTP deadline. | `src/t3-projection-stream.ts`, `src/t3.ts` | 2 | `t3.test.ts` (over 32 MiB on the wire), `t3-projection-stream.test.ts` | automated; the post-port comparison on deployment data is retired |
 | Health contract | The container health check stays healthy and `/health` keeps its JSON shape. | `src/supervisor.ts` | 2 | `supervisor.characterization.test.ts` (CT-HEALTH-01); `./dev up` waits for health | automated |
 | Stop and restart of an installation | SIGTERM closes listeners and databases and exits 130; a restart keeps the state. | `src/main.ts` | 2 | `cli-bin.test.ts` (CT-MAIN-01); `./dev check` leaves no port, process or run folder | automated; checking a deployed revision belongs to the deployment owner |
@@ -326,16 +331,16 @@ holds older testing reports, whose scenarios are classified the same way.
 | Restart with an in-flight notice or introduction | Reopen recovers each uncertain record once, sends no duplicate and shows it as uncertain. | `src/guidance-store.ts` | 2 | `guidance-store-service.test.ts` (CT-GDB-01), `supervisor-conversation-admission.test.ts` (CT-CONV-01, CT-CONV-02 crash), `unknown-send-reconciliation.test.ts` (CT-CONV-02 abort) | automated; the check on live deployment data is retired |
 | Supervision data after the database cut-over | Existing bindings, tasks, controls, No Project mode and owned IDs read back unchanged. | `src/project-supervisor-store.ts` | none | `project-supervisor-store.regression.test.ts` (CT-PSS-06) | retired one-off migration |
 | Uncertain task after a restart | A dispatching or uncertain task keeps its original message identity across a restart and is never sent fresh. | `src/project-supervisor-store.ts`, `src/project-supervisor.ts` | 2 | `project-supervisor.test.ts` (CT-PS-01 crash, CT-PS-02), `unknown-send-reconciliation.test.ts` (CT-PS-01 abort) | automated |
-| Concurrent writes under the supervision cycle | Concurrent MCP writes and the supervision cycle meet no SQLITE_BUSY and no self-contention. | `src/project-supervisor-store.ts` | 4 | `db-worker.test.ts`, `sql-semantics.test.ts` (CT-SQL-04) | manual gap (increment 5) |
+| Concurrent writes under the supervision cycle | Concurrent MCP writes and the supervision cycle meet no SQLITE_BUSY and no self-contention. | `src/project-supervisor-store.ts` | 4 | `db-worker.test.ts`, `sql-semantics.test.ts` (CT-SQL-04), `soak/concurrent-writes.test.ts` | automated: `./dev soak` saves through the dashboard beside the cycle; workflow MCP writes, which need native proofs, stay in the replay suite |
 | Uncoached No Project Start and Stop | A Start runs one interpretation and activates on a positive verdict; a Stop during the interpretation sends one notice and nothing again. | `src/project-supervisor.ts` | 6 | `interpretation-start.test.ts`, `stop-linearization.test.ts` (CT-LIN-04, CT-LIN-06), `project-supervisor.test.ts` | manual gap (increment 5) |
 | No-contact reads | Dashboard snapshot and overview reads make no native write. | `src/project-supervisor.ts` | 2 | `project-supervisor.characterization.test.ts` (CT-PS-08), `dashboard-overview.test.ts`; `./dev check` (no-contact conversation) | automated |
 | Auth state after the port | Existing sessions still authenticate, the login database keeps its journal mode and schema, and the workflow token is unchanged. | `src/service-auth.ts` | none | `service-auth.characterization.test.ts` (CT-AUTH-01), `db.test.ts` | retired one-off migration |
 | Catalog after the port | The existing catalog opens without a schema change, its cursor continues and its file modes stay private. | `src/store.ts` | none | `store.characterization.test.ts` (CT-STORE-03, CT-FILES-MODE-01), `store.test.ts` | retired one-off migration |
 | Monitor schema PRAGMA comparisons | Recorded column layouts decided whether legacy ALTER guards could go. | `src/supervisor-conversation-store.ts`, `src/supervisor-monitor-store.ts` | none | `supervisor-monitor.test.ts` (older monitor schema) | retired one-off migration |
 | Scope version on every installation | Each installation's database carried the current scope version, which decided whether the reset branch could go. | `src/supervisor-state-reset.ts` | none | `supervisor-state-reset-service.test.ts` | retired one-off migration |
-| Uncoached operative request | A real operative reaches the introduction and, if it happens naturally, acceptance; rendered prompts stay bounded and free of duplication. | `src/supervisor-conversation.ts` | 6 | `supervisor-conversation.test.ts` (payload bounds, exchange audit), `exchange-audit.test.ts` | manual gap (increment 5) |
+| Uncoached operative request | A real operative reaches the introduction and, if it happens naturally, acceptance; rendered prompts stay bounded and free of duplication. | `src/supervisor-conversation.ts` | 6 | `supervisor-conversation.test.ts` (payload bounds, exchange audit), `exchange-audit.test.ts` | provider trial `./dev trial introduction`: the introduction reaching the operative once is required, a natural agreement is reported; `./dev trial no-contact` is its no-contact control |
 | Kill between sending and receipt | After a restart no native message is duplicated and the original identity is reconciled. | `src/supervisor-conversation.ts` | 2 | `supervisor-conversation-admission.test.ts` (CT-CONV-01, CT-CONV-02 crash), `stop-linearization.test.ts` (CT-LIN-06) | automated over the scripted peer |
-| Human Stop during supervised work | A Stop gives exactly one operative notice and prompt Supervisor settlement. | `src/supervisor-conversation.ts` | 6 | `supervisor-conversation.test.ts`, `supervisor-scope-lifecycle.test.ts` | manual gap (increment 5) |
+| Human Stop during supervised work | A Stop gives exactly one operative notice and prompt Supervisor settlement. | `src/supervisor-conversation.ts` | 6 | `supervisor-conversation.test.ts`, `supervisor-scope-lifecycle.test.ts` | provider trial `./dev trial stop`: one Stop pressed once during a running turn, one Stop notice recorded as Supervisor's, nothing created after it and settlement within the budget are required |
 | Idle parking | A completed main with quiet children parks its Supervisor once after the quiet period, and a later human message reuses the same Supervisor. | `src/supervisor-lifecycle.ts` | 6 | `supervisor-scope-lifecycle.characterization.test.ts` (CT-LIFE-03), `supervisor-scope-lifecycle.test.ts` | manual gap (increment 5) |
 | Helper check-in through the published frame | A helper check-in is rendered and attributed through T3's published frame, and a lost reply stays uncertain without a second POST. | `src/supervisor-helper-transport.ts` | 6 | `helper-webhook-integration.test.ts` (CT-INT-03), `supervisor-helper-transport.test.ts` | manual gap (increment 5) |
 | Helper recruitment and one check-in | Readiness completes over the real webhook channel, one assigned child activity gives exactly one check-in, and a restart during it gives no second POST. | `src/supervisor-team-runtime.ts` | 6 | `supervisor-team-runtime.test.ts`, `supervisor-team-runtime.characterization.test.ts` (CT-TRUN-01 crash), `helper-webhook-integration.test.ts` (CT-INT-03 H1 with CT-TRUN-01 abort) | manual gap (increment 5) |

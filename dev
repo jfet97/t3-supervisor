@@ -28,6 +28,12 @@ usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
   check [ARGS]        a disposable published-T3 stack check, removed when it ends
   e2e [ARGS]          the browser journeys: builds the dashboard, then runs vitest with vitest.e2e.config.ts in the e2e
                       image (ARGS go to vitest); each journey owns its Supervisor, scripted T3 and Chromium
+  soak [ARGS]         the scripted soaks: vitest with vitest.soak.config.ts in the toolchain container (ARGS go to vitest);
+                      each soak runs the Supervisor process against a fake T3 on the wall clock, without credentials
+  trial SCENARIO --budget-minutes N [--model MODEL] [--keep]
+                      a provider trial in the running signed-in environment: a disposable project and chat of its own,
+                      observed for the whole budget, then removed with its chats unless --keep; local only, never in CI
+                      (scripts/provider-trial.ts)
   reset               remove test data: the workspaces' T3 projects with their chats, Supervisor data and the
                       workspaces; provider sign-ins, T3 settings and T3 provider connections stay
   reset-auth          sign out every provider: T3's own sign-out for each instance it offers one for, including
@@ -169,6 +175,14 @@ case $command in
       --port "$T3SUP_DEV_UI_FIXTURE_PORT" "$@"
     ;;
   check) tools pnpm dev:stack --check --cache-dir /cache/t3-runtime "$@" ;;
+  trial)
+    running || die "the environment is not running; start it with ./dev$flag up"
+    compose exec env node --import tsx scripts/provider-trial.ts "$@"
+    ;;
+  soak)
+    setup
+    tools pnpm test:soak "$@"
+    ;;
   e2e)
     setup
     compose build e2e

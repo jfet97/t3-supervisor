@@ -27,6 +27,8 @@ directly. Images never contain source, credentials or state.
 | `./dev fixture`, `./dev ui-fixture` | the dashboard fixtures, below |
 | `./dev check` | the disposable published-T3 check, below |
 | `./dev e2e [ARGS]` | the browser journeys, below; ARGS go to vitest |
+| `./dev soak [ARGS]` | the scripted soaks, below; ARGS go to vitest |
+| `./dev trial SCENARIO --budget-minutes N` | a provider trial in the running environment, below |
 | `./dev reset` | removes test data; provider sign-ins, T3 settings and T3 provider connections stay |
 | `./dev reset-auth` | signs out every provider; chats and all data stay |
 
@@ -177,6 +179,91 @@ viewer opens a trace: `playwright-core show-trace <trace.zip>` where Node and a 
 browser are available, or trace.playwright.dev, which reads the file in the browser.
 They are fixture evidence: real Supervisor and dashboard, scripted T3.
 
+## Scripted soaks
+
+```sh
+./dev soak [vitest arguments]
+```
+
+`./dev soak` runs the scripted soaks of `test/soak/` ([testing](testing.md), execution
+type 4) in the toolchain container: each starts the Supervisor process against a
+loopback fake T3 and observes it on the wall clock, with its own temporary state and
+ports and no credentials. The idle-watch soak keeps the watch idle for longer than a
+minute and passes only when the one subscription survived, the heartbeats continued and
+health stayed ready throughout; `SOAK_IDLE_MS` asks for a longer window. The
+concurrent-writes soak keeps several writers saving the master switch through the
+dashboard beside the supervision cycle and passes only when every save committed or met a
+newer generation, the generation advanced by exactly the saves and no statement met a
+busy database; `SOAK_WRITE_MS` asks for a longer window. Each soak prints
+its outcome with this checkout's commit and whether the tree was clean. Soaks are
+extended runs: started by hand or by the manually dispatched `extended` workflow, never
+by the ordinary suites or a schedule.
+
+## Provider trials
+
+```sh
+./dev trial no-contact|introduction|stop --budget-minutes N [--model MODEL] [--keep]
+```
+
+A provider trial ([testing](testing.md), execution type 6) runs in the running
+environment with its signed-in Codex CLI and never in CI. It uses that sign-in as it is
+and never signs in or out. It creates a disposable project of its own in the development
+workspaces, which detection supervises, and starts one operative chat there with an
+uncoached request: `no-contact` asks a quick question, `introduction` asks for a small
+change to tracked content, and `stop` makes the same request and stops the chat once
+with its own Stop in the dashboard, as a person does, at the first look after the
+proposal reached the operative that shows the operative's run running, so the Stop falls
+during model work. It never presses again: a refused press, such as a conflict with a
+newer policy, ends the trial `inconclusive`, and an unanswered one counts only once the
+chat's policy shows it stopped from the dashboard under a newer generation. It passes
+only when one Stop notice, recorded by T3 with its creation time as Supervisor's,
+reached the operative, T3 created no Supervisor message after it, and Supervisor settled
+within the budget; without the creation times that order needs, it is `inconclusive`.
+The chat is launched automatically, with the call T3's web app makes: one
+`orchestration.launchThread` call over T3's WebSocket RPC, which T3 records as the
+user's request from the web although no person typed it, as the report says. It is made
+with an `orchestration:operate` session that exists only for that launch. `t3 thread
+start` is not used, because T3 records a chat started through its MCP server as an
+agent's, and Supervisor does not take that for a person's request. When T3 records the
+request otherwise, the trial ends `unavailable` at its first look and names what T3
+recorded. It reads only that chat and its Supervisor state, through a scoped T3 read
+session and a dashboard sign-in of its own, both ended with the trial, and it observes
+for the whole budget you give, so a late or repeated contact still shows. There is no
+default budget: choose one, and use the milestone times a trial prints to settle on it.
+
+The trial prints one JSON line: its outcome (`pass` only on the scenario's required
+sequence, `fail` when an invariant is contradicted, `inconclusive` when the budget ended
+first, `unavailable` when T3, Supervisor or the provider sign-in was), the reason, for
+each milestone the bounds of when it happened (the last readable look before it and the
+look that first showed it, as the trial looks every 10 seconds), the Supervisor messages
+that reached the chat with the times T3 created them, how T3 recorded the request, what
+its cleanup did, and its inputs: this checkout's commit and whether the tree was clean,
+separate running Supervisor version/revision from health (a null revision is unknown),
+the T3 pin, the prompt versions, how the chat was launched, the model requested, the
+provider instance, model and options T3 selected for the operative chat and for the
+Supervisor root, read from their own projections (`null` while T3 shows none), and the
+runtime version T3's own provider status reports for each selected instance (`null` when
+it reports none). The Codex CLI version found in the environment is reported apart and
+labelled unverified, because it need not be the runtime T3 runs. A pass needs gapless
+evidence: a readable look after the budget ended, so the verdict never rests on an older
+look; the provider and runtime inputs above recorded; a clean checkout; and a completed
+cleanup. Otherwise the trial reports `inconclusive` and lists its evidence gaps. Its T3
+read session lasts the budget and an hour more, and the trial ends `unavailable` before
+launching anything if T3 grants less than the budget and half an hour. The trial exits
+non-zero unless it passed.
+
+When the trial ends, also by a failure or an interruption, it turns supervision off for
+its own project, so Supervisor starts nothing more there, and asks T3 to remove that
+project with its chats, the Supervisor root among them, through `t3 project remove
+--force`. On the pinned T3 that commits the project's deletion, which cascades to its
+chats, whose deletion detaches their provider sessions as durable effects. The trial
+reports the removal T3 acknowledged, not a physically observed end of the model work.
+The project's folder stays in the workspaces until `./dev reset`. A trial that ends
+without its report prints what its cleanup did on stderr. With `--keep`, the project and
+its chats stay with supervision off for inspection, a turn still running finishes on its
+own, and `./dev reset` removes them later with the other workspace projects. The trial
+changes no other project, chat, chat Stop or setting.
+
 ## Disposable published-T3 check
 
 ```sh
@@ -192,12 +279,17 @@ in the cache volume, with an environment built from nothing, then:
   empty or T3 bearer;
 - a conversation in a disposable project, started through T3's thread CLI, gets
   no Supervisor contact in either system;
+- T3 stops and starts again over the same data and port: Supervisor reports itself
+  degraded while T3 is down, is ready again over the sessions it holds, and a
+  conversation started after the restart reaches its catalog once, still without
+  contact;
 - a token without `orchestration:read`, a forged token and a revoked session each
   get T3's own 401 or 403 on its native shell route, checked between successful
   reads with the valid read credential, so an outage cannot pass as a refusal;
 - after the stop, no port, process group or run folder remains.
 
-It prints one result per check and a JSON summary, removes the run folder unless
+It prints one result per check and a JSON summary with the T3 pin and this checkout's
+commit and whether its tree was clean, removes the run folder unless
 `--keep` is given, and exits non-zero on any failure. `./dev pnpm dev:stack clean`
 removes the marked run folders whose creating process ended; it never touches an
 unmarked folder.

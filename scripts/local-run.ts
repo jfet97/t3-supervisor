@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Clock, Data, Effect, FileSystem, Option, Schema, type Scope } from "effect";
+import { runProcess } from "../test/support/g8-process.js";
 
 /*
   The run folders of the repository's local development stack (docs/local-stack.md). Each run owns one fresh folder under
@@ -14,6 +15,18 @@ import { Clock, Data, Effect, FileSystem, Option, Schema, type Scope } from "eff
 export const runMarker = ".t3-supervisor-local-run";
 export const runPrefix = "t3-supervisor-local-";
 export const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+
+/**
+ * The checkout a run exercises: its commit and whether its tree is clean, the inputs every extended or provider outcome records
+ * (docs/testing.md). Either is null when Git cannot tell.
+ */
+export const checkoutInputs = Effect.gen(function* () {
+  const git = (args: ReadonlyArray<string>) => Effect.map(runProcess("git", args, {env: {PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: process.env.HOME ?? "/tmp"}, cwd: repositoryRoot, timeoutMs: 10_000}), (result) => result.code === 0 ? Option.some(result.stdout.trim()) : Option.none<string>());
+  const revision = yield* git(["rev-parse", "HEAD"]);
+  const status = yield* git(["status", "--porcelain"]);
+  return {revision: Option.getOrNull(revision), clean: Option.match(status, {onNone: () => null, onSome: (value) => value === ""})};
+});
 
 export type RunKind = "stack" | "fixture";
 

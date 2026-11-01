@@ -1,0 +1,50 @@
+# Extended runs (docs/testing.md, "Where tests run"): the scripted soaks and the published-T3 compatibility check, started by
+# hand before a release whose inputs they cover or when one of those inputs changes, through the same ./dev commands
+# contributors run. Never scheduled, never part of the check aggregate and never a release gate; it holds no credentials.
+name: extended
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: The extended runs to start
+        type: choice
+        options: [both, soaks, compatibility]
+        default: both
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # the scripted soaks (execution type 4): the Supervisor process against a fake T3 on the wall clock
+  soaks:
+    if: ${{ inputs.runs != 'compatibility' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the scripted soaks
+        run: |
+          set -eu
+          ./dev soak
+          echo "scripted soaks passed for $(git rev-parse HEAD) on $(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # the published-T3 compatibility check (execution type 5): a disposable stack of the pinned published T3 and this checkout
+  compatibility:
+    if: ${{ inputs.runs != 'soaks' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the published-T3 compatibility check
+        run: |
+          set -eu
+          ./dev setup
+          ./dev pnpm build
+          ./dev check
+          echo "published-T3 compatibility passed for $(git rev-parse HEAD) on $(uname -m)" | tee -a "$GITHUB_STEP_SUMMARY"
