@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { TestClock } from "effect/testing";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
 import { preparedAcceptanceRecord } from "../src/supervisor-conversation.js";
-import { T3TransportError } from "../src/t3.js";
+import { T3ReadError } from "../src/t3-native/index.js";
 import { taskScopeRevision } from "../src/supervision-conversation-contract.js";
 import type { TaskRecord } from "../src/project-supervisor-store.js";
 import type { Projection } from "../src/types.js";
@@ -51,7 +51,7 @@ const introduced = Effect.gen(function* () {
     listThreads: () => Effect.succeed([]),
     projection: (threadId) => {
       const projection = fixture.projections.get(threadId);
-      return projection ? Effect.succeed(projection) : Effect.fail(new T3TransportError("missing projection", 404));
+      return projection ? Effect.succeed(projection) : Effect.fail(new T3ReadError({operation: "orchestration/thread", message: "missing projection", httpStatus: 404}));
     },
     getTurnItem: ({threadId, itemId}) => Effect.succeed({item: submissionDetail(fixture.projections.get(threadId), itemId)}),
   }});
@@ -192,7 +192,7 @@ const childScoped = Effect.gen(function* () {
     listThreads: () => Effect.sync(() => native.lineage),
     projection: (threadId) => {
       const projection = threadId === sourceThreadId && !native.mainReadable ? undefined : fixture.projections.get(threadId);
-      return projection ? Effect.succeed(projection) : Effect.fail(new T3TransportError("missing projection", 404));
+      return projection ? Effect.succeed(projection) : Effect.fail(new T3ReadError({operation: "orchestration/thread", message: "missing projection", httpStatus: 404}));
     },
     getTurnItem: ({threadId, itemId}) => Effect.succeed({item: submissionDetail(fixture.projections.get(threadId), itemId)}),
   }});

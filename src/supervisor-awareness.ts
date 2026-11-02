@@ -2,6 +2,7 @@ import { Cause, Effect, Exit, Schema } from "effect";
 import { mainRunNodeReader, timestampMs } from "./domain.js";
 import { record } from "./supervisor-native.js";
 import type { ConversationRequest } from "./supervisor-conversation-store.js";
+import type { TurnItemView } from "./t3-native/index.js";
 import type { Projection } from "./types.js";
 import { recognisedThreadReadArguments, type WorkflowToolRoutes } from "./workflow-write-evidence.js";
 
@@ -53,9 +54,12 @@ export const nativeActivityRead = (projection: Projection, detail: unknown, allo
     partial, snapshotEndReached: input.view === "activity" && !input.itemId && !partial && !result.value.hasMore};
 };
 
-/** Bounded native detail reads stay on the existing read adapter and request record, including during a busy owner turn. */
+/**
+ * Bounded native detail reads stay on the existing read adapter and request record, including during a busy owner turn. Each read is
+ * the item a turn item reply carries, whatever its fields; a failed read, including a reply that carries no item, yields no observation.
+ */
 export const collectNativeReads = <E>(request: ConversationRequest, projection: Projection,
-  read: (itemId: string) => Effect.Effect<unknown, E>, now: number, routes: WorkflowToolRoutes) => Effect.gen(function* () {
+  read: (itemId: string) => Effect.Effect<TurnItemView, E>, now: number, routes: WorkflowToolRoutes) => Effect.gen(function* () {
   const allowed = new Set(request.batch?.threads.map(item => item.threadId) ?? []);
   const run = projection.runs.find(run => run.id === request.runId || run.userMessageId === request.messageId);
   if (!run || !allowed.size) return [];
@@ -66,8 +70,7 @@ export const collectNativeReads = <E>(request: ConversationRequest, projection: 
   for (const item of candidates) {
     const result = yield* Effect.exit(read(String(item.id)));
     if (Exit.isFailure(result)) {if (Cause.hasInterruptsOnly(result.cause)) return yield* Effect.interrupt;continue;}
-    const value = record(result.value) && "item" in result.value ? result.value.item : result.value;
-    const observation = nativeActivityRead(projection, value, allowed, now, routes);
+    const observation = nativeActivityRead(projection, result.value._tag === "Absent" ? null : result.value.item, allowed, now, routes);
     if (observation) reads.push(observation);
   }
   return reads;

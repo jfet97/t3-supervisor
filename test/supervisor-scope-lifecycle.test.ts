@@ -17,6 +17,7 @@ import { mainConversation, resolveSupervisorScope } from "../src/supervisor-scop
 import { taskScopeRevision } from "../src/supervision-conversation.js";
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle, observeScopeThread } from "../src/supervisor-observation.js";
 import { T3TransportError } from "../src/t3.js";
+import { T3ReadError } from "../src/t3-native/index.js";
 import { completionRecordId } from "../src/workflow-progress.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import {
@@ -378,7 +379,7 @@ it.effect("readMain rejects projections whose thread or project identity does no
 
 it.effect("transient main reads clear the quiet epoch and fail closed", () => Effect.gen(function* () {
   const f = yield* fixture;f.setFailure("main", new T3TransportError("unavailable", 503));
-  const error = yield* Effect.flip(f.lifecycle.readMain(f.binding));assert.ok(error instanceof T3TransportError && error.httpStatus === 503);
+  const error = yield* Effect.flip(f.lifecycle.readMain(f.binding));assert.ok(error instanceof T3ReadError && error.httpStatus === 503);
   yield* f.check(10);assert.equal(f.calls.length, 0);assert.equal((yield* f.store.binding("p", "main"))?.quietSince, null);
   f.setFailure("main", null);yield* f.check(100_000);assert.equal(f.calls.length, 0);
   yield* f.check(100_000 + SUPERVISOR_SETTLE_QUIET_MS);assert.equal(f.calls.length, 1);

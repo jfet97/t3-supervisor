@@ -19,13 +19,14 @@ import { SupervisionScopeLive, SupervisionStoresLive, SupervisionTeamLive } from
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorConversationStore } from "../../src/supervisor-conversation-store.js";
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
+import { NativeOperateRpc, NativeShell, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
+import { fakeNativeLayer } from "./native-access.js";
 
 // the g1b conversation suites' processes: the production conversation, admission gate, workflow state and supervision stores of a
 // temporary data directory, and the production project supervisor beside them, each built from its production layer
@@ -268,8 +269,9 @@ const suiteScopeLayer = (eligible: (thread: ThreadInfo) => boolean) => Layer.eff
 // the workflow state store whose owner check admits every scope (as the baseline suites constructed it), the suite's scope
 // predicates with their admission gate, and the conversation over the fake's T3 client, credentials and definitions, with no
 // helper team
-const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: ThreadInfo) => boolean, config: Partial<SupervisorSettings> = {}) =>
-  SupervisorConversation.layer.pipe(
+const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: ThreadInfo) => boolean, config: Partial<SupervisorSettings> = {}) => {
+  const settings = {...runSettings(directory), ...config};
+  return SupervisorConversation.layer.pipe(
     Layer.provideMerge(SupervisionGate.layer),
     Layer.provideMerge(suiteScopeLayer(eligible)),
     Layer.provideMerge(WorkflowStateStore.layerWith(() => Effect.succeed(true))),
@@ -277,10 +279,11 @@ const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: T
     Layer.provideMerge(ThreadPolicyStore.layer),
     Layer.provideMerge(GuidanceStore.layer),
     Layer.provideMerge(Layer.mergeAll(supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()),
-      Layer.succeed(SupervisorConfig, {...runSettings(directory), ...config}),
-      Layer.succeed(T3Client, fake.t3), Layer.succeed(NativeOperateRpc, fake.operate), Layer.succeed(NativeRpc, fake.read),
+      Layer.succeed(SupervisorConfig, settings),
+      fakeNativeLayer({t3: fake.t3, read: fake.read, operate: fake.operate, baseUrl: settings.t3Url}),
       Layer.succeed(ProjectDefinitions, fake.definitions))),
   );
+};
 
 type ConversationServices = Layer.Success<ReturnType<typeof conversationLayer>> | GuidanceDb | PolicyDb;
 
@@ -354,11 +357,13 @@ export interface ProjectSupervisorProcess {
 export const openProjectSupervisor = (process: ConversationProcess, fake: FakeT3, natives: ProjectSupervisorNatives):
   Effect.Effect<ProjectSupervisorProcess, never, Scope.Scope> => Effect.gen(function* () {
     const clock = yield* Effect.clockWith(Effect.succeed);
-    const stamped = Layer.mergeAll(Layer.succeed(Clock.Clock, wallTimeClock(clock, natives.now)), Layer.succeed(NativeRpc, natives.read));
+    const shell = NativeShell.of({ baseline: Effect.succeed(natives.baseline), threads: Effect.die(new Error("unused native lineage read")) });
+    // the project supervisor's and its control's T3Native hold the read credential; the team services' T3Native, as before, does not
+    const stamped = Layer.mergeAll(Layer.succeed(Clock.Clock, wallTimeClock(clock, natives.now)),
+      fakeNativeLayer({ t3: fake.supervisorT3, read: natives.read, shell, operate: fake.operate, baseUrl: natives.settings.t3Url }));
     const catalog: StoreShape = { catalog: natives.catalog, activate: unused("catalog activation"), ingest: unused("catalog ingest"),
       coverage: unused("catalog coverage"), cursor: unused("catalog cursor"), thread: unused("catalog thread"),
       project: unused("catalog project"), stats: unused("catalog stats") };
-    const shell = NativeShell.of({ baseline: Effect.succeed(natives.baseline), threads: Effect.die(new Error("unused native lineage read")) });
     const stores = Context.pick(GuidanceDb, SupervisorIds, GuidanceStore, SupervisorOwnership, SupervisorStateReset, ProjectSupervisorStore, SupervisorConversationStore,
       ProjectSupervisorMonitorStore, SupervisorTeamStore, ThreadPolicyStore)(process.context);
     const layer = ProjectSupervisor.layer({ definitions: { load: (projectId, threadId) => fake.definitions.load(projectId, threadId) } }).pipe(
@@ -366,8 +371,10 @@ export const openProjectSupervisor = (process: ConversationProcess, fake: FakeT3
       Layer.provideMerge(SupervisionControl.layer.pipe(Layer.provide(stamped))),
       Layer.provideMerge(SupervisionTeamLive({ baseUrl: natives.settings.t3Url })),
       Layer.provideMerge(SupervisionScopeLive(true)),
-      Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, Layer.succeed(SupervisorConfig, natives.settings), Layer.succeed(Store, catalog), Layer.succeed(NativeShell, shell),
-        Layer.succeed(T3Client, fake.supervisorT3), Layer.succeed(NativeOperateRpc, fake.operate), Layer.succeed(ProjectDefinitions, fake.definitions), FetchHttpClient.layer)),
+      Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, Layer.succeed(SupervisorConfig, natives.settings), Layer.succeed(Store, catalog),
+        Layer.succeed(T3Client, fake.supervisorT3), Layer.succeed(NativeOperateRpc, fake.operate),
+        fakeNativeLayer({ t3: fake.supervisorT3, shell, operate: fake.operate, baseUrl: natives.settings.t3Url }),
+        Layer.succeed(ProjectDefinitions, fake.definitions), FetchHttpClient.layer)),
       Layer.provide(Layer.succeedContext(stores)),
     );
     const context = yield* Layer.build(layer).pipe(Effect.orDie);

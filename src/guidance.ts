@@ -8,14 +8,14 @@ import { type GuidanceStoreError, guidanceTransaction } from "./guidance-sql.js"
 import { GuidanceStore } from "./guidance-store.js";
 import { isSupervisorThread, SupervisorOwnership } from "./project-supervisor-store.js";
 import { Store, type StoreError, type StoreShape } from "./store.js";
-import type { T3EnvironmentDescriptor } from "./t3.js";
+import type { T3Environment } from "./t3-native/index.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
 import { timestampMs } from "./timestamp.js";
 
 // the connection state the supervision cycle publishes and every snapshot reads
 export interface RuntimeState {
-  readonly descriptor: T3EnvironmentDescriptor | null;
+  readonly descriptor: T3Environment | null;
   readonly lastCycleAt: number | null;
   readonly connected: boolean;
   readonly coverage: string;
@@ -98,7 +98,7 @@ const makeGuidanceRuntime = (config: SupervisorSettings, source: Pick<StoreShape
   return {
     state,
     snapshot,
-    recordDescriptor: (descriptor: T3EnvironmentDescriptor) => update({ descriptor }),
+    recordDescriptor: (descriptor: T3Environment) => update({ descriptor }),
     markActive: Effect.flatMap(Clock.currentTimeMillis, (lastCycleAt) =>
       update({ connected: true, lastCycleAt, coverage: "Native project and workflow supervision is active." })),
     markUnavailable: update({ connected: false, coverage: "T3 connection unavailable. Project editing needs a working T3 connection." }),
@@ -110,7 +110,7 @@ export class GuidanceRuntime extends Context.Service<GuidanceRuntime, {
   // written only by the operations below; readers may follow its changes
   readonly state: SubscriptionRef.SubscriptionRef<RuntimeState>;
   readonly snapshot: Effect.Effect<GuidanceSnapshot, StoreError | GuidanceStoreError | ThreadPolicyStoreError>;
-  readonly recordDescriptor: (descriptor: T3EnvironmentDescriptor) => Effect.Effect<void>;
+  readonly recordDescriptor: (descriptor: T3Environment) => Effect.Effect<void>;
   // a completed cycle: connected, its time on the Effect clock and the active coverage text
   readonly markActive: Effect.Effect<void>;
   // a failed cycle keeps the last descriptor and cycle time

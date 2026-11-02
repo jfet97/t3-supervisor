@@ -3,7 +3,6 @@ import { conversationMayContact, conversationMayObserve, taskScopeRevision } fro
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
 import { fingerprint } from "./guidance-store.js";
-import { NativeOperateRpc, record, SupervisorRpcError } from "./supervisor-native.js";
 import { GuidanceDb } from "./db.js";
 import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { ProjectSupervisorStore, type BindingRecord, type ParticipantSettlement, type TaskRecord } from "./project-supervisor-store.js";
@@ -13,7 +12,7 @@ import { introductionOutcomeUnknown, SupervisorConversationStore, type Conversat
 import { ProjectSupervisorMonitorStore } from "./supervisor-monitor-store.js";
 import { documentBranchSelections, notApplicableNodeIds, WorkflowStateStore } from "./workflow-state-store.js";
 import { unsettledOccurrences } from "./workflow-plan-tree.js";
-import { T3Client, T3TransportError } from "./t3.js";
+import { T3Native, T3RequestError, type T3InvalidInput, type T3ReadError } from "./t3-native/index.js";
 import type { Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope, type SupervisorScopeResolution } from "./supervisor-scope.js";
 import { childOrigin, delegatedLifecycle, directParentChildLifecycle, normalizeLifecycle } from "./supervisor-observation.js";
@@ -98,7 +97,7 @@ const attempt = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Attempt
 
 export interface SupervisorLifecycleShape {
   /** Returns a confirmed missing main as null; every other unreadable or mismatched scope fails closed. */
-  readonly readMain: (binding: BindingRecord) => Effect.Effect<Projection | null, T3TransportError | MainScopeMismatch>;
+  readonly readMain: (binding: BindingRecord) => Effect.Effect<Projection | null, T3ReadError | T3InvalidInput | MainScopeMismatch>;
   readonly check: (input: BindingRecord, threads: readonly ThreadInfo[]) => Effect.Effect<void, SupervisionStoreError>;
   /** Parks an inactive No Project scope without manufacturing a human Stop or changing its permission. */
   readonly parkInactive: (input: BindingRecord, stillInactive: () => Effect.Effect<boolean, SupervisionStoreError>) => Effect.Effect<void, SupervisionStoreError>;
@@ -115,10 +114,10 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   const transaction = guidanceTransaction(yield* GuidanceDb);
   const conversation = yield* SupervisorConversation;
   const gate = yield* SupervisionGate;
-  const t3 = yield* T3Client;
+  const native = yield* T3Native;
   const ids = yield* SupervisorIds;
-  // the operate credential and the helper team are absent where a scope has none of them
-  const rpc = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  // the operate credential's commands and the helper team are absent where a scope has none of them
+  const commands = native.orchestration.commands;
   const teamRuntime = Option.getOrNull(yield* Effect.serviceOption(SupervisorTeamRuntime));
   // the in-flight settle commands of this service (plan 3.11): closing its scope interrupts each one and keeps its reservation
   const settlements = yield* FiberMap.make<string, void>();
@@ -126,16 +125,17 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   const childObservations = new Map<string, QuietChildObservation>();
   const childScanOffsets = new Map<string, number>();
 
-  const projection = (threadId: string): Effect.Effect<Projection, T3TransportError> => Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection);
+  const projection = (threadId: string): Effect.Effect<Projection, T3ReadError | T3InvalidInput> =>
+    Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection);
   // a confirmed 404 is a missing projection; any other failure stays a failure
-  const presentProjection = (threadId: string): Effect.Effect<Projection | null, T3TransportError> => projection(threadId).pipe(
-    Effect.catchTag("T3TransportError", (error) => error.httpStatus === 404 ? Effect.succeed(null) : Effect.fail(error)));
+  const presentProjection = (threadId: string): Effect.Effect<Projection | null, T3ReadError | T3InvalidInput> => projection(threadId).pipe(
+    Effect.catchTag("T3ReadError", (error) => error.httpStatus === 404 ? Effect.succeed(null) : Effect.fail(error)));
   // one admitted block: its guard reads and writes as one guidance transaction in the admission section
   const admitted = <A, E>(block: (guard: GateGuard) => Effect.Effect<A, E>) => gate.admit((guard) => transaction(block(guard)));
   const teamWorkOf = (binding: BindingRecord): Effect.Effect<boolean, SupervisionStoreError> => teamRuntime ? teamRuntime.hasBlockingWork(binding) : Effect.succeed(false);
   const teamEffectsOf = (binding: BindingRecord): Effect.Effect<boolean, SupervisionStoreError> => teamRuntime ? teamRuntime.hasInflightEffects(binding) : Effect.succeed(false);
 
-  const readMain = (binding: BindingRecord): Effect.Effect<Projection | null, T3TransportError | MainScopeMismatch> => Effect.gen(function* () {
+  const readMain = (binding: BindingRecord): Effect.Effect<Projection | null, T3ReadError | T3InvalidInput | MainScopeMismatch> => Effect.gen(function* () {
     const main = yield* presentProjection(binding.mainThreadId);
     if (main === null) return null;
     if (main.thread.id !== binding.mainThreadId || main.thread.projectId !== binding.projectId) return yield* new MainScopeMismatch({message: "main_scope_mismatch"});
@@ -229,7 +229,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   };
 
   const relatedChildren = (binding: BindingRecord, main: Projection | null, threads: readonly ThreadInfo[], scope: SupervisorScopeResolution | null):
-    Effect.Effect<ChildScopes, T3TransportError> => Effect.gen(function* () {
+    Effect.Effect<ChildScopes, T3ReadError | T3InvalidInput> => Effect.gen(function* () {
     if (!main || main.thread.deletedAt) return {blocked: false, version: fingerprint("deleted-main"), threadIds: [binding.mainThreadId]};
     if (!scope || !scope.complete || !scope.main || !scope.allowedIds.has(scope.main.id))
       return {blocked: true, version: fingerprint(["incomplete-child-scope", scope?.issues ?? []]), threadIds: scope ? [...scope.allowedIds] : [binding.mainThreadId]};
@@ -261,7 +261,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
     const refreshCandidates = [...stale, ...ordered.filter(child => observed.has(child.id)).slice(0, SUPERVISOR_LIFECYCLE_MAX_CACHE_REFRESHES)];
     let projectionReads = 0;
     let scanned = 0;
-    const readProjection = (threadId: string): Effect.Effect<Projection | null | "budget", T3TransportError> => Effect.gen(function* () {
+    const readProjection = (threadId: string): Effect.Effect<Projection | null | "budget", T3ReadError | T3InvalidInput> => Effect.gen(function* () {
       const existing = projections.get(threadId);
       if (existing) return existing;
       if (projectionReads >= SUPERVISOR_LIFECYCLE_MAX_PROJECTION_READS) return "budget" as const;
@@ -327,7 +327,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   const check = (input: BindingRecord, threads: readonly ThreadInfo[]): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     let initial = yield* store.binding(input.projectId, input.mainThreadId);
-    if (!initial || initial.threadId !== input.threadId || initial.state !== "ready" || !rpc) return;
+    if (!initial || initial.threadId !== input.threadId || initial.state !== "ready" || !commands) return;
     const supervisorRead = yield* attempt(projection(initial.threadId));
     if (!supervisorRead.ok) {yield* clearQuiet(initial, "supervisor_unreadable");return;}
     const supervisor = supervisorRead.value;
@@ -587,8 +587,8 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
 
   const sendSettlement = (owner: BindingRecord, version: string, now: number, final: (guard: GateGuard) => Effect.Effect<BindingRecord | null, SupervisionStoreError>, main = false):
     Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
-    if (!rpc) {yield* admitted(final);return;}
-    const operate = rpc;
+    if (!commands) {yield* admitted(final);return;}
+    const settle = commands.dispatchCommand;
     const fresh = `supervisor-settle:${yield* ids.uuid}`;
     const targetId = main ? owner.mainThreadId : owner.threadId;
     const key = main ? "mainSettlement" : "settlement";
@@ -601,6 +601,9 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
         if (!binding) return {_tag: "Answer", value: undefined};
         const existing = binding[key];
         const settlement = existing && ["pending", "uncertain"].includes(existing.state) ? existing : {commandId: fresh, state: "pending" as const, observedAt: now, activityVersion: version, attempts: 0};
+        // a settle whose command is invalid is not sent and records nothing
+        const prepared = yield* settle.prepare({_tag: "ThreadSettle", commandId: settlement.commandId, threadId: targetId}).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!prepared) return {_tag: "Answer", value: undefined};
         const sending = {...settlement, attempts: (settlement.attempts ?? 0) + 1, observedAt: now};
         yield* store.setBinding({...binding, [key]: sending});
         // the settled check and the uncertain write are one transaction; a failed write is a defect of the in-flight operation
@@ -608,11 +611,10 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
           const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
           if (latest && latest[key]?.state !== "settled") yield* store.setBinding({...latest, [key]: {...sending, state: "uncertain"}});
         })).pipe(Effect.orDie);
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {type: "thread.settle", commandId: settlement.commandId, threadId: targetId}), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(prepared.initiate(), (flight) => ({
           result: Effect.gen(function* () {
             const outcome = yield* attempt(Effect.gen(function* () {
-              const receipt = yield* flight.result;
-              if (!record(receipt) || !Number.isSafeInteger(receipt.sequence)) return yield* new SupervisorRpcError("uncertain");
+              yield* flight.result;
               const current = yield* projection(targetId);
               yield* transaction(Effect.gen(function* () {
                 const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
@@ -620,7 +622,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
               })).pipe(Effect.orDie);
             }));
             if (outcome.ok) return;
-            if (outcome.cause instanceof SupervisorRpcError && outcome.cause.definiteRejection) yield* transaction(Effect.gen(function* () {
+            if (outcome.cause instanceof T3RequestError && outcome.cause.definiteRejection) yield* transaction(Effect.gen(function* () {
               const latest = yield* store.binding(binding.projectId, binding.mainThreadId);
               if (latest) yield* store.setBinding({...latest, [main ? "mainQuietSince" : "quietSince"]: null, [key]: {...sending, state: "superseded"}});
             })).pipe(Effect.orDie);
@@ -711,9 +713,12 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   // changed snapshot or a user's override produces; every callback write is fenced to the owner root, its generation and this command
   const sendParticipantSettlement = (owner: BindingRecord, execution: ExecutionStamp, scope: SupervisorScopeResolution, target: ParticipantTarget, snapshotAt: string,
     version: string, now: number): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
-    if (!rpc) return;
-    const operate = rpc;
+    if (!commands) return;
     const commandId = `supervisor-settle:${yield* ids.uuid}`;
+    // a settle whose command is invalid is not sent and records nothing
+    const prepared = yield* commands.dispatchCommand.prepare({_tag: "ThreadAutoSettle", commandId, threadId: target.threadId, snapshotAt}).pipe(
+      Effect.catch(() => Effect.succeed(null)));
+    if (!prepared) return;
     yield* admitSend(gate, {
       identity: `participant:${settlementKey(target.threadId, target.environmentId)}`,
       inFlight: settlements,
@@ -737,17 +742,15 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
           if (latest && latest.threadId === owner.threadId && latest.generation === owner.generation && row?.commandId === commandId && row.state !== "settled")
             yield* store.setBinding(withParticipantRow(latest, {...sending, state, reason}));
         })).pipe(Effect.orDie);
-        const payload = {type: "thread.auto-settle", commandId, threadId: target.threadId, snapshotAt};
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", payload), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(prepared.initiate(), (flight) => ({
           result: Effect.gen(function* () {
             const outcome = yield* attempt(Effect.gen(function* () {
-              const receipt = yield* flight.result;
-              if (!record(receipt) || !Number.isSafeInteger(receipt.sequence)) return yield* new SupervisorRpcError("uncertain");
+              yield* flight.result;
               const current = yield* projection(target.threadId);
               yield* mark(current.thread.settledAt || current.thread.settledOverride === "settled" ? "settled" : current.thread.settledOverride === "active" ? "superseded" : "uncertain", null);
             }));
             if (outcome.ok) return;
-            if (outcome.cause instanceof SupervisorRpcError && outcome.cause.definiteRejection) yield* mark("unresolved", "settle_rejected");
+            if (outcome.cause instanceof T3RequestError && outcome.cause.definiteRejection) yield* mark("unresolved", "settle_rejected");
             else yield* mark("uncertain", null);
           }).pipe(Effect.onInterrupt(() => mark("uncertain", null))),
           release: flight.release,

@@ -17,8 +17,7 @@ import { SupervisorConversation } from "./supervisor-conversation.js";
 import { reviewOutcomes, SupervisorConversationStore, type ConversationRequest, type ReviewOutcomeKind } from "./supervisor-conversation-store.js";
 import { reviewWaitOwners, type ReviewWaitInfo } from "./project-supervisor-contract.js";
 import { StoreError } from "./store.js";
-import { NativeRpc, NativeShell, record, type SupervisorRpcError } from "./supervisor-native.js";
-import { T3Client, type T3TransportError } from "./t3.js";
+import { T3Native, type T3InvalidInput, type T3ReadError, type T3RequestError } from "./t3-native/index.js";
 import {acceptedTaskPlanForBinding, acceptedWorkflowPlansForBinding, documentBranchSelections, notApplicableNodeIds, WorkflowStateStore, type WorkflowApplyValidationContext} from "./workflow-state-store.js";
 import {
   externalContributionDecisions,
@@ -99,25 +98,24 @@ const untilCancelled = <A, E, R>(effect: Effect.Effect<A, E, R>, cancel: Workflo
 // the native reads of workflow proof and scope on the read credential (S4 transports): fresh lineage, projections and turn
 // items; each read receives the call's cancel, which ends it as the baseline signal ended the read it was handed
 export interface WorkflowNativeAccessShape {
-  readonly listThreads: (cancel?: WorkflowCallCancel) => Effect.Effect<ReadonlyArray<ThreadInfo>, SupervisorRpcError | WorkflowReadCancelled>;
-  readonly projection: (threadId: string, cancel?: WorkflowCallCancel) => Effect.Effect<Projection, T3TransportError | WorkflowReadCancelled>;
+  readonly listThreads: (cancel?: WorkflowCallCancel) => Effect.Effect<ReadonlyArray<ThreadInfo>, T3RequestError | WorkflowReadCancelled>;
+  readonly projection: (threadId: string, cancel?: WorkflowCallCancel) => Effect.Effect<Projection, T3ReadError | T3InvalidInput | WorkflowReadCancelled>;
+  // the item as the verifiers receive it, null where the reply carries none; a failed read is unavailable
   readonly getTurnItem: (input: {threadId: string; itemId: string}, cancel?: WorkflowCallCancel) =>
-    Effect.Effect<{item: unknown}, SupervisorRpcError | WorkflowNativeItemUnavailable>;
+    Effect.Effect<{item: unknown}, WorkflowNativeItemUnavailable>;
 }
 
 export class WorkflowNativeAccess extends Context.Service<WorkflowNativeAccess, WorkflowNativeAccessShape>()("t3-supervisor/WorkflowNativeAccess") {
   static readonly make = Effect.gen(function* () {
-    const shell = yield* NativeShell;
-    const t3 = yield* T3Client;
-    const rpc = yield* NativeRpc;
+    const native = yield* T3Native;
     return WorkflowNativeAccess.of({
-      listThreads: (cancel) => untilCancelled(shell.threads, cancel),
-      projection: (threadId, cancel) => untilCancelled(Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection), cancel),
-      getTurnItem: (input, cancel) => Effect.flatMap(rpc.call("orchestration.getTurnItem", input, cancel), (result) =>
-        record(result) && "item" in result ? Effect.succeed({item: result.item}) : Effect.fail(new WorkflowNativeItemUnavailable())),
+      listThreads: (cancel) => untilCancelled(native.orchestration.shellThreads, cancel),
+      projection: (threadId, cancel) => untilCancelled(Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection), cancel),
+      getTurnItem: (input, cancel) => Effect.map(Effect.mapError(native.orchestration.turnItem(input, cancel), () => new WorkflowNativeItemUnavailable()),
+        (view) => ({item: view._tag === "Absent" ? null : view.item})),
     });
   });
-  static readonly layer: Layer.Layer<WorkflowNativeAccess, never, NativeShell | T3Client | NativeRpc> = Layer.effect(WorkflowNativeAccess, WorkflowNativeAccess.make);
+  static readonly layer: Layer.Layer<WorkflowNativeAccess, never, T3Native> = Layer.effect(WorkflowNativeAccess, WorkflowNativeAccess.make);
 }
 
 // the workflow-editing and per-chat stop predicates a binding check reads: the supervision scope's display reads

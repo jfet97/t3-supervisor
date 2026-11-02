@@ -5,12 +5,14 @@ import { GuidanceDb } from "../src/db.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type GateGuard, type SupervisionGateShape, type SupervisionScopeStores } from "../src/supervision-gate.js";
 import { HelperTransport } from "../src/supervisor-helper-transport.js";
-import { NativeOperateRpc, type NativeRpcShape } from "../src/supervisor-native.js";
+import type { NativeRpcShape } from "../src/supervisor-native.js";
 import { SupervisorTeamController } from "../src/supervisor-team-controller.js";
+import { T3Native } from "../src/t3-native/index.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
+import { fakeNative } from "./support/native-access.js";
 import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory, type StoreOpen } from "./support/psx-stores.js";
 
 // CT-LIN-08 (target regression, plan 3.11): the workflow_write commit, a supervision_team mutation and a guide's reservation and
@@ -124,7 +126,7 @@ const services = (f: Fixture) => Effect.gen(function* () {
     Effect.provideService(WorkflowNativeAccess, native), Effect.provideService(SupervisionScopeService, f.display), Effect.provide(provided));
   const team = yield* SupervisorTeamController.make().pipe(Effect.provide(provided),
     Effect.provideService(WorkflowWriteController, writes), Effect.provideService(WorkflowNativeAccess, native),
-    Effect.provideService(SupervisionGate, gate), Effect.provideService(NativeOperateRpc, operate),
+    Effect.provideService(SupervisionGate, gate), Effect.provideService(T3Native, yield* fakeNative({operate})),
     Effect.provideService(HelperTransport, {receiptDocument: () => Effect.succeed(null)} as unknown as HelperTransport["Service"]));
   return {gate, writes, team, dispatched};
 });

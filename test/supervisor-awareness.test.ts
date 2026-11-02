@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { nativeActivityRead } from "../src/supervisor-awareness.js";
+import { Effect } from "effect";
+import { collectNativeReads, nativeActivityRead } from "../src/supervisor-awareness.js";
+import type { ConversationRequest } from "../src/supervisor-conversation-store.js";
+import type { NativeRpcShape } from "../src/supervisor-native.js";
+import { T3RequestError } from "../src/t3-native/index.js";
 import type { Projection } from "../src/types.js";
 import { defaultWorkflowServerAliases, defaultWorkflowToolRoutes, workflowToolRoutes } from "../src/workflow-write-evidence.js";
+import { fakeNative } from "./support/native-access.js";
 
 const nodes = [{id: "root", kind: "root_turn", threadId: "owner", runId: "run", rootNodeId: "root", providerThreadId: "provider", status: "running"},
   {id: "read-node", kind: "dynamic_tool", threadId: "owner", runId: "run", rootNodeId: "root", providerThreadId: "provider", parentNodeId: "root", status: "completed"}];
@@ -106,3 +111,44 @@ it("a read through a configured gateway call tool counts; the unconfigured defau
   assert.equal(routed("gateway.invoke", call, {...detail(), output: {structuredContent: {thread: {threadId: "other-child"}, items: [], hasMore: false}}}),
     null, "another thread's page");
 });
+
+/**
+ * The turn item reads of a check-in through the production T3Native: the verifier receives the reply's item itself, every native key
+ * kept, so a valid and a nonconforming item decide exactly as their detail does; a reply that carries no item is a failed read.
+ */
+it.effect("a native read hands each reply's item whole to the verifier, and a reply without an item records no read", () => Effect.gen(function* () {
+  const valid = {...detail(), id: "valid", providerTurnId: "turn-1", nativeItemRef: {driver: "codex", nativeId: "valid", strength: "strong"}};
+  // a numeric provider turn breaks the pinned identity types; the verifier reads no such field and still decides on the rest
+  const nonconforming = {...detail(), id: "nonconforming", providerTurnId: 42, ordinal: 7};
+  // the item itself as the reply, without the reply's item key
+  const unwrapped = {...detail(), id: "unwrapped"};
+  const replies = new Map<string, unknown>([["valid", {item: valid}], ["nonconforming", {item: nonconforming}], ["unwrapped", unwrapped],
+    ["absent", {item: null}]]);
+  const requested: string[] = [];
+  const read: NativeRpcShape = {
+    call: (tag, payload) => {
+      assert.equal(tag, "orchestration.getTurnItem");
+      requested.push(String(payload.itemId));
+      return Effect.succeed(replies.get(String(payload.itemId)));
+    },
+    initiate: () => Effect.die(new Error("a turn item read never initiates")),
+  };
+  const native = yield* fakeNative({read});
+  const owner: Projection = {...projection, turnItems: [...replies.keys()].map((id) => ({...detail(), id}))};
+  // only the fields the reads use: the request's batch, its run and its recorded read calls
+  const request = {runId: "run", messageId: "request-message", batch: {threads: [{threadId: "child"}]}} as unknown as ConversationRequest;
+  const reads = yield* collectNativeReads(request, owner, (itemId) => native.orchestration.turnItem({threadId: "owner", itemId}), 100,
+    defaultWorkflowToolRoutes);
+  assert.deepEqual(requested, ["valid", "nonconforming", "unwrapped", "absent"]);
+  assert.deepEqual(reads, [nativeActivityRead(owner, valid, allowed, 100, defaultWorkflowToolRoutes),
+    nativeActivityRead(owner, nonconforming, allowed, 100, defaultWorkflowToolRoutes)]);
+  assert.deepEqual(reads.map((item) => item.callItemId), ["valid", "nonconforming"]);
+  // the item each view hands on is the reply's own object, with every key it carried
+  const validView = yield* native.orchestration.turnItem({threadId: "owner", itemId: "valid"});
+  assert.ok(validView._tag === "Item" && validView.item === valid);
+  const nonconformingView = yield* native.orchestration.turnItem({threadId: "owner", itemId: "nonconforming"});
+  assert.ok(nonconformingView._tag === "Nonconforming" && nonconformingView.item === nonconforming);
+  assert.deepEqual(yield* native.orchestration.turnItem({threadId: "owner", itemId: "absent"}), {_tag: "Absent"});
+  const failed = yield* Effect.flip(native.orchestration.turnItem({threadId: "owner", itemId: "unwrapped"}));
+  assert.ok(failed instanceof T3RequestError && failed.malformedReply && failed.outcome === "uncertain");
+}));

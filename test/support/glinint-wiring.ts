@@ -30,6 +30,7 @@ import { SupervisorTeamController } from "../../src/supervisor-team-controller.j
 import { SupervisorTeamRuntime } from "../../src/supervisor-team-runtime.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { makeT3Client } from "../../src/t3.js";
+import { T3Native } from "../../src/t3-native/index.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { ProjectInfo, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
@@ -128,6 +129,8 @@ const intRunLayer = (input: IntRunInput, config: SupervisorSettings) => {
   // the webhook POSTs go through the platform fetch, or the case's observed fetch; a fresh client, since the shell's and the T3
   // client's own instance of the shared layer is built over the platform fetch
   const fetch = Layer.fresh(FetchHttpClient.layer).pipe(Layer.provide(input.fetch ? Layer.succeed(FetchHttpClient.Fetch, input.fetch) : Layer.sync(FetchHttpClient.Fetch, () => globalThis.fetch)));
+  // the run's T3Native over these same clients, as the composition root builds it, its webhook POSTs on the run's webhook fetch
+  const access = T3Native.layer({baseUrl: config.t3Url, read}).pipe(Layer.provideMerge(natives), Layer.provide(Layer.mergeAll(NativeEnvelope.layer, fetch)));
   const definitions = input.definitions;
   const supervisor = Layer.effectContext(Effect.map(ProjectSupervisor.makeUnit(definitions ? {definitions: {load: (projectId, threadId) => definitions(projectId, threadId)}} : {}),
     (unit) => Context.make(ProjectSupervisor, unit.service).pipe(Context.add(IntSupervisorSeams, unit.seams))));
@@ -137,7 +140,7 @@ const intRunLayer = (input: IntRunInput, config: SupervisorSettings) => {
     Layer.provideMerge(SupervisionTeamLive({baseUrl: config.t3Url})),
     Layer.provideMerge(SupervisionScopeLive(true)),
     Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),
-    Layer.provideMerge(Layer.mergeAll(natives, stores, policy, fetch)),
+    Layer.provideMerge(Layer.mergeAll(access, stores, policy, fetch)),
     Layer.provideMerge(Layer.succeed(Configuration, config)),
     Layer.provide(Layer.mergeAll(NodeCrypto.layer, NodeFileSystem.layer)),
   );

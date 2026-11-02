@@ -235,13 +235,15 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
       // the definite rejection of a disabled provider instance, as test/supervisor-native.test.ts scripts it
       if (options.launch?.accepted === false) return {failure: {name: "ThreadManagementProviderInstanceDisabledError"}};
       const threadId = String(entry.payload.threadId);
+      const resumed = state.projections.has(threadId);
       const thread: ThreadInfo = {id: threadId, title: String(entry.payload.title ?? "Supervisor"), projectId: String(entry.payload.projectId),
         archivedAt: null, deletedAt: null, createdBy: "system", creationSource: "server", lineage: {parentThreadId: null, relationshipToParent: null},
         modelSelection: entry.payload.modelSelection ?? defaultSupervisorModel, runtimeMode: "full-access", interactionMode: "default", worktreePath: null};
       if (!catalog.threads.some((item) => item.id === threadId)) catalog.threads.push(thread);
       if (!state.shellThreads.some((item) => item.id === threadId)) state.shellThreads.push({...thread, latestRunId: null});
       if (!state.projections.has(threadId)) state.projections.set(threadId, {thread, runs: [], messages: [], nodes: [], turnItems: [], runtimeRequests: []} as Projection);
-      return {value: {threadId}};
+      // the pinned launch result: the thread, its projection and whether an existing thread was resumed
+      return {value: {threadId, projection: state.projections.get(threadId), resumed}};
     }
     if (entry.tag !== "orchestration.dispatchCommand") return undefined;
     const payload = entry.payload;

@@ -1,5 +1,4 @@
 import { collectNativeReads } from "./supervisor-awareness.js";
-import { NativeRpc } from "./supervisor-native.js";
 import {helperCore} from "./supervisor-helper-instructions.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, HashMap, HashSet, Layer, Option, Ref } from "effect";
 import { GuidanceDb } from "./db.js";
@@ -9,7 +8,7 @@ import { SUPERVISOR_MONITOR_COOLDOWN_MS, SUPERVISOR_TEAM_ATTENTION_MS, type Supe
 import { ProjectSupervisorMonitorStore, type InvalidMonitorObservation } from "./supervisor-monitor-store.js";
 import { conversationRequestMessageId, SupervisorConversationStore, type ConversationRequest, type RequestInflight } from "./supervisor-conversation-store.js";
 import { endedWithoutCompletion, notificationClosed, SupervisorTeamStore, type HandoverAttempt, type SupervisorTeamSnapshot, type TeamEvent, type TeamMember, type TeamNotification, type TeamRequest, type TeamRequestTarget } from "./supervisor-team-store.js";
-import { T3Client } from "./t3.js";
+import { T3Native } from "./t3-native/index.js";
 import { helperDeliveryBudget, HelperTransport, type HelperTransportShape, type SupervisorHelperMessage, type SupervisorHelperSendResult } from "./supervisor-helper-transport.js";
 import { SupervisionGate, SupervisionScopeService, type GateGuard } from "./supervision-gate.js";
 import { SupervisorIds } from "./ids.js";
@@ -167,8 +166,7 @@ const lastAssistantText = (projection: Projection, runId: string): string | unde
 
 const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) => Effect.gen(function* () {
   const gate = yield* SupervisionGate;
-  const t3 = yield* T3Client;
-  const readRpc = Option.getOrNull(yield* Effect.serviceOption(NativeRpc));
+  const native = yield* T3Native;
   // the exact native routes of this deployment's registrations, on which a helper's own thread reads are recognised
   const nativeRoutes = configuredWorkflowToolRoutes((yield* SupervisionScopeService).config);
   const ids = yield* SupervisorIds;
@@ -289,8 +287,8 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     // the loss transaction itself checks again
     const unchanged = memberUnchanged(binding, member);
     const read = yield* Effect.exit(Effect.gen(function* () {
-      const snapshot = yield* (cancel === undefined ? t3.projection(member.threadId)
-        : Effect.raceFirst(t3.projection(member.threadId), Effect.andThen(Deferred.await(cancel), Effect.fail(new Cancelled()))));
+      const snapshot = yield* (cancel === undefined ? native.orchestration.thread(member.threadId)
+        : Effect.raceFirst(native.orchestration.thread(member.threadId), Effect.andThen(Deferred.await(cancel), Effect.fail(new Cancelled()))));
       const value = snapshot.projection;
       if (value.thread.id !== member.threadId) return null;
       if (value.thread.archivedAt != null || value.thread.deletedAt != null) {
@@ -302,7 +300,7 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     if (Exit.isSuccess(read)) return read.value;
     if (Cause.hasInterruptsOnly(read.cause)) return yield* Effect.failCause(read.cause as Cause.Cause<never>);
     const error = Option.getOrNull(Cause.findErrorOption(read.cause));
-    if (!observeOnly && error !== null && error._tag === "T3TransportError" && error.httpStatus === 404 && (yield* unchanged)) {
+    if (!observeOnly && error !== null && error._tag === "T3ReadError" && error.httpStatus === 404 && (yield* unchanged)) {
       yield* loseMember(binding, member, cancel, "The helper conversation returned native 404; its check-in was closed and pending operational effects remain fenced.");
     }
     return null;
@@ -419,8 +417,8 @@ const makeSupervisorTeamRuntime = (options: SupervisorTeamRuntimeOptions = {}) =
     const projection = yield* readMemberProjection(binding, member, cancel, observeOnly);
     if (!projection) return;
     if (!validHelper(member, binding, projection) || !(yield* teamStore.resolveActor(binding, member.threadId, teamRequest.memberEpoch))) return;
-    if (readRpc) yield* requests.recordNativeReads(binding.projectId, request.id,
-      yield* collectNativeReads(request, projection, itemId => readRpc.call("orchestration.getTurnItem", {threadId: member.threadId, itemId}), yield* Clock.currentTimeMillis,
+    yield* requests.recordNativeReads(binding.projectId, request.id,
+      yield* collectNativeReads(request, projection, itemId => native.orchestration.turnItem({threadId: member.threadId, itemId}), yield* Clock.currentTimeMillis,
         nativeRoutes));
     const message = yield* firstMatch(binding, request.messageId, request.text, projection, member.threadId);
     const run = projection.runs.find(item => item.threadId === member.threadId && (item.id === message?.runId || item.id === request.runId || item.userMessageId === message?.id));
