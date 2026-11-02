@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import {it} from "@effect/vitest";
 import {Effect, Redacted} from "effect";
 import {actorGaps, budgetRefusal, classifyTrial, combinedOutcome, detailReceipt, evidenceGaps, finalVerdict, followUpRequest, interpretationPhaseAtPress,
-  isTrialScenario, observingScenarios, ownExecutions, parentChildLifecycle, planTrial, projectFiles, readBound, runPhaseAtPress, scenarioActors, scenarioVerdicts, scratchDeletions, selectionShown,
+  isTrialScenario, observingScenarios, ownExecutions, parentChildLifecycle, planTrial, projectFiles, readBound, requestDecisions, requestScopes, runPhaseAtPress,
+  scenarioActors, scenarioVerdicts, scratchDeletions, selectionShown,
   stopPressReady, stopTime, successfulReceipt, trialScenarios, workflowMcpAlias, workflowMcpRegistration, type ActorProvenance, type FullRecordProblem,
-  type RunPhase, type InterpretationPhase, type StopTime, type TaskReading, type TrialEvidence, type TrialObservation, type TrialVerdict}
+  type RequestDecision, type RunPhase, type InterpretationPhase, type StopTime, type TaskReading, type TrialEvidence, type TrialObservation, type TrialVerdict}
   from "../scripts/provider-trial.js";
 import {trafficKind, type WorkloadObservation} from "../scripts/provider-trial-oracles.js";
 import {parseDefinitionStep, parseDefinitionWorkflow, parseProjectConfiguration} from "../src/project-definitions.js";
@@ -371,6 +372,98 @@ it.live("a run-less native child's lifecycle is its direct parent's own record, 
   assert.equal(parentChildLifecycle({subagents: [record], turnItems: [{...item, status: "running"}]}, child), null, "conflicting statuses");
   assert.equal(parentChildLifecycle({}, child), null, "no record of the child");
   assert.equal(parentChildLifecycle({subagents: [{...record, childThreadId: "another-child"}]}, child), null, "another child's record");
+}));
+
+// the retained idle-parking trial: one task identity carried the original request, judged needed, and the follow-up, judged not needed
+const idle = (() => {
+  const operative = "operative", root = "99220e0a-2045-4f61-9b9c-afba8ebd04fe", taskId = "faffe45c-61e2-4a23-b8b8-0337dc2fa525";
+  const original = "request-original", followUpId = "provider-trial:idle:stamp:follow-up";
+  const followUp = {messageId: followUpId, createdAt: "2026-11-01T23:49:26.720Z", sentAt: Date.parse("2026-11-01T23:49:26.500Z")};
+  // the four contacts before the follow-up: the planning hold, its release, the proposal and the root's own contact
+  const contacts = [["supervisor-planning:attempt-1:hold:h1", "2026-11-01T23:40:59.405Z"], ["supervisor-planning:attempt-1:release:r1", "2026-11-01T23:41:35.585Z"],
+    [`supervisor-notice:workflow:${taskId}:rev`, "2026-11-01T23:41:38.024Z"], ["root-contact-1", "2026-11-01T23:42:02.827Z"]] as const;
+  const sent = contacts.map(([id, createdAt]) => ({id, createdAt}));
+  const needed = {id: taskId, threadId: operative, status: "inferred", sourceMessageId: original, supervision: "needed" as const, agreement: {status: "agreed"}};
+  const notNeeded = {id: taskId, threadId: operative, status: "not_supervised", sourceMessageId: followUpId, supervision: "not_needed" as const};
+  type SnapshotTask = Parameters<typeof requestDecisions>[0][number];
+  const decisionsOf = (...looks: ReadonlyArray<ReadonlyArray<SnapshotTask>>) => {
+    const decisions = new Map<string, RequestDecision>();
+    for (const tasks of looks) for (const [source, decision] of requestDecisions(tasks, operative)) decisions.set(source, decision);
+    return decisions;
+  };
+  const run = (id: string, startedAt: string, completedAt: string) => ({id, status: "completed", requestedAt: startedAt, startedAt, completedAt, userMessageId: null});
+  const workload: WorkloadObservation = {operativeThreadId: operative, supervisors: [{threadId: root, generation: 1, firstSeenAt: Date.parse("2026-11-01T23:40:40.000Z")}],
+    helpers: {threadIds: [], ready: [], assigned: [], mostAtOnce: 0, limit: 5}, task: {id: taskId, supervision: "needed"},
+    traffic: contacts.map(([id, createdAt]) => ({id, threadId: operative, kind: trafficKind(id, !id.startsWith("supervisor-"))!, runId: null, createdAt, textHash: id})),
+    runs: {[operative]: [run("op-1", "2026-11-01T23:40:31.000Z", "2026-11-01T23:45:39.098Z")],
+      [root]: [run("root-4", "2026-11-01T23:43:50.000Z", "2026-11-01T23:44:33.330Z"), run("root-5", "2026-11-01T23:49:30.000Z", "2026-11-01T23:49:55.000Z")]},
+    executions: {}, childLifecycles: {}, stopPresses: 0, agreement: null, children: [], monitoring: [], monitor: {state: "idle", pendingItems: 0},
+    settlements: [{threadId: root, settledAt: "2026-11-01T23:46:44.236Z"}], compactions: [], rootLatestStart: {}, instructionReads: [], writes: [], history: [],
+    parking: {threadId: root, generation: 1, after: Date.parse("2026-11-01T23:46:40.000Z"), seenAt: Date.parse("2026-11-01T23:46:50.000Z"),
+      settledAt: "2026-11-01T23:46:44.236Z", followUp: {sentAt: followUp.sentAt, messageId: followUpId, answer: "accepted", createdAt: followUp.createdAt}},
+    start: null, endedAt: Date.parse("2026-11-01T23:52:30.000Z")};
+  // an observation as the trial's last look forms it, from its decisions and the Supervisor messages in the chat
+  const observe = (decisions: ReadonlyMap<string, RequestDecision>, messages: ReadonlyArray<{id: string; createdAt: string | null}> = sent,
+    shown: {messageId: string; createdAt: string | null; sentAt: number} | null = followUp): TrialObservation =>
+    ({...requestScopes({requestMessageId: original, decisions, sent: messages, followUp: shown}), workload});
+  return {operative, taskId, original, followUpId, followUp, sent, needed, notNeeded, decisionsOf, observe};
+})();
+
+it.live("a task identity that carries the follow-up keeps Supervisor's decision on the original request apart, by the request each answers", () => Effect.sync(() => {
+  const {taskId, original, followUpId, followUp, sent, needed, notNeeded, decisionsOf} = idle;
+  const neededDecision = {id: taskId, status: "inferred", supervision: "needed", agreed: true};
+  const notNeededDecision = {id: taskId, status: "not_supervised", supervision: "not_needed", agreed: false};
+  // the same task identity, first interpreted from the original request, then from the follow-up
+  const reused = decisionsOf([needed], [notNeeded, {id: "elsewhere", threadId: "another-chat", status: "inferred", sourceMessageId: "x", supervision: "needed"},
+    {id: taskId, threadId: idle.operative, status: "inferred", supervision: "not_needed"}]);
+  assert.deepEqual([...reused.entries()], [[original, neededDecision], [followUpId, notNeededDecision]], "another chat's task and a task without its source are not attributed");
+  // a new task identity for the follow-up keeps the same scopes
+  const changed = decisionsOf([needed], [{...notNeeded, id: "task-follow-up"}]);
+  assert.deepEqual([...changed.entries()], [[original, neededDecision], [followUpId, {...notNeededDecision, id: "task-follow-up"}]]);
+  for (const decisions of [reused, changed]) {
+    const scopes = requestScopes({requestMessageId: original, decisions, sent, followUp});
+    assert.deepEqual(scopes.task, neededDecision, "the original request's own decision");
+    assert.deepEqual(scopes.supervisorMessageIds, sent.map(message => message.id), "the four contacts came before the follow-up");
+    assert.deepEqual(scopes.followUp?.contacts, [], "nothing after the follow-up");
+    assert.equal(scopes.followUp?.decision?.supervision, "not_needed");
+  }
+  // a message at the follow-up's own time, one without a time, and any after the send while T3 has not shown the follow-up are on neither side
+  const unplaced = (messages: ReadonlyArray<{id: string; createdAt: string | null}>, shown: {messageId: string; createdAt: string | null; sentAt: number} = followUp) =>
+    requestScopes({requestMessageId: original, decisions: reused, sent: messages, followUp: shown});
+  assert.equal(unplaced([...sent, {id: "at-follow-up", createdAt: followUp.createdAt}]).followUp?.placementComplete, false);
+  assert.equal(unplaced([...sent, {id: "untimed", createdAt: null}]).followUp?.placementComplete, false);
+  const unshown = unplaced([...sent, {id: "after-send", createdAt: "2026-11-01T23:49:27.000Z"}], {...followUp, createdAt: null});
+  assert.deepEqual([unshown.supervisorMessageIds, unshown.followUp?.placementComplete], [sent.map(message => message.id), false]);
+  // without a follow-up every message answers the original request
+  assert.deepEqual(requestScopes({requestMessageId: original, decisions: reused, sent, followUp: null}),
+    {supervisorMessageIds: sent.map(message => message.id), task: neededDecision});
+}));
+
+it.live("idle parking judges contact by the decision on the request it answered: the original before the follow-up, the follow-up after it", () => Effect.sync(() => {
+  const {followUp, sent, needed, notNeeded, decisionsOf, observe} = idle;
+  const outcome = (observed: TrialObservation) => classifyTrial("idle-parking", observed).outcome;
+  // the retained trial: a needed original with its four contacts, then a quiet follow-up judged not needed under the same task identity
+  assert.equal(outcome(observe(decisionsOf([needed], [notNeeded]))), "pass");
+  assert.equal(outcome(observe(decisionsOf([needed], [{...notNeeded, id: "task-follow-up"}]))), "pass", "a new task identity for the follow-up");
+  const after = {id: "contact-after", createdAt: "2026-11-01T23:50:05.000Z"};
+  assert.equal(outcome(observe(decisionsOf([needed], [{...notNeeded, supervision: "needed" as const, status: "inferred"}]), [...sent, after])), "pass",
+    "contact after a follow-up judged needed");
+  // genuine contact for a request judged not needed fails, on either side of the follow-up
+  assert.equal(outcome(observe(decisionsOf([{...needed, supervision: "not_needed" as const, agreement: {status: "none"}}], [notNeeded]))), "fail",
+    "contact for an original request judged not needed");
+  assert.equal(outcome(observe(decisionsOf([needed], [notNeeded]), [...sent, after])), "fail", "contact after a follow-up judged not needed");
+  assert.equal(outcome(observe(decisionsOf([needed], [notNeeded]), [...sent, after, {id: "untimed", createdAt: null}])), "fail",
+    "an untimed message cannot hide definite contact after a follow-up judged not needed");
+  // a message or a decision the trial cannot place leaves it inconclusive
+  const open: ReadonlyArray<readonly [string, TrialObservation]> = [
+    ["a message without its creation time", observe(decisionsOf([needed], [notNeeded]), [...sent, {id: "untimed", createdAt: null}])],
+    ["a message at the follow-up's own time", observe(decisionsOf([needed], [notNeeded]), [...sent, {id: "same-time", createdAt: followUp.createdAt}])],
+    ["a follow-up T3 has not shown", observe(decisionsOf([needed], [notNeeded]), sent, {...followUp, createdAt: null})],
+    ["contact after the follow-up before its decision was seen", observe(decisionsOf([needed]), [...sent, after])],
+    ["contact before the follow-up without the original request's decision", observe(decisionsOf([notNeeded]))],
+    ["no task attributed to the original request's source", observe(decisionsOf([{...needed, sourceMessageId: undefined}], [notNeeded]))],
+  ];
+  for (const [why, observed] of open) assert.equal(outcome(observed), "inconclusive", why);
 }));
 
 it.live("a look reads a bounded number of helpers and descendants and reports the rest unread, which keeps the trial from a pass", () => Effect.sync(() => {

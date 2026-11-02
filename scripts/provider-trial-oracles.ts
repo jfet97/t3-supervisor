@@ -234,7 +234,7 @@ export interface WorkloadObservation {
   /** Supervisor's team: every helper seen, those seen ready, those seen with an active assignment, the most at once, its limit. */
   readonly helpers: {readonly threadIds: ReadonlyArray<string>; readonly ready: ReadonlyArray<string>; readonly assigned: ReadonlyArray<string>;
     readonly mostAtOnce: number; readonly limit: number | null};
-  /** The original request's task and Supervisor's decision, as last seen while it was the chat's task. */
+  /** The original request's task and Supervisor's decision on it, as the task interpreted from that request last showed it. */
   readonly task: {readonly id: string | null; readonly supervision: "needed" | "not_needed" | null} | null;
   readonly traffic: ReadonlyArray<TrafficMessage>;
   readonly runs: Readonly<Record<string, ReadonlyArray<NativeRun>>>;

@@ -133,10 +133,16 @@ export const planTrial = (names: ReadonlyArray<string>, followUpMinutes: number 
 
 /** What one look at the trial's operative chat and its Supervisor state shows. */
 export interface TrialObservation {
-  // ids of the messages in the operative chat that Supervisor sent: its service notices or messages of its root thread
+  /* IDs of the messages in the operative chat that Supervisor sent, its service notices or messages of its root thread: in idle parking,
+   * only those T3 created before the follow-up (requestScopes)
+   */
   readonly supervisorMessageIds: ReadonlyArray<string>;
-  // the task Supervisor records for the operative chat, once it has one
-  readonly task: {readonly id: string | null; readonly status: string; readonly supervision: "needed" | "not_needed" | null; readonly agreed: boolean} | null;
+  // Supervisor's decision on the original request, as the task interpreted from that request last showed it, once it has one
+  readonly task: RequestDecision | null;
+  /* Idle parking's follow-up, a request of its own: Supervisor's decision on it, as the task interpreted from it last showed it, and the
+   * Supervisor messages T3 created after it; incomplete placement retains definite contacts when another message cannot be placed
+   */
+  readonly followUp?: {readonly decision: RequestDecision | null; readonly contacts: ReadonlyArray<string>; readonly placementComplete: boolean};
   /* The chat's Stop, pressed once by the trial in the dashboard: the dashboard's answer (saved, conflict, unavailable, or no answer
    * when the outcome is unknown) and, as reads after the answer showed it against the Stop's recorded time, in stop whether the
    * operative's run was running and in no-project-stop whether Supervisor's interpretation of the started request was in flight.
@@ -165,6 +171,64 @@ export interface TrialVerdict {
   readonly outcome: Exclude<TrialOutcome, "unavailable">;
   readonly reason: string;
 }
+
+/** Supervisor's decision on one request of the chat, as the task interpreted from that request last showed it. */
+export interface RequestDecision {readonly id: string | null; readonly status: string; readonly supervision: "needed" | "not_needed" | null; readonly agreed: boolean}
+
+/**
+ * Supervisor's decision on each request of the operative chat, keyed by the request its task was interpreted from (sourceMessageId). A
+ * continued conversation keeps its task identity for a later request and moves the task's source to it (src/project-supervisor.ts,
+ * discover), so a task identity alone never says which request a decision answers; a task without its source is not attributed.
+ */
+export const requestDecisions = (tasks: ReadonlyArray<{readonly id?: string | undefined; readonly threadId: string; readonly status: string;
+  readonly sourceMessageId?: string | undefined; readonly supervision?: "needed" | "not_needed" | undefined;
+  readonly agreement?: {readonly status: string} | null | undefined}>, threadId: string): ReadonlyArray<readonly [string, RequestDecision]> =>
+  tasks.flatMap((task) => task.threadId === threadId && task.sourceMessageId !== undefined ? [[task.sourceMessageId, {id: task.id ?? null, status: task.status,
+    supervision: task.supervision ?? null, agreed: task.agreement?.status === "agreed"}] as const] : []);
+
+/**
+ * The original request's and the follow-up's scopes: Supervisor's decision on each, by its own source, and the Supervisor messages T3
+ * created before the follow-up and after it. Before T3 shows the follow-up, only messages created before the trial sent it are placed.
+ * A message with no creation time, at the follow-up's own time, or after the send while T3 has not shown the follow-up, is placed on
+ * neither side. Definite later contacts stay recorded even when placement is incomplete.
+ */
+export const requestScopes = (input: {
+  readonly requestMessageId: string | null;
+  readonly followUp: {readonly messageId: string; readonly createdAt: string | null; readonly sentAt: number} | null;
+  readonly decisions: ReadonlyMap<string, RequestDecision>;
+  readonly sent: ReadonlyArray<{readonly id: string; readonly createdAt: string | null}>;
+}): Pick<TrialObservation, "supervisorMessageIds" | "task" | "followUp"> => {
+  const task = input.requestMessageId === null ? null : input.decisions.get(input.requestMessageId) ?? null;
+  if (input.followUp === null) return {supervisorMessageIds: input.sent.map((message) => message.id), task};
+  const followedAt = nativeTime(input.followUp.createdAt);
+  const before = followedAt ?? input.followUp.sentAt;
+  const placed = input.sent.map((message) => {
+    const created = nativeTime(message.createdAt);
+    return {id: message.id, side: created === null ? "unknown" : created < before ? "original" : followedAt !== null && created > followedAt ? "followUp" : "unknown"};
+  });
+  const ids = (side: string) => placed.filter((message) => message.side === side).map((message) => message.id);
+  return {supervisorMessageIds: ids("original"), task, followUp: {decision: input.decisions.get(input.followUp.messageId) ?? null,
+    contacts: ids("followUp"), placementComplete: followedAt !== null && ids("unknown").length === 0}};
+};
+
+/*
+  Idle parking's follow-up is a request of its own, which the same task identity may carry: contact after it is judged by Supervisor's
+  decision on the follow-up itself, as contact before it is by its decision on the original request. A message that cannot be placed
+  on either side, or contact on a side whose decision was not seen, leaves the trial inconclusive; a contact after a follow-up judged
+  not needed fails it.
+*/
+const followUpVerdict = (seen: TrialObservation, originalContact: ReadonlyArray<string>): TrialVerdict | null => {
+  const followUp = seen.followUp;
+  if (followUp === undefined) return null;
+  if (followUp.contacts.length > 0 && followUp.decision?.supervision === "not_needed")
+    return {outcome: "fail", reason: `Supervisor contacted the chat after judging its follow-up not needed: ${followUp.contacts.join(", ")}`};
+  if (!followUp.placementComplete) return {outcome: "inconclusive", reason: "a Supervisor message cannot be placed before or after the follow-up, so the request it answered cannot be told"};
+  if (followUp.contacts.length > 0 && (followUp.decision?.supervision ?? null) === null)
+    return {outcome: "inconclusive", reason: "Supervisor contacted the chat after the follow-up, but its decision on the follow-up was not seen"};
+  if (originalContact.length > 0 && (seen.task?.supervision ?? null) === null)
+    return {outcome: "inconclusive", reason: "Supervisor contacted the chat before the follow-up, but its decision on the original request was not seen"};
+  return null;
+};
 
 const workflowNotice = "supervisor-notice:workflow:";
 const stopNotice = "supervisor-notice:stop:";
@@ -277,8 +341,13 @@ export const classifyTrial = (scenario: TrialScenario, seen: TrialObservation): 
   const contact = press === null ? seen.supervisorMessageIds : seen.supervisorMessageIds.filter((id) => !id.startsWith(stopNotice));
   if (seen.task?.supervision === "not_needed" && contact.length > 0)
     return {outcome: "fail", reason: `Supervisor contacted a chat whose request it judged not needed: ${contact.join(", ")}`};
-  if (isWorkloadScenario(scenario)) return seen.workload === undefined
-    ? {outcome: "inconclusive", reason: "the trial recorded no observation of its workload"} : classifyWorkload(scenario, seen.workload);
+  const followUp = followUpVerdict(seen, contact);
+  if (followUp?.outcome === "fail") return followUp;
+  if (isWorkloadScenario(scenario)) {
+    const verdict: TrialVerdict = seen.workload === undefined
+      ? {outcome: "inconclusive", reason: "the trial recorded no observation of its workload"} : classifyWorkload(scenario, seen.workload);
+    return verdict.outcome === "pass" && followUp !== null ? followUp : verdict;
+  }
   if (scenario === "no-contact") {
     if (seen.supervisorMessageIds.length > 0) return {outcome: "fail", reason: `Supervisor contacted the chat: ${seen.supervisorMessageIds.join(", ")}`};
     if (seen.task?.supervision === "not_needed") return {outcome: "pass", reason: "the request was judged not needed and nobody was contacted"};
@@ -514,7 +583,7 @@ const Snapshot = Schema.Struct({
   chatSupervision: Schema.optional(Schema.NullOr(Schema.Struct({stopped: Schema.Boolean, policyGeneration: Schema.Number,
     stoppedBy: optionalText, stoppedAt: Schema.optional(Schema.NullOr(Schema.Number)), activation: optionalText}))),
   tasks: Schema.Array(Schema.Struct({id: Schema.optional(Schema.String), threadId: Schema.String, status: Schema.String,
-    updatedAt: Schema.optional(Schema.Number),
+    updatedAt: Schema.optional(Schema.Number), sourceMessageId: Schema.optional(Schema.String),
     supervision: Schema.optional(Schema.Literals(["needed", "not_needed"])), workflowProposalId: Schema.optional(Schema.String),
     agreement: Schema.optional(Schema.NullOr(Schema.Struct({status: Schema.String, proposalId: Schema.optional(Schema.String),
       agentMessageId: Schema.optional(Schema.String)})))})),
@@ -964,7 +1033,6 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
     detailReceipts: new Map<string, {readonly status: string; readonly hash: string}>(),
     detailProblems: new Map<string, string>(),
     history: new Map<string, {readonly operationId: string; readonly recordedAt: number}>(),
-    task: null as WorkloadObservation["task"],
     agreement: null as {readonly proposalId: string; readonly agentMessageId: string} | null,
   };
   const ownedThreads = (): ReadonlySet<string> => new Set([...[...ledger.supervisors.values()].map((supervisor) => supervisor.threadId), ...ledger.helpers]);
@@ -1022,8 +1090,6 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
     if (binding !== null && !ledger.supervisors.has(`${binding.threadId}\u0000${binding.generation ?? 0}`))
       ledger.supervisors.set(`${binding.threadId}\u0000${binding.generation ?? 0}`, {threadId: binding.threadId, generation: binding.generation ?? 0, firstSeenAt: now});
     const task = value.tasks.find((item) => item.threadId === operativeId) ?? null;
-    // the original request's task: Supervisor's decision on it as last seen while it was the chat's task
-    if (task !== null && (ledger.task === null || ledger.task.id === (task.id ?? null))) ledger.task = {id: task.id ?? null, supervision: task.supervision ?? null};
     const agreement = task?.agreement ?? null;
     if (ledger.agreement === null && agreement?.status === "agreed" && agreement.proposalId !== undefined && agreement.agentMessageId !== undefined)
       ledger.agreement = {proposalId: agreement.proposalId, agentMessageId: agreement.agentMessageId};
@@ -1211,6 +1277,8 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
   // the proposals Supervisor recorded for the request's task, the first task the chat showed, at the readable looks
   let requestTaskId: string | null | undefined = undefined;
   const proposalIds = new Set<string>();
+  // Supervisor's decision on each request of the chat, by the request its task was interpreted from, as the looks last showed it
+  const decisions = new Map<string, RequestDecision>();
   let supervisorThreadId: string | null = null;
   // the chat's Stop, pressed once by a stop scenario, and why Supervisor last kept itself from settling
   /* The Stop's one press: the fresh reads before it (begun at readAt, done at observedAt), its sending and answer, the reads at once
@@ -1299,6 +1367,7 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
       }
     }
     const task = snapshot.value.tasks.find((item) => item.threadId === operative) ?? null;
+    for (const [source, decision] of requestDecisions(snapshot.value.tasks, operative)) decisions.set(source, decision);
     if (task !== null && requestTaskId === undefined) requestTaskId = task.id ?? null;
     if (task !== null && (task.id ?? null) === requestTaskId && task.workflowProposalId !== undefined) proposalIds.add(task.workflowProposalId);
     // a workload trial also reads Supervisor's helpers, the operative's delegated children and Supervisor's workflow progress
@@ -1516,12 +1585,13 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
       : sent.filter((message) => message !== notice && createdAt(message) > createdAt(notice)).map((message) => message.id);
     const settlement = snapshot.value.binding?.settlementState ?? null;
     settlementBlockedBy = snapshot.value.binding?.settlementBlockedBy ?? null;
-    // idle parking judges the original request's contact: what reached the chat before the follow-up and the task as it was then
-    const followedAt = nativeTime(parking?.followUp?.createdAt);
-    const original = followedAt === null ? sent : sent.filter((message) => (nativeTime(message.createdAt) ?? Infinity) < followedAt);
-    const decided = parking?.followUp && ledger.task !== null ? {id: ledger.task.id, status: task?.status ?? "unknown", supervision: ledger.task.supervision, agreed: false}
-      : task === null ? null : {id: task.id ?? null, status: task.status, supervision: task.supervision ?? null, agreed: task.agreement?.status === "agreed"};
-    last = {supervisorMessageIds: original.map((message) => message.id), task: decided,
+    // the original request and, in idle parking, the follow-up: each judged by Supervisor's decision on it and the contact on its side
+    const followUpSent = parking?.followUp ?? null;
+    const scopes = requestScopes({requestMessageId, decisions, sent: sent.map((message) => ({id: message.id, createdAt: message.createdAt ?? null})),
+      followUp: followUpSent === null ? null : {messageId: followUpSent.messageId, createdAt: followUpSent.createdAt, sentAt: followUpSent.sentAt}});
+    const originalIds = new Set(scopes.supervisorMessageIds);
+    const original = sent.filter((message) => originalIds.has(message.id));
+    last = {...scopes,
       stop: stop === null ? null : {answer: stop.answer, ...(scenarios.has("stop") ? {runAtPress: runPhaseAtPress(afterPress.run, stopTime(stop, afterPress.recorded))} : {}),
         ...(scenarios.has("no-project-stop") ? {interpretationAtPress: interpretationPhaseAtPress(stop.taskBefore, stop.taskAfter, stopTime(stop, afterPress.recorded))} : {})},
       policyStopped: stop !== null && policy?.stopped === true && policy.stoppedBy === "ui" && policy.policyGeneration > stop.policyGeneration,
@@ -1562,7 +1632,8 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
     supervisors: [...ledger.supervisors.values()],
     helpers: {threadIds: [...ledger.helpers], ready: [...ledger.readyHelpers], assigned: [...ledger.assignedHelpers], mostAtOnce: ledger.mostHelpers,
       limit: ledger.helperLimit},
-    task: ledger.task,
+    // the original request's task and Supervisor's decision on it, by its source
+    task: last.task === null ? null : {id: last.task.id, supervision: last.task.supervision},
     traffic: [...ledger.traffic.values()],
     runs: Object.fromEntries([...ledger.runs].map(([threadId, runs]) => [threadId, [...runs.values()]])),
     executions: Object.fromEntries([...ledger.executions].map(([threadId, items]) => [threadId, [...items.values()]])),
@@ -1613,7 +1684,7 @@ export const runTrial = (plan: TrialPlan, budgetMs: number, chosenModel: string 
   return {scenario, outcome, reason, ...(verdicts.length > 1 ? {verdicts} : {}), evidenceGaps: gaps,
     ...(Object.keys(scenarioGaps).length > 0 ? {actorGaps: scenarioGaps} : {}), milestones, unreadable,
     project: {id: projectId, path, ...(scratchTrial ? {scratch: true} : {})}, operativeThreadId: operative, requestRecordedAs: recorded, supervisorThreadId,
-    supervisorMessages, task: last.task, proposals: {notices: last.proposalNotices ?? [], recordedProposalIds: last.proposalIds ?? []},
+    supervisorMessages, task: last.task, ...(last.followUp === undefined ? {} : {followUp: last.followUp}), proposals: {notices: last.proposalNotices ?? [], recordedProposalIds: last.proposalIds ?? []},
     ...(scratchTrial ? {startPress: startPress === null ? null : {observedAtMs: startPress.observedAt - begin, sentAtMs: startPress.sentAt - begin,
       answeredAtMs: startPress.answeredAt - begin}} : {}),
     ...(scenarios.has("stop") || scenarios.has("no-project-stop") ? {stop: stop === null ? null : {answer: stop.answer, policyGeneration: stop.policyGeneration,
