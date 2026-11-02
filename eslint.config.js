@@ -11,10 +11,12 @@ const timerRules = {
     ...["globalThis", "window"].flatMap((object) => timerNames.map((property) => ({ object, property, message: timerMessage })))],
 };
 
-// the T3 integration boundary: production modules reach T3 only through the public surface src/t3-native/index.ts (T3Native).
-// They import none of the transport clients (the native envelope, the native and operate request clients and their shell reads,
-// the T3 client and its projection stream, the private T3Native modules) and write no native request tag or T3 API path. The
-// domain helpers of src/supervisor-native.ts (record, modelSelection, validModelSelection, sameModel) stay importable
+/*
+ * The T3 integration boundary: production modules reach T3 only through the public surface src/t3-native/index.ts (T3Native).
+ * They import none of the transport clients (the native envelope, the native and operate request clients and their shell reads,
+ * the T3 client and its projection stream, the private T3Native modules) and write no native request tag or T3 API path. The
+ * domain helpers of src/supervisor-native.ts (record, modelSelection, validModelSelection, sameModel) stay importable.
+ */
 const boundaryMessage = "production modules reach T3 only through src/t3-native/index.ts (T3Native); transport clients, native tags and T3 API paths stay behind it";
 const boundaryPatterns = [
   { regex: "(^|/)(native-envelope|t3|t3-projection-stream)(\\.js)?$", message: boundaryMessage },
@@ -29,9 +31,11 @@ const boundarySyntax = [
   { selector: "Literal[value=/^\\/(api\\/(orchestration|hooks)|\\.well-known\\/t3)\\//]", message: boundaryMessage },
   { selector: "TemplateElement[value.raw=/^\\/(api\\/(orchestration|hooks)|\\.well-known\\/t3)\\//]", message: boundaryMessage },
 ];
-// outside the boundary: the integration itself and the legacy transport modules it wraps, the composition root that wires the
-// clients, and (transitional) the production modules not yet migrated onto T3Native; each migration removes its own entries and
-// the last one leaves the list empty. Tests, fixtures, support and scripts are outside src and never guarded
+/*
+ * Outside the boundary: the integration itself and the legacy transport modules it wraps, the composition root that wires the
+ * clients, and (transitional) the production modules not yet migrated onto T3Native; each migration removes its own entries and
+ * the last one leaves the list empty. Tests, fixtures, support and scripts are outside src and never guarded.
+ */
 const t3Boundary = {
   adapter: ["src/t3-native/**/*.ts", "src/native-envelope.ts", "src/supervisor-native.ts", "src/t3.ts", "src/t3-projection-stream.ts"],
   composition: ["src/guidance-application.ts", "src/supervisor.ts"],

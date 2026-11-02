@@ -2,10 +2,12 @@ import { Schema } from "effect";
 import { ModelSelection, SupervisorModel } from "../project-supervisor-contract.js";
 import type { Projection, ThreadInfo } from "../types.js";
 
-// The typed contract of every Supervisor -> T3 operation behind T3Native: operation names, inputs, receipts and stream items, with
-// their types derived from these schemas. A native value is checked by a guard over its declared fields and kept whole: every key,
-// value and key order stays as T3 sent it, and nothing here decodes a native object through an excess-stripping Struct. Passing a
-// guard never makes a value authoritative; the existing verifiers decide what a native value proves.
+/*
+ * The typed contract of every Supervisor -> T3 operation behind T3Native: operation names, inputs, receipts and stream items, with
+ * their types derived from these schemas. A native value is checked by a guard over its declared fields and kept whole: every key,
+ * value and key order stays as T3 sent it, and nothing here decodes a native object through an excess-stripping Struct. Passing a
+ * guard never makes a value authoritative; the existing verifiers decide what a native value proves.
+ */
 
 // ---- operations ----
 
@@ -331,13 +333,32 @@ const isWebhookDelivery = Schema.is(WebhookDeliveryFields);
 export type WebhookDelivery = typeof WebhookDeliveryFields.Type & NativeRecord;
 export const WebhookDelivery = Schema.declare((value: unknown): value is WebhookDelivery => isWebhookDelivery(value));
 
-export const HelperTaskList = Schema.Struct({tasks: Schema.Array(HelperTask)});
+const TaskVariant = Schema.Struct({_tag: Schema.Literal("Task"), task: HelperTask});
+const NonconformingTask = Schema.Struct({_tag: Schema.Literal("Nonconforming"), task: NativeRecord});
+const DeliveryVariant = Schema.Struct({_tag: Schema.Literal("Delivery"), delivery: WebhookDelivery});
+const NonconformingDelivery = Schema.Struct({_tag: Schema.Literal("Nonconforming"), delivery: NativeRecord});
+
+/**
+ * One present scheduled task, never a failed read: `Task` is the typed view, kept whole; `Nonconforming` is a JSON object whose
+ * declared fields break the pinned types, the same object as received, so the transport's own checks keep deciding it
+ */
+export const HelperTaskView = Schema.Union([TaskVariant, NonconformingTask]);
+export type HelperTaskView = typeof HelperTaskView.Type;
+/** One present webhook delivery, typed or nonconforming as HelperTaskView: present delivery evidence is never hidden */
+export const WebhookDeliveryView = Schema.Union([DeliveryVariant, NonconformingDelivery]);
+export type WebhookDeliveryView = typeof WebhookDeliveryView.Type;
+
+/*
+ * Lists must contain only native objects, as the existing helper transport requires. Each object then keeps its typed or
+ * nonconforming view; a null, primitive or array invalidates the entire list instead of exposing partial delivery evidence.
+ */
+export const HelperTaskList = Schema.Struct({tasks: Schema.Array(NativeRecord)});
 export const WebhookDeliveriesRequest = Schema.Struct({taskId: Id});
 export type WebhookDeliveriesRequest = typeof WebhookDeliveriesRequest.Type;
-export const WebhookDeliveryList = Schema.Struct({deliveries: Schema.Array(WebhookDelivery)});
+export const WebhookDeliveryList = Schema.Struct({deliveries: Schema.Array(NativeRecord)});
 export const WebhookDeliveryRequest = Schema.Struct({taskId: Id, deliveryId: Id});
 export type WebhookDeliveryRequest = typeof WebhookDeliveryRequest.Type;
-export const WebhookDeliveryDetail = Schema.Struct({delivery: WebhookDelivery});
+export const WebhookDeliveryDetail = Schema.Struct({delivery: NativeRecord});
 
 /**
  * The helper's webhook task, created or updated under the caller's deterministic command identity: an enabled webhook task on the
@@ -348,7 +369,7 @@ export const HelperTaskUpsert = Schema.Struct({
   modelSelection: NativeModelSelection, runtimeMode: RuntimeMode, interactionMode: InteractionMode,
 });
 export type HelperTaskUpsert = typeof HelperTaskUpsert.Type;
-export const HelperTaskUpsertReply = Schema.Struct({task: HelperTask});
+export const HelperTaskUpsertReply = Schema.Struct({task: NativeRecord});
 export const HelperTaskDelete = Schema.Struct({taskId: Id});
 export type HelperTaskDelete = typeof HelperTaskDelete.Type;
 

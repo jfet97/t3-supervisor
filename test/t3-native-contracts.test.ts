@@ -8,8 +8,10 @@ import {
   ThreadStreamItem, TurnItem, WebhookDelivery, webhookBody, type ReferenceBuild, type T3Environment,
 } from "../src/t3-native/index.js";
 
-// the T3Native contracts as pure rules: the build facts and translation selection, and the guards that check declared native fields
-// while keeping each value whole (every key in its order); the native behavior of each operation is in t3-native-boundary.test.ts
+/*
+ * The T3Native contracts as pure rules: the build facts and translation selection, and the guards that check declared native fields
+ * while keeping each value whole (every key in its order); the native behavior of each operation is in t3-native-boundary.test.ts.
+ */
 
 const environment = (serverVersion: string): T3Environment => ({environmentId: "environment-1", orchestrationProtocolVersion: 2, serverVersion});
 const pinned = referenceBuilds[0]!;
@@ -73,6 +75,7 @@ describe("T3Native contracts", () => {
   });
 
   it("T3N-05: helper tasks and deliveries are typed on the fields the transport reads and kept whole; the upsert sends the thread's own model and modes", () => {
+    // a task or delivery that does not conform is still returned by the helper reads, as Nonconforming (t3-native-boundary.test.ts)
     const scheduled = {title: "Supervisor helper check-ins", prompt: "{{body.text}}", enabled: true, projectId: "project-1", workspaceStrategy: {type: "root"},
       modelSelection: {instanceId: "codex", model: "gpt-5", options: [{id: "effort", value: "high"}]}, runtimeMode: "full-access", interactionMode: "default",
       createdAt: "2026-11-02T00:00:00.000Z", runCount: 0};
@@ -81,8 +84,8 @@ describe("T3Native contracts", () => {
     kept(HelperTask, task);
     // another task of the scheduler: a user's interval task, with no thread and no webhook
     kept(HelperTask, {id: "task-2", ...scheduled, schedule: {type: "interval", everyMs: 60_000}, threadId: null, createdBy: "user", creationSource: "web"});
-    for (const refused of [{...task, id: ""}, {...task, enabled: "yes"}, {...task, webhook: {path: 5}}, {...task, modelSelection: {model: "gpt-5"}}])
-      assert.equal(Schema.is(HelperTask)(refused), false, JSON.stringify(refused));
+    for (const nonconforming of [{...task, id: ""}, {...task, enabled: "yes"}, {...task, webhook: {path: 5}}, {...task, modelSelection: {model: "gpt-5"}}])
+      assert.equal(Schema.is(HelperTask)(nonconforming), false, JSON.stringify(nonconforming));
     const summary = {id: "delivery-1", taskId: "task-1", receivedAt: "2026-11-02T00:00:01.000Z", method: "POST", contentType: "application/json", bodyBytes: 40,
       outcome: "a-future-outcome", signatureVerified: false, missingFields: [], error: null};
     kept(WebhookDelivery, summary);

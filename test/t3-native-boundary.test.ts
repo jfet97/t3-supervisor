@@ -14,9 +14,11 @@ import { canonicalJson, recognisedWorkflowCallArguments, verifyWorkflowToolEvide
 import { httpRequests, intPeer, json, rpcRequests, type IntNativePeer, type PeerRpcEntry, type RpcAnswer } from "./support/int-native-peer.js";
 import * as fx from "./support/s6e-prep-interpretation.js";
 
-// T3Native at the native boundary (it.live): the production service over the production clients of each credential, on real loopback
-// sockets to the scripted peer. Each case asserts the typed answer, the native requests per route and credential, and the
-// acknowledgements the peer received
+/*
+ * T3Native at the native boundary (it.live): the production service over the production clients of each credential, on real loopback
+ * sockets to the scripted peer. Each case asserts the typed answer, the native requests per route and credential, and the
+ * acknowledgements the peer received.
+ */
 
 const transport = Layer.mergeAll(NativeEnvelope.layer, FetchHttpClient.layer, NodeCrypto.layer);
 const credential = (peer: IntNativePeer, token: string) => ({baseUrl: peer.baseUrl, token});
@@ -426,19 +428,30 @@ describe("T3Native at the native boundary", () => {
       commit: ["Bearer commit-token"]});
   }), {timeout: 10_000});
 
-  it.live("T3N-B09: the helper's scheduler requests run on the operate credential and its webhook POST goes out once with its exact body", () =>
-    Effect.gen(function* () {
+  it.live("T3N-B09: helper records stay whole, non-object elements invalidate their list, and a POST goes out once on the correct credentials",
+    () => Effect.gen(function* () {
       const summary = {id: "delivery-1", taskId: "task-1", receivedAt: "2026-11-02T00:00:01.000Z", method: "POST", contentType: "application/json", bodyBytes: 40,
         outcome: "accepted", signatureVerified: false, missingFields: [], error: null};
       const detail = {...summary, query: "", headers: {}, body: "{}", bodyTruncated: false, renderedPrompt: "<webhook-data-0123456789ab>x</webhook-data-0123456789ab>"};
+      // present records whose declared fields break the pinned types
+      const oddTask = {...helperTask, id: "task-2", createdAt: 5};
+      const oddSummary = {...summary, id: "delivery-2", bodyBytes: -1};
+      const oddDetail = {...detail, renderedPrompt: 5};
+      const nonObjects: ReadonlyArray<unknown> = [null, 7, "entry", true, []];
+      const taskSnapshots: Array<unknown> = [{tasks: [helperTask, oddTask]},
+        ...nonObjects.map((entry) => ({tasks: [helperTask, entry, oddTask]})), {tasks: "none"}, {snapshot: [helperTask]}];
+      const deliveryLists: Record<string, unknown> = {"task-1": {deliveries: [summary, oddSummary]}, "task-malformed": {deliveries: summary},
+        "task-none": {}, ...Object.fromEntries(nonObjects.map((entry, index) => [`task-invalid-${index}`, {deliveries: [summary, entry, oddSummary]}]))};
+      const deliveryDetails: Record<string, unknown> = {"delivery-1": {delivery: detail}, "delivery-odd": {delivery: oddDetail}, "delivery-missing": {delivery: null}};
+      const upserted: Record<string, unknown> = {"task-1": {task: helperTask}, "task-odd": {task: {...helperTask, id: "task-odd", enabled: "yes"}}, "task-missing": {task: null}};
       const peer = yield* intPeer([{
         rpc: (entry): RpcAnswer | undefined => {
           switch (entry.tag) {
-            case "scheduledTasks.subscribe": return {stream: [{tasks: [helperTask]}]};
-            case "scheduledTasks.upsert": return {value: {task: helperTask}};
+            case "scheduledTasks.subscribe": return {stream: [taskSnapshots.shift()]};
+            case "scheduledTasks.upsert": return {value: upserted[String(entry.payload.id)]};
             case "scheduledTasks.delete": return {value: {id: entry.payload.id}};
-            case "scheduledTasks.listWebhookDeliveries": return {value: {deliveries: [summary]}};
-            case "scheduledTasks.getWebhookDelivery": return {value: {delivery: detail}};
+            case "scheduledTasks.listWebhookDeliveries": return {value: deliveryLists[String(entry.payload.id)]};
+            case "scheduledTasks.getWebhookDelivery": return {value: deliveryDetails[String(entry.payload.deliveryId)]};
             default: return undefined;
           }
         },
@@ -453,22 +466,49 @@ describe("T3Native at the native boundary", () => {
       }]);
       const native = yield* nativeOf(peer);
       const helper = native.helper!;
-      assert.equal(JSON.stringify(yield* helper.tasks()), JSON.stringify([helperTask]));
+      const malformed = (error: unknown) => {
+        assert.ok(error instanceof T3RequestError);
+        assert.deepEqual(classification(error),
+          {outcome: "uncertain", definiteRejection: false, providerDisabled: false, dispatchCommandFailure: false, malformedReply: true});
+      };
+
+      // conforming and nonconforming objects keep their order and all native fields
+      assert.equal(JSON.stringify(yield* helper.tasks()),
+        JSON.stringify([{_tag: "Task", task: helperTask}, {_tag: "Nonconforming", task: oddTask}]));
       // the first snapshot ends the subscription without an Ack
       assert.equal(yield* unacknowledged(lastStream(peer, (entry) => entry.tag === "scheduledTasks.subscribe")), true);
+      // malformed elements cannot expose partial evidence from an otherwise populated list
+      for (let index = 0; index < nonObjects.length; index++) malformed(yield* Effect.flip(helper.tasks()));
+      malformed(yield* Effect.flip(helper.tasks()));
+      malformed(yield* Effect.flip(helper.tasks()));
+
       const upsert = {taskId: "task-1", commandId: "supervisor-helper-channel:1", title: "Supervisor helper check-ins", prompt: "{{body.text}}",
         projectId: "project-1", threadId: "helper-1", modelSelection: {instanceId: "codex", model: "gpt-5"}, runtimeMode: "full-access", interactionMode: "default"};
-      assert.equal(JSON.stringify(yield* helper.upsertTask({...upsert, requireExisting: false})), JSON.stringify(helperTask));
+      assert.equal(JSON.stringify(yield* helper.upsertTask({...upsert, requireExisting: false})), JSON.stringify({_tag: "Task", task: helperTask}));
       yield* helper.upsertTask({...upsert, requireExisting: true});
       const nativeTask = {commandId: "supervisor-helper-channel:1", title: "Supervisor helper check-ins", prompt: "{{body.text}}", enabled: true,
         schedule: {type: "webhook"}, projectId: "project-1", threadId: "helper-1", workspaceStrategy: {type: "root"}, modelSelection: {instanceId: "codex", model: "gpt-5"},
         runtimeMode: "full-access", interactionMode: "default", createdBy: "system", creationSource: "server"};
       assert.deepEqual(rpcRequests(peer, "scheduledTasks.upsert").map((entry) => entry.payload),
         [{id: "task-1", ...nativeTask}, {id: "task-1", requireExisting: true, ...nativeTask}]);
+      // a present task reply that breaks the types is returned as received; a reply without a task object is malformed
+      assert.equal(JSON.stringify(yield* helper.upsertTask({...upsert, taskId: "task-odd", requireExisting: true})),
+        JSON.stringify({_tag: "Nonconforming", task: {...helperTask, id: "task-odd", enabled: "yes"}}));
+      malformed(yield* Effect.flip(helper.upsertTask({...upsert, taskId: "task-missing", requireExisting: true})));
       yield* helper.deleteTask({taskId: "task-1"});
       assert.deepEqual(rpcRequests(peer, "scheduledTasks.delete")[0]!.payload, {id: "task-1"});
-      assert.equal(JSON.stringify(yield* helper.webhookDeliveries({taskId: "task-1"})), JSON.stringify([summary]));
-      assert.equal(JSON.stringify(yield* helper.webhookDelivery({taskId: "task-1", deliveryId: "delivery-1"})), JSON.stringify(detail));
+
+      // the delivery log keeps every element in order, as the task list does
+      assert.equal(JSON.stringify(yield* helper.webhookDeliveries({taskId: "task-1"})),
+        JSON.stringify([{_tag: "Delivery", delivery: summary}, {_tag: "Nonconforming", delivery: oddSummary}]));
+      for (let index = 0; index < nonObjects.length; index++)
+        malformed(yield* Effect.flip(helper.webhookDeliveries({taskId: `task-invalid-${index}`})));
+      malformed(yield* Effect.flip(helper.webhookDeliveries({taskId: "task-malformed"})));
+      malformed(yield* Effect.flip(helper.webhookDeliveries({taskId: "task-none"})));
+      assert.equal(JSON.stringify(yield* helper.webhookDelivery({taskId: "task-1", deliveryId: "delivery-1"})), JSON.stringify({_tag: "Delivery", delivery: detail}));
+      assert.equal(JSON.stringify(yield* helper.webhookDelivery({taskId: "task-1", deliveryId: "delivery-odd"})),
+        JSON.stringify({_tag: "Nonconforming", delivery: oddDetail}));
+      malformed(yield* Effect.flip(helper.webhookDelivery({taskId: "task-1", deliveryId: "delivery-missing"})));
       assert.deepEqual({list: rpcRequests(peer, "scheduledTasks.listWebhookDeliveries")[0]!.payload, detail: rpcRequests(peer, "scheduledTasks.getWebhookDelivery")[0]!.payload},
         {list: {id: "task-1"}, detail: {id: "task-1", deliveryId: "delivery-1"}});
       const operate = new Set(peer.log.filter((entry) => entry.kind === "rpc").map((entry) => entry.authorization));
@@ -523,7 +563,7 @@ describe("T3Native at the native boundary", () => {
       assert.equal(yield* unacknowledged(lastStream(peer, (entry) => entry.tag === "terminal.attach" && entry.payload.terminalId === "terminal-1")), true);
       assert.deepEqual(rpcRequests(peer, "terminal.attach")[0]!.payload, {...session, cwd: "/checkout", worktreePath: null, restartIfNotRunning: false});
 
-      // Acknowledge writes the Ack and then runs afterAck; a completed cancel ends the attach
+      // the Acknowledge step writes the Ack and then runs afterAck; a completed cancel ends the attach
       const cancel = yield* Deferred.make<void>();
       const acknowledgedAfter = yield* Deferred.make<void>();
       const attaching = yield* Effect.forkChild(Effect.flip(terminal.attach({threadId: "probe-thread", terminalId: "terminal-2", cwd: "/checkout"}, {

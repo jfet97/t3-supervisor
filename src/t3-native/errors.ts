@@ -1,8 +1,10 @@
 import { Schema } from "effect";
 import { FileFailure, FileScope, T3Operation } from "./contracts.js";
 
-// The failures of T3Native operations. Each keeps today's classification exactly and carries a fixed message: never a token, a url,
-// a native body or a raw cause.
+/*
+ * The failures of T3Native operations. Each keeps today's classification exactly and carries a fixed message: never a token, a url,
+ * a native body or a raw cause.
+ */
 
 /** rejected: the request never left, or T3 refused it definitively; uncertain: T3 may have acted on it */
 export const RequestOutcome = Schema.Literals(["rejected", "uncertain"]);

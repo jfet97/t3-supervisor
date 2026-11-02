@@ -59,9 +59,11 @@ export const runGuidanceApplication = (
     // metadata
     const nativeClients = yield* Effect.context<NativeTransport>();
     const endpoint = (token: string) => ({baseUrl: config.t3Url, token});
-    // the run's native access, built once in its scope before any client of it is used: one native client per credential with the
-    // shell reads on the read client, the T3 client, and T3Native as a facade over these same instances; a credential without a token
-    // leaves its client and its T3Native family unconstructed
+    /*
+     * The run's native access, built once in its scope before any client of it is used: one native client per credential with the
+     * shell reads on the read client, the T3 client, and T3Native as a facade over these same instances; a credential without a token
+     * leaves its client and its T3Native family unconstructed.
+     */
     const nativeAccess = yield* Layer.build(T3Native.layer({
       baseUrl: config.t3Url, read: endpoint(readToken.trim()),
       ...(writeToken.trim() ? {projectWrite: endpoint(writeToken.trim())} : {}),
@@ -102,8 +104,10 @@ export const runGuidanceApplication = (
     }});
     const editor = projectWriter ? yield* ProjectConfigEditorService.make({definitions, writer: projectWriter,
       onSaved: (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)}) : undefined;
-    // the clients of the run's services: its native access (the same instances the constructors above received), the catalog and
-    // the definitions
+    /*
+     * The clients of the run's services: its native access (the same instances the constructors above received), the catalog and
+     * the definitions.
+     */
     const clients = Layer.mergeAll(Layer.succeedContext(nativeAccess), Layer.succeed(Store, source), Layer.succeed(ProjectDefinitions, definitions));
     // the services of the supervision run, one layer graph built once in this scope over those clients and the run's stores: the
     // supervisor's scope predicates with the admission gate that guards with them, the team services, the Start/Stop control, the

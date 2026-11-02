@@ -11,10 +11,12 @@ import { T3InvalidInput, T3ReadError, T3RequestError } from "../errors.js";
 import type { T3Command, T3InFlight, T3OrchestrationFamily } from "../service.js";
 import { ConsumerFailed, malformedReply, readError, requestError } from "./classify.js";
 
-// the orchestration family over the run's own client instances: the T3 client (HTTP reads and the subscription sockets of the read
-// token), the read credential's native client and its coherent shell reads, and the operate credential's native client. Every
-// deadline, byte bound, framing, retry and acknowledgement stays the wrapped client's; this module adds input validation before any
-// request, receipt validation before exposure and the typed failures
+/*
+ * The orchestration family over the run's own client instances: the T3 client (HTTP reads and the subscription sockets of the read
+ * token), the read credential's native client and its coherent shell reads, and the operate credential's native client. Every
+ * deadline, byte bound, framing, retry and acknowledgement stays the wrapped client's; this module adds input validation before any
+ * request, receipt validation before exposure and the typed failures.
+ */
 
 export interface OrchestrationClients {
   readonly t3: T3ClientShape;
@@ -74,8 +76,10 @@ const nativeCommand = (command: OrchestrationCommand): Readonly<Record<string, u
   }
 };
 
-// the Supervisor conversation's launch profile: created by the server, titled by the caller, full access in the default mode on the
-// project root
+/*
+ * The Supervisor conversation's launch profile: created by the server, titled by the caller, full access in the default mode on the
+ * project root.
+ */
 const nativeLaunch = (launch: LaunchThread): Readonly<Record<string, unknown>> => ({
   commandId: launch.commandId, threadId: launch.threadId, creationSource: "server", projectId: launch.projectId, title: launch.title,
   generateTitle: false, modelSelection: launch.modelSelection, runtimeMode: "full-access", interactionMode: "default",

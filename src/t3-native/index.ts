@@ -1,5 +1,7 @@
-// The public surface of the T3 integration: the T3Native service, its shape and the contracts its callers need. Business modules import
-// only this file; everything under ./internal is private to the integration.
+/*
+ * The public surface of the T3 integration: the T3Native service, its shape and the contracts its callers need. Business modules import
+ * only this file; everything under ./internal is private to the integration.
+ */
 export * from "./contracts.js";
 export * from "./errors.js";
 export { buildFacts, referenceBuilds } from "./build.js";

@@ -11,20 +11,22 @@ import { makeHelper } from "./internal/helper.js";
 import { makeOrchestration } from "./internal/orchestration.js";
 import { makeTerminal } from "./internal/terminal.js";
 import type {
-  BuildFacts, CommandReceipt, CommitOutcome, CommitRequest, DirectoryListing, FileContents, FileMetadata, HelperTask, HelperTaskDelete,
-  HelperTaskUpsert, LaunchReceipt, LaunchThread, ListEntriesRequest, MetadataRequest, OrchestrationCommand, ReadFileRequest, ReferenceBuild,
+  BuildFacts, CommandReceipt, CommitOutcome, CommitRequest, DirectoryListing, FileContents, FileMetadata, HelperTaskDelete,
+  HelperTaskUpsert, HelperTaskView, LaunchReceipt, LaunchThread, ListEntriesRequest, MetadataRequest, OrchestrationCommand, ReadFileRequest, ReferenceBuild,
   ShellBaseline, ShellSourceItem, T3Environment, T3Operation, TerminalAttachEvent, TerminalAttachExit, TerminalAttachRequest,
   TerminalCloseRequest, TerminalOpenRequest, TerminalSnapshot, TerminalWriteRequest, ThreadSnapshot, ThreadStreamItem, TurnItemRequest,
-  TurnItemView, VcsRefs, VcsRequest, VcsStatus, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryRequest, WebhookPost,
+  TurnItemView, VcsRefs, VcsRequest, VcsStatus, WebhookDeliveriesRequest, WebhookDeliveryRequest, WebhookDeliveryView, WebhookPost,
   WebhookReply, WriteFileReceipt, WriteFileRequest,
 } from "./contracts.js";
 import type {
   T3FileError, T3InvalidInput, T3ReadError, T3RequestError, T3TerminalError, T3Unsupported, T3WebhookError,
 } from "./errors.js";
 
-// The public shape of T3Native: every runtime Supervisor -> T3 operation, grouped by family. Reads are effects; watches hand each
-// validated item to their consumer and acknowledge a chunk only after the consumer ingested every item of it; commands are prepared
-// without I/O and then initiated. A completed `cancel` ends a request as its client always ended it.
+/*
+ * The public shape of T3Native: every runtime Supervisor -> T3 operation, grouped by family. Reads are effects; watches hand each
+ * validated item to their consumer and acknowledge a chunk only after the consumer ingested every item of it; commands are prepared
+ * without I/O and then initiated. A completed `cancel` ends a request as its client always ended it.
+ */
 
 /** A committed request: initiation created it, `result` awaits its reply and `release` ends it without sending anything */
 export interface T3InFlight<A, E> {
@@ -38,8 +40,10 @@ export interface T3InFlight<A, E> {
 /** A command that passed validation and translation selection; nothing was connected or sent */
 export interface T3PreparedCommand<A, E> {
   readonly operation: T3Operation;
-  // commits synchronously, as NativeRpcShape.initiate does: an admission section that runs it knows the request exists before it
-  // yields, and the reply is awaited outside the section
+  /*
+   * Commits synchronously, as NativeRpcShape.initiate does: an admission section that runs it knows the request exists before it
+   * yields, and the reply is awaited outside the section.
+   */
   readonly initiate: (cancel?: Deferred.Deferred<void>) => Effect.Effect<T3InFlight<A, E>>;
 }
 
@@ -84,15 +88,19 @@ export interface T3OrchestrationCommands {
   readonly dispatchCommand: T3Command<OrchestrationCommand, CommandReceipt, T3RequestError>;
 }
 
-/** The operate credential's scheduler requests and the helper webhook */
+/**
+ * The operate credential's scheduler requests and the helper webhook. Every present task or delivery comes back as its view, typed or
+ * nonconforming, never as a failed read. Lists must contain only native objects; a non-object element makes the entire list
+ * malformed, as in the existing transport. A missing expected array or detail object is also a malformed reply.
+ */
 export interface T3HelperFamily {
   // the first value of the scheduler subscription; its socket ends on that value
-  readonly tasks: (cancel?: Deferred.Deferred<void>) => Effect.Effect<ReadonlyArray<HelperTask>, T3RequestError>;
+  readonly tasks: (cancel?: Deferred.Deferred<void>) => Effect.Effect<ReadonlyArray<HelperTaskView>, T3RequestError>;
   readonly webhookDeliveries: (request: WebhookDeliveriesRequest, cancel?: Deferred.Deferred<void>) =>
-    Effect.Effect<ReadonlyArray<WebhookDelivery>, T3RequestError | T3InvalidInput>;
+    Effect.Effect<ReadonlyArray<WebhookDeliveryView>, T3RequestError | T3InvalidInput>;
   readonly webhookDelivery: (request: WebhookDeliveryRequest, cancel?: Deferred.Deferred<void>) =>
-    Effect.Effect<WebhookDelivery, T3RequestError | T3InvalidInput>;
-  readonly upsertTask: (request: HelperTaskUpsert, cancel?: Deferred.Deferred<void>) => Effect.Effect<HelperTask, T3RequestError | T3InvalidInput>;
+    Effect.Effect<WebhookDeliveryView, T3RequestError | T3InvalidInput>;
+  readonly upsertTask: (request: HelperTaskUpsert, cancel?: Deferred.Deferred<void>) => Effect.Effect<HelperTaskView, T3RequestError | T3InvalidInput>;
   readonly deleteTask: (request: HelperTaskDelete, cancel?: Deferred.Deferred<void>) => Effect.Effect<void, T3RequestError | T3InvalidInput>;
   // the POST has no idempotency key: once initiated its outcome may be unknown, and it is never repeated
   readonly postWebhook: T3Command<WebhookPost, WebhookReply, T3WebhookError>;
@@ -184,9 +192,11 @@ export interface T3NativeCredentials {
 // the client instances and process transport T3Native wraps
 export type T3NativeClients = T3Client | NativeRpc | NativeShell | NativeEnvelope | HttpClient.HttpClient | Crypto.Crypto;
 
-// a facade over the run's own client instances: the T3 client, the read credential's native client with its shell reads and the
-// operate credential's client when configured, plus the shared envelope, crypto and HTTP client of the process; it builds no client,
-// memo or heartbeat of its own. The operate client's presence gates the commands and the helper family exactly as before
+/*
+ * A facade over the run's own client instances: the T3 client, the read credential's native client with its shell reads and the
+ * operate credential's client when configured, plus the shared envelope, crypto and HTTP client of the process; it builds no client,
+ * memo or heartbeat of its own. The operate client's presence gates the commands and the helper family exactly as before.
+ */
 const makeT3Native = (credentials: T3NativeCredentials): Effect.Effect<T3NativeShape, never, T3NativeClients> => Effect.gen(function* () {
   const t3 = yield* T3Client;
   const read = yield* NativeRpc;

@@ -10,9 +10,11 @@ import { T3InvalidInput, T3TerminalError, type TerminalFailure } from "../errors
 import type { T3TerminalFamily, TerminalAttachHandlers } from "../service.js";
 import { ConsumerFailed } from "./classify.js";
 
-// the terminal family over the shared native envelope with the probe credential, with the Git probe's bounds: 2 MiB frames, a 5 s
-// handshake, the whole message checked as at most 256 envelopes before any is handled, a 5 s deadline per request and 15 s for an
-// attach stream. Each request has its own socket and a fresh id. A Malformed exit is not an answer: the request keeps waiting
+/*
+ * The terminal family over the shared native envelope with the probe credential, with the Git probe's bounds: 2 MiB frames, a 5 s
+ * handshake, the whole message checked as at most 256 envelopes before any is handled, a 5 s deadline per request and 15 s for an
+ * attach stream. Each request has its own socket and a fresh id. A Malformed exit is not an answer: the request keeps waiting.
+ */
 
 const RPC_TIMEOUT = "5 seconds";
 const ATTACH_TIMEOUT = "15 seconds";
@@ -72,8 +74,10 @@ export const makeTerminal = (native: NativeEnvelope["Service"], endpoint: Native
       cancel))
     : Effect.fail(new T3InvalidInput({operation: "terminal/close"}));
 
-  // the attach stream: each chunk's events go to the consumer in order, one value at a time; its exit never ends the stream, which
-  // ends only when the consumer stops it or with its socket. A consumer's failure is handed back unchanged; a defect stays a defect
+  /*
+   * The attach stream: each chunk's events go to the consumer in order, one value at a time; its exit never ends the stream, which
+   * ends only when the consumer stops it or with its socket. A consumer's failure is handed back unchanged; a defect stays a defect.
+   */
   const attach = <E>(request: TerminalAttachRequest, handlers: TerminalAttachHandlers<E>, cancel?: Deferred.Deferred<void>):
     Effect.Effect<void, T3TerminalError | T3InvalidInput | E> => Effect.gen(function* () {
     const operation = "terminal/attach" as const;

@@ -7,9 +7,11 @@ import {
 import { T3FileError, T3InvalidInput } from "../errors.js";
 import type { T3FileCommits, T3FileReads, T3FilesFamily, T3FileWrites } from "../service.js";
 
-// the files family over the shared native envelope, one native request per call on its own socket with the project file clients'
-// bounds: 2 MiB frames, a 5 s handshake and a deadline over the whole call (10 s, 30 s for a commit). A completed cancel ends a
-// request as unavailable, before connecting when it was already completed. Native failures keep the file clients' classification.
+/*
+ * The files family over the shared native envelope, one native request per call on its own socket with the project file clients'
+ * bounds: 2 MiB frames, a 5 s handshake and a deadline over the whole call (10 s, 30 s for a commit). A completed cancel ends a
+ * request as unavailable, before connecting when it was already completed. Native failures keep the file clients' classification.
+ */
 
 export interface FileEndpoints {
   readonly read: NativeEndpoint;
@@ -126,8 +128,10 @@ export const makeFiles = (native: NativeEnvelope["Service"], endpoints: FileEndp
     };
   };
 
-  // committed only for a finished action that created a commit; an already cancelled commit connects nothing, and once a socket
-  // exists every unconfirmed end is uncertain. Every chunk of the action is acknowledged once its events were taken in
+  /*
+   * Committed only for a finished action that created a commit; an already cancelled commit connects nothing, and once a socket
+   * exists every unconfirmed end is uncertain. Every chunk of the action is acknowledged once its events were taken in.
+   */
   const commits = (endpoint: NativeEndpoint): T3FileCommits => ({
     commit: (request, cancel) => Effect.gen(function* () {
       const operation = "files/commit" as const;
