@@ -425,7 +425,8 @@ export const DirectoryListing = Schema.declare((value: unknown): value is Direct
 
 export const MetadataRequest = Schema.Struct({paths: Schema.Array(Schema.String)});
 export type MetadataRequest = typeof MetadataRequest.Type;
-const FileMetadataFields = Schema.Struct({entries: Schema.Array(NativeRecord)});
+// missing paths and other non-record entries stay native so each project/Git reader keeps its existing classification
+const FileMetadataFields = Schema.Struct({entries: Schema.Array(Schema.Unknown)});
 const isFileMetadata = Schema.is(FileMetadataFields);
 export type FileMetadata = typeof FileMetadataFields.Type & NativeRecord;
 export const FileMetadata = Schema.declare((value: unknown): value is FileMetadata => isFileMetadata(value));

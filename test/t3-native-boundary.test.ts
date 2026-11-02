@@ -383,10 +383,15 @@ describe("T3Native at the native boundary", () => {
 
   it.live("T3N-B08: file requests keep their credentials, payloads, native results and failure classification", () => Effect.gen(function* () {
     const read = {contents: "steps: []\n", byteLength: 10, truncated: false, revision: "kept"};
+    const metadata = {entries: [null, {path: "/checkout/.t3-supervisor", kind: "directory", future: {kept: true}}], extra: "kept"};
     const peer = yield* intPeer([{rpc: (entry): RpcAnswer | undefined => {
       switch (entry.tag) {
         case "projects.readFile": return entry.payload.relativePath === ".t3-supervisor/missing.md" ? {failure: {code: "ENOENT"}} : {value: read};
-        case "filesystem.getMetadata": return {failure: {_tag: "EnvironmentAuthorizationError"}};
+        case "filesystem.getMetadata": {
+          const path = Array.isArray(entry.payload.paths) ? entry.payload.paths[0] : undefined;
+          return path === "/checkout/.git" ? {failure: {_tag: "EnvironmentAuthorizationError"}}
+            : {value: path === "/checkout/malformed" ? {entries: null} : metadata};
+        }
         case "vcs.listRefs": return {value: {isRepo: true, refs: [{name: "main", current: true, isDefault: true, worktreePath: null}], extra: "kept"}};
         case "subscribeVcsStatus": return {stream: [{_tag: "snapshot", local: {isRepo: true, workingTree: {files: [{path: "a.ts"}]}, extra: "kept"}}]};
         case "projects.listEntries": return {value: {truncated: false, entries: [{path: ".t3-supervisor", kind: "directory"}, {path: "link", kind: "symlink"}]}};
@@ -406,6 +411,10 @@ describe("T3Native at the native boundary", () => {
     assert.ok(denied instanceof T3FileError);
     assert.deepEqual({code: denied.code, scope: denied.scope, message: denied.message},
       {code: "permission_required", scope: "read", message: "Enable filesystem:read on the Supervisor read credential through deployment setup."});
+    assert.equal(JSON.stringify(yield* files.read.metadata({paths: ["/checkout/missing", "/checkout/.t3-supervisor"]})), JSON.stringify(metadata));
+    const malformedMetadata = yield* Effect.flip(files.read.metadata({paths: ["/checkout/malformed"]}));
+    assert.ok(malformedMetadata instanceof T3FileError);
+    assert.deepEqual({code: malformedMetadata.code, scope: malformedMetadata.scope}, {code: "unavailable", scope: "read"});
     assert.equal(JSON.stringify(yield* files.read.vcsRefs({cwd: "/checkout"})),
       JSON.stringify({isRepo: true, refs: [{name: "main", current: true, isDefault: true, worktreePath: null}], extra: "kept"}));
     assert.equal(JSON.stringify(yield* files.read.vcsStatus({cwd: "/checkout"})),
