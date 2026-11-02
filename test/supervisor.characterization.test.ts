@@ -291,10 +291,12 @@ it.effect("CT-MAIN-04: a supervision failure degrades and restarts the guidance 
   const settings = {...config(directory, 0), uiPort: 0, uiHost: "127.0.0.1"};
   const {ref, status} = yield* liveStatus(settings);
   yield* Effect.gen(function* () {
-    const failures = yield* Queue.unbounded<string>();
+    const failures = yield* Queue.unbounded<number>();
     const descriptorCalls = yield* Queue.unbounded<number>();
-    const {console, events} = yield* eventConsole((event) => {
-      if (event === "supervision_unavailable") Queue.offerUnsafe(failures, event);
+    const {console, events} = yield* eventConsole((event, fields) => {
+      if (event !== "supervision_unavailable") return;
+      assert.ok(typeof fields.time === "string");
+      Queue.offerUnsafe(failures, Date.parse(fields.time));
     });
     const client: T3ClientShape = {watchThread: () => Effect.never,
       descriptor: () => Clock.currentTimeMillis.pipe(Effect.flatMap(now => Queue.offer(descriptorCalls, now)), Effect.as(environment)),
@@ -302,18 +304,21 @@ it.effect("CT-MAIN-04: a supervision failure degrades and restarts the guidance 
       watch: () => Effect.never,
     };
     const fiber = yield* startReal(settings, ref, client, console);
-    // the root activation and the first guidance application each read the descriptor at 0
+    /*
+     * The root uses its injected client. Guidance fails on the missing credential before reading its descriptor, so the failure
+     * events measure the retry independently of descriptor calls.
+     */
     assert.equal(yield* within(Queue.take(descriptorCalls)), 0);
-    assert.equal(yield* within(Queue.take(descriptorCalls)), 0);
-    yield* within(Queue.take(failures));
+    assert.equal(yield* within(Queue.take(failures)), 0);
+    assert.equal(yield* Queue.size(descriptorCalls), 0);
     assert.equal(status.supervisionState, "degraded");
     assert.equal(status.lastErrorPhase, "supervision");
     yield* TestClock.adjust(9_999);
     assert.equal(yield* Queue.size(descriptorCalls), 0);
     assert.equal(yield* Queue.size(failures), 0);
     yield* TestClock.adjust(1);
-    assert.equal(yield* within(Queue.take(descriptorCalls)), 10_000);
-    yield* within(Queue.take(failures));
+    assert.equal(yield* within(Queue.take(failures)), 10_000);
+    assert.equal(yield* Queue.size(descriptorCalls), 0);
     assert.equal(status.supervisionState, "degraded");
     assert.equal(status.lastErrorPhase, "supervision");
     yield* Fiber.interrupt(fiber);
