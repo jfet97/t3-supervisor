@@ -1,10 +1,10 @@
 import { Context, Data, Deferred, Effect, Layer, Schema } from "effect";
 import { posix } from "node:path";
-import { NativeEnvelope, nativeMaxPayload, NativeStep, type NativeCall, type NativeEndpoint, type NativeExit } from "./native-envelope.js";
+import type {
+  CommitOutcome, DirectoryListing, FileContents, FileFailure, FileScope, T3FileCommits, T3FileError, T3FileReads, T3FileWrites, T3InvalidInput, VcsRefs,
+} from "./t3-native/index.js";
 
-export const FileFailure = Schema.Literals(["missing", "invalid_file", "permission_required", "unavailable"]);
-export type FileFailure = typeof FileFailure.Type;
-export type FileScope = "read" | "write";
+export type { CommitOutcome, FileFailure, FileScope };
 export type GitOperationState = {status: "safe"} | {status: "in_progress"; marker: string} | {status: "unavailable"; message: string};
 export interface FreshGitInfo {
   workspaceRoot: string;
@@ -28,78 +28,41 @@ export class ProjectFileError extends Data.TaggedError("ProjectFileError")<{read
   override readonly message: string = fileErrorMessage(this.code, this.scope);
 }
 
-// the native results each client accepts; a client returns the native value itself, so revisions hash exactly what T3 returned
+// a T3Native file failure keeps its classification and credential scope; an input T3Native refuses before connecting is the local refusal it replaces
+const projectFileError = (scope: FileScope) => (error: T3FileError | T3InvalidInput): ProjectFileError =>
+  error._tag === "T3FileError" ? new ProjectFileError(error.code, error.scope) : new ProjectFileError("unavailable", scope);
+
+/**
+ * The listing the file client accepts: files and directories only. The client returns the native value itself, so revisions hash
+ * exactly what T3 returned.
+ */
 const Entry = Schema.Struct({path: Schema.String, kind: Schema.Literals(["file", "directory"])});
 export const ListEntries = Schema.Struct({truncated: Schema.Boolean, entries: Schema.Array(Entry)});
 export type ListEntries = typeof ListEntries.Type;
-const ByteLength = Schema.Number.check(Schema.makeFilter((value: number) => Number.isSafeInteger(value) && value >= 0));
-export const ReadFileResult = Schema.Struct({contents: Schema.String, byteLength: ByteLength, truncated: Schema.Boolean});
-export type ReadFileResult = typeof ReadFileResult.Type;
-export const Metadata = Schema.Struct({entries: Schema.Array(Schema.Unknown)});
-export const VcsStatus = Schema.Struct({isRepo: Schema.Boolean, workingTree: Schema.Struct({files: Schema.Array(Schema.Struct({path: Schema.String}))})});
-export const VcsRefs = Schema.Struct({isRepo: Schema.Boolean, refs: Schema.Array(Schema.Struct({name: Schema.String, current: Schema.Boolean,
-  isDefault: Schema.Boolean, worktreePath: Schema.NullOr(Schema.String), isRemote: Schema.optionalKey(Schema.Boolean), remoteName: Schema.optionalKey(Schema.String)}))});
-export type VcsInfo = {isRepo: boolean; branch: string | null; changedPaths?: string[]; refs?: typeof VcsRefs.Type.refs};
-const CreatedCommit = Schema.Struct({commit: Schema.Struct({status: Schema.Literal("created"), commitSha: Schema.String})});
+// a file's text as T3 read it, the native value itself
+export type ReadFileResult = FileContents;
+export type VcsInfo = {isRepo: boolean; branch: string | null; changedPaths?: string[]; refs?: VcsRefs["refs"]};
 const isListEntries = Schema.is(ListEntries);
-const isReadFileResult = Schema.is(ReadFileResult);
-const isMetadata = Schema.is(Metadata);
-const isVcsStatus = Schema.is(VcsStatus);
-const isCreatedCommit = Schema.is(CreatedCommit);
 const record = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
 const validPath = (path: string): boolean => path.startsWith(".t3-supervisor/") && !path.includes("\\") && !path.includes("\0") &&
   path.split("/").every(part => part !== ".." && part !== "." && part.length > 0);
 
-const failure = (value: unknown, depth = 0): FileFailure => {
-  if (depth > 12 || !value || typeof value !== "object") return "unavailable";
-  if (record(value)) {
-    if (value._tag === "EnvironmentAuthorizationError") return "permission_required";
-    if (value.code === "ENOENT" || typeof value.message === "string" && /^ENOENT:/.test(value.message)) return "missing";
-    if (value.code === "EACCES" || value.code === "EPERM" || typeof value.message === "string" && /^(?:EACCES|EPERM):/.test(value.message)) return "invalid_file";
-    if (value.failure === "binary_file" || value.failure === "path_not_file") return "invalid_file";
-  }
-  const codes = Object.values(value).map(v => failure(v, depth + 1));
-  return codes.includes("permission_required") ? "permission_required" : codes.includes("invalid_file") ? "invalid_file" : codes.includes("missing") ? "missing" : "unavailable";
-};
-
-// one native request on its own socket: 2 MiB frames, 5 s handshake, deadline over the whole call; a completed cancel ends it as unavailable
-const fileCall = <A, E>(endpoint: NativeEndpoint, call: Pick<NativeCall<A, E>, "request" | "onChunk" | "onExit" | "cancel">, timeout: "10 seconds" | "30 seconds") =>
-  ({endpoint, maxPayload: nativeMaxPayload.files, handshakeTimeout: "5 seconds", timeout, ...call}) satisfies NativeCall<A, E>;
-
-const makeRpc = (native: NativeEnvelope["Service"], endpoint: NativeEndpoint, scope: FileScope) =>
-  (tag: string, payload: Record<string, unknown>, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<unknown, ProjectFileError> =>
-    native.call(fileCall(endpoint, {request: {id: "definitions", tag, payload}, cancel,
-      onExit: (exit: NativeExit) => exit._tag === "Success" ? Effect.succeed(NativeStep.done(exit.value))
-        : Effect.fail(new ProjectFileError(exit._tag === "Malformed" ? "unavailable" : failure(exit.exit), scope)),
-    }, "10 seconds")).pipe(Effect.catchTag("NativeEnvelopeError", () => Effect.fail(new ProjectFileError("unavailable", scope))));
-
-// the first snapshot or local update of a status subscription, never acknowledged; an Exit before it is a failure
-const vcsSnapshot = (native: NativeEnvelope["Service"], endpoint: NativeEndpoint, payload: Record<string, unknown>, cancel: Deferred.Deferred<void> | undefined) =>
-  native.call(fileCall(endpoint, {request: {id: "definition-vcs-snapshot", tag: "subscribeVcsStatus", payload}, cancel,
-    onChunk: (values: ReadonlyArray<unknown>) => {
-      const event = values.find(value => record(value) && (value._tag === "snapshot" || value._tag === "localUpdated" || value.type === "snapshot" || value.type === "localUpdated"));
-      return Effect.succeed(record(event) && record(event.local) ? NativeStep.done<unknown>(event.local) : NativeStep.continue);
-    },
-    onExit: (exit: NativeExit) => Effect.fail(new ProjectFileError(exit._tag === "Failure" ? failure(exit.exit) : "unavailable")),
-  }, "10 seconds")).pipe(Effect.catchTag("NativeEnvelopeError", () => Effect.fail(new ProjectFileError("unavailable"))));
-
 const unavailable = (message: string): GitOperationState => ({status: "unavailable", message});
 
-const makeProjectFiles = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
-  const native = yield* NativeEnvelope;
-  const rpc = makeRpc(native, endpoint, "read");
-  const readNativeFile = (root: string, path: string, cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
-    if (path.length > 512 || path.includes("\0") || path.includes("\\")) return yield* new ProjectFileError("unavailable");
-    const value = yield* rpc("projects.readFile", {cwd: root, relativePath: path}, cancel);
-    if (!isReadFileResult(value)) return yield* new ProjectFileError("unavailable");
-    return value;
-  });
+const makeProjectFiles = (reads: T3FileReads): ProjectFiles["Service"] => {
+  const readError = projectFileError("read");
+  // T3Native refuses a path over 512 characters or with a NUL or a backslash before connecting
+  const readNativeFile = (root: string, path: string, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<ReadFileResult, ProjectFileError> =>
+    Effect.mapError(reads.readFile({cwd: root, relativePath: path}, cancel), readError);
+  // one metadata entry per requested path; an entry that is not a record describes no file
+  const metadataOf = (path: string, cancel: Deferred.Deferred<void> | undefined) => Effect.mapError(reads.metadata({paths: [path]}, cancel), readError);
   const gitOperationState = (root: string, cancel?: Deferred.Deferred<void>): Effect.Effect<GitOperationState, ProjectFileError> => Effect.gen(function* () {
     if (!posix.isAbsolute(root)) return unavailable("T3 requires an absolute checkout path to inspect Git state.");
     const metadataPath = posix.join(root, ".git");
     if (metadataPath.length > 512) return unavailable("The checkout path is too long to inspect Git state safely.");
-    const metadata = yield* rpc("filesystem.getMetadata", {paths: [metadataPath]}, cancel);
-    const kind = isMetadata(metadata) && metadata.entries.length === 1 && record(metadata.entries[0]) ? metadata.entries[0].kind : undefined;
+    const metadata = yield* metadataOf(metadataPath, cancel);
+    const entry = metadata.entries.length === 1 ? metadata.entries[0] : undefined;
+    const kind = record(entry) ? entry.kind : undefined;
     if (kind !== "directory" && kind !== "file") return unavailable("T3 could not identify this checkout's Git metadata directory.");
     let readGitFile: (path: string) => Effect.Effect<ReadFileResult, ProjectFileError>;
     if (kind === "directory") readGitFile = path => readNativeFile(root, `.git/${path}`, cancel);
@@ -112,9 +75,9 @@ const makeProjectFiles = Effect.fnUntraced(function* (endpoint: NativeEndpoint) 
       if (!match || !match[1] || match[1].includes("\0") || match[1].includes("\\")) return unavailable("This checkout has an unsupported Git directory pointer.");
       const gitDirectory = posix.isAbsolute(match[1]) ? posix.normalize(match[1]) : posix.resolve(root, match[1]);
       if (!posix.isAbsolute(gitDirectory) || gitDirectory.length > 512) return unavailable("This checkout's Git directory path is invalid or too long.");
-      const gitDirectoryMetadata = yield* rpc("filesystem.getMetadata", {paths: [gitDirectory]}, cancel);
-      if (!isMetadata(gitDirectoryMetadata) || gitDirectoryMetadata.entries.length !== 1 || !record(gitDirectoryMetadata.entries[0]) ||
-        gitDirectoryMetadata.entries[0].kind !== "directory") return unavailable("T3 could not verify this checkout's Git metadata directory.");
+      const gitDirectoryMetadata = yield* metadataOf(gitDirectory, cancel);
+      const gitDirectoryEntry = gitDirectoryMetadata.entries.length === 1 ? gitDirectoryMetadata.entries[0] : undefined;
+      if (!record(gitDirectoryEntry) || gitDirectoryEntry.kind !== "directory") return unavailable("T3 could not verify this checkout's Git metadata directory.");
       // linked worktrees store private metadata outside the checkout; inspect only fixed filenames read from the native pointer.
       readGitFile = path => readNativeFile(root, posix.join(gitDirectory, path), cancel);
     }
@@ -136,30 +99,29 @@ const makeProjectFiles = Effect.fnUntraced(function* (endpoint: NativeEndpoint) 
   });
   return ProjectFiles.of({
     directoryExists: (root, cancel) => Effect.gen(function* () {
-      const value = yield* rpc("filesystem.getMetadata", {paths: [root]}, cancel);
-      if (!isMetadata(value) || value.entries.length !== 1) return yield* new ProjectFileError("unavailable");
-      return record(value.entries[0]) && value.entries[0].kind === "directory";
+      const value = yield* metadataOf(root, cancel);
+      if (value.entries.length !== 1) return yield* new ProjectFileError("unavailable");
+      const entry = value.entries[0];
+      return record(entry) && entry.kind === "directory";
     }),
     list: (root, path, cancel) => Effect.gen(function* () {
       if (path !== "" && path !== ".t3-supervisor" && !validPath(path)) return yield* new ProjectFileError("unavailable");
-      const value = yield* rpc("projects.listEntries", {cwd: root, directoryPath: path}, cancel);
+      const value = yield* Effect.mapError(reads.listEntries({cwd: root, directoryPath: path}, cancel), readError);
       if (!isListEntries(value) || value.entries.length > 512) return yield* new ProjectFileError("unavailable");
       return value;
     }),
     read: (root, path, cancel) => validPath(path) ? readNativeFile(root, path, cancel) : Effect.fail(new ProjectFileError("unavailable")),
     vcsInfo: (root, cancel) => Effect.gen(function* () {
-      const refs = yield* rpc("vcs.listRefs", {cwd: root, refKind: "all", limit: 200}, cancel);
-      if (!Schema.is(VcsRefs)(refs)) return yield* new ProjectFileError("unavailable");
+      const refs = yield* Effect.mapError(reads.vcsRefs({cwd: root}, cancel), readError);
       const current = refs.refs.filter(ref => ref.current === true && !ref.isRemote);
       if (current.length > 1) return yield* new ProjectFileError("unavailable");
       if (!refs.isRepo) return {isRepo: false, branch: null, changedPaths: []};
-      const status = yield* vcsSnapshot(native, endpoint, {cwd: root, includeRemote: false}, cancel);
-      if (!isVcsStatus(status)) return yield* new ProjectFileError("unavailable");
+      const status = yield* Effect.mapError(reads.vcsStatus({cwd: root}, cancel), readError);
       return {isRepo: true, branch: current[0] ? String(current[0].name) : null, refs: refs.refs, changedPaths: status.workingTree.files.map(entry => String(entry.path))};
     }),
     gitOperationState,
   });
-});
+};
 
 /** Uses native T3 read RPCs; it never reads project content from the container filesystem. */
 export class ProjectFiles extends Context.Service<ProjectFiles, {
@@ -170,30 +132,28 @@ export class ProjectFiles extends Context.Service<ProjectFiles, {
   readonly vcsInfo?: ((root: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<VcsInfo, ProjectFileError>) | undefined;
   readonly gitOperationState?: ((root: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<GitOperationState, ProjectFileError>) | undefined;
 }>()("t3-supervisor/ProjectFiles") {
-  static readonly make: (endpoint: NativeEndpoint) => Effect.Effect<ProjectFiles["Service"], never, NativeEnvelope> = makeProjectFiles;
-  static readonly layer = (endpoint: NativeEndpoint): Layer.Layer<ProjectFiles, never, NativeEnvelope> => Layer.effect(ProjectFiles, makeProjectFiles(endpoint));
+  // over the run's T3Native file reads (the read credential)
+  static readonly make = (reads: T3FileReads): Effect.Effect<ProjectFiles["Service"]> => Effect.sync(() => makeProjectFiles(reads));
+  static readonly layer = (reads: T3FileReads): Layer.Layer<ProjectFiles> => Layer.effect(ProjectFiles, ProjectFiles.make(reads));
 }
 
-const makeProjectWriter = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
-  const rpc = makeRpc(yield* NativeEnvelope, endpoint, "write");
-  const writeFile = (root: string, path: string, contents: string, cancel?: Deferred.Deferred<void>) => Effect.gen(function* () {
-    if (!validPath(path)) return yield* new ProjectFileError("unavailable", "write");
-    const result = yield* rpc("projects.writeFile", {cwd: root, relativePath: path, contents}, cancel);
-    if (!record(result) || result.relativePath !== path) return yield* new ProjectFileError("unavailable", "write");
-  });
-  const includes = (value: unknown, path: string, kind: string) => record(value) && value.truncated === false && Array.isArray(value.entries) &&
-    value.entries.some(entry => record(entry) && entry.path === path && entry.kind === kind);
+const makeProjectWriter = (writes: T3FileWrites): ProjectWriter["Service"] => {
+  const writeError = projectFileError("write");
+  // T3Native writes only fixed .t3-supervisor paths, before connecting, and requires the echoed path to be the written one
+  const writeFile = (root: string, path: string, contents: string, cancel?: Deferred.Deferred<void>): Effect.Effect<void, ProjectFileError> =>
+    Effect.asVoid(Effect.mapError(writes.writeFile({cwd: root, relativePath: path, contents}, cancel), writeError));
+  const includes = (listing: DirectoryListing, path: string, kind: string) => listing.truncated === false &&
+    listing.entries.some(entry => entry.path === path && entry.kind === kind);
   return ProjectWriter.of({
     checkProjectConfigFile: (root, cancel) => Effect.gen(function* () {
-      const rootEntries = yield* rpc("projects.listEntries", {cwd: root, directoryPath: ""}, cancel);
-      if (!includes(rootEntries, ".t3-supervisor", "directory")) return false;
-      const folder = yield* rpc("projects.listEntries", {cwd: root, directoryPath: ".t3-supervisor"}, cancel);
-      return includes(folder, ".t3-supervisor/project.yaml", "file");
+      const list = (directoryPath: string) => Effect.mapError(writes.listEntries({cwd: root, directoryPath}, cancel), writeError);
+      if (!includes(yield* list(""), ".t3-supervisor", "directory")) return false;
+      return includes(yield* list(".t3-supervisor"), ".t3-supervisor/project.yaml", "file");
     }),
     writeProjectConfig: (root, contents, cancel) => writeFile(root, ".t3-supervisor/project.yaml", contents, cancel),
     writeFile,
   });
-});
+};
 
 // writes only fixed .t3-supervisor paths through the native filesystem:write credential and verifies the echoed path
 export class ProjectWriter extends Context.Service<ProjectWriter, {
@@ -202,48 +162,15 @@ export class ProjectWriter extends Context.Service<ProjectWriter, {
   readonly writeProjectConfig: (root: string, contents: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<void, ProjectFileError>;
   readonly writeFile: (root: string, path: string, contents: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<void, ProjectFileError>;
 }>()("t3-supervisor/ProjectWriter") {
-  static readonly make: (endpoint: NativeEndpoint) => Effect.Effect<ProjectWriter["Service"], never, NativeEnvelope> = makeProjectWriter;
-  static readonly layer = (endpoint: NativeEndpoint): Layer.Layer<ProjectWriter, never, NativeEnvelope> => Layer.effect(ProjectWriter, makeProjectWriter(endpoint));
+  // over the run's T3Native file writes (the project-write credential)
+  static readonly make = (writes: T3FileWrites): Effect.Effect<ProjectWriter["Service"]> => Effect.sync(() => makeProjectWriter(writes));
+  static readonly layer = (writes: T3FileWrites): Layer.Layer<ProjectWriter> => Layer.effect(ProjectWriter, ProjectWriter.make(writes));
 }
 
-export type CommitOutcome = {status: "committed" | "uncertain"; commitSha?: string};
-const uncertain: CommitOutcome = {status: "uncertain"};
-
-const makeProjectCommitter = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
-  const native = yield* NativeEnvelope;
-  const commit = (payload: {readonly actionId: string} & Record<string, unknown>, cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
-    // an already cancelled commit connects nothing; once a socket exists every unconfirmed end is uncertain
-    if (cancel !== undefined && (yield* Deferred.isDone(cancel))) return yield* new ProjectFileError("unavailable", "write");
-    let actionResult: unknown;
-    let actionFailed = false;
-    let actionFinished = false;
-    return yield* native.call(fileCall(endpoint, {request: {id: "definition-setup-commit", tag: "git.runStackedAction", payload}, cancel,
-      // every chunk of the action is acknowledged once its events were taken in
-      onChunk: (values: ReadonlyArray<unknown>) => Effect.sync(() => {
-        for (const event of values) {
-          if (!record(event)) return NativeStep.done(uncertain);
-          if (event.actionId !== payload.actionId) continue;
-          if (event.kind === "action_failed") actionFailed = true;
-          if (event.kind === "action_finished") {actionFinished = true;actionResult = event.result;}
-        }
-        return NativeStep.ack();
-      }),
-      onExit: (exit: NativeExit) => {
-        if (exit._tag === "Failure") {
-          if (failure(exit.exit) === "permission_required") return Effect.fail(new ProjectFileError("permission_required", "write"));
-          return actionFinished || actionFailed ? Effect.succeed(NativeStep.done(uncertain)) : Effect.fail(new ProjectFileError("unavailable", "write"));
-        }
-        if (exit._tag !== "Success") return Effect.succeed(NativeStep.done(uncertain));
-        if (actionFailed || !actionFinished || !isCreatedCommit(actionResult)) return Effect.fail(new ProjectFileError("unavailable", "write"));
-        return Effect.succeed(NativeStep.done<CommitOutcome>({status: "committed", commitSha: actionResult.commit.commitSha}));
-      },
-    }, "30 seconds")).pipe(Effect.catchTag("NativeEnvelopeError", () => Effect.succeed(uncertain)));
-  });
-  return ProjectCommitter.of({
-    commitFiles: (root, paths, message, actionId, cancel) => !paths.length || !paths.every(validPath)
-      ? Effect.fail(new ProjectFileError("unavailable", "write"))
-      : commit({actionId, cwd: root, action: "commit", commitMessage: message, filePaths: [...paths]}, cancel),
-  });
+const makeProjectCommitter = (commits: T3FileCommits): ProjectCommitter["Service"] => ProjectCommitter.of({
+  // T3Native refuses an empty or non-Supervisor path list before connecting, and an already cancelled commit connects nothing
+  commitFiles: (root, paths, message, actionId, cancel) =>
+    Effect.mapError(commits.commit({cwd: root, filePaths: paths, message, actionId}, cancel), projectFileError("write")),
 });
 
 // commits fixed setup paths through git.runStackedAction under the caller's deterministic action id; it never retries
@@ -252,6 +179,7 @@ export class ProjectCommitter extends Context.Service<ProjectCommitter, {
   readonly commitFiles: (root: string, paths: readonly string[], message: string, actionId: string, cancel?: Deferred.Deferred<void>) =>
     Effect.Effect<CommitOutcome, ProjectFileError>;
 }>()("t3-supervisor/ProjectCommitter") {
-  static readonly make: (endpoint: NativeEndpoint) => Effect.Effect<ProjectCommitter["Service"], never, NativeEnvelope> = makeProjectCommitter;
-  static readonly layer = (endpoint: NativeEndpoint): Layer.Layer<ProjectCommitter, never, NativeEnvelope> => Layer.effect(ProjectCommitter, makeProjectCommitter(endpoint));
+  // over the run's T3Native commit (the commit credential)
+  static readonly make = (commits: T3FileCommits): Effect.Effect<ProjectCommitter["Service"]> => Effect.sync(() => makeProjectCommitter(commits));
+  static readonly layer = (commits: T3FileCommits): Layer.Layer<ProjectCommitter> => Layer.effect(ProjectCommitter, ProjectCommitter.make(commits));
 }

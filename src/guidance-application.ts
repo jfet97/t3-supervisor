@@ -43,9 +43,6 @@ export const runGuidanceApplication = (
       Layer.provideMerge(Layer.succeed(DashboardUpdates, updates)), Layer.provide(SupervisorIds.layer)));
     const store = Context.get(guidance, GuidanceStore);
     const guidanceRuntime = yield* GuidanceRuntime.make(config, source).pipe(Effect.provide(guidance));
-    const descriptor = yield* t3.descriptor();
-    yield* guidanceRuntime.recordDescriptor(descriptor);
-    yield* store.bind(descriptor.environmentId);
     const readToken = yield* Effect.tryPromise(() => readFile(config.t3TokenFile, "utf8"));
     const writePath = config.projectWriteTokenFile;
     const writeToken = writePath && existsSync(writePath) ? yield* Effect.tryPromise(() => readFile(writePath, "utf8")) : "";
@@ -54,9 +51,10 @@ export const runGuidanceApplication = (
     const probePath = config.gitProbeTokenFile;
     const probeToken = probePath && existsSync(probePath) ? yield* Effect.tryPromise(() => readFile(probePath, "utf8")) : "";
     const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
-    // the native file, writer, commit, probe and rpc clients run on the root native transport (one envelope, crypto and fetch
-    // client per process, d-08); the probe draws its ids from the platform crypto and keeps its pending sessions in the guidance
-    // metadata
+    /**
+     * The run's native clients and T3Native run on the root native transport (one envelope, crypto and fetch client per process,
+     * d-08); the probe draws its ids from the platform crypto and keeps its pending sessions in the guidance metadata.
+     */
     const nativeClients = yield* Effect.context<NativeTransport>();
     const endpoint = (token: string) => ({baseUrl: config.t3Url, token});
     /*
@@ -74,8 +72,13 @@ export const runGuidanceApplication = (
       operateToken.trim() ? NativeOperateRpc.layer(endpoint(operateToken.trim())) : Layer.empty,
       Layer.succeed(T3Client, t3),
     ))));
-    const native = Context.merge(nativeClients, nativeAccess);
-    const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim())), Context.merge(native, guidance)) : undefined;
+    // the run's T3Native: the project-write, commit and probe families exist exactly where their tokens are configured
+    const native = Context.get(nativeAccess, T3Native);
+    // the run's environment, read through its T3Native once the credential files built it; the read records its build facts
+    const descriptor = yield* native.orchestration.environment;
+    yield* guidanceRuntime.recordDescriptor(descriptor);
+    yield* store.bind(descriptor.environmentId);
+    const gitProbe = native.terminal ? yield* Effect.provide(GitProbe.make(native.terminal), Context.merge(nativeClients, guidance)) : undefined;
     const cleanupGitProbe = gitProbe ? gitProbe.cleanup.pipe(
       Effect.catch(() => logEvent("native_git_probe_cleanup_unavailable")),
     ) : Effect.void;
@@ -85,15 +88,15 @@ export const runGuidanceApplication = (
     // into the process's set here, before the run reads or filters the catalog (cc-ownership)
     const stores = yield* Layer.build(SupervisionStoresLive.pipe(Layer.provideMerge(Layer.succeedContext(guidance)), Layer.provide(SupervisorIds.layer)));
     const supervisionStore = Context.get(stores, ProjectSupervisorStore);
-    const projectWriter = writeToken.trim() ? yield* Effect.provide(ProjectWriter.make(endpoint(writeToken.trim())), native) : undefined;
-    const commitWriter = commitToken.trim() ? yield* Effect.provide(ProjectCommitter.make(endpoint(commitToken.trim())), native) : undefined;
+    const projectWriter = native.files.write ? yield* ProjectWriter.make(native.files.write) : undefined;
+    const commitWriter = native.files.commit ? yield* ProjectCommitter.make(native.files.commit) : undefined;
     const setupWriter = projectWriter ? {
       writeFile: projectWriter.writeFile,
       ...(commitWriter ? {commitFiles: commitWriter.commitFiles} : {}),
     } : undefined;
     const managedScratchRoot = config.managedScratchRoot && posix.isAbsolute(config.managedScratchRoot) ? posix.normalize(config.managedScratchRoot) : null;
     // the definitions and the config editor are built once in the supervision run scope
-    const definitions = yield* ProjectDefinitions.make({source, t3, files: yield* Effect.provide(ProjectFiles.make(endpoint(readToken.trim())), native), options: {
+    const definitions = yield* ProjectDefinitions.make({source, t3: native.orchestration, files: yield* ProjectFiles.make(native.files.read), options: {
       globalRoot: "~",
       recordCheckoutObservation: supervisionStore.recordCheckoutObservation,
       useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
@@ -112,7 +115,7 @@ export const runGuidanceApplication = (
     // the services of the supervision run, one layer graph built once in this scope over those clients and the run's stores: the
     // supervisor's scope predicates with the admission gate that guards with them, the team services, the Start/Stop control, the
     // workflow controllers and the project supervisor
-    const services = yield* Layer.build(SupervisionLive({operateRpcAvailable: Boolean(operateToken.trim()), baseUrl: config.t3Url,
+    const services = yield* Layer.build(SupervisionLive({operateRpcAvailable: Boolean(operateToken.trim()),
       helperProviderInstanceId: config.helperProviderInstanceId}).pipe(Layer.provideMerge(clients), Layer.provideMerge(Layer.succeedContext(stores))));
     const supervision = Context.get(services, ProjectSupervisor);
     // the dashboard's access client, runtime and workflow MCP endpoint over the run's controllers, provided once in this scope;
@@ -131,7 +134,7 @@ export const runGuidanceApplication = (
     );
     yield* Effect.forkScoped(interpretation);
     // each cycle publishes the descriptor before binding and pruning; any failure but an interruption marks the runtime unavailable
-    const cycle = t3.descriptor().pipe(
+    const cycle = native.orchestration.environment.pipe(
       Effect.tap(guidanceRuntime.recordDescriptor),
       // the binding check and the pruning are one transaction
       Effect.tap(next => guidanceTransaction(Context.get(guidance, GuidanceDb))(Effect.andThen(store.bind(next.environmentId), store.prune()))),

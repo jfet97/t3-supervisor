@@ -4,17 +4,20 @@ import { it } from "@effect/vitest";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { TestClock } from "effect/testing";
 import { WebSocketServer, type WebSocket } from "ws";
-import { GitProbe, GitProbeError } from "../src/git-probe.js";
+import { GitProbeError } from "../src/git-probe.js";
 import { NativeEnvelope } from "../src/native-envelope.js";
-import { ProjectCommitter, ProjectFileError, ProjectFiles, ProjectWriter } from "../src/project-files.js";
+import { ProjectFileError } from "../src/project-files.js";
 import { type ProbeStatus } from "./support/c3a-fake-terminal-t3.js";
-import { fakeTerminalT3, probeGuidance } from "./support/g10-probe-guidance.js";
+import { fakeTerminalT3, nativeGitProbe, probeGuidance } from "./support/g10-probe-guidance.js";
+import { nativeProjectCommitter, nativeProjectFiles, nativeProjectWriter } from "./support/native-file-access.js";
 
-// target regressions of the ported native file clients and git probe: native values pass through unchanged, deadlines run on
-// the Effect clock, cancel triggers end calls with their baseline outcome, an interrupted probe still closes its terminal, and
-// the envelope's 2 MiB maxPayload gives the outcome the probe's own frame-size check never reached.
-// every peer is a real loopback websocket server and every probe keeps its pending sessions in a guidance file; it.live
-// where the test waits on that i/o only, it.effect where it steps a client deadline on the TestClock over the same peers
+/**
+ * Target regressions of the native file clients and git probe over the run's T3Native: native values pass through unchanged,
+ * deadlines run on the Effect clock, cancel triggers end calls with their baseline outcome, an interrupted probe still closes its
+ * terminal, and the envelope's 2 MiB maxPayload gives the outcome the probe's own frame-size check never reached. Every peer is a
+ * real loopback websocket server and every probe keeps its pending sessions in a guidance file; it.live where the test waits on that
+ * i/o only, it.effect where it steps a client deadline on the TestClock over the same peers.
+ */
 
 type Frame = {_tag?: string; id?: string; tag?: string; payload?: Record<string, unknown>};
 
@@ -55,7 +58,7 @@ it.live("TR-FILES-01: a listing and a read return the native value itself, extra
   const listing = {entries: [{kind: "file", path: ".t3-supervisor/project.yaml", size: 24}], truncated: false, cursor: null};
   const file = {relativePath: ".t3-supervisor/project.yaml", truncated: false, byteLength: 10, contents: "steps: []\n", encoding: "utf8"};
   const t3 = yield* peer((socket, frame) => success(socket, frame, frame.tag === "projects.listEntries" ? listing : file));
-  const files = yield* Effect.provide(ProjectFiles.make({baseUrl: t3.url, token: "read-token"}), native);
+  const files = yield* Effect.provide(nativeProjectFiles(t3.url, "read-token"), native);
   const listed = yield* files.list(root, ".t3-supervisor");
   const read = yield* files.read(root, ".t3-supervisor/project.yaml");
   assert.equal(JSON.stringify(listed), JSON.stringify(listing));
@@ -64,7 +67,7 @@ it.live("TR-FILES-01: a listing and a read return the native value itself, extra
 
 it.effect("TR-FILES-02: the 10 s file deadline and the 30 s commit deadline run on the Effect clock against a silent peer", () => Effect.gen(function* () {
   const reads = yield* peer();
-  const files = yield* Effect.provide(ProjectFiles.make({baseUrl: reads.url, token: "read-token"}), native);
+  const files = yield* Effect.provide(nativeProjectFiles(reads.url, "read-token"), native);
   const reading = yield* Effect.forkChild(Effect.flip(files.read(root, ".t3-supervisor/project.yaml")));
   yield* Effect.promise(() => reads.requested);
   yield* TestClock.adjust("9999 millis");
@@ -75,7 +78,7 @@ it.effect("TR-FILES-02: the 10 s file deadline and the 30 s commit deadline run 
   assert.deepEqual([error.code, error.message], ["unavailable", "T3 project file access is unavailable."]);
 
   const commits = yield* peer();
-  const committer = yield* Effect.provide(ProjectCommitter.make({baseUrl: commits.url, token: "commit-token"}), native);
+  const committer = yield* Effect.provide(nativeProjectCommitter(commits.url, "commit-token"), native);
   const committing = yield* Effect.forkChild(committer.commitFiles(root, [".t3-supervisor/project.yaml"], "message", "action-1"));
   yield* Effect.promise(() => commits.requested);
   yield* TestClock.adjust("29999 millis");
@@ -86,8 +89,8 @@ it.effect("TR-FILES-02: the 10 s file deadline and the 30 s commit deadline run 
 
 it.live("TR-FILES-03: a cancel trigger ends an in-flight read and write as unavailable, and an already completed one never connects", () => Effect.gen(function* () {
   const t3 = yield* peer();
-  const files = yield* Effect.provide(ProjectFiles.make({baseUrl: t3.url, token: "read-token"}), native);
-  const writer = yield* Effect.provide(ProjectWriter.make({baseUrl: t3.url, token: "write-token"}), native);
+  const files = yield* Effect.provide(nativeProjectFiles(t3.url, "read-token"), native);
+  const writer = yield* Effect.provide(nativeProjectWriter(t3.url, "write-token"), native);
   for (const call of [(cancel: Deferred.Deferred<void>) => files.read(root, ".t3-supervisor/project.yaml", cancel),
     (cancel: Deferred.Deferred<void>) => writer.writeProjectConfig(root, "workflows: []\nsteps: []\n", cancel)]) {
     const cancel = yield* Deferred.make<void>();
@@ -186,7 +189,7 @@ it.live("TR-PROBE-05: a defect in the attach consumer ends the probe with that c
   const original = yield* NativeEnvelope;
   const defect = new Error("attach-consumer-defect");
   const faulty = NativeEnvelope.of({...original, call: spec => original.call(spec.request.tag === "terminal.attach" ? {...spec, onChunk: () => Effect.die(defect)} : spec)});
-  const probe = yield* GitProbe.make({baseUrl: t3.url, token: "terminal-operate-test-token"}).pipe(Effect.provideService(NativeEnvelope, faulty), Effect.provide(state.guidance));
+  const probe = yield* nativeGitProbe(t3.url, "terminal-operate-test-token").pipe(Effect.provideService(NativeEnvelope, faulty), Effect.provide(state.guidance));
   // well inside the 15 s probe deadline: the probe settles on the defect itself, not on its deadline
   const exit = yield* Effect.exit(probe.probe(root)).pipe(Effect.timeout("5 seconds"));
   assert.ok(Exit.isFailure(exit) && Cause.hasDies(exit.cause) && Cause.squash(exit.cause) === defect, "the probe ends with the consumer's defect");

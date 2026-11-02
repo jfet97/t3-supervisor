@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { parseDocument } from "yaml";
 import {SupportingReferences, SupportingSkills, type DefinitionGuidance, definitionGuidanceFields, definitionGuidanceProblem, describeDefinitionReferenceProblem } from "./definition-references.js";
 import type { StoreShape } from "./store.js";
-import type { T3ClientShape } from "./t3.js";
+import type { T3OrchestrationFamily } from "./t3-native/index.js";
 import type { FreshGitProbe } from "./git-probe.js";
 import { ProjectFileError, type FileFailure, type ProjectCommitter, type ProjectFiles, type ProjectWriter, type ReadFileResult, type VcsInfo } from "./project-files.js";
 import {branchConditionMaxLength, branchConditionText, catalogEntryId, DefinitionNode, definitionIdPattern, normalizeProjectConfiguration, projectConfigurationError, ProjectConfigurationInfo, returnBudgetMaximum, workflowDefinitionExpansionLimits,
@@ -44,10 +44,10 @@ export interface ProjectDefinitionLoaderOptions {
   setupWriter?: ProjectDefinitionSetupWriter;
   gitProbe?: FreshGitProbe;
 }
-// what the loader reads: the catalog, the native projection and the native file client, with the scope and setup options
+// what the loader reads: the catalog, the native thread read and the native file client, with the scope and setup options
 export interface ProjectDefinitionSources {
   readonly source: Pick<StoreShape, "catalog">;
-  readonly t3: Pick<T3ClientShape, "projection">;
+  readonly t3: Pick<T3OrchestrationFamily, "thread">;
   readonly files: ProjectFiles["Service"];
   readonly options?: ProjectDefinitionLoaderOptions;
 }
@@ -537,7 +537,7 @@ const makeProjectDefinitions = Effect.fnUntraced(function* (sources: ProjectDefi
   const read = (root: string, path: string) => withOperationCancel(cancel => files.read(root, path, cancel));
   const vcsInfo = (root: string) => withOperationCancel(cancel => files.vcsInfo!(root, cancel));
   const readCatalog = boundedRead(() => source.catalog());
-  const readProjection = (threadId: string) => boundedRead(() => t3.projection(threadId));
+  const readProjection = (threadId: string) => boundedRead(() => t3.thread(threadId));
 
   // a store read's failure or defect is a definition source failure, as a throwing callback was
   const sourceRead = <A, E>(read: Effect.Effect<A, E>): Effect.Effect<A, DefinitionSourceFailure> => Effect.catchCause(read, (cause) => Cause.hasInterruptsOnly(cause)

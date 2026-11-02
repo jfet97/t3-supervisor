@@ -4,8 +4,9 @@ import { it } from "@effect/vitest";
 import { Deferred, Effect, Fiber } from "effect";
 import { WebSocketServer, type WebSocket } from "ws";
 import { NativeEnvelope } from "../src/native-envelope.js";
-import { ProjectCommitter, ProjectFileError, ProjectFiles, ProjectWriter } from "../src/project-files.js";
+import { ProjectFileError } from "../src/project-files.js";
 import { cancelAfter, within } from "./support/g5a-bounds.js";
+import { nativeProjectCommitter, nativeProjectFiles, nativeProjectWriter } from "./support/native-file-access.js";
 
 type Frame = {_tag?: string; id?: string; tag?: string; payload?: Record<string, unknown>};
 
@@ -44,7 +45,7 @@ const failWith = (cause: unknown) => (socket: WebSocket, frame: Frame) =>
 // one native call whose cancel trigger completes after 5 s
 const timed = <A, E>(call: (cancel: Deferred.Deferred<void>) => Effect.Effect<A, E>) => Effect.scoped(Effect.flatMap(cancelAfter("5 seconds"), call));
 const commitArgs = [["/workspace", [".t3-supervisor/project.yaml"], "Initialize T3 Supervisor definitions", "supervisor-setup-c3b"]] as const;
-const commit = (url: string, cancel: Deferred.Deferred<void>) => ProjectCommitter.make({baseUrl: url, token: "commit-token"}).pipe(
+const commit = (url: string, cancel: Deferred.Deferred<void>) => nativeProjectCommitter(url, "commit-token").pipe(
   Effect.provide(NativeEnvelope.layer), Effect.flatMap(committer => committer.commitFiles(...commitArgs[0], cancel)));
 
 it.live("CT-FILES-01: a commit whose connection drops after the request frame is uncertain; any close, even before open, is uncertain; a pre-aborted signal never connects", () => Effect.gen(function* () {
@@ -98,8 +99,8 @@ it.live("CT-FILES-02: native failure classification maps nested authorization, E
     tooDeep: [[[[[[[[[[[[[{_tag: "EnvironmentAuthorizationError"}]]]]]]]]]]]]],
   };
   const peer = yield* nativePeer({onRequest: (socket, frame) => failWith(causes[String(frame.payload?.relativePath ?? frame.payload?.actionId).split("/").at(-1)!])(socket, frame)});
-  const files = yield* ProjectFiles.make({baseUrl: peer.url, token: "read-token"}).pipe(Effect.provide(NativeEnvelope.layer));
-  const writer = yield* ProjectWriter.make({baseUrl: peer.url, token: "write-token"}).pipe(Effect.provide(NativeEnvelope.layer));
+  const files = yield* nativeProjectFiles(peer.url, "read-token").pipe(Effect.provide(NativeEnvelope.layer));
+  const writer = yield* nativeProjectWriter(peer.url, "write-token").pipe(Effect.provide(NativeEnvelope.layer));
   // an operation's outcome: resolved, or its native file failure's code and message
   const outcome = (operation: Effect.Effect<unknown, ProjectFileError>) => Effect.match(operation, {
     onSuccess: (): unknown => "resolved",
@@ -124,7 +125,7 @@ it.live("CT-FILES-02: native failure classification maps nested authorization, E
     ["permission_required", "Enable filesystem:write on the Supervisor write credential through deployment setup."]);
   assert.deepEqual(yield* timed(cancel => outcome(writer.writeFile("/workspace", ".t3-supervisor/enoentMessage", "x", cancel))),
     ["missing", "The requested project path does not exist."]);
-  const committer = yield* ProjectCommitter.make({baseUrl: peer.url, token: "commit-token"}).pipe(Effect.provide(NativeEnvelope.layer));
+  const committer = yield* nativeProjectCommitter(peer.url, "commit-token").pipe(Effect.provide(NativeEnvelope.layer));
   const commitWith = (actionId: string) => timed(cancel => outcome(committer.commitFiles("/workspace", [".t3-supervisor/project.yaml"], "message", actionId, cancel)));
   assert.deepEqual(yield* commitWith("authorization"), ["permission_required", "Enable filesystem:write on the Supervisor write credential through deployment setup."]);
   assert.deepEqual(yield* commitWith("enoentMessage"), ["unavailable", "T3 project file access is unavailable."]);

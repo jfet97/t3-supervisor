@@ -1,9 +1,9 @@
 import { Cause, Effect, Exit, Fiber, Ref, Schema, Scope, type Deferred } from "effect";
 import { HttpClient, HttpClientRequest } from "effect/http";
-import type { NativeRpcShape } from "../../supervisor-native.js";
+import { helperTaskSnapshot, type NativeRpcShape } from "../../supervisor-native.js";
 import { selectTranslation } from "../build.js";
 import {
-  HelperTask, HelperTaskDelete, HelperTaskList, HelperTaskUpsert, HelperTaskUpsertReply, isHelperWebhookPath, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryDetail,
+  HelperTask, HelperTaskDelete, HelperTaskUpsert, HelperTaskUpsertReply, isHelperWebhookPath, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryDetail,
   WebhookDeliveryList, WebhookDeliveryRequest, WebhookPost, webhookBody, type NativeRecord, type BuildFacts, type HelperTaskView,
   type T3Operation, type WebhookDeliveryView, type WebhookReply,
 } from "../contracts.js";
@@ -25,7 +25,6 @@ export interface HelperClients {
   readonly observed: Ref.Ref<BuildFacts | null>;
 }
 
-const isHelperTaskList: (value: unknown) => value is typeof HelperTaskList.Type = Schema.is(HelperTaskList);
 const isDeliveriesRequest: (value: unknown) => value is WebhookDeliveriesRequest = Schema.is(WebhookDeliveriesRequest);
 const isDeliveryList: (value: unknown) => value is typeof WebhookDeliveryList.Type = Schema.is(WebhookDeliveryList);
 const isDeliveryRequest: (value: unknown) => value is WebhookDeliveryRequest = Schema.is(WebhookDeliveryRequest);
@@ -65,9 +64,9 @@ export const makeHelper = ({operate, http, baseUrl, observed}: HelperClients): T
     Effect.mapError(Effect.suspend(() => operate.call(tag, payload, cancel)), (error) => requestError(operation, error));
 
   const tasks = (cancel?: Deferred.Deferred<void>): Effect.Effect<ReadonlyArray<HelperTaskView>, T3RequestError> =>
-    Effect.flatMap(Effect.mapError(Effect.suspend(() => operate.call("scheduledTasks.subscribe", {}, cancel, "firstChunk")),
-      (error) => requestError("helper/tasks", error)),
-    (value) => isHelperTaskList(value) ? Effect.succeed(value.tasks.map(taskView)) : Effect.fail(malformedReply("helper/tasks")));
+    Effect.map(Effect.mapError(Effect.suspend(() => helperTaskSnapshot(operate, cancel)),
+      (error) => error._tag === "ChannelsUnavailable" ? malformedReply("helper/tasks") : requestError("helper/tasks", error)),
+    (tasks) => tasks.map(taskView));
 
   const webhookDeliveries = (request: WebhookDeliveriesRequest, cancel?: Deferred.Deferred<void>):
     Effect.Effect<ReadonlyArray<WebhookDeliveryView>, T3RequestError | T3InvalidInput> => {

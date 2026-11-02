@@ -5,7 +5,7 @@ import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Console, Data, Effect, Exit, FileSystem, Layer, Option, Schema, Scope, Stream } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { NativeEnvelope } from "../src/native-envelope.js";
-import { helperTaskSnapshot } from "../src/supervisor-helper-transport.js";
+import { helperTaskSnapshot } from "../src/supervisor-native.js";
 import { NativeOperateRpc } from "../src/supervisor-native.js";
 import { groupAlive, tsxLoader } from "../test/support/cli-process.js";
 import { freePort, httpGet, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "../test/support/g8-process.js";

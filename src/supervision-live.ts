@@ -25,11 +25,9 @@ import { WorkflowNativeAccess, WorkflowWriteController } from "./workflow-write-
 // shell, the operate client when configured, the catalog, the T3 client, the definitions and the native transport); released in
 // reverse, the project supervisor first and the supervision stores last
 
-// one supervision run: whether the operate credential is configured, the T3 base url of the helper webhooks and the configured
-// helper provider instance
+// one supervision run: whether the operate credential is configured, and the configured helper provider instance
 export interface SupervisionRun {
   readonly operateRpcAvailable: boolean;
-  readonly baseUrl: string;
   readonly helperProviderInstanceId?: string | undefined;
 }
 
@@ -51,11 +49,11 @@ export const SupervisionScopeLive = (operateRpcAvailable: boolean) => Layer.unwr
 
 // i-01/i-02: the admission gate over the scope predicates, then the helper transport, the team runtime, the conversation and the
 // lifecycle of the run
-export const SupervisionTeamLive = (run: Pick<SupervisionRun, "baseUrl">) => SupervisorLifecycle.layer.pipe(
+export const SupervisionTeamLive = SupervisorLifecycle.layer.pipe(
   Layer.provideMerge(SupervisorCompaction.layer),
   Layer.provideMerge(SupervisorConversation.layer),
   Layer.provideMerge(SupervisorTeamRuntime.layer()),
-  Layer.provideMerge(HelperTransport.layer({baseUrl: run.baseUrl})),
+  Layer.provideMerge(HelperTransport.layer),
   Layer.provideMerge(SupervisionGate.layer),
 );
 
@@ -73,7 +71,7 @@ export const SupervisionControllersLive = (run: Pick<SupervisionRun, "helperProv
 // controllers and the project supervisor
 export const SupervisionLive = (run: SupervisionRun) => ProjectSupervisor.layer().pipe(
   Layer.provideMerge(SupervisionControllersLive(run)),
-  Layer.provideMerge(SupervisionTeamLive(run)),
+  Layer.provideMerge(SupervisionTeamLive),
   Layer.provideMerge(SupervisionScopeLive(run.operateRpcAvailable)),
   Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),
 );

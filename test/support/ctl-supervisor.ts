@@ -110,7 +110,7 @@ export const ctlSupervisor = (options: CtlSupervisorOptions) => Effect.gen(funct
   const shell = NativeShell.of({baseline: options.baseline, threads: Effect.die(new Error("unused native lineage read"))});
   // the run's T3Native over the same fakes, built once and given to every service beside them
   const native = yield* fakeNative({t3, read: options.read, shell, operate: options.operate, baseUrl: config.t3Url});
-  const team = yield* Layer.build(SupervisionTeamLive({baseUrl: config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
+  const team = yield* Layer.build(SupervisionTeamLive.pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(base), Layer.succeed(T3Client, t3),
     options.definitions ? Layer.succeed(ProjectDefinitions, teamDefinitions(options.definitions)) : Layer.empty,
     options.operate ? Layer.succeed(NativeOperateRpc, options.operate) : Layer.empty,

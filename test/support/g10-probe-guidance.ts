@@ -6,11 +6,16 @@ import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
 import { startFakeTerminalT3, type ProbeStatus } from "./c3a-fake-terminal-t3.js";
+import { fileNative } from "./native-file-access.js";
 
 // the git probe's guidance metadata and the production probe over a loopback T3, for the native file and probe suites (g10)
 
 // the root's native transport as the probe uses it: the shared envelope and the platform crypto
 const probeTransport = Layer.merge(NativeEnvelope.layer, NodeCrypto.layer);
+
+/** The production probe over the T3Native terminal of the probe credential at `url`, on the envelope and crypto in context. */
+export const nativeGitProbe = (url: string, token: string) =>
+  Effect.flatMap(fileNative(url, {probe: token}), (native) => GitProbe.make(native.terminal!));
 
 /**
  * The run's guidance client and store on a fresh temporary data directory, composed as src/guidance-application.ts composes
@@ -26,7 +31,7 @@ export const probeGuidance = (prefix: string) => Effect.gen(function* () {
     guidance,
     /** The production probe over the loopback T3 at `url`, on the root's native transport and this guidance client. */
     gitProbe: (url: string, token = "terminal-operate-test-token") =>
-      GitProbe.make({ baseUrl: url, token }).pipe(Effect.provide(probeTransport), Effect.provide(guidance)),
+      nativeGitProbe(url, token).pipe(Effect.provide(probeTransport), Effect.provide(guidance)),
     /** The stored pending probe sessions, parsed as the baseline suites read them from the meta table. */
     pendingSessions: Effect.map(sql<{ value: string }>`SELECT value FROM meta WHERE key='native_git_probe_sessions'`,
       ([row]): unknown => JSON.parse(String(row?.value))).pipe(Effect.orDie),

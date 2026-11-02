@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import {Effect, Layer} from "effect";
+import {Effect} from "effect";
 import {WebSocketServer} from "ws";
 import {NativeEnvelope} from "../src/native-envelope.js";
-import {ProjectCommitter, ProjectFileError} from "../src/project-files.js";
+import {ProjectFileError} from "../src/project-files.js";
 import {cancelAfter} from "./support/g5a-bounds.js";
+import {nativeProjectCommitter} from "./support/native-file-access.js";
 
 type Scenario = "success" | "failed" | "foreign_identity";
 
@@ -81,13 +82,13 @@ async function fakeGitServer(scenario: Scenario) {
 // the fake git server for the test's scope, closed when the test ends
 const gitServer = (scenario: Scenario) => Effect.acquireRelease(Effect.promise(() => fakeGitServer(scenario)), server => Effect.promise(() => server.close()));
 
-// the committer service over the fake; the commit's cancel trigger completes after 5 s
+// the committer service over the run's T3Native commit credential at the fake; the commit's cancel trigger completes after 5 s
 const commit = (server: Awaited<ReturnType<typeof fakeGitServer>>) => Effect.scoped(Effect.gen(function* () {
-  const committer = yield* ProjectCommitter;
+  const committer = yield* nativeProjectCommitter(server.url, "commit-test-token");
   return yield* committer.commitFiles(
     "/workspace", [".t3-supervisor/rules.yaml"], "Create Supervisor definitions", "action-1", yield* cancelAfter("5 seconds"),
   );
-})).pipe(Effect.provide(ProjectCommitter.layer({baseUrl: server.url, token: "commit-test-token"}).pipe(Layer.provide(NativeEnvelope.layer))));
+})).pipe(Effect.provide(NativeEnvelope.layer));
 
 it.live("native commit ACKs each action chunk before accepting the next and reports the finished commit", () => Effect.gen(function* () {
   const server = yield* gitServer("success");

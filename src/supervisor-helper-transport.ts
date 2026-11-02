@@ -1,13 +1,15 @@
-import {Cause, Context, Data, Deferred, Effect, Exit, Fiber, FiberMap, Layer, Option, Schema, Scope} from "effect";
+import {Cause, Context, Data, Deferred, Effect, FiberMap, Layer, Option, Schema} from "effect";
 import type {SqlError} from "effect/sql";
-import {HttpClient, HttpClientRequest, type HttpClientResponse} from "effect/http";
 import {workflowRequestHash} from "./workflow-write-evidence.js";
-import {NativeOperateRpc, record, type NativeRpcShape, type SupervisorRpcError} from "./supervisor-native.js";
+import {record} from "./supervisor-native.js";
 import {admitSend, SupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation} from "./supervision-gate.js";
 import {GuidanceDb} from "./db.js";
 import {type GuidanceStoreError, guidanceSql, guidanceTransaction, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, type SupervisionStoreError} from "./guidance-sql.js";
 import {ProjectSupervisorStore, type BindingRecord} from "./project-supervisor-store.js";
-import {T3Client, type T3TransportError} from "./t3.js";
+import {
+  InteractionMode, isHelperWebhookPath, NativeModelSelection, RuntimeMode, T3InvalidInput, T3Native, webhookBody, type NativeRecord, type T3HelperFamily,
+  type T3PreparedCommand, type T3ReadError, type T3RequestError, type T3WebhookError, type WebhookReply,
+} from "./t3-native/index.js";
 import type {MessageInfo, Projection} from "./types.js";
 
 export type SupervisorHelperMessage = {threadId: string; commandId: string; messageId: string; text: string};
@@ -39,8 +41,8 @@ const RENDER_FRAME_ALLOWANCE = 256;
 // published T3 inserts one U+2060 after each mention trigger (currency sign, @, a slash command, t3-context: and
 // webhook-data); counting every currency sign, @, slash, t3-context and webhook is a superset of those insertions
 const mentionTriggerSuperset = /[\p{Sc}@/]|t3-context|webhook/giu;
-// the exact request body the transport posts; receipts and native detail are compared against the same bytes
-export const helperDeliveryBody = (messageId: string, text: string): string => JSON.stringify({batchId: messageId, text});
+// the exact request body T3Native posts; receipts and native detail are compared against the same bytes
+export const helperDeliveryBody = (messageId: string, text: string): string => webhookBody({batchId: messageId, text});
 // an upper bound, in UTF-16 code units, of the prompt T3 renders from this text
 export const renderedLengthBound = (text: string): number =>
   text.length + RENDER_FRAME_ALLOWANCE + (text.match(mentionTriggerSuperset)?.length ?? 0);
@@ -100,19 +102,15 @@ export const attributesHelperDelivery = (delivery: HelperDeliveryAttribution, me
   for (const candidate of messages) if (deliveryCandidate(delivery, candidate)) count += 1;
   return count === 1;
 };
-const renderedPromptOf = (detail: Record<string, unknown>): string | null =>
+const renderedPromptOf = (detail: NativeRecord): string | null =>
   typeof detail.renderedPrompt === "string" && detail.renderedPrompt.length > 0 && detail.renderedPrompt.length < NATIVE_RENDERED_PROMPT_LOG_LIMIT
     ? detail.renderedPrompt : null;
 
-// the native values and stored documents are checked with Schema guards that keep the value whole, so a document
-// keeps its exact bytes and key order when it is written back and a native record keeps every field T3 sent
-const NativeRecord = Schema.declare((value: unknown): value is Record<string, unknown> => record(value));
-const isTaskList = Schema.is(Schema.Struct({tasks: Schema.Array(NativeRecord)}));
-const isUpsertReply = Schema.is(Schema.Struct({task: NativeRecord}));
-const isDeliveryList = Schema.is(Schema.Struct({deliveries: Schema.Array(NativeRecord)}));
-const isDeliveryDetail = Schema.is(Schema.Struct({delivery: NativeRecord}));
-// a 2xx webhook reply names the native delivery when its body is readable
-const isPostReply = Schema.is(Schema.Struct({deliveryId: Schema.String}));
+// the helper thread's model selection and modes as the pinned build writes them, checked before they are sent back exactly as read
+const isNativeModelSelection = Schema.is(NativeModelSelection);
+const isRuntimeMode = Schema.is(RuntimeMode);
+const isInteractionMode = Schema.is(InteractionMode);
+// the stored documents are checked with Schema guards that keep the value whole, so a document keeps its exact bytes and key order
 const isChannel: (value: unknown) => value is Channel = Schema.is(Schema.Struct({taskId: Schema.String, helperThreadId: Schema.String,
   createdAt: Schema.NullOr(Schema.String), state: Schema.Literals(["creating", "ready", "retiring", "retired"])}));
 const isDelivery: (value: unknown) => value is Delivery = Schema.is(Schema.Struct({threadId: Schema.String, commandId: Schema.String,
@@ -144,13 +142,6 @@ const storedRow = <A>(guard: (value: unknown) => value is A, row: unknown): A | 
 
 // the native webhook delivery that matches a receipt, with its rendered prompt when the log proves it
 type NativeDelivery = {id: string; outcome: string; renderedPrompt?: string};
-// the scheduled-task list was unreadable, so channel ownership cannot be checked
-class ChannelsUnavailable extends Data.TaggedError("ChannelsUnavailable") {}
-
-// one validated scheduler snapshot, shared with the published-T3 compatibility check; the socket ends on its first value
-export const helperTaskSnapshot = (operate: NativeRpcShape, cancel?: Deferred.Deferred<void>): Effect.Effect<ReadonlyArray<Record<string, unknown>>, SupervisorRpcError | ChannelsUnavailable> =>
-  Effect.flatMap(operate.call("scheduledTasks.subscribe", {}, cancel, "firstChunk"),
-    (result) => isTaskList(result) ? Effect.succeed(result.tasks) : Effect.fail(new ChannelsUnavailable()));
 // a caller's cancel completed during an awaited read: it ends like the aborted read it replaces
 class Cancelled extends Data.TaggedError("Cancelled") {}
 
@@ -190,20 +181,20 @@ export interface HelperTransportShape {
   readonly retire: (binding: BindingRecord, helperThreadId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<boolean, GuidanceStoreError>;
 }
 
-export type HelperTransportOptions = {baseUrl: string};
-
 const helperSchema = [
   "CREATE TABLE IF NOT EXISTS supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))",
   "CREATE TABLE IF NOT EXISTS supervisor_helper_deliveries(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,message_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,message_id))",
 ];
 
-/** Uses a genuine native webhook task, without timers or repeated tasks on the root. */
-const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(function* () {
+/**
+ * Uses a genuine native webhook task, without timers or repeated tasks on the root. The webhook URL is resolved by T3Native on the
+ * T3 origin.
+ */
+const makeHelperTransport = Effect.gen(function* () {
   const gate = yield* SupervisionGate;
-  const client = yield* HttpClient.HttpClient;
-  const t3 = yield* T3Client;
-  // the operate credential; without it nothing is sent, retired or reconciled natively
-  const rpc: NativeRpcShape | null = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  const native = yield* T3Native;
+  // the operate credential's scheduler and webhook; without it nothing is sent, retired or reconciled natively
+  const operateFamily: T3HelperFamily | null = native.helper;
   // the transport's service-lifetime in-flight posts (plan 3.11): closing its scope aborts each one and keeps its receipt
   const inFlight = yield* FiberMap.make<string, Admission>();
   const store = yield* ProjectSupervisorStore;
@@ -212,8 +203,11 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   // the transport's own two tables on the run's guidance client
   yield* guidanceSql(Effect.forEach(helperSchema, (statement) => db.unsafe(statement)));
 
-  const projection = (threadId: string, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<Projection, T3TransportError | Cancelled> =>
-    untilCancelled(Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection), cancel);
+  const projection = (threadId: string, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<Projection, T3ReadError | T3InvalidInput | Cancelled> =>
+    untilCancelled(Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection), cancel);
+  // every scheduled task object as T3 recorded it; a reply that is not a list of task objects fails, as the unreadable snapshot did
+  const scheduledTasks = (operate: T3HelperFamily, cancel: Deferred.Deferred<void> | undefined) =>
+    Effect.map(operate.tasks(cancel), (views) => views.map((view): NativeRecord => view.task));
   const channelOf = (binding: BindingRecord, helperThreadId: string) => Effect.map(
     db`SELECT document FROM supervisor_helper_channels WHERE owner_thread_id=${binding.threadId} AND owner_generation=${binding.generation} AND helper_thread_id=${helperThreadId}`,
     ([row]): Channel | null | InvalidReceipt => row === undefined ? null : storedRow(isChannel, row));
@@ -242,9 +236,9 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   }));
   // native delivery detail is evidence for this attempt only when it reproduces the exact durable request: same
   // delivery and task, POST JSON, the exact untruncated body and byte count, and no missing template fields.
-  const exactDetail = (value: Delivery, detail: unknown, deliveryId: string, summary: Record<string, unknown>): Record<string, unknown> | null => {
+  const exactDetail = (value: Delivery, detail: NativeRecord, deliveryId: string, summary: NativeRecord): NativeRecord | null => {
     const expectedBody = helperDeliveryBody(value.messageId, value.text);
-    if (!record(detail) || detail.id !== deliveryId || detail.taskId !== value.taskId ||
+    if (detail.id !== deliveryId || detail.taskId !== value.taskId ||
       typeof detail.receivedAt !== "string" || detail.receivedAt.length === 0 || detail.receivedAt !== summary.receivedAt ||
       detail.method !== "POST" || summary.method !== "POST" || detail.contentType !== "application/json" || summary.contentType !== "application/json" ||
       detail.bodyBytes !== new TextEncoder().encode(expectedBody).length || detail.bodyBytes !== summary.bodyBytes ||
@@ -252,20 +246,21 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       !Array.isArray(detail.missingFields) || detail.missingFields.length !== 0) return null;
     return detail;
   };
-  const resolveWebhookDelivery = (operate: NativeRpcShape, value: Delivery, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<NativeDelivery | null, SupervisorRpcError> => Effect.gen(function* () {
-    const result = yield* operate.call("scheduledTasks.listWebhookDeliveries", {id: value.taskId}, cancel);
-    if (!isDeliveryList(result)) return null;
+  // a delivery log or detail reply that is not one fails the resolution, which its reconciliation reads as no native evidence
+  const resolveWebhookDelivery = (operate: T3HelperFamily, value: Delivery, cancel: Deferred.Deferred<void> | undefined):
+    Effect.Effect<NativeDelivery | null, T3RequestError | T3InvalidInput> => Effect.gen(function* () {
+    const deliveries = (yield* operate.webhookDeliveries({taskId: value.taskId}, cancel)).map((view): NativeRecord => view.delivery);
     if (value.nativeDeliveryId) {
       const nativeDeliveryId = value.nativeDeliveryId;
-      const summary = result.deliveries.find(item => item.id === nativeDeliveryId && item.taskId === value.taskId);
+      const summary = deliveries.find(item => item.id === nativeDeliveryId && item.taskId === value.taskId);
       if (!summary || typeof summary.outcome !== "string") return null;
       const resolved: NativeDelivery = {id: nativeDeliveryId, outcome: summary.outcome};
       // a dispatch failure needs the rendering too: T3 may have created the message before it failed
       if (value.renderedText !== undefined || preRenderRejectionOutcomes.has(summary.outcome)) return resolved;
       // binding the rendered prompt is best effort: unavailable or mismatched detail leaves the attempt unmatched
-      return yield* operate.call("scheduledTasks.getWebhookDelivery", {id: value.taskId, deliveryId: nativeDeliveryId}, cancel).pipe(
-        Effect.map((reply): NativeDelivery => {
-          const detail = record(reply) ? exactDetail(value, reply.delivery, nativeDeliveryId, summary) : null;
+      return yield* operate.webhookDelivery({taskId: value.taskId, deliveryId: nativeDeliveryId}, cancel).pipe(
+        Effect.map((view): NativeDelivery => {
+          const detail = exactDetail(value, view.delivery, nativeDeliveryId, summary);
           const renderedPrompt = detail && renderedPromptOf(detail);
           return renderedPrompt ? {...resolved, renderedPrompt} : resolved;
         }),
@@ -275,15 +270,13 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
 
     const expectedBody = helperDeliveryBody(value.messageId, value.text);
     const expectedBodyBytes = new TextEncoder().encode(expectedBody).length;
-    const candidates = result.deliveries.filter(item => item.taskId === value.taskId && item.method === "POST" &&
+    const candidates = deliveries.filter((item): item is NativeRecord & {readonly id: string} => item.taskId === value.taskId && item.method === "POST" &&
       item.contentType === "application/json" && item.bodyBytes === expectedBodyBytes && typeof item.id === "string");
     if (candidates.length === 0 || candidates.length > MAX_WEBHOOK_DELIVERY_DETAILS) return null;
 
-    const bodyMatches: Array<{detail: Record<string, unknown>; outcome: string}> = [];
+    const bodyMatches: Array<{detail: NativeRecord; outcome: string}> = [];
     for (const summary of candidates) {
-      const reply = yield* operate.call("scheduledTasks.getWebhookDelivery", {id: value.taskId, deliveryId: summary.id}, cancel);
-      if (!isDeliveryDetail(reply)) return null;
-      const detail = reply.delivery;
+      const detail = (yield* operate.webhookDelivery({taskId: value.taskId, deliveryId: summary.id}, cancel)).delivery;
       if (detail.id !== summary.id || detail.taskId !== value.taskId || typeof detail.receivedAt !== "string" || detail.receivedAt.length === 0 ||
         detail.receivedAt !== summary.receivedAt ||
         detail.method !== summary.method || detail.contentType !== summary.contentType || detail.bodyBytes !== summary.bodyBytes ||
@@ -300,12 +293,28 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     if (!renderedPrompt && !preRenderRejection) return null;
     return {id: String(detail.id), outcome, ...(renderedPrompt ? {renderedPrompt} : {})};
   });
-  const owned = (task: Record<string, unknown>, value: Channel, binding: BindingRecord): boolean =>
+  const owned = (task: NativeRecord, value: Channel, binding: BindingRecord): boolean =>
     task.id === value.taskId && task.threadId === value.helperThreadId && task.projectId === binding.projectId &&
       task.prompt === promptTemplate && record(task.schedule) && task.schedule.type === "webhook" &&
       (value.createdAt === null || task.createdAt === value.createdAt);
+  /**
+   * The helper thread's model selection and modes, sent back exactly as read; on the pinned wire T3 wrote them, so a value that does
+   * not conform is refused before any request. A reply that is not a task object leaves the channel busy, as before.
+   */
+  const upsertChannelTask = (operate: T3HelperFamily, binding: BindingRecord, current: Channel, helper: Projection, existing: boolean,
+    cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
+    const {modelSelection, runtimeMode, interactionMode} = helper.thread;
+    if (!isNativeModelSelection(modelSelection) || !isRuntimeMode(runtimeMode) || !isInteractionMode(interactionMode))
+      return yield* new T3InvalidInput({operation: "helper/upsertTask"});
+    const upserted = yield* operate.upsertTask({taskId: current.taskId, requireExisting: existing,
+      commandId: `supervisor-helper-channel:${workflowRequestHash({taskId: current.taskId, model: modelSelection, runtimeMode, interactionMode})}`,
+      title: `Supervisor helper check-ins · ${helper.thread.title.slice(0, 100)}`, prompt: promptTemplate, projectId: binding.projectId,
+      threadId: helper.thread.id, modelSelection, runtimeMode, interactionMode}, cancel).pipe(
+      Effect.catchIf((error) => error._tag === "T3RequestError" && error.malformedReply, () => Effect.succeed(null)));
+    return upserted === null ? null : upserted.task;
+  });
   // the channel upsert keeps its baseline behaviour: no policy recheck after its awaited reads (L-01)
-  const readyChannel = (operate: NativeRpcShape, binding: BindingRecord, helper: Projection, cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
+  const readyChannel = (operate: T3HelperFamily, binding: BindingRecord, helper: Projection, cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
     let current = yield* channel(binding, helper.thread.id);
     if (current === invalidReceipt || current?.state === "retired" || current?.state === "retiring") return null;
     if (!current) {
@@ -314,23 +323,17 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       yield* saveChannel(binding, current);
     }
     const taskId = current.taskId;
-    let task = (yield* helperTaskSnapshot(operate, cancel)).find(item => item.id === taskId);
+    let task: NativeRecord | undefined = (yield* scheduledTasks(operate, cancel)).find(item => item.id === taskId);
     if (task && !owned(task, current, binding)) return null;
     if (!task && current.state !== "creating") return null;
     if (task && task.enabled !== true) return null;
     if (!task || workflowRequestHash(task.modelSelection) !== workflowRequestHash(helper.thread.modelSelection) ||
       task.runtimeMode !== helper.thread.runtimeMode || task.interactionMode !== helper.thread.interactionMode) {
-      const result = yield* operate.call("scheduledTasks.upsert", {id: current.taskId,
-        ...(task ? {requireExisting: true} : {}), commandId: `supervisor-helper-channel:${workflowRequestHash({taskId: current.taskId, model: helper.thread.modelSelection,
-          runtimeMode: helper.thread.runtimeMode, interactionMode: helper.thread.interactionMode})}`,
-        title: `Supervisor helper check-ins · ${helper.thread.title.slice(0, 100)}`, prompt: promptTemplate, enabled: true,
-        schedule: {type: "webhook"}, projectId: binding.projectId, threadId: helper.thread.id, workspaceStrategy: {type: "root"},
-        modelSelection: helper.thread.modelSelection, runtimeMode: helper.thread.runtimeMode, interactionMode: helper.thread.interactionMode,
-        createdBy: "system", creationSource: "server"}, cancel);
-      if (!isUpsertReply(result) || result.task.enabled !== true || !owned(result.task, current, binding)) return null;
-      task = result.task;
+      const upserted = yield* upsertChannelTask(operate, binding, current, helper, Boolean(task), cancel);
+      if (upserted === null || upserted.enabled !== true || !owned(upserted, current, binding)) return null;
+      task = upserted;
     }
-    if (typeof task.createdAt !== "string" || !record(task.webhook) || typeof task.webhook.path !== "string" || !task.webhook.path.startsWith("/api/hooks/")) return null;
+    if (typeof task.createdAt !== "string" || !record(task.webhook) || typeof task.webhook.path !== "string" || !isHelperWebhookPath(task.webhook.path)) return null;
     current = {...current, createdAt: task.createdAt, state: "ready"};yield* saveChannel(binding, current);
     return {channel: current, task};
   });
@@ -366,7 +369,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   const settled = (binding: BindingRecord, messageId: string, value: SupervisorHelperSendResult) => Effect.map(delivery(binding, messageId),
     (stored): SupervisorHelperSendResult => stored === invalidReceipt || stored?.contradicted === true ? "uncertain" : value);
   // `messages` is the helper's current native projection, or null when it could not be read
-  const reconcileReceipt = (operate: NativeRpcShape, binding: BindingRecord, value: Delivery, cancel: Deferred.Deferred<void> | undefined,
+  const reconcileReceipt = (operate: T3HelperFamily, binding: BindingRecord, value: Delivery, cancel: Deferred.Deferred<void> | undefined,
     messages: readonly MessageInfo[] | null): Effect.Effect<SupervisorHelperSendResult, GuidanceStoreError> => Effect.gen(function* () {
     if (value.contradicted === true) return "uncertain";
     const settle = (result: SupervisorHelperSendResult) => settled(binding, value.messageId, result);
@@ -420,12 +423,12 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       }
       return "rejected" as const;
     }
-    if (!rpc) return "uncertain" as const;
-    return yield* reconcileReceipt(rpc, binding, value, cancel, messages).pipe(otherwise("uncertain" as const));
+    if (!operateFamily) return "uncertain" as const;
+    return yield* reconcileReceipt(operateFamily, binding, value, cancel, messages).pipe(otherwise("uncertain" as const));
   }).pipe(Effect.catchDefect((defect) => defect instanceof InvalidReceiptOverwrite ? Effect.succeed("uncertain" as const) : Effect.die(defect)));
   // an existing receipt for the identity, read with the helper projection the send already holds: it is never posted
   // again, only reconciled; a different request under the same identity or a contradiction stays unresolved
-  const existing = (operate: NativeRpcShape, binding: BindingRecord, input: SupervisorHelperMessage, helper: Projection,
+  const existing = (operate: T3HelperFamily, binding: BindingRecord, input: SupervisorHelperMessage, helper: Projection,
     cancel: Deferred.Deferred<void> | undefined) => Effect.gen(function* () {
     const value = yield* delivery(binding, input.messageId);
     if (!value || value === invalidReceipt) return "uncertain" as const;
@@ -439,25 +442,17 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     }
     return yield* settled(binding, value.messageId, yield* reconcileReceipt(operate, binding, value, cancel, helper.messages));
   });
-  // the POST, started by the admission section's initiation and awaited outside it. A webhook has no client
-  // idempotency key, so an uncertain post is never repeated; an interruption leaves the receipt 'posting', which is
-  // uncertain from then on
-  const initiate = (binding: BindingRecord, posting: Delivery, endpoint: URL, messages: readonly MessageInfo[],
-    cancel: Deferred.Deferred<void> | undefined): Effect.Effect<AdmittedInFlight<Admission>> => Effect.gen(function* () {
-    // the request belongs to this exchange from its start: the release closes it, which aborts whatever is still open
-    // (a reply held between its headers and its body read, a reply whose body is never read, an interrupted wait); a
-    // completed read is unaffected
-    const exchange = yield* Scope.make();
-    // no client span and no trace headers: a span would carry the webhook path, which holds the hook token
-    const request = HttpClient.withScope(client).execute(HttpClientRequest.post(endpoint).pipe(
-      HttpClientRequest.bodyText(helperDeliveryBody(posting.messageId, posting.text), "application/json")))
-      .pipe(Scope.provide(exchange), Effect.provideService(HttpClient.TracerDisabledWhen, () => true));
-    const post = yield* Effect.forkDetach(request, {startImmediately: true});
-    return {
+  /**
+   * The POST, started by the admission section's initiation and awaited outside it. A webhook has no client idempotency key, so an
+   * uncertain post is never repeated; an interruption leaves the receipt 'posting', which is uncertain from then on. T3Native owns the
+   * exchange: its release aborts whatever is still open, without a client span or trace headers.
+   */
+  const initiate = (binding: BindingRecord, posting: Delivery, post: T3PreparedCommand<WebhookReply, T3WebhookError>, messages: readonly MessageInfo[],
+    cancel: Deferred.Deferred<void> | undefined): Effect.Effect<AdmittedInFlight<Admission>> => Effect.map(post.initiate(cancel), (flight) => ({
       result: Effect.gen(function* () {
         const settle = (value: SupervisorHelperSendResult) => settled(binding, posting.messageId, value);
-        const response: HttpClientResponse.HttpClientResponse = yield* untilCancelled(Fiber.join(post), cancel);
-        if (response.status >= 400 && response.status < 500) {
+        const reply = yield* flight.result;
+        if (reply._tag === "Refused") {
           // a rendering bound by an overlapping reconciliation while the POST was in flight is read back from the receipt
           const contradicted = yield* contradicts(binding, posting, messages);
           yield* save(binding, {...posting, state: "rejected", ...(contradicted ? {contradicted: true as const} : {})});
@@ -465,10 +460,9 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
           // snapshot predates the POST, so a contradiction stored while it was in flight is read back from the receipt.
           return sent(posting.hash, contradicted ? "uncertain" : yield* settle("rejected"));
         }
-        if (response.status < 200 || response.status >= 300) return sent(posting.hash, "uncertain");
+        if (reply._tag === "Unconfirmed") return sent(posting.hash, "uncertain");
         // a 2xx is recorded acceptance even when its body cannot be read; only the delivery id is then unknown
-        const reply = yield* untilCancelled(response.json, cancel).pipe(otherwise(null));
-        const nativeDeliveryId = isPostReply(reply) ? reply.deliveryId : undefined;
+        const nativeDeliveryId = reply.deliveryId;
         const posted: Delivery = {...posting, state: "posted", ...(nativeDeliveryId ? {nativeDeliveryId} : {})};
         yield* save(binding, posted);
         const bound = yield* bindAttributed(binding, (yield* readable(yield* delivery(binding, posting.messageId))) ?? posted, messages);
@@ -477,15 +471,14 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
         return sent(posting.hash, yield* settle(nativeDeliveryId || attributed ? "waiting" : "uncertain"));
       }).pipe(otherwise(sent(posting.hash, "uncertain"))),
       // exactly once, at any end of the operation
-      release: Scope.close(exchange, Exit.void).pipe(Effect.andThen(Fiber.interrupt(post)), Effect.asVoid),
-    };
-  });
+      release: flight.release,
+    }));
   // `authorized` is re-checked with the admission guard after this method's own awaits, immediately before the
   // receipt and POST, so authority revoked meanwhile (for example a quarantine) posts nothing.
   const send = (binding: BindingRecord, input: SupervisorHelperMessage, sendOptions: HelperSendOptions = {}): Effect.Effect<SupervisorHelperSendResult, SupervisionStoreError> => Effect.gen(function* () {
     const {cancel, authorized} = sendOptions;
-    if (!rpc) return "busy";
-    const operate = rpc;
+    if (!operateFamily) return "busy";
+    const operate = operateFamily;
     if (!(yield* gate.admit((guard) => transaction(guard.scopeEnabled(binding.projectId, binding.mainThreadId))))) return "busy";
     const hash = workflowRequestHash(input);
     const read = yield* delivery(binding, input.messageId);
@@ -520,8 +513,10 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       if (!Array.isArray(helper.runtimeRequests) || helper.runtimeRequests.some(item => !record(item) || item.status === "pending")) return yield* settle("busy");
       const ready = yield* readyChannel(operate, binding, helper, cancel);
       if (!ready || !record(ready.task.webhook) || typeof ready.task.webhook.path !== "string") return yield* settle("busy");
-      const endpoint = new URL(ready.task.webhook.path, options.baseUrl);
-      if (endpoint.origin !== new URL(options.baseUrl).origin || endpoint.search || endpoint.hash) return yield* settle("rejected");
+      // T3Native resolves the hook path on the T3 origin and refuses another origin, a query or a fragment before any request
+      const post = yield* operate.postWebhook.prepare({path: ready.task.webhook.path, batchId: input.messageId, text: input.text}).pipe(
+        Effect.catch(() => Effect.succeed(null)));
+      if (post === null) return yield* settle("rejected");
       // the admission section (plan 3.11): a live post of this identity is joined; otherwise the final guard, the
       // durable 'posting' receipt and the start of the POST happen in one section, and its reply is awaited outside it
       const admission = yield* admitSend(gate, {
@@ -536,7 +531,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
           if (authorized && !(yield* authorized(guard))) return {_tag: "Answer", value: sent(hash, "revoked")};
           const posting: Delivery = {...input, hash, taskId: ready.channel.taskId, state: "posting"};
           yield* save(binding, posting);
-          return {_tag: "Initiate", initiate: initiate(binding, posting, endpoint, helper.messages, cancel)};
+          return {_tag: "Initiate", initiate: initiate(binding, posting, post, helper.messages, cancel)};
         })),
         // the interrupted original's receipt decides: it is only reconciled
         reconcile: Effect.succeed(receipt),
@@ -551,13 +546,13 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     // an invalid channel row is never reported retired
     if (current === invalidReceipt) return false;
     if (!current || current.state === "retired") return true;
-    if (!rpc) return false;
-    const operate = rpc;
+    if (!operateFamily) return false;
+    const operate = operateFamily;
     return yield* Effect.gen(function* () {
-      const task = (yield* helperTaskSnapshot(operate, cancel)).find(item => item.id === current.taskId);
+      const task = (yield* scheduledTasks(operate, cancel)).find(item => item.id === current.taskId);
       if (task && !owned(task, current, binding)) return false;
       yield* saveChannel(binding, {...current, state: "retiring"});
-      if (task) yield* operate.call("scheduledTasks.delete", {id: current.taskId}, cancel);
+      if (task) yield* operate.deleteTask({taskId: current.taskId}, cancel);
       yield* saveChannel(binding, {...current, state: "retired"});return true;
     }).pipe(otherwise(false));
   });
@@ -576,10 +571,10 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
   });
 });
 
-// the helper webhook transport: the admission section, the operate credential, the HTTP client and T3 projections
+// the helper webhook transport: the admission section and the run's T3Native (its operate credential's helper family and thread reads)
 export class HelperTransport extends Context.Service<HelperTransport, HelperTransportShape>()("t3-supervisor/HelperTransport") {
   static readonly make = makeHelperTransport;
-  static readonly layer = (options: HelperTransportOptions) => Layer.effect(HelperTransport, makeHelperTransport(options));
+  static readonly layer = Layer.effect(HelperTransport, makeHelperTransport);
 }
 
 /**

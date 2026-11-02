@@ -486,7 +486,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     const shell = NativeShell.of({baseline: activationSnapshot, threads: Effect.die(new Error("unused native lineage read"))});
     // the run's T3Native over the same fakes, built once and given to every service beside them
     const native = yield* fakeNative({t3, read: readRpc, shell, operate: operateRpc, baseUrl: config.t3Url});
-    const teamContext = yield* Layer.build(SupervisionTeamLive({baseUrl: config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
+    const teamContext = yield* Layer.build(SupervisionTeamLive.pipe(Layer.provide(Layer.mergeAll(
       Layer.succeedContext(base), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitionsService(loader)),
       Layer.succeed(NativeOperateRpc, operateRpc), Layer.succeed(T3Native, native), FetchHttpClient.layer)))).pipe(Effect.orDie);
     const locks = yield* Layer.build(ScopeLocks.layer);

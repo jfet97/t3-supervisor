@@ -117,7 +117,7 @@ export function makeDefinitionFixture(options: {
     projects: [{project: {id: projectId, title: "Project", workspaceRoot: root}, available: true}],
     threads: [{id: "thread", projectId, title: "Worktree", lineage: {parentThreadId: null, relationshipToParent: null}}],
   })};
-  const t3 = {projection: (threadId: string) => Effect.succeed({snapshotSequence: 1, projection: {
+  const t3 = {thread: (threadId: string) => Effect.succeed({snapshotSequence: 1, projection: {
     thread: {id: threadId, projectId, title: "Worktree", lineage: {parentThreadId: null, relationshipToParent: null}, worktreePath: threadRoot},
     runs: [], messages: [],
   }})};

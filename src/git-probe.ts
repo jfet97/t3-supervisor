@@ -3,14 +3,15 @@ import { posix } from "node:path";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
 import { type GuidanceStoreError, rowFindings, rowKey, rowsOf, type StoredRowScan } from "./guidance-sql.js";
-import { NativeEnvelope, NativeFraming, nativeMaxPayload, NativeStep, type NativeEndpoint, type NativeEnvelopeError, type NativeExit } from "./native-envelope.js";
 import type { FreshGitInfo, GitOperationState } from "./project-files.js";
+import type {
+  T3InvalidInput, T3TerminalError, T3TerminalFamily, TerminalAttachEvent, TerminalAttachExit, TerminalAttachStep, TerminalSnapshot,
+} from "./t3-native/index.js";
 
 const MAX_PROBE_OUTPUT_BYTES = 768 * 1024;
 const MAX_CHANGED_PATHS = 4096;
 const MAX_CHANGED_PATH_BYTES = 4096;
 const PROBE_TIMEOUT = "15 seconds";
-const RPC_TIMEOUT = "5 seconds";
 const CLEANUP_TIMEOUT = "5 seconds";
 const PENDING_KEY = "native_git_probe_sessions";
 const PROBE_PREFIX = "T3_SUPERVISOR_GIT_PROBE";
@@ -206,7 +207,7 @@ const validateResult = (value: unknown): FreshGitInfo => {
   return {workspaceRoot: value.workspaceRoot, branch: value.branch, isRepo: value.isRepo, changedPaths: [...value.changedPaths], operationState};
 };
 
-const snapshotIsTarget = (snapshot: Record<string, unknown>, ids: SessionIds, root: string): boolean =>
+const snapshotIsTarget = (snapshot: TerminalSnapshot, ids: SessionIds, root: string): boolean =>
   snapshot.threadId === ids.threadId && snapshot.terminalId === ids.terminalId && snapshot.cwd === root && snapshot.status === "running";
 
 const makePythonSource = (root: string, nonce: string): string => {
@@ -241,15 +242,34 @@ const parsePending = (value: string | undefined): Effect.Effect<SessionIds[], Gi
 };
 const decodeMetaValue = Schema.decodeUnknownEffect(Schema.Struct({value: Schema.String}));
 
-// envelope failures of a terminal rpc, with the baseline's fixed messages
-const rpcFailure = (error: NativeEnvelopeError): GitProbeError => new GitProbeError(
-  error.reason === "binary_frame" ? "T3 returned a binary terminal frame."
-    : error.reason === "malformed_json" ? "T3 returned malformed terminal data."
-      : error.reason === "invalid_frame" ? "T3 returned an invalid terminal frame." : "The Git probe RPC was canceled or timed out.");
+// a failed terminal request with the baseline's fixed messages; the probe's own ids and payloads always pass T3Native's request checks
+const terminalFailure = (error: T3TerminalError | T3InvalidInput): GitProbeError => {
+  if (error._tag === "T3InvalidInput") return new GitProbeError();
+  switch (error.reason) {
+    case "cancelled":
+      return new GitProbeError("The Git probe was canceled.");
+    case "rejected":
+      return new GitProbeError("T3 rejected a terminal Git probe request.");
+    case "binary_frame":
+      return new GitProbeError("T3 returned a binary terminal frame.");
+    case "malformed_json":
+      return new GitProbeError("T3 returned malformed terminal data.");
+    case "invalid_frame":
+      return new GitProbeError("T3 returned an invalid terminal frame.");
+    case "malformed_reply":
+      return new GitProbeError("T3 did not start the Git probe terminal in the selected checkout.");
+    default:
+      return new GitProbeError("The Git probe RPC was canceled or timed out.");
+  }
+};
+const terminalCall = <A>(request: Effect.Effect<A, T3TerminalError | T3InvalidInput>): Effect.Effect<A, GitProbeError> =>
+  Effect.mapError(request, terminalFailure);
+const stop: TerminalAttachStep = {_tag: "Stop"};
+const keepWaiting: TerminalAttachStep = {_tag: "Continue"};
 
 interface AttachStream {
   // the attach snapshot, settled once its chunk was acknowledged
-  readonly ready: Deferred.Deferred<Record<string, unknown>, GitProbeError>;
+  readonly ready: Deferred.Deferred<TerminalSnapshot, GitProbeError>;
   // the standalone readiness line, settled once its chunk was acknowledged
   readonly helperReady: Deferred.Deferred<void, GitProbeError>;
   // starts capturing the helper's result frame and exit; result settles with the validated result of a successful exit
@@ -257,8 +277,11 @@ interface AttachStream {
   readonly result: Deferred.Deferred<ProbeResult, GitProbeError>;
 }
 
-const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
-  const native = yield* NativeEnvelope;
+/**
+ * The probe over the run's T3Native terminal (the probe credential): each request has its own socket, the probe's framing, payload
+ * bound and deadlines, and a fresh request id.
+ */
+const makeGitProbe = Effect.fnUntraced(function* (terminal: T3TerminalFamily) {
   const db = yield* GuidanceDb;
   const crypto = yield* Crypto.Crypto;
   // v4 generation never fails; its signature only shares the platform error of randomBytes
@@ -266,24 +289,13 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
   const nonce = Effect.map(Effect.orDie(crypto.randomBytes(16)), bytes => Buffer.from(bytes).toString("hex"));
   const lock = yield* Semaphore.make(1);
 
-  const rpc = (tag: string, payload: Record<string, unknown>, cancel: Cancel | undefined): Effect.Effect<unknown, GitProbeError> => Effect.gen(function* () {
-    if (cancel !== undefined && (yield* Deferred.isDone(cancel))) return yield* new GitProbeError("The Git probe was canceled.");
-    const requestId = "git-probe-" + (yield* uuid);
-    return yield* native.call({endpoint, request: {id: requestId, tag, payload}, maxPayload: nativeMaxPayload.probe, handshakeTimeout: RPC_TIMEOUT,
-      timeout: RPC_TIMEOUT, framing: NativeFraming.flatChecked(4, 256), cancel,
-      onExit: (exit: NativeExit) => exit._tag === "Malformed" ? Effect.succeed(NativeStep.continue)
-        : exit._tag === "Success" ? Effect.succeed(NativeStep.done(exit.value)) : Effect.fail(new GitProbeError("T3 rejected a terminal Git probe request.")),
-    }).pipe(Effect.catchTag("NativeEnvelopeError", error => Effect.fail(rpcFailure(error))));
-  });
-
   // the attach stream runs in the caller's scope until the probe ends it; its chunks are handled in order, each in one synchronous step
   const attach = (ids: SessionIds, root: string, streamNonce: string, cancel: Cancel) => Effect.gen(function* () {
-    const requestId = "git-probe-stream-" + (yield* uuid);
-    const ready = yield* Deferred.make<Record<string, unknown>, GitProbeError>();
+    const ready = yield* Deferred.make<TerminalSnapshot, GitProbeError>();
     const helperReady = yield* Deferred.make<void, GitProbeError>();
     const result = yield* Deferred.make<ProbeResult, GitProbeError>();
     const helperReadyMarker = "T3_SUPERVISOR_GIT_READY:" + streamNonce;
-    let snapshotToResolve: Record<string, unknown> | undefined;
+    let snapshotToResolve: TerminalSnapshot | undefined;
     let helperReadyObserved = false;
     let capturing = false;
     let output = "";
@@ -342,16 +354,17 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
     });
     // a non-record event or a foreign snapshot ends the attach stream at once, as the baseline stopped reading the message:
     // no later frame of it is handled, no Ack or Pong is written and no later exit can replace this first failure
-    const onChunk = (values: ReadonlyArray<unknown>) => Effect.sync(() => {
-      for (const event of values) {
-        if (!record(event)) {
+    const onChunk = (events: ReadonlyArray<TerminalAttachEvent>) => Effect.sync((): TerminalAttachStep => {
+      for (const item of events) {
+        if (item._tag === "Malformed") {
           abort();
-          return NativeStep.done(undefined);
+          return stop;
         }
+        const event = item.event;
         if (event.type === "snapshot" && record(event.snapshot)) {
           if (!snapshotIsTarget(event.snapshot, ids, root)) {
             fail(new GitProbeError("T3 attached the probe to an unexpected terminal."));
-            return NativeStep.done(undefined);
+            return stop;
           }
           if (!Deferred.isDoneUnsafe(ready)) snapshotToResolve = event.snapshot;
           continue;
@@ -364,21 +377,18 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
           else priorExit = true;
         } else if (event.type === "error") fail(new GitProbeError("The terminal Git probe reported an error."));
       }
-      return streamFailure ? NativeStep.continue : NativeStep.ack(acknowledged);
+      return streamFailure ? keepWaiting : {_tag: "Acknowledge", afterAck: acknowledged};
     });
-    const onExit = (attachExit: NativeExit) => Effect.sync(() => {
-      if (attachExit._tag !== "Success") fail(new GitProbeError("T3 rejected the terminal attach request."));
+    // the attach request's exit never ends the stream
+    const onExit = (attachExit: TerminalAttachExit) => Effect.sync(() => {
+      if (attachExit !== "Success") fail(new GitProbeError("T3 rejected the terminal attach request."));
       else if (!packet) abort();
-      return NativeStep.continue;
     });
-    const stream = native.call({endpoint, request: {id: requestId, tag: "terminal.attach", payload: {
-      threadId: ids.threadId, terminalId: ids.terminalId, cwd: root, worktreePath: null, restartIfNotRunning: false,
-    }}, maxPayload: nativeMaxPayload.probe, handshakeTimeout: RPC_TIMEOUT, timeout: PROBE_TIMEOUT, framing: NativeFraming.flatChecked(4, 256), cancel, onChunk, onExit}).pipe(
-      Effect.catch((error: NativeEnvelopeError) => Effect.sync(() => {
-        if (error.reason === "binary_frame") fail(new GitProbeError("T3 returned a binary terminal frame."));
-        else if (error.reason === "malformed_json") fail(new GitProbeError("T3 returned malformed terminal data."));
-        else if (error.reason === "invalid_frame") fail(new GitProbeError("T3 returned an invalid terminal frame."));
-        else if (error.reason !== "socket_closed" || !packet || !exit) abort();
+    const stream = terminal.attach({threadId: ids.threadId, terminalId: ids.terminalId, cwd: root}, {onChunk, onExit}, cancel).pipe(
+      Effect.catch((error) => Effect.sync(() => {
+        const reason = error._tag === "T3TerminalError" ? error.reason : null;
+        if (reason === "binary_frame" || reason === "malformed_json" || reason === "invalid_frame") fail(terminalFailure(error));
+        else if (reason !== "socket_closed" || !packet || !exit) abort();
       })));
     // a consumer or adapter defect ends the attach fiber without a typed failure: the probe waiting on these signals receives
     // that cause at once, so it ends, closes its terminal and releases the probe lock instead of outliving its deadline
@@ -411,7 +421,7 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
   const removePending = (session: SessionIds) =>
     updatePending(sessions => sessions.filter(item => item.threadId !== session.threadId || item.terminalId !== session.terminalId));
   const closeSession = (session: SessionIds, cancel: Cancel | undefined) =>
-    rpc("terminal.close", {threadId: session.threadId, terminalId: session.terminalId, deleteHistory: true}, cancel).pipe(Effect.andThen(removePending(session)));
+    terminalCall(terminal.close({threadId: session.threadId, terminalId: session.terminalId, deleteHistory: true}, cancel)).pipe(Effect.andThen(removePending(session)));
   // a cancel trigger completed after the duration or once the parent cancel completes, released with the caller's scope
   const deadline = (duration: typeof PROBE_TIMEOUT | typeof CLEANUP_TIMEOUT, parent?: Cancel) => Effect.gen(function* () {
     const expired = yield* Deferred.make<void>();
@@ -429,16 +439,16 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
   }));
 
   const session = (ids: SessionIds, root: string, cancel: Cancel) => Effect.scoped(Effect.gen(function* () {
-    const opened = yield* rpc("terminal.open", {
+    // a reply that is not a terminal snapshot fails with the same message as a foreign one
+    const opened = yield* terminalCall(terminal.open({
       threadId: ids.threadId,
       terminalId: ids.terminalId,
       cwd: root,
-      worktreePath: null,
       cols: 1000,
       rows: 40,
       env: {HISTFILE: "/dev/null", TERM: "dumb", ZDOTDIR: "/nonexistent"},
-    }, cancel);
-    if (!record(opened) || !snapshotIsTarget(opened, ids, root)) return yield* new GitProbeError("T3 did not start the Git probe terminal in the selected checkout.");
+    }, cancel));
+    if (!snapshotIsTarget(opened, ids, root)) return yield* new GitProbeError("T3 did not start the Git probe terminal in the selected checkout.");
     const streamNonce = yield* nonce;
     // the attach stream lives in this scope, so it ends before the session is closed
     const stream = yield* attach(ids, root, streamNonce, cancel);
@@ -446,12 +456,12 @@ const makeGitProbe = Effect.fnUntraced(function* (endpoint: NativeEndpoint) {
     if (!snapshotIsTarget(attached, ids, root)) return yield* new GitProbeError("T3 attached the Git probe to an unexpected terminal.");
     const bootstrap = makeBootstrap(streamNonce);
     if (bootstrap.length > 256) return yield* new GitProbeError("The Git probe bootstrap exceeded its input limit.");
-    yield* rpc("terminal.write", {threadId: ids.threadId, terminalId: ids.terminalId, data: bootstrap}, cancel);
+    yield* terminalCall(terminal.write({threadId: ids.threadId, terminalId: ids.terminalId, data: bootstrap}, cancel));
     yield* Deferred.await(stream.helperReady);
     yield* stream.capture;
     const helper = makePythonSource(root, streamNonce) + "\n\x04";
     if (helper.length > 32_000) return yield* new GitProbeError("The Git probe helper exceeded its input limit.");
-    yield* rpc("terminal.write", {threadId: ids.threadId, terminalId: ids.terminalId, data: helper}, cancel);
+    yield* terminalCall(terminal.write({threadId: ids.threadId, terminalId: ids.terminalId, data: helper}, cancel));
     const probeResult = yield* Deferred.await(stream.result);
     if (probeResult.workspaceRoot !== posix.normalize(root)) return yield* new GitProbeError("The Git probe resolved a different checkout.");
     return probeResult;
@@ -488,9 +498,9 @@ export class GitProbe extends Context.Service<GitProbe, {
   // closes every pending session left by an earlier process
   readonly cleanup: Effect.Effect<void, GitProbeError>;
 }>()("t3-supervisor/GitProbe") {
-  static readonly make: (endpoint: NativeEndpoint) => Effect.Effect<GitProbe["Service"], never, NativeEnvelope | Crypto.Crypto | GuidanceDb> = makeGitProbe;
-  static readonly layer = (endpoint: NativeEndpoint): Layer.Layer<GitProbe, never, NativeEnvelope | Crypto.Crypto | GuidanceDb> =>
-    Layer.effect(GitProbe, makeGitProbe(endpoint));
+  static readonly make: (terminal: T3TerminalFamily) => Effect.Effect<GitProbe["Service"], never, Crypto.Crypto | GuidanceDb> = makeGitProbe;
+  static readonly layer = (terminal: T3TerminalFamily): Layer.Layer<GitProbe, never, Crypto.Crypto | GuidanceDb> =>
+    Layer.effect(GitProbe, makeGitProbe(terminal));
 }
 
 // the probe call shape the definitions take

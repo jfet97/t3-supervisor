@@ -6,11 +6,12 @@ import { FetchHttpClient, HttpClient, type HttpClientResponse } from "effect/htt
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, type GateGuard, type SupervisionGateShape } from "../src/supervision-gate.js";
 import { helperDeliveryBody, HelperTransport, invalidReceipt, type SupervisorHelperMessage } from "../src/supervisor-helper-transport.js";
-import { NativeOperateRpc, SupervisorRpcError, type NativeRpcShape } from "../src/supervisor-native.js";
-import { T3Client, type T3ClientShape } from "../src/t3.js";
+import { SupervisorRpcError, type NativeRpcShape } from "../src/supervisor-native.js";
+import type { T3ClientShape } from "../src/t3.js";
 import { workflowRequestHash } from "../src/workflow-write-evidence.js";
 import type { MessageInfo, Projection } from "../src/types.js";
 import { execute, row as firstRow, supervisionStores, temporaryDirectory } from "./support/g11-stores.js";
+import { fakeNativeLayer } from "./support/native-access.js";
 
 // CT-LIN-05 on the real helper transport (plan 3.11): the webhook POST is the admitted send. Its final guard, its
 // 'posting' receipt and the start of the POST happen in one admission section; the reply is awaited outside it. The
@@ -166,13 +167,14 @@ const fixtureWith = (mode: "held" | number) => Effect.gen(function* () {
       return { snapshotSequence: 0, projection: helper };
     }),
   };
-  // a transport in its own scope, as the supervision run builds it; `wrap` stands between it and the fetch client
+  // a transport in its own scope over its T3Native, as the supervision run builds them; `wrap` stands between the POST and the fetch client
   const transport = (scope: Scope.Scope, wrap: (client: HttpClient.HttpClient) => HttpClient.HttpClient = (client) => client) => {
     const client = Layer.effect(HttpClient.HttpClient, Effect.map(HttpClient.HttpClient, wrap)).pipe(
       Layer.provide(FetchHttpClient.layer), Layer.provide(Layer.succeed(FetchHttpClient.Fetch, fetch)));
-    return Layer.buildWithScope(HelperTransport.layer({ baseUrl: http.baseUrl }).pipe(Layer.provide(Layer.mergeAll(
-      client, Layer.succeed(NativeOperateRpc, rpc), Layer.succeed(SupervisionGate, gate), Layer.succeed(T3Client, projections),
-      Layer.succeedContext(stores.context)))), scope).pipe(Effect.orDie, Effect.map((context) => Context.get(context, HelperTransport)));
+    const native = fakeNativeLayer({t3: projections, operate: rpc, baseUrl: http.baseUrl, http: client});
+    return Layer.buildWithScope(HelperTransport.layer.pipe(Layer.provide(Layer.mergeAll(
+      native, Layer.succeed(SupervisionGate, gate), Layer.succeedContext(stores.context)))), scope).pipe(
+      Effect.orDie, Effect.map((context) => Context.get(context, HelperTransport)));
   };
   // the stored rows as bytes, and a row replaced by bytes this transport did not write
   const row = (table: "deliveries" | "channels") => Effect.map(table === "deliveries"
