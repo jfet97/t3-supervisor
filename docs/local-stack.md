@@ -392,7 +392,15 @@ a finished run without its completion time is `inconclusive`, while a settlement
 the quiet window of the runs it can bound still fails. It also requires that Supervisor
 stayed parked through the wait, and the follow-up woke the same Supervisor root and
 generation; it fails when Supervisor settled sooner, woke without a human message or
-handled the follow-up with another Supervisor.
+handled the follow-up with another Supervisor. The original request and the follow-up
+are separate requests even when one task identity carries both, and each is found by the
+request its task was interpreted from (its `sourceMessageId`). Contact before the
+follow-up, by T3's creation times, is judged by Supervisor's decision on the original
+request, and contact after it by the decision on the follow-up, so contact for either
+one judged not needed fails. A Supervisor message that cannot be placed before or after
+the follow-up, or contact on a side whose decision was not seen, leaves it
+`inconclusive`; a definite forbidden contact still fails when another message cannot
+be placed.
 
 `no-project-start` and `no-project-stop` start their chat in T3's scratch project, which
 T3 opens for a chat without a project (`projects.ensureScratch`), and need Supervisor to
