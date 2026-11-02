@@ -18,11 +18,12 @@ import { SupervisionStoresLive, SupervisionTeamLive } from "../../src/supervisio
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorConversationStore } from "../../src/supervisor-conversation-store.js";
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
+import { NativeOperateRpc, NativeShell, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { SupervisorTeamRuntime } from "../../src/supervisor-team-runtime.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
+import { T3Native, T3ReadError } from "../../src/t3-native/index.js";
 import { makeThreadPolicyStore, ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
@@ -31,6 +32,7 @@ import {
   type WorkflowNativeAccessShape,
 } from "../../src/workflow-write-controller.js";
 import { installSubmission, submissionDetail, type SubmissionItemOptions } from "./interpretation-submit.js";
+import { fakeNative } from "./native-access.js";
 
 // the conversation suite's services, each built from its production layer or constructor in the current scope over the stores
 // of a temporary data directory: the supervision stores of one run with its thread-policy store, the conversation with its
@@ -280,19 +282,21 @@ export const conversationUnit = Effect.fnUntraced(function* (options: Conversati
   const t3 = t3Projections((threadId) => callbacks.projection(threadId));
   const teamRuntime = options.team ? yield* Effect.gen(function* () {
     const runtimeGate = yield* makeSupervisionGate(openGuard).pipe(Effect.provide(stores.context));
+    // the runtime's T3Native over the same projections: as before, the runtime is given no read or operate client
+    const runtimeNative = yield* fakeNative({t3, baseUrl: config.t3Url});
     return yield* SupervisorTeamRuntime.make({stopped: Effect.fnUntraced(function* (_guard, mainThreadId) {
       if (yield* callbacks.supervisionStopped(mainThreadId)) return true;
       const projectId = (yield* stores.supervisors.bindings()).find((item) => item.mainThreadId === mainThreadId)?.projectId ?? "";
       return !callbacks.enabled(projectId, mainThreadId);
-    })}).pipe(Effect.provideService(SupervisionScopeService, scope), Effect.provideService(SupervisionGate, runtimeGate), Effect.provideService(T3Client, t3),
-      Effect.provide(stores.context));
+    })}).pipe(Effect.provideService(SupervisionScopeService, scope), Effect.provideService(SupervisionGate, runtimeGate),
+      Effect.provideService(T3Native, runtimeNative), Effect.provide(stores.context));
   }) : null;
+  // the conversation's T3Native over the same fakes: the projections, the read client when given and the operate client when given
+  const native = yield* fakeNative({t3, read: options.read, operate: options.operate, baseUrl: config.t3Url});
   const {service, seams} = yield* SupervisorConversation.makeUnit.pipe(
     Effect.provideService(SupervisionScopeService, scope),
     Effect.provideService(SupervisionGate, gate),
-    Effect.provideService(T3Client, t3),
-    (effect) => options.operate ? Effect.provideService(effect, NativeOperateRpc, options.operate) : effect,
-    (effect) => options.read ? Effect.provideService(effect, NativeRpc, options.read) : effect,
+    Effect.provideService(T3Native, native),
     (effect) => options.definitions ? Effect.provideService(effect, ProjectDefinitions, definitionsService(options.definitions)) : effect,
     (effect) => teamRuntime ? Effect.provideService(effect, SupervisorTeamRuntime, teamRuntime) : effect,
     Effect.provide(context),
@@ -333,15 +337,17 @@ export const projectSupervisorUnit = Effect.fnUntraced(function* (options: Proje
     Layer.provide(Layer.succeedContext(stores.context)))).pipe(Effect.orDie);
   const base = Context.merge(stores.context, workflows).pipe(Context.add(SupervisionScopeService, scope));
   const t3 = t3Projections(options.projection);
+  const shell = NativeShell.of({baseline: options.baseline, threads: Effect.die(new Error("unused native lineage read"))});
+  // the run's T3Native over the same fakes, built once and given to every service beside them
+  const native = yield* fakeNative({t3, read: options.read, shell, operate: options.operate, baseUrl: options.config.t3Url});
   // the team services get the read credential as the root provides it (an interpretation submission's item detail)
   const team = yield* Layer.build(SupervisionTeamLive({baseUrl: options.config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(base), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitionsService(options.definitions)),
-    Layer.succeed(NativeRpc, options.read), options.operate ? Layer.succeed(NativeOperateRpc, options.operate) : Layer.empty, FetchHttpClient.layer)))).pipe(Effect.orDie);
+    options.operate ? Layer.succeed(NativeOperateRpc, options.operate) : Layer.empty,
+    Layer.succeed(T3Native, native), FetchHttpClient.layer)))).pipe(Effect.orDie);
   const locks = yield* Layer.build(ScopeLocks.layer);
-  const shell = NativeShell.of({baseline: options.baseline, threads: Effect.die(new Error("unused native lineage read"))});
   const clients = Context.merge(Context.merge(base, team), locks).pipe(Context.add(Store, {catalog: options.catalog} as StoreShape),
-    Context.add(T3Client, t3), Context.add(NativeRpc, options.read), Context.add(NativeShell, shell),
-    (context) => options.operate ? Context.add(context, NativeOperateRpc, options.operate) : context);
+    Context.add(T3Native, native));
   const clock = yield* clockAt(() => options.clock.now);
   const control = yield* SupervisionControl.make.pipe(Effect.provideService(Clock.Clock, clock), Effect.provide(clients));
   const {service, seams} = yield* ProjectSupervisor.makeUnit({definitions: definitionsAccess(options.definitions)}).pipe(
@@ -425,7 +431,7 @@ export const interpretationSubmitter = Effect.fnUntraced(function* (options: Int
     listThreads: () => Effect.succeed([]),
     projection: (threadId) => {
       const projection = options.projections.get(threadId);
-      return projection ? Effect.succeed(projection) : Effect.fail(new T3TransportError("missing projection", 404));
+      return projection ? Effect.succeed(projection) : Effect.fail(new T3ReadError({operation: "orchestration/thread", message: "missing projection", httpStatus: 404}));
     },
     getTurnItem: ({threadId, itemId}) => Effect.succeed({item: submissionDetail(options.projections.get(threadId), itemId)}),
   }});

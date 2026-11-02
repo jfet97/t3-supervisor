@@ -6,11 +6,12 @@ import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService } from "../src/supervision-gate.js";
 import { SupervisorCompaction } from "../src/supervisor-compaction.js";
 import { roleDeliveryVersion } from "../src/supervisor-compaction-contract.js";
-import { NativeOperateRpc, SupervisorRpcError } from "../src/supervisor-native.js";
-import { T3Client, T3TransportError } from "../src/t3.js";
+import { SupervisorRpcError } from "../src/supervisor-native.js";
+import { T3TransportError } from "../src/t3.js";
 import type { JsonRecord } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { conversationUnit, dataDirectory, nativeClient, openStores, t3Projections, workflowStore } from "./support/g1a-conversation.js";
+import { fakeNativeLayer } from "./support/native-access.js";
 import { baseTime, emptySupervisorProjection, makeSourceProjection } from "./support/ps-fixture.js";
 import { nativeWrites, rpcRequests, startScenario } from "./support/scenario-driver.js";
 
@@ -75,7 +76,7 @@ const fixture = Effect.fnUntraced(function* () {
   };
   const context = yield* Layer.build(SupervisorCompaction.layer.pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(stores.context), Layer.succeed(SupervisionScopeService, scope), Layer.succeed(SupervisionGate, gate),
-    Layer.succeed(T3Client, port), Layer.succeed(NativeOperateRpc, operate), Layer.succeed(WorkflowStateStore, workflows)))));
+    fakeNativeLayer({t3: port, operate}), Layer.succeed(WorkflowStateStore, workflows)))));
   const service = Context.get(context, SupervisorCompaction);
   const publish = (item: JsonRecord) => Effect.gen(function* () {
     const done = yield* Deferred.make<void>();

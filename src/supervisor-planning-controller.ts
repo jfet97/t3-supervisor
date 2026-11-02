@@ -20,7 +20,7 @@ import { resolveSupervisorScope, type SupervisorScopeResolution } from "./superv
 import { planningTargetLimit, type NewPlanningAttempt, type PlanningUncovered } from "./supervisor-planning-contract.js";
 import { SupervisorTeamStore } from "./supervisor-team-store.js";
 import { exactFenceRecords } from "./supervisor-workflow-agreement.js";
-import { NativeOperateRpc, record, SupervisorRpcError } from "./supervisor-native.js";
+import { T3Native, T3RequestError, type DispatchMode, type OrchestrationCommand } from "./t3-native/index.js";
 import { WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel, type WorkflowLocator } from "./workflow-write-controller.js";
 import { workflowRequestHash } from "./workflow-write-evidence.js";
 import {
@@ -111,7 +111,8 @@ const make = Effect.gen(function* () {
   const gate = yield* SupervisionGate;
   const ids = yield* SupervisorIds;
   const transaction = guidanceTransaction(yield* GuidanceDb);
-  const rpc = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  // the operate credential's commands; absent where a scope has none
+  const commands = (yield* T3Native).orchestration.commands;
   // the read-only context views a drafter reads; absent where a scope has no conversation service
   const conversation = Option.getOrNull(yield* Effect.serviceOption(SupervisorConversation));
   const inFlight = yield* FiberMap.make<string, void>();
@@ -554,7 +555,8 @@ const make = Effect.gen(function* () {
       ? {state: "resolved" as const, closedAt: clock.currentTimeMillisUnsafe()} : {})};
   };
   const deliver = (binding: BindingRecord, selected: PlanningAttempt, target: PlanningTarget, kind: "hold" | "release") => Effect.gen(function* () {
-    if (!rpc) return;
+    if (!commands) return;
+    const dispatch = commands.dispatchCommand;
     const delivery = kind === "hold" ? target.hold : target.release;
     if (!delivery || delivery.state !== "prepared") return;
     const observedThreads = yield* attempt(native.listThreads());
@@ -574,9 +576,8 @@ const make = Effect.gen(function* () {
     if (kind === "hold" && hasPendingOwnerInput(recipient.value)) return;
     const child = target.recipientThreadId !== binding.mainThreadId;
     if (child && !steerable) return;
-    const dispatchMode = steerable && !hasPendingOwnerInput(recipient.value)
+    const dispatchMode: DispatchMode = steerable && !hasPendingOwnerInput(recipient.value)
       ? {type: "steer_active", targetRunId: steerable.id} : {type: "queue_after_active"};
-    const operate = rpc;
     yield* admitSend(gate, {identity: delivery.commandId, inFlight,
       reconcile: Effect.void,
       prepare: guard => transaction(Effect.gen(function* (): Effect.fn.Return<SendPreparation<void>, SupervisionStoreError> {
@@ -599,18 +600,18 @@ const make = Effect.gen(function* () {
         // a release reads the main's current agreement state: planning resolved or superseded leaves an unagreed proposal unagreed
         const text = kind === "hold" ? planningHoldText(anchored, currentTarget)
           : planningReleaseText(anchored, currentTarget, unacceptedProposal(anchored, currentTarget, currentTask));
+        // a delivery whose command is invalid is not sent and records nothing
+        const prepared = yield* dispatch.prepare({_tag: "MessageDispatch", commandId: stored.commandId, messageId: stored.messageId,
+          threadId: target.recipientThreadId, text, dispatchMode}).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!prepared) return {_tag: "Answer", value: undefined};
         const sending: PlanningDelivery = {...stored, state: "sending", attemptedAt: now, text,
-          runId: dispatchMode.type === "steer_active" ? dispatchMode.targetRunId ?? null : null};
+          runId: dispatchMode.type === "steer_active" ? dispatchMode.targetRunId : null};
         yield* requests.savePlanningAttempt(replaceDelivery(anchored, target.threadId, kind, sending));
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {
-          type: "message.dispatch", commandId: stored.commandId, messageId: stored.messageId, threadId: target.recipientThreadId,
-          text, attachments: [], createdBy: "system", creationSource: "server", dispatchMode,
-        }), flight => ({release: flight.release, result: Effect.gen(function* () {
+        return {_tag: "Initiate", initiate: Effect.map(prepared.initiate(), flight => ({release: flight.release, result: Effect.gen(function* () {
           const reply = yield* attempt(flight.result);
-          const accepted = reply.ok && record(reply.value) && Number.isSafeInteger(reply.value.sequence);
-          const definite = !reply.ok && reply.cause instanceof SupervisorRpcError && reply.cause.definiteRejection;
+          const definite = !reply.ok && reply.cause instanceof T3RequestError && reply.cause.definiteRejection;
           yield* update(binding.projectId, selected.id, latest => replaceDelivery(latest, target.threadId, kind,
-            {...sending, state: accepted ? "sent" : definite ? "not_sent" : "uncertain"})).pipe(Effect.orDie);
+            {...sending, state: reply.ok ? "sent" : definite ? "not_sent" : "uncertain"})).pipe(Effect.orDie);
         }).pipe(Effect.onInterrupt(() => update(binding.projectId, selected.id, latest => replaceDelivery(latest, target.threadId, kind,
           {...sending, state: "uncertain"})).pipe(Effect.orDie, Effect.asVoid)))}))};
       })),
@@ -619,7 +620,8 @@ const make = Effect.gen(function* () {
 
   // these are the same published native commands used by T3 task cancellation, restricted to the registered drafting task
   const draftEffect = (binding: BindingRecord, selected: PlanningAttempt, kind: "notice" | "cleanup", cleanupIndex = 0) => Effect.gen(function* () {
-    if (!rpc || !selected.draft?.taskId) return;
+    if (!commands || !selected.draft?.taskId) return;
+    const dispatch = commands.dispatchCommand;
     const owner = yield* attempt(native.projection(selected.ownerThreadId));
     const child = yield* attempt(native.projection(selected.draft.threadId));
     if (!owner.ok || !child.ok || child.value.thread.lineage.parentThreadId !== selected.ownerThreadId ||
@@ -638,21 +640,26 @@ const make = Effect.gen(function* () {
         const stored = kind === "notice" ? current?.draft?.ownerNotice : current?.draft?.cleanup?.[cleanupIndex]?.receipt;
         if (!current?.draft || current.draft.threadId !== selected.draft!.threadId || stored?.state !== "prepared" ||
           kind === "notice" && (current.state !== "open" || (yield* guard.supervisionStopped(binding.mainThreadId)))) return {_tag: "Answer", value: undefined};
+        const taskId = current.draft.taskId;
+        const runId = cleanup?.runId ?? null;
+        // the notice or the cleanup row's command; one missing an identity it needs, or invalid, is not sent and records nothing
+        const command: OrchestrationCommand | null = kind === "notice" ? {_tag: "MessageDispatch", commandId: stored.commandId, messageId: stored.messageId,
+          threadId: selected.ownerThreadId, text: text!, dispatchMode: {type: "queue_after_active"}}
+          : cleanup!.type === "delegated_task.completion-delivery.dispose" ? taskId === null ? null
+            : {_tag: "DelegatedCompletionDispose", commandId: stored.commandId, parentThreadId: selected.ownerThreadId, taskId}
+          : cleanup!.type === "queued-run.cancel" ? runId === null ? null
+            : {_tag: "QueuedRunCancel", commandId: stored.commandId, threadId: current.draft.threadId, runId}
+          : {_tag: "ThreadStop", commandId: stored.commandId, threadId: current.draft.threadId, stopDelegatedTasks: true, reason: "The bounded planning attempt has ended."};
+        const prepared = command === null ? null : yield* dispatch.prepare(command).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!prepared) return {_tag: "Answer", value: undefined};
         const sending: PlanningDelivery = {...stored, state: "sending", attemptedAt: yield* Clock.currentTimeMillis, runId: null,
           ...(kind === "notice" ? {text: text!} : {})};
         yield* requests.savePlanningAttempt(save(current, sending));
-        const command = kind === "notice" ? {type: "message.dispatch", commandId: stored.commandId, messageId: stored.messageId,
-          threadId: selected.ownerThreadId, text, attachments: [], createdBy: "system", creationSource: "server", dispatchMode: {type: "queue_after_active"}}
-          : cleanup!.type === "delegated_task.completion-delivery.dispose" ? {type: cleanup!.type, commandId: stored.commandId,
-            parentThreadId: selected.ownerThreadId, taskId: current.draft.taskId}
-          : cleanup!.type === "queued-run.cancel" ? {type: cleanup!.type, commandId: stored.commandId, threadId: current.draft.threadId, runId: cleanup!.runId}
-          : {type: "thread.stop", commandId: stored.commandId, threadId: current.draft.threadId, stopDelegatedTasks: true, reason: "The bounded planning attempt has ended."};
-        return {_tag: "Initiate", initiate: Effect.map(rpc!.initiate("orchestration.dispatchCommand", command), flight => ({release: flight.release,
+        return {_tag: "Initiate", initiate: Effect.map(prepared.initiate(), flight => ({release: flight.release,
           result: Effect.gen(function* () {
             const reply = yield* attempt(flight.result);
-            const accepted = reply.ok && record(reply.value) && Number.isSafeInteger(reply.value.sequence);
-            yield* update(binding.projectId, current.id, row => save(row, {...sending, state: accepted ? "sent" :
-              !reply.ok && reply.cause instanceof SupervisorRpcError && reply.cause.definiteRejection ? "not_sent" : "uncertain"})).pipe(Effect.orDie);
+            yield* update(binding.projectId, current.id, row => save(row, {...sending, state: reply.ok ? "sent" :
+              !reply.ok && reply.cause instanceof T3RequestError && reply.cause.definiteRejection ? "not_sent" : "uncertain"})).pipe(Effect.orDie);
           }).pipe(Effect.onInterrupt(() => update(binding.projectId, current.id, row => save(row, {...sending, state: "uncertain"})).pipe(Effect.orDie, Effect.asVoid)))}))};
       }))});
   });

@@ -5,7 +5,7 @@ import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, La
 import { mainRunNodeReader, hasUnansweredHuman, nativeUserMessageVisible, operativeRunStopped, timestampMs, workspacePreparationPending } from "./domain.js";
 import { activeWatchInstructions, ownInboxInstructions, hasActiveMonitoredRun, isCurrentMainGraphRun, SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
 import { SupervisorConversationStore, type ConversationRequest, type RequestInflight, type ReviewOutcomeRecord, type ReviewPins, type WorkflowAgreementCandidate, type WorkflowIntroduction } from "./supervisor-conversation-store.js";
-import { NativeOperateRpc, NativeRpc, record, SupervisorRpcError, type NativeRpcInFlight } from "./supervisor-native.js";
+import { record } from "./supervisor-native.js";
 import { fixedOccurrencesPreserved, interpretationPlanRules, interpretationRules, interpretationRulesVersion, localThreadToolRules, toolRouteReminder, stepEntryGuidance, proportionatePlanRule, manifestMembers, proposalContextFromDefinitions, proposalContextMatches, redact, validateWorkflowRecord, type ProposalContext, type WorkflowPlanValue } from "./supervisor-workflow.js";
 import { compactProposalDigest, exactFenceRecords, extractWorkflowAgreementRecords, parseWorkflowAgreementRecord, resolveCompactAcceptance, resolveCompactProposal, workflowAgreementPlanHash, workflowProtocolDiagnosticCodes, type CompactProposalPins, type StoredProposalDigest, type WorkflowAgreementRecordKind } from "./supervisor-workflow-agreement.js";
 import { definitionChangedProcedure, definitionReassessProcedure, extractApprovedProjectDefinitions, extractProjectDefinitionDecisionRecords, parseProjectDefinitionDecisionRecord, buildProjectDefinitionReviewRequest, sameDefinitionContents } from "./supervisor-definition-review.js";
@@ -16,7 +16,7 @@ import { ProjectDefinitions } from "./project-definitions.js";
 import type { SupervisorContextViewInput, SupervisorContextViewResult } from "./workflow-write-controller.js";
 import type { SupervisorMonitoringReview, SupervisorMonitoringStatus, WorkflowAgreementInfo, WorkflowProposalInfo, WorkflowProtocolDiagnostic } from "./project-supervisor-contract.js";
 import { fingerprint } from "./guidance-store.js";
-import { T3Client, T3TransportError } from "./t3.js";
+import { T3Native, T3ReadError, T3RequestError, type T3InvalidInput } from "./t3-native/index.js";
 import { roleDeliveryVersion } from "./supervisor-compaction-contract.js";
 import type { MessageInfo, Projection, ThreadInfo } from "./types.js";
 import { resolveSupervisorScope } from "./supervisor-scope.js";
@@ -43,7 +43,6 @@ import { agreedWorkUnfinished, explicitWaitRecorded, latestExecutedRun, liveness
 const busy = (projection: Projection) => projection.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status));
 const failedRunStates = new Set(["failed", "interrupted", "cancelled", "rolled_back"]);
 const rank = (mode: unknown) => ["approval-required", "auto-accept-edits", "auto", "full-access"].indexOf(String(mode));
-const acceptedReceipt = (value: unknown): boolean => record(value) && Number.isSafeInteger(value.sequence) && Number(value.sequence) >= 0;
 const MAX_DESCENDANT_OBSERVATIONS_PER_CYCLE = 100;
 const MAX_DESCENDANT_OBSERVATIONS_PER_MAIN = 20;
 const MAX_ARCHIVED_RECONCILIATIONS_PER_MAIN = 5;
@@ -527,7 +526,7 @@ type Attempt<A> = {readonly ok: true; readonly value: A} | {readonly ok: false; 
 const attempt = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Attempt<A>, never, R> =>
   Effect.catchCauseIf(Effect.map(effect, (value): Attempt<A> => ({ok: true, value})), (cause) => !Cause.hasInterruptsOnly(cause),
     (cause) => Effect.succeed<Attempt<A>>({ok: false, cause: Cause.squash(cause)})) as Effect.Effect<Attempt<A>, never, R>;
-const notFound = (cause: unknown): boolean => cause instanceof T3TransportError && cause.httpStatus === 404;
+const notFound = (cause: unknown): boolean => cause instanceof T3ReadError && cause.httpStatus === 404;
 const uncertainCheckIn = "Supervisor request delivery is uncertain; its original identity is retained and only observed, never resent.";
 const uncertainIntroduction = "Proposal delivery is uncertain. Its exact message identity is retained.";
 // whether a stored record is still exactly the one a caller read (none, for a creation); the store keeps each record's exact
@@ -553,10 +552,10 @@ export type OperativeProposalResult = {status: "ok"; taskId: string; proposalId:
 
 export interface SupervisorConversationShape {
   // one supervision pass of a bound main: introductions, the in-flight check-in and the next due check-in
-  readonly run: (binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[]) => Effect.Effect<void, ConversationError | T3TransportError>;
+  readonly run: (binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[]) => Effect.Effect<void, ConversationError | T3ReadError | T3InvalidInput>;
   readonly observe: (threads: readonly ThreadInfo[]) => Effect.Effect<void, SupervisionStoreError>;
   readonly reconcileStopNotice: (owner: BindingRecord) => Effect.Effect<void, SupervisionStoreError>;
-  readonly reconcileStopped: (binding: BindingRecord, threads: readonly ThreadInfo[], supervisor?: Projection) => Effect.Effect<void, ConversationError | T3TransportError>;
+  readonly reconcileStopped: (binding: BindingRecord, threads: readonly ThreadInfo[], supervisor?: Projection) => Effect.Effect<void, ConversationError | T3ReadError | T3InvalidInput>;
   // `cancel` is the calling tool's soft cancel; it reaches the check view's definitions read as that read's abort signal
   readonly readContextView: (binding: BindingRecord, input: SupervisorContextViewInput, cancel?: Deferred.Deferred<void>) => Effect.Effect<SupervisorContextViewResult, SupervisionStoreError>;
   /** The operative main's own current proposal, once the caller verified its own native read; it never answers for another task. */
@@ -581,7 +580,7 @@ const makeSupervisorConversation = Effect.gen(function* () {
   // the exact native routes of this deployment's registrations of the workflow server and its gateway
   const nativeRoutes = configuredWorkflowToolRoutes(scope.config);
   const gate = yield* SupervisionGate;
-  const t3 = yield* T3Client;
+  const native = yield* T3Native;
   const ids = yield* SupervisorIds;
   const store = yield* ProjectSupervisorStore;
   // the Start a task answers, as the interpretation reads it: its pinned request is never before that Start's own boundary
@@ -592,10 +591,8 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const transaction = guidanceTransaction(yield* GuidanceDb);
   // the status and retry reads stamp their time from the clock the service was built with
   const clock = yield* Clock.Clock;
-  // the operate credential, the definitions, the helper team and workflow state are absent where a scope has none of them
-  const rpc = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
-  // the read credential, for the native detail of a recorded interpretation submission
-  const readRpc = Option.getOrNull(yield* Effect.serviceOption(NativeRpc));
+  // the operate credential's commands, the definitions, the helper team and workflow state are absent where a scope has none of them
+  const commands = native.orchestration.commands;
   const definitions = Option.getOrNull(yield* Effect.serviceOption(ProjectDefinitions));
   const teamRuntime = Option.getOrNull(yield* Effect.serviceOption(SupervisorTeamRuntime));
   const workflows = Option.getOrNull(yield* Effect.serviceOption(WorkflowStateStore));
@@ -619,7 +616,8 @@ const makeSupervisorConversation = Effect.gen(function* () {
   const supervisionStopped = (mainThreadId: string) => scope.supervisionStopped(mainThreadId);
   const eligible = (thread: ThreadInfo, threads: readonly ThreadInfo[]) => scope.eligible(thread, threads);
   const descendantContactable = (thread: ThreadInfo) => !isSupervisorThread(scope.owned, thread) && !thread.archivedAt && !thread.deletedAt;
-  const projection = (threadId: string): Effect.Effect<Projection, T3TransportError> => Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection);
+  const projection = (threadId: string): Effect.Effect<Projection, T3ReadError | T3InvalidInput> =>
+    Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection);
   // one policy-dependent durable write (plan 3.11): its guard and its write as one guidance transaction in the admission section
   const admitted = <A, E>(block: (guard: GateGuard) => Effect.Effect<A, E>) => gate.admit((guard) => transaction(block(guard)));
   const teamPolicyOf = (binding: BindingRecord): Effect.Effect<TeamPolicy | null, SupervisionStoreError> => teamRuntime ? teamRuntime.coordinatorPolicy(binding) : Effect.succeed(null);
@@ -1000,7 +998,7 @@ Turns without a service request: do pending context/planning work, then keep the
   }));
   // one observed task: its operative, scoped descendants and Supervisor, then definition review or the workflow agreement
   const observeTask = (task: TaskRecord, introduction: WorkflowIntroduction | null, threads: readonly ThreadInfo[], now: number,
-    cycle: {supervisorProjections: Map<string, Projection | null>; missingSupervisors: Set<string>; descendantBudget: number}): Effect.Effect<void, ConversationError | T3TransportError> => Effect.gen(function* () {
+    cycle: {supervisorProjections: Map<string, Projection | null>; missingSupervisors: Set<string>; descendantBudget: number}): Effect.Effect<void, ConversationError | T3ReadError | T3InvalidInput> => Effect.gen(function* () {
     const agent = yield* projection(task.threadId);
     const observedAgent = yield* admitted((guard) => Effect.gen(function* () {
       if (!(yield* guard.scopeEnabled(task.projectId, task.threadId))) return false;
@@ -2271,7 +2269,7 @@ Turns without a service request: do pending context/planning work, then keep the
     // the event carries the import status only, never task or plan text
     if (importStatus !== null) yield* Console.log(JSON.stringify({event: "workflow_agreement_import_unavailable", status: importStatus}));
   });
-  const run = (binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[]): Effect.Effect<void, ConversationError | T3TransportError> => Effect.gen(function* () {
+  const run = (binding: BindingRecord, supervisor: Projection, threads: readonly ThreadInfo[]): Effect.Effect<void, ConversationError | T3ReadError | T3InvalidInput> => Effect.gen(function* () {
     if (!(yield* enabled(binding.projectId, binding.mainThreadId))) return;
     // a stopped chat's unsent check-ins are fenced in the same section that reads the stop
     const stoppedChat = yield* admitted((guard) => Effect.gen(function* () {
@@ -2283,8 +2281,8 @@ Turns without a service request: do pending context/planning work, then keep the
       yield* reconcileStopped(binding, threads, supervisor);return;
     }
     const reading = yield* requests.pending(binding.projectId, binding.threadId);
-    if (reading && readRpc) yield* requests.recordNativeReads(binding.projectId, reading.id,
-      yield* collectNativeReads(reading, supervisor, itemId => readRpc.call("orchestration.getTurnItem", {threadId: binding.threadId, itemId}), yield* Clock.currentTimeMillis,
+    if (reading) yield* requests.recordNativeReads(binding.projectId, reading.id,
+      yield* collectNativeReads(reading, supervisor, itemId => native.orchestration.turnItem({threadId: binding.threadId, itemId}), yield* Clock.currentTimeMillis,
         nativeRoutes));
     const currentConversationTask = yield* store.task(binding.mainThreadId);
     if (currentConversationTask) {
@@ -2405,7 +2403,7 @@ Turns without a service request: do pending context/planning work, then keep the
     const batch = rootCooldown || dormant ? null : teamPartition.rootBatch;
     const rootEvents = dormant ? [] : teamPartition.rootEvents;
     const inflight = yield* requests.pending(binding.projectId, binding.threadId);
-    if (!rpc) {if (inflight) yield* reconcile(inflight, supervisor, threads);return;}
+    if (!commands) {if (inflight) yield* reconcile(inflight, supervisor, threads);return;}
     // introductions go to the operative and never wait behind an in-flight root check-in
     for (const task of tasks) {
       if (!conversationMayContact(task)) continue;
@@ -2685,8 +2683,8 @@ Turns without a service request: do pending context/planning work, then keep the
   });
   /** Delivers one Stop notice; Enable fences unsent notices, while dispatched identities are only observed. */
   const reconcileStopNotice = (owner: BindingRecord): Effect.Effect<void, SupervisionStoreError> => Effect.gen(function* () {
-    if (!rpc || !store.scopeCompatible) return;
-    const operate = rpc;
+    if (!commands || !store.scopeCompatible) return;
+    const dispatch = commands.dispatchCommand;
     const current = Effect.map(store.binding(owner.projectId, owner.mainThreadId), (binding) =>
       binding?.threadId === owner.threadId && binding.generation === owner.generation ? binding : null);
     const first = yield* current;
@@ -2759,16 +2757,19 @@ Turns without a service request: do pending context/planning work, then keep the
         const dispatchMode = notice.dispatchMode ?? (queuedSupervisorMessage ? {type: "queue_after_active" as const} : active ? {type: "steer_active" as const, targetRunId: active.id} :
           main.runs.some(run => ["preparing", "queued", "starting", "running", "waiting"].includes(run.status)) ? null : {type: "queue_after_active" as const});
         if (!dispatchMode) return {_tag: "Answer", value: undefined};
+        // a notice whose command is invalid is not sent and records nothing
+        const command = yield* dispatch.prepare({_tag: "MessageDispatch", commandId: notice.commandId, messageId: notice.messageId, threadId: owner.mainThreadId, text,
+          dispatchMode}).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!command) return {_tag: "Answer", value: undefined};
         // persist before the POST, so a crash or a lost response cannot create a second notice.
         const sending = {...notice, state: "uncertain" as const, dispatchMode};yield* save(sending);
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {type: "message.dispatch", commandId: notice.commandId, messageId: notice.messageId,
-          threadId: owner.mainThreadId, text, attachments: [], createdBy: "system", creationSource: "server", dispatchMode}), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(command.initiate(), (flight) => ({
           // a non-definite failure or an interruption saves nothing over the reservation; the classification writes are plain
           // statements, so a failed one is a defect of the in-flight operation, as a thrown write was
           result: Effect.gen(function* () {
-            const reply = yield* attempt(receiptOf(flight));
+            const reply = yield* attempt(flight.result);
             if (reply.ok) {yield* save({...sending, state: "accepted", error: null});return;}
-            if (reply.cause instanceof SupervisorRpcError && reply.cause.definiteRejection) {
+            if (reply.cause instanceof T3RequestError && reply.cause.definiteRejection) {
               if (dispatchMode.type === "steer_active") yield* save({...notice, state: "ready", messageId: `${notice.messageId}:queue`, commandId: `${notice.commandId}:queue`, dispatchMode: {type: "queue_after_active"},
                 rejectedAttempts: [...(notice.rejectedAttempts ?? []), {messageId: notice.messageId, commandId: notice.commandId}], error: null});
               else yield* save({...sending, state: "blocked", error: "T3 rejected the Stop notice."});
@@ -2785,7 +2786,7 @@ Turns without a service request: do pending context/planning work, then keep the
    * A stopped chat sends nothing new, also while supervision is disabled: unsent check-ins are fenced, and an accepted request
    * is matched to its native run so its identity and outcome stay exact and the Supervisor settles only after a confirmed outcome.
    */
-  const reconcileStopped = (binding: BindingRecord, threads: readonly ThreadInfo[], supervisor?: Projection): Effect.Effect<void, ConversationError | T3TransportError> => Effect.gen(function* () {
+  const reconcileStopped = (binding: BindingRecord, threads: readonly ThreadInfo[], supervisor?: Projection): Effect.Effect<void, ConversationError | T3ReadError | T3InvalidInput> => Effect.gen(function* () {
     yield* fenceStoppedSupervision(binding);
     const inflight = yield* requests.pending(binding.projectId, binding.threadId);
     if (!inflight) return;
@@ -2806,9 +2807,6 @@ Turns without a service request: do pending context/planning work, then keep the
         ? {...request, state: "uncertain", error: "Supervision was stopped for this chat; this check-in's delivery is uncertain and its identity is retained."}
         : {...request, state: "failed", failureAcknowledged: true, error: "Supervision was stopped for this chat before this check-in was sent; it was not sent."});
   }));
-  // a native reply is an accepted receipt or an uncertain outcome
-  const receiptOf = (flight: NativeRpcInFlight): Effect.Effect<void, SupervisorRpcError> =>
-    Effect.flatMap(flight.result, (receipt) => acceptedReceipt(receipt) ? Effect.void : Effect.fail(new SupervisorRpcError("uncertain")));
   /**
    * One root check-in under the admission contract (plan 3.11): the caller's preparation (its request and bookkeeping, built
    * in `prepare` from the guard), the scope and per-chat stop recheck, the 'sending' receipt with its notice time and the
@@ -2821,8 +2819,8 @@ Turns without a service request: do pending context/planning work, then keep the
     const now = at ?? (yield* Clock.currentTimeMillis);
     const root = yield* attempt(projection(supervisorThreadId));
     if (!root.ok || hasUnansweredHuman(root.value)) return joined;
-    if (!rpc) return yield* admitted((guard) => Effect.map(prepare(guard, now), (prepared) => prepared.value));
-    const operate = rpc;
+    if (!commands) return yield* admitted((guard) => Effect.map(prepare(guard, now), (prepared) => prepared.value));
+    const dispatch = commands.dispatchCommand;
     const value = yield* admitSend(gate, {
       identity: supervisorThreadId,
       inFlight: checkIns,
@@ -2837,16 +2835,19 @@ Turns without a service request: do pending context/planning work, then keep the
           return {_tag: "Answer", value: prepared.value};
         const owner = yield* store.bindingForSupervisor(request.supervisorThreadId);
         if (owner && (yield* guard.supervisionStopped(owner.mainThreadId))) {yield* fenceStoppedSupervision(owner);return {_tag: "Answer", value: prepared.value};}
+        // a check-in whose command is invalid is not sent and records nothing
+        const command = yield* dispatch.prepare({_tag: "MessageDispatch", commandId: `supervisor-review:${request.id}`, messageId: request.messageId,
+          threadId: request.supervisorThreadId, text: request.text, dispatchMode: {type: "queue_after_active"}}).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!command) return {_tag: "Answer", value: prepared.value};
         const sending = {...request, state: "sending" as const, sentAt: now};
         yield* requests.saveRequest(sending);
         yield* requests.noticeSent(request.supervisorThreadId, sending.sentAt);
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {type: "message.dispatch", commandId: `supervisor-review:${request.id}`, messageId: request.messageId,
-          threadId: request.supervisorThreadId, text: request.text, attachments: [], createdBy: "system", creationSource: "server", dispatchMode: {type: "queue_after_active"}}), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(command.initiate(), (flight) => ({
           // the classification writes are plain statements: a failed one is a defect of the in-flight operation, as a thrown write was
           result: Effect.gen(function* () {
-            const reply = yield* attempt(receiptOf(flight));
+            const reply = yield* attempt(flight.result);
             if (reply.ok) {yield* requests.saveRequest({...sending, state: "waiting"});return prepared.value;}
-            const definite = reply.cause instanceof SupervisorRpcError && reply.cause.definiteRejection;
+            const definite = reply.cause instanceof T3RequestError && reply.cause.definiteRejection;
             yield* requests.saveRequest({...sending, state: definite ? "failed" : "uncertain", error: definite ? "T3 rejected the supervising request; pending activity is retained." : uncertainCheckIn});
             // the refused dialogue initialization blocks its introduction only while no send of it is recorded
             if (definite && request.taskId) {
@@ -2894,9 +2895,8 @@ Turns without a service request: do pending context/planning work, then keep the
       if (signature === null) continue;
       const memo = HashMap.get(yield* Ref.get(submissionDetailMemo), evidence.itemId);
       if (Option.isSome(memo) && memo.value.signature === signature) {details.set(evidence.itemId, memo.value.detail);continue;}
-      if (!readRpc) continue;
-      const read = yield* attempt(readRpc.call("orchestration.getTurnItem", {threadId: supervisor.thread.id, itemId: evidence.itemId}));
-      if (!read.ok || !record(read.value) || !record(read.value.item)) continue;
+      const read = yield* attempt(native.orchestration.turnItem({threadId: supervisor.thread.id, itemId: evidence.itemId}));
+      if (!read.ok || read.value._tag === "Absent") continue;
       const detail = read.value.item;
       let bytes = Number.POSITIVE_INFINITY;
       try {bytes = Buffer.byteLength(JSON.stringify(detail), "utf8");} catch { /* an undecodable detail stays unread */ }
@@ -3115,7 +3115,7 @@ Turns without a service request: do pending context/planning work, then keep the
       }
     }));
   });
-  const sendIntroduction = (task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[]): Effect.Effect<void, SupervisionStoreError | T3TransportError> => Effect.gen(function* () {
+  const sendIntroduction = (task: TaskRecord, introduction: WorkflowIntroduction, threads: readonly ThreadInfo[]): Effect.Effect<void, SupervisionStoreError | T3ReadError | T3InvalidInput> => Effect.gen(function* () {
     if (!(yield* enabled(task.projectId, task.threadId))) return;
     const agent = yield* projection(task.threadId);
     const observedNow = yield* Clock.currentTimeMillis;
@@ -3158,8 +3158,8 @@ Turns without a service request: do pending context/planning work, then keep the
     const evidenceDetails = yield* submissionDetails(supervisor, [task.interpretationEvidence, sentProposal?.evidence]);
     const rootNow = yield* projection(task.supervisorThreadId);
     if (hasUnansweredHuman(rootNow)) return;
-    if (!rpc) return yield* Effect.die(new Error("supervisor_operate_rpc_unavailable"));
-    const operate = rpc;
+    if (!commands) return yield* Effect.die(new Error("supervisor_operate_rpc_unavailable"));
+    const dispatch = commands.dispatchCommand;
     // the admission section (plan 3.11): every POST reaching here is fresh (unknown identities returned above), including a
     // known-unsent queued fallback; the final checks, the 'sending' receipt with its dispatch mode and the POST run in one
     // section, its reads and writes in one transaction, and the reply is classified outside it
@@ -3218,15 +3218,18 @@ Turns without a service request: do pending context/planning work, then keep the
         // open past its deadline) or a no-plan release; planning resolved or superseded grants no implementation permission
         const nonBlocking = planning !== undefined && (planning.resolution === "timeout" || planning.resolution === "no_plan" ||
           planning.state === "open" && (yield* Clock.currentTimeMillis) >= planning.deadline);
-        const sending = {...introduction, ...(nonBlocking ? {text: workflowIntroductionText(task, false, true)} : {}), commandId: introduction.commandId ?? `supervisor-workflow:${introduction.messageId}`, state: "sending" as const, dispatchMode: mode, targetRunId: mode.type === "steer_active" ? mode.targetRunId : null};yield* requests.saveIntroduction(sending);
-        return {_tag: "Initiate", initiate: Effect.map(operate.initiate("orchestration.dispatchCommand", {type: "message.dispatch", commandId: sending.commandId, messageId: introduction.messageId,
-          threadId: task.threadId, text: sending.text, attachments: [], createdBy: "system", creationSource: "server",
-          dispatchMode: mode}), (flight) => ({
+        const sending = {...introduction, ...(nonBlocking ? {text: workflowIntroductionText(task, false, true)} : {}), commandId: introduction.commandId ?? `supervisor-workflow:${introduction.messageId}`, state: "sending" as const, dispatchMode: mode, targetRunId: mode.type === "steer_active" ? mode.targetRunId : null};
+        // an introduction whose command is invalid is not sent and records nothing
+        const command = yield* dispatch.prepare({_tag: "MessageDispatch", commandId: sending.commandId, messageId: introduction.messageId, threadId: task.threadId,
+          text: sending.text, dispatchMode: mode}).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!command) return {_tag: "Answer", value: undefined};
+        yield* requests.saveIntroduction(sending);
+        return {_tag: "Initiate", initiate: Effect.map(command.initiate(), (flight) => ({
           // the classification writes are plain statements: a failed one is a defect of the in-flight operation, as a thrown write was
           result: Effect.gen(function* () {
-            const reply = yield* attempt(receiptOf(flight));
+            const reply = yield* attempt(flight.result);
             if (reply.ok) {yield* requests.saveIntroduction({...sending, state: "accepted", acceptedAt: yield* Clock.currentTimeMillis, visibilityMisses: 0});return;}
-            const definite = reply.cause instanceof SupervisorRpcError && reply.cause.definiteRejection;
+            const definite = reply.cause instanceof T3RequestError && reply.cause.definiteRejection;
             if (definite && mode.type === "steer_active") {
               const queued: WorkflowIntroduction = {...sending, state: "ready", messageId: `supervisor-notice:workflow:${task.id}:queue`, commandId: `supervisor-workflow:${task.id}:queue`,
                 dispatchMode: {type: "queue_after_active"}, targetRunId: null, error: null,

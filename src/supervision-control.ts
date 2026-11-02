@@ -1,4 +1,4 @@
-import { Cause, Clock, Context, Data, Deferred, Effect, Layer, Option } from "effect";
+import { Cause, Clock, Context, Data, Deferred, Effect, Layer } from "effect";
 import { genuineHumanMessage as genuineUserMessage, timestampMs } from "./domain.js";
 export {genuineHumanMessage as genuineUserMessage} from "./domain.js";
 import { GuidanceDb } from "./db.js";
@@ -12,10 +12,9 @@ import { SupervisionGate, SupervisionScopeService } from "./supervision-gate.js"
 import { SupervisorConversation } from "./supervisor-conversation.js";
 import { introductionOutcomeUnknown, SupervisorConversationStore } from "./supervisor-conversation-store.js";
 import type { SupervisionControlInfo } from "./supervisor-control-contract.js";
-import { NativeOperateRpc } from "./supervisor-native.js";
 import { mainConversation } from "./supervisor-scope.js";
 import { conversationOriginAllowed, projectRequesterPolicy } from "./task-requester.js";
-import { T3Client, type T3TransportError } from "./t3.js";
+import { T3Native, type T3InvalidInput, type T3ReadError } from "./t3-native/index.js";
 import type { ThreadPolicySettings } from "./thread-policy-contract.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "./thread-policy.js";
 import type { Projection, ThreadInfo } from "./types.js";
@@ -92,15 +91,15 @@ const makeSupervisionControl = Effect.gen(function* () {
   const gate = yield* SupervisionGate;
   const locks = yield* ScopeLocks;
   const source = yield* Store;
-  const t3 = yield* T3Client;
+  const native = yield* T3Native;
   const conversation = yield* SupervisorConversation;
   const ids = yield* SupervisorIds;
   // the sections stamp their time from the clock the service was built with
   const clock = yield* Clock.Clock;
-  const operateRpcAvailable = Option.isSome(yield* Effect.serviceOption(NativeOperateRpc));
+  const operateRpcAvailable = native.orchestration.commands !== null;
   const now = () => clock.currentTimeMillisUnsafe();
-  const projection = (threadId: string, cancel?: Deferred.Deferred<void>): Effect.Effect<Projection, T3TransportError | EvidenceReadCancelled> => {
-    const read = Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection);
+  const projection = (threadId: string, cancel?: Deferred.Deferred<void>): Effect.Effect<Projection, T3ReadError | T3InvalidInput | EvidenceReadCancelled> => {
+    const read = Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection);
     return cancel === undefined ? read : Effect.raceFirst(read, Effect.andThen(Deferred.await(cancel), Effect.fail(new EvidenceReadCancelled())));
   };
   // the start read and its rejection are one transaction
@@ -155,7 +154,7 @@ const makeSupervisionControl = Effect.gen(function* () {
     operation ? {threadId, operationId, status: operation.status, reason: operation.reason}
       : {threadId, operationId, status: "denied" as const, reason: "No matching Start operation is recorded. Nothing was replayed."});
   const evaluateStart = (threadId: string, operationId: string, route: "agent" | "ui", userMessageId: string | null, runId: string | null,
-    cancel: Deferred.Deferred<void> | undefined, decided: (result: SupervisionStartResult) => void) => Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, StoreError | T3TransportError | EvidenceReadCancelled | SupervisionStoreError> {
+    cancel: Deferred.Deferred<void> | undefined, decided: (result: SupervisionStartResult) => void) => Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, StoreError | T3ReadError | T3InvalidInput | EvidenceReadCancelled | SupervisionStoreError> {
     if (!threadId || threadId.length > 512 || !operationId || operationId.length > 512 || /[\s\x00-\x1f\x7f]/u.test(operationId)) return {status: "invalid", reason: "invalid_start_arguments"};
     // a bound Supervisor's own call resumes its stopped main; it never starts supervision of another chat
     const bound = route === "agent" && userMessageId && runId ? yield* store.bindingForSupervisor(threadId) : null;
@@ -234,7 +233,7 @@ const makeSupervisionControl = Effect.gen(function* () {
    * call must answer the cited message, the latest human message of its conversation, written after the Stop and the latest Enable.
    */
   const evaluateResume = (binding: BindingRecord, operationId: string, userMessageId: string, runId: string, cancel: Deferred.Deferred<void> | undefined,
-    decided: (result: SupervisionStartResult) => void) => Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, StoreError | T3TransportError | EvidenceReadCancelled | SupervisionStoreError> {
+    decided: (result: SupervisionStartResult) => void) => Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult, StoreError | T3ReadError | T3InvalidInput | EvidenceReadCancelled | SupervisionStoreError> {
     const mainThreadId = binding.mainThreadId;
     if (binding.state !== "ready") return {status: "denied", reason: "supervisor_binding_not_ready"};
     const catalog = yield* source.catalog();

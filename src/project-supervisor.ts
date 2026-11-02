@@ -14,7 +14,7 @@ import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs, workspacePre
 import { ThreadPolicyStore } from "./thread-policy.js";
 import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type InterpretationSourceMessage, type InterpretationSources, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
 import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } from "./task-requester.js";
-import { modelSelection, NativeOperateRpc, NativeRpc, NativeShell, sameModel, supervisorModels, validModelSelection, SupervisorRpcError } from "./supervisor-native.js";
+import { modelSelection, sameModel, validModelSelection } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
 import { prepareWorkflowRequest } from "./supervisor-workflow.js";
 import { interpretationChecks, interpretationSubmissionEvidence, readInterpretationReceipt, taskPendingStart, taskReceiptOwner, workflowWriteReceiptsTable,
@@ -27,7 +27,7 @@ import { ProjectDefinitions, type DefinitionCheckoutTarget, type DefinitionCheck
   type ProjectDefinitionSetupInput, type ProjectDefinitionSetupOutcome } from "./project-definitions.js";
 import type { ProjectDefinitionSnapshot } from "./project-definitions-contract.js";
 import { Store, type StoreError } from "./store.js";
-import { T3Client, T3TransportError } from "./t3.js";
+import { T3Native, T3ReadError, T3RequestError, type T3InvalidInput } from "./t3-native/index.js";
 import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "./types.js";
 import { SupervisorConversation } from "./supervisor-conversation.js";
 import { SupervisorCompaction } from "./supervisor-compaction.js";
@@ -105,7 +105,7 @@ export class SupervisorModelMissing extends Data.TaggedError("SupervisorModelMis
 export class SharedCheckEnded extends Data.TaggedError("SharedCheckEnded") {}
 
 export type EnsureBindingError = SupervisionDisabled | SupervisorCredentialMissing | MainConversationUnavailable | SupervisorReadUnavailable | InvalidSupervisorBinding |
-  SupervisorMissing | SupervisorCreationNeedsRetry | SupervisorCreationUncertain | ProjectUnavailable | StoreError | T3TransportError | Effect.Error<SupervisorLifecycle["Service"]["readMain"]> |
+  SupervisorMissing | SupervisorCreationNeedsRetry | SupervisorCreationUncertain | ProjectUnavailable | StoreError | T3ReadError | T3InvalidInput | Effect.Error<SupervisorLifecycle["Service"]["readMain"]> |
   SupervisionStoreError;
 
 const enabledAgainReason = "Supervision was enabled again after this request; only a request written after the Enable is supervised.";
@@ -158,7 +158,7 @@ type Attempt<A> = {readonly ok: true; readonly value: A} | {readonly ok: false; 
 const attempt = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<Attempt<A>, never, R> =>
   Effect.catchCauseIf(Effect.map(effect, (value): Attempt<A> => ({ok: true, value})), (cause) => !Cause.hasInterruptsOnly(cause),
     (cause) => Effect.succeed<Attempt<A>>({ok: false, cause: Cause.squash(cause)})) as Effect.Effect<Attempt<A>, never, R>;
-const notFound = (cause: unknown): boolean => cause instanceof T3TransportError && cause.httpStatus === 404;
+const notFound = (cause: unknown): boolean => cause instanceof T3ReadError && cause.httpStatus === 404;
 
 // a recorded Start row: its stored document keeps every field, with the ones its readers rely on checked
 
@@ -230,7 +230,7 @@ type SaveOutcome<S extends string, C> = {status: S; message: string; control: C}
 export interface ProjectSupervisorShape {
   // one supervision pass (today's runOnce): activation boundary, Starts, discovery, the binding batches and observation; the root
   // loop bounds it (120 s) and spaces the passes (5 s)
-  readonly cycle: Effect.Effect<void, StoreError | SupervisorRpcError | SupervisionStoreError>;
+  readonly cycle: Effect.Effect<void, StoreError | T3RequestError | SupervisionStoreError>;
   // reads
   readonly noProjectControl: () => Effect.Effect<{generation: number; mode: "off" | "on_request" | "automatic"; globallyEnabled: boolean}, ProjectSupervisorStoreError>;
   readonly workflowLocator: (projectId: string, mainThreadId: string) => Effect.Effect<ProjectSupervisorWorkflowLocator | null, ProjectSupervisorStoreError>;
@@ -244,10 +244,10 @@ export interface ProjectSupervisorShape {
   // writes, each committing in an admission section after its last read
   readonly saveNoProjectControl: (input: NoProjectControlInput) => Effect.Effect<SaveOutcome<"saved" | "conflict" | "unavailable", Effect.Success<ReturnType<ProjectSupervisorShape["noProjectControl"]>>>, SupervisionStoreError>;
   readonly saveGlobalDefinitionsControl: (input: GlobalDefinitionsControlInput) => Effect.Effect<SaveOutcome<"saved" | "conflict" | "unavailable" | "uncertain", GlobalDefinitionsControlInfo>, SupervisionStoreError>;
-  readonly setup: (input: SupervisionSetupInput) => Effect.Effect<SetupResult, StoreError | ProjectUnavailable | T3TransportError | SupervisionStoreError>;
+  readonly setup: (input: SupervisionSetupInput) => Effect.Effect<SetupResult, StoreError | ProjectUnavailable | T3ReadError | T3InvalidInput | SupervisionStoreError>;
   // a folder check its caller joined and that ended without a result fails the save (SharedCheckEnded)
   readonly saveControl: (input: SupervisionControlInput) => Effect.Effect<SaveOutcome<"saved" | "conflict" | "unavailable" | "setup_required", ControlInfo>, StoreError | ProjectUnavailable | SharedCheckEnded | SupervisionStoreError>;
-  readonly save: (input: ProjectSupervisorSaveInput) => Effect.Effect<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | SupervisorRpcError | SupervisionStoreError>;
+  readonly save: (input: ProjectSupervisorSaveInput) => Effect.Effect<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | T3RequestError | SupervisionStoreError>;
   readonly setChatSupervision: (input: ProjectSupervisorChatSupervisionInput) => Effect.Effect<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | SupervisionStoreError>;
   readonly retry: (input: ProjectSupervisorRetryInput) => Effect.Effect<ProjectSupervisorSaveOutcome, RetryError>;
 }
@@ -257,7 +257,7 @@ type SetupOptions = {projectId: string; generation: number; available: boolean; 
 type SetupResult = {status: "saved" | "conflict" | "unavailable" | "uncertain";
   message: string; control: ControlInfo; workspaceRoot: string | null; branch: string | null};
 type Candidates = {exceptions: string[]; candidates: Array<{id: string; projectId: string; title: string; updatedAt: string | null; active: boolean; excluded: boolean}>; message: string};
-type RetryError = StoreError | ProjectUnavailable | InvalidMainConversation | SupervisorRpcError | T3TransportError | Effect.Error<SupervisorLifecycle["Service"]["readMain"]> | SupervisionStoreError;
+type RetryError = StoreError | ProjectUnavailable | InvalidMainConversation | T3RequestError | T3ReadError | T3InvalidInput | Effect.Error<SupervisorLifecycle["Service"]["readMain"]> | SupervisionStoreError;
 
 // the internal steps a unit seam drives on its own: the binding creation and one interpretation dispatch with its final checks
 export interface ProjectSupervisorSeams {
@@ -285,9 +285,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const gate = yield* SupervisionGate;
   const locks = yield* ScopeLocks;
   const source = yield* Store;
-  const t3 = yield* T3Client;
-  const readRpc = yield* NativeRpc;
-  const shell = yield* NativeShell;
+  const native = yield* T3Native;
   const ids = yield* SupervisorIds;
   const conversation = yield* SupervisorConversation;
   const lifecycle = yield* SupervisorLifecycle;
@@ -296,8 +294,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const transport = yield* HelperTransport;
   // the sections stamp their time from the clock the service was built with
   const clock = yield* Clock.Clock;
-  // the operate credential, the team runtime and the team controller are absent where a scope has none of them
-  const operate = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  // the operate credential's commands, the team runtime and the team controller are absent where a scope has none of them
+  const commands = native.orchestration.commands;
   const teamRuntime = Option.getOrNull(yield* Effect.serviceOption(SupervisorTeamRuntime));
   const teamEffects = Option.getOrNull(yield* Effect.serviceOption(SupervisorTeamController));
   const definitions = options.definitions ?? Option.getOrNull(Option.map(yield* Effect.serviceOption(ProjectDefinitions), definitionsAccess));
@@ -324,9 +322,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
 
   // one admitted block: its guard reads and writes as one guidance transaction in the admission section
   const admitted = <A, E, R>(block: (guard: GateGuard) => Effect.Effect<A, E, R>) => gate.admit((guard) => transaction(block(guard)));
-  const projection = (threadId: string): Effect.Effect<Projection, T3TransportError> => Effect.map(t3.projection(threadId), (snapshot) => snapshot.projection);
+  const projection = (threadId: string): Effect.Effect<Projection, T3ReadError | T3InvalidInput> =>
+    Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection);
   // the models T3 advertises now, read on each use
-  const models = Effect.suspend(() => Effect.map(readRpc.call("server.getConfig", {}), supervisorModels));
+  const models = native.orchestration.config;
   const projectEnabled = (projectId: string, mainThreadId?: string): Effect.Effect<boolean, SupervisionStoreError> => scope.projectEnabled(projectId, mainThreadId);
   const project = (projectId: string) => Effect.gen(function* () {
     const catalog = yield* source.catalog();
@@ -342,7 +341,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     const current = yield* noProjectControl();
     if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "No Project mode changed. Reload before saving.", control: current};
     const unconfirmed = () => Effect.map(noProjectControl(), (control) => ({status: "unavailable" as const, message: "Mode was not confirmed. Reload before saving again.", control}));
-    const boundary = yield* attempt(shell.baseline);
+    const boundary = yield* attempt(native.orchestration.shellBaseline);
     if (!boundary.ok) return yield* unconfirmed();
     // after the boundary read, the mode save runs as one admission section
     return yield* admitted(() => Effect.gen(function* () {
@@ -552,7 +551,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     const fresh = yield* Deferred.make<SupervisorBaseline, SharedCheckEnded>();
     const existing = yield* Ref.modify(activationBoundaryInFlight, (current) => current ? [current, current] as const : [null, fresh] as const);
     if (existing) return yield* Deferred.await(existing);
-    return yield* shell.baseline.pipe(Effect.timeout("30 seconds"), Effect.onExit((exit) => Effect.andThen(
+    return yield* native.orchestration.shellBaseline.pipe(Effect.timeout("30 seconds"), Effect.onExit((exit) => Effect.andThen(
       Ref.update(activationBoundaryInFlight, (current) => current === fresh ? null : current),
       Exit.isSuccess(exit) ? Deferred.succeed(fresh, exit.value) : Deferred.fail(fresh, new SharedCheckEnded()))));
   });
@@ -691,7 +690,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     return {projectId, generation: current.generation, available: checkouts.length > 0,
       message: checkouts.length ? "Choose a registered checkout and confirm its current branch before creating .t3-supervisor files." : "No eligible registered checkout is available.", checkouts};
   });
-  const setup = (input: SupervisionSetupInput): Effect.Effect<SetupResult, StoreError | ProjectUnavailable | T3TransportError | SupervisionStoreError> => Effect.gen(function* () {
+  const setup = (input: SupervisionSetupInput): Effect.Effect<SetupResult, StoreError | ProjectUnavailable | T3ReadError | T3InvalidInput | SupervisionStoreError> => Effect.gen(function* () {
     const current = yield* controlFor(input.projectId);
     if (!store.scopeCompatible) return {status: "unavailable" as const, message: "Supervisor state is unavailable; no setup was made.", control: current, workspaceRoot: null, branch: null};
     if (current.generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload checkout options before setup.", control: current, workspaceRoot: null, branch: null};
@@ -709,7 +708,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if ((yield* store.control(input.projectId)).generation !== input.expectedGeneration) return {status: "conflict" as const, message: "Supervision changed in another window. Reload checkout options before setup.", control: yield* store.control(input.projectId), workspaceRoot: null, branch: null};
     let baseline: SupervisorBaseline | undefined;
     if (!current.enabled && current.globallyEnabled) {
-      const boundary = yield* attempt(shell.baseline);
+      const boundary = yield* attempt(native.orchestration.shellBaseline);
       if (!boundary.ok) return {status: "unavailable" as const, message: "The enable boundary could not be captured; no files were changed.", control: yield* store.control(input.projectId), workspaceRoot: null, branch: null};
       baseline = boundary.value;
     }
@@ -826,7 +825,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       return needsBoundary ? null : yield* commit(undefined);
     }));
     if (decided) return decided;
-    const boundary = yield* attempt(shell.baseline);
+    const boundary = yield* attempt(native.orchestration.shellBaseline);
     if (!boundary.ok) return {status: "unavailable" as const, message: "The enable boundary could not be captured; no change was made.", control: yield* visible()};
     // after the boundary read, the save runs as one admission section
     return yield* admitted(() => commit(boundary.value));
@@ -858,7 +857,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   });
   const ensureBinding = (projectId: string, mainThreadId: string, title: string): Effect.Effect<BindingRecord, EnsureBindingError> => Effect.gen(function* () {
     if (!(yield* projectEnabled(projectId, mainThreadId))) return yield* new SupervisionDisabled();
-    if (!operate) return yield* new SupervisorCredentialMissing();
+    if (!commands) return yield* new SupervisorCredentialMissing();
     const {catalog} = yield* project(projectId);
     const main = yield* projection(mainThreadId);
     // after the main read, the scope and main rechecks and the reservation (or the retained binding) run as one admission section
@@ -896,7 +895,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (binding.state === "rejected" || (binding.creationAttempts ?? 0) >= 3) return yield* new SupervisorCreationNeedsRetry();
     const freshMain = yield* lifecycle.readMain(binding);
     const reserved = binding;
-    const rpc = operate;
+    // the launch of the retained identity in the Supervisor's profile; a reservation that cannot form a valid launch is not sent
+    const launch = yield* commands.launchThread.prepare({commandId: `supervisor-create:${reserved.threadId}:${reserved.generation}`, threadId: reserved.threadId,
+      projectId, title: reserved.title, modelSelection: reserved.initialModel}).pipe(Effect.catch(() => Effect.succeed(null)));
+    if (!launch) return yield* new InvalidSupervisorBinding();
     // the fresh scope recheck, the attempt receipt and the launch command run in one admission section, its reads and writes one
     // transaction; the reply and the readback of the new conversation are classified outside it
     const launched = yield* admitSend(gate, {
@@ -910,9 +912,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         // the classification writes are plain statements of the in-flight operation; a failed one is its defect, as a thrown write was
         const uncertain = (providerDisabled: boolean, definite: boolean) => store.setBinding({...attempted, state: definite ? "rejected" : "uncertain",
           creationMessage: providerDisabled ? "The Supervisor provider is disabled for this project in T3. Save another model or enable the provider, then retry native access." : "Conversation creation could not be confirmed. Retry native access to inspect its retained identity."}).pipe(Effect.orDie);
-        return {_tag: "Initiate", initiate: Effect.map(rpc.initiate("orchestration.launchThread", {commandId: `supervisor-create:${attempted.threadId}:${attempted.generation}`, threadId: attempted.threadId,
-          creationSource: "server", projectId, title: attempted.title, generateTitle: false, modelSelection: attempted.initialModel,
-          runtimeMode: "full-access", interactionMode: "default", workspaceStrategy: {type: "root"}}), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(launch.initiate(), (flight) => ({
           result: Effect.gen(function* () {
             const outcome = yield* attempt(Effect.gen(function* () {
               yield* flight.result;
@@ -922,7 +922,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             }));
             if (outcome.ok) return {_tag: "Ready" as const, binding: outcome.value};
             const cause = outcome.cause;
-            yield* uncertain(cause instanceof SupervisorRpcError && cause.providerDisabled, cause instanceof SupervisorRpcError && cause.definiteRejection);
+            yield* uncertain(cause instanceof T3RequestError && cause.providerDisabled, cause instanceof T3RequestError && cause.definiteRejection);
             return {_tag: "Uncertain" as const};
           }).pipe(Effect.onInterrupt(() => uncertain(false, false))),
           release: flight.release,
@@ -988,7 +988,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const overview = (page: OverviewPage) => Effect.gen(function* () {
     const catalog = yield* source.catalog();
     yield* scope.rememberCatalog(catalog.projects.map(item => item.project), catalog.threads);
-    const read = readDashboardOverview({page, catalog, available: store.scopeCompatible && Boolean(operate), observedAt: now()}).pipe(Effect.provideContext(readServices));
+    const read = readDashboardOverview({page, catalog, available: store.scopeCompatible && Boolean(commands), observedAt: now()}).pipe(Effect.provideContext(readServices));
     return yield* (workflows ? Effect.provideService(read, WorkflowStateStore, workflows) : read);
   });
   const snapshot = (projectId: string, mainThreadId: string | null = null): Effect.Effect<ProjectSupervisorInfo, StoreError | ProjectUnavailable | InvalidMainConversation | SupervisionStoreError> => Effect.gen(function* () {
@@ -1000,7 +1000,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         !((yield* scope.eligible(selected, catalog.threads)) || ((yield* scope.supervisionStopped(mainThreadId)) || (yield* store.binding(projectId, mainThreadId))) && scope.mainShape(selected))) return yield* new InvalidMainConversation();
     }
     const binding = store.scopeCompatible && mainThreadId ? yield* store.binding(projectId, mainThreadId) : null;
-    let selection: SupervisorModelSelection | null = null;let available = Boolean(operate && store.scopeCompatible);let message = binding ? "Supervisor conversation is being prepared." : "The Supervisor conversation will be created automatically for the first new task.";
+    let selection: SupervisorModelSelection | null = null;let available = Boolean(commands && store.scopeCompatible);let message = binding ? "Supervisor conversation is being prepared." : "The Supervisor conversation will be created automatically for the first new task.";
     let advertised: ProjectSupervisorInfo["models"] = [];
     const access = yield* attempt(Effect.gen(function* () {
       advertised = yield* models;
@@ -1020,7 +1020,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           }
         }
       }
-      if (!operate) message = "Project supervision needs a dedicated T3 read/operate credential through deployment setup.";
+      if (!commands) message = "Project supervision needs a dedicated T3 read/operate credential through deployment setup.";
     }));
     if (!access.ok) {available = false;message = "T3 Supervisor access is unavailable. Existing settings and conversation identity are retained.";}
     const teamData = binding ? yield* readTeamViewData(binding).pipe(Effect.provideContext(readServices)) : null;
@@ -1049,9 +1049,9 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
         ...(definitionReview ? {definitionReview} : {})}))};
   });
-  const save = (input: ProjectSupervisorSaveInput): Effect.Effect<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | SupervisorRpcError | SupervisionStoreError> => Effect.gen(function* () {
+  const save = (input: ProjectSupervisorSaveInput): Effect.Effect<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | T3RequestError | SupervisionStoreError> => Effect.gen(function* () {
     if (!store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
-    return yield* locks.withLock(input.projectId)<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | SupervisorRpcError | SupervisionStoreError, never>(Effect.gen(function* () {
+    return yield* locks.withLock(input.projectId)<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | T3RequestError | SupervisionStoreError, never>(Effect.gen(function* () {
       yield* project(input.projectId);
       if (input.mainThreadId) yield* snapshot(input.projectId, input.mainThreadId);
       // the settings save inside the caller's section and transaction; null when it committed
@@ -1111,8 +1111,8 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
    * and writes one transaction; its reply is classified outside it under the original identity, an interrupted wait as uncertain.
    */
   const dispatch = (job: TaskRecord, fresh: {readonly source: Projection} | null) => Effect.gen(function* () {
-    if (!operate) return;
-    const rpc = operate;
+    if (!commands) return;
+    const dispatchCommand = commands.dispatchCommand;
     const root = yield* attempt(projection(job.supervisorThreadId));
     if (!root.ok || hasUnansweredHuman(root.value)) return;
     yield* admitSend(gate, {
@@ -1132,10 +1132,13 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
         if (!job.attempt || job.attempt.key.requestMessageId !== job.messageId || job.attempt.key.requestTextHash !== interpretationTextHash(job.requestText))
           return {_tag: "Answer", value: undefined};
         if (fresh && (yield* beforeBoundary(job, fresh.source))) {yield* complete(job, "expired", null, enabledAgainReason);return {_tag: "Answer", value: undefined};}
+        // a request whose command is invalid is never sent, as a request that pins another text
+        const prepared = yield* dispatchCommand.prepare({_tag: "MessageDispatch", commandId: `supervisor-objective:${job.attempt.attemptId}`, messageId: job.messageId,
+          threadId: job.supervisorThreadId, text: job.requestText, dispatchMode: {type: "queue_after_active"}}).pipe(Effect.catch(() => Effect.succeed(null)));
+        if (!prepared) return {_tag: "Answer", value: undefined};
         // the classification writes are plain statements of the in-flight operation; a failed one is its defect, as a thrown write was
         const uncertain = () => store.saveTask({...job, status: "uncertain", reason: "Interpretation dispatch is uncertain; retry native access to reconcile the original request identity.", updatedAt: now()}).pipe(Effect.orDie);
-        return {_tag: "Initiate", initiate: Effect.map(rpc.initiate("orchestration.dispatchCommand", {type: "message.dispatch", createdBy: "system", creationSource: "server", commandId: `supervisor-objective:${job.attempt.attemptId}`,
-          threadId: job.supervisorThreadId, messageId: job.messageId, text: job.requestText, attachments: [], dispatchMode: {type: "queue_after_active"}}), (flight) => ({
+        return {_tag: "Initiate", initiate: Effect.map(prepared.initiate(), (flight) => ({
           result: Effect.gen(function* () {
             const reply = yield* attempt(flight.result);
             if (reply.ok) {
@@ -1143,7 +1146,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
               yield* interpretationPhase("dispatch_admitted", attemptFields(job));return;
             }
             const cause = reply.cause;
-            if (cause instanceof SupervisorRpcError && cause.definiteRejection) yield* completeAdmitted(job, "unavailable", null, cause.providerDisabled ? "The Supervisor provider is disabled for this project in T3. Choose another model or enable the provider; other tasks can continue." : "T3 definitively rejected the interpretation request. Other tasks can continue.").pipe(Effect.orDie);
+            if (cause instanceof T3RequestError && cause.definiteRejection) yield* completeAdmitted(job, "unavailable", null, cause.providerDisabled ? "The Supervisor provider is disabled for this project in T3. Choose another model or enable the provider; other tasks can continue." : "T3 definitively rejected the interpretation request. Other tasks can continue.").pipe(Effect.orDie);
             else yield* uncertain();
           }).pipe(Effect.onInterrupt(() => uncertain())),
           release: flight.release,
@@ -1405,10 +1408,13 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   });
   // the full re-verification of a recorded submission's retained proof against the bound root's current projection and item detail
   const reverifySubmission = (job: TaskRecord, receipt: InterpretationReceipt): Effect.Effect<InterpretationProofVerdict, SupervisionStoreError> => Effect.gen(function* () {
-    const read = yield* attempt(Effect.all([projection(job.supervisorThreadId), readRpc.call("orchestration.getTurnItem", {threadId: job.supervisorThreadId, itemId: receipt.proof.itemId})]));
+    // the reply's item as the verifier receives it; no item, or a reply that carries none, is no detail
+    const item = native.orchestration.turnItem({threadId: job.supervisorThreadId, itemId: receipt.proof.itemId}).pipe(
+      Effect.map((view) => view._tag === "Absent" ? null : view.item),
+      Effect.catchTag("T3RequestError", (error) => error.malformedReply ? Effect.succeed(null) : Effect.fail(error)));
+    const read = yield* attempt(Effect.all([projection(job.supervisorThreadId), item]));
     if (!read.ok) return {status: "pending_proof", code: "native_item_detail_unavailable"};
-    const [supervisorNow, item] = read.value;
-    const detail = typeof item === "object" && item !== null && "item" in item ? (item as {item: unknown}).item : null;
+    const [supervisorNow, detail] = read.value;
     const rawArguments = decodeSubmittedArguments(receipt.argumentsCanonical);
     if (Exit.isFailure(rawArguments)) return {status: "denied", code: "native_proof_changed"};
     const binding = yield* store.binding(job.projectId, job.threadId);
@@ -1434,7 +1440,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     if (!(yield* projectEnabled(binding.projectId, binding.mainThreadId))) return;
     const bound = binding;
     // a confirmed missing Supervisor's binding write is a send guard input: one admission section
-    const supervisor = yield* projection(binding.threadId).pipe(Effect.tapError((cause) => cause instanceof T3TransportError && cause.httpStatus === 404 && bound.state === "ready"
+    const supervisor = yield* projection(binding.threadId).pipe(Effect.tapError((cause) => cause instanceof T3ReadError && cause.httpStatus === 404 && bound.state === "ready"
       ? admitted(() => store.setBinding({...bound, state: "missing"})) : Effect.void));
     yield* compaction.observe(binding, supervisor);
     // after the Supervisor read, its binding and model bookkeeping, the in-flight boundary closure and the path decision run as one
@@ -1617,7 +1623,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   const wakeScope = (target: InterpretationWakeScope) => wakePass(target).pipe(
     Effect.repeat({schedule: Schedule.spaced("250 millis").pipe(Schedule.upTo({duration: "300 seconds"})), while: (pending) => pending}), Effect.asVoid);
   const checkClosedMainLifecycle = (binding: BindingRecord, threads: readonly ThreadInfo[]) => Effect.gen(function* () {
-    if (!operate) return;
+    if (!commands) return;
     const current = yield* store.binding(binding.projectId, binding.mainThreadId);
     if (!current || current.threadId !== binding.threadId || current.state !== "ready") return;
     const read = yield* attempt(lifecycle.readMain(current));
@@ -1746,10 +1752,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
     }));
   });
   const cycle = Effect.gen(function* () {
-    if (!operate || !store.scopeCompatible) return;
+    if (!commands || !store.scopeCompatible) return;
     const masterEnabled = (yield* store.control(null)).enabled;
     if (masterEnabled && (yield* store.baseline()) === null) {
-      const boundary = yield* shell.baseline;
+      const boundary = yield* native.orchestration.shellBaseline;
       // the activation boundary is an input of the dispatch guard's boundary check: one admission section
       yield* admitted(() => store.baseline(boundary));
     }
@@ -1834,7 +1840,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       if (!(yield* scope.scopeEnabled(input.projectId, input.mainThreadId, "reconcile"))) return {status: "unavailable", message: "Enable global and project supervision before retrying native work.", snapshot: null};
       if (settings.generation !== input.expectedGeneration) return {status: "conflict", message: "Settings changed. Refresh before retrying native access.", snapshot: null};
       const binding = yield* store.binding(input.projectId, input.mainThreadId);
-      if (!binding || !operate) return {status: "unavailable", message: "No Supervisor conversation is available to reconcile.", snapshot: null};
+      if (!binding || !commands) return {status: "unavailable", message: "No Supervisor conversation is available to reconcile.", snapshot: null};
       if (binding.threadId !== input.threadId || binding.generation !== input.bindingGeneration ||
         (input.action === "replace") !== (binding.state === "missing")) return {status: "conflict", message: "The conversation state changed. Refresh and choose the intended recovery action again.", snapshot: null};
       const main = yield* lifecycle.readMain(binding);

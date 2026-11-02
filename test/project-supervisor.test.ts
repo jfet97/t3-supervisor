@@ -733,7 +733,7 @@ const interpretationRows = (fixture: PsxFixture) =>
 const crashWhileDispatching = (lateReply: "accepted" | "rejected") => Effect.gen(function* () {
   const fixture = yield* makeCrashFixture(crashSource);
   const reached = yield* Deferred.make<void>();
-  const release = yield* Deferred.make<{accepted: boolean}, SupervisorRpcError>();
+  const release = yield* Deferred.make<{sequence: number}, SupervisorRpcError>();
   fixture.setOperateHook((tag, payload) => {
     if (tag !== "orchestration.dispatchCommand" || payload.type !== "message.dispatch") return null;
     fixture.setOperateHook(null);
@@ -743,7 +743,7 @@ const crashWhileDispatching = (lateReply: "accepted" | "rejected") => Effect.gen
   const crashed = yield* Effect.flatMap(fixture.makeSupervisor(), (supervisor) => Effect.forkDetach(supervisor.cycle));
   yield* Deferred.await(reached);
   yield* fixture.restart();
-  yield* lateReply === "accepted" ? Deferred.succeed(release, {accepted: true}) : Deferred.fail(release, new SupervisorRpcError("rejected"));
+  yield* lateReply === "accepted" ? Deferred.succeed(release, {sequence: 21}) : Deferred.fail(release, new SupervisorRpcError("rejected"));
   yield* Fiber.await(crashed);
   const dispatching = yield* fixture.supervisorStore.task("source-thread");
   assert.ok(dispatching);

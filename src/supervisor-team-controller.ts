@@ -3,7 +3,7 @@ import type { SqlError } from "effect/sql";
 import {isRecord, workflowRequestHash, workflowToolInputSize, workflowToolInputMaxBytes} from "./workflow-write-evidence.js";
 import {WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel, type WorkflowLocator, type WorkflowReadCancelled} from "./workflow-write-controller.js";
 import {resolveSupervisorScope} from "./supervisor-scope.js";
-import {modelSelection, NativeOperateRpc, SupervisorRpcError, type NativeRpcShape} from "./supervisor-native.js";
+import {modelSelection} from "./supervisor-native.js";
 import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
 import {GuidanceDb} from "./db.js";
@@ -16,7 +16,7 @@ import {endedWithoutCompletion, maxHandoverReviewChain, notificationClosed, pars
 import {attributesHelperDelivery, HelperTransport, invalidReceipt} from "./supervisor-helper-transport.js";
 import {teamNotificationEvidence, teamNotificationText} from "./supervisor-team-runtime.js";
 import {admitSend, SupervisionGate, type AdmittedInFlight, type GateGuard, type SendPreparation} from "./supervision-gate.js";
-import type {T3TransportError} from "./t3.js";
+import {T3Native, T3RequestError, type OrchestrationCommand, type T3InvalidInput, type T3ReadError} from "./t3-native/index.js";
 import type {Projection, ThreadInfo} from "./types.js";
 
 const locator = {
@@ -212,8 +212,8 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
   const native = yield* WorkflowNativeAccess;
   const gate = yield* SupervisionGate;
   const transport = yield* HelperTransport;
-  // the operate credential; without it no guidance is dispatched
-  const rpc: NativeRpcShape | null = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  // the operate credential's commands; without them no guidance is dispatched
+  const commands = (yield* T3Native).orchestration.commands;
   // the service-lifetime in-flight steers (plan 3.11): closing its scope interrupts each one and runs its release
   const inFlight = yield* FiberMap.make<string, GuideDispatch>();
   // each admitted send registers under its own key, so a concurrent duplicate is answered from the durable receipt (b) and
@@ -448,7 +448,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       requestId, targetRunId: "", text: String(payload.text), attempts: []};
   };
   const findGuideRoute = Effect.fnUntraced(function* (binding: BindingRecord, payload: Payload, includeTarget: boolean,
-    cancel: WorkflowCallCancel): Effect.fn.Return<GuideRouteSearch, SupervisorRpcError | T3TransportError | WorkflowReadCancelled | SupervisionStoreError> {
+    cancel: WorkflowCallCancel): Effect.fn.Return<GuideRouteSearch, T3RequestError | T3ReadError | T3InvalidInput | WorkflowReadCancelled | SupervisionStoreError> {
     const threads = yield* native.listThreads(cancel);
     const nativeScope = resolveSupervisorScope(threads, binding.projectId, binding.mainThreadId, supervisors.ownedIds);
     const parents = parentMap(threads);
@@ -501,9 +501,8 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     return {...record, attempts, ...(attemptIndex === attempts.length - 1 ? {routedThreadId: attempt.routedThreadId,
       commandId: attempt.commandId, messageId: attempt.messageId, targetRunId: attempt.targetRunId} : {})};
   };
-  const guideCommand = (attempt: GuideAttempt, textValue: string): Record<string, unknown> =>
-    ({type: "message.dispatch", commandId: attempt.commandId, messageId: attempt.messageId,
-      threadId: attempt.routedThreadId, text: textValue, attachments: [], createdBy: "system", creationSource: "server",
+  const guideCommand = (attempt: GuideAttempt, textValue: string): OrchestrationCommand =>
+    ({_tag: "MessageDispatch", commandId: attempt.commandId, messageId: attempt.messageId, threadId: attempt.routedThreadId, text: textValue,
       dispatchMode: {type: "steer_active", targetRunId: attempt.targetRunId}});
   // the root escalation after a definite rejection: the attention event, the request settlement and the escalated receipt in one
   // transaction; it closes the guidance and enables no send, so it stays outside the admission section as at baseline
@@ -523,18 +522,20 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       return Effect.as(save(payload, binding, evidenceItemId, pending), pending);
     }));
   };
-  // the steer, started by its admission section and awaited outside it
-  const initiate = (operate: NativeRpcShape, command: Record<string, unknown>, cancel: WorkflowCallCancel): Effect.Effect<AdmittedInFlight<GuideDispatch>> =>
-    Effect.map(operate.initiate("orchestration.dispatchCommand", command, cancel), (flight) => ({
+  /**
+   * The steer of a command, prepared in its admission section, started there and awaited outside it; without the operate credential,
+   * or for a command that is invalid, the reserved attempt is not sent and stays unknown, as the baseline's failed call did.
+   */
+  const steer = (command: OrchestrationCommand, cancel: WorkflowCallCancel) => Effect.gen(function* (): Effect.fn.Return<SendPreparation<GuideDispatch>> {
+    const prepared = commands ? yield* commands.dispatchCommand.prepare(command).pipe(Effect.catch(() => Effect.succeed(null))) : null;
+    if (prepared === null) return {_tag: "Answer", value: unavailableDispatch};
+    return {_tag: "Initiate", initiate: Effect.map(prepared.initiate(cancel), (flight): AdmittedInFlight<GuideDispatch> => ({
       result: Effect.map(Effect.exit(flight.result), (exit): GuideDispatch => ({_tag: "Dispatched", exit})),
       release: flight.release,
-    }));
-  // a dispatch reply: accepted with a durable sequence, else the failure the baseline classified
-  const dispatchFailure = (exit: Exit.Exit<unknown, unknown>): unknown | null => {
-    if (Exit.isFailure(exit)) return Cause.squash(exit.cause);
-    return isRecord(exit.value) && Number.isSafeInteger(exit.value.sequence) ? null : new SupervisorRpcError("uncertain");
-  };
-  // without the operate credential the reserved attempt cannot be sent; it stays unknown, as the baseline's failed call did
+    }))};
+  });
+  // a dispatch reply: accepted with its validated receipt, else the failure the baseline classified
+  const dispatchFailure = (exit: Exit.Exit<unknown, unknown>): unknown | null => Exit.isFailure(exit) ? Cause.squash(exit.cause) : null;
   const unavailableDispatch: GuideDispatch = {_tag: "Dispatched", exit: Exit.die(new Error("native_guidance_unavailable"))};
 
   // after a definite rejection: a fresh route search and its records fall back to an escalation, as the baseline caught them;
@@ -609,7 +610,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
               assignmentRootThreadId: coverage.assignmentRootThreadId ?? binding.mainThreadId, assignmentEpoch: coverage.assignmentEpoch ?? 0}], parentById: parents});
         }
         yield* save(payload, binding, evidenceItemId, reserved);
-        return rpc ? {_tag: "Initiate", initiate: initiate(rpc, guideCommand(attempt, record.text), cancel)} : {_tag: "Answer", value: unavailableDispatch};
+        return yield* steer(guideCommand(attempt, record.text), cancel);
       })),
       // the original was interrupted after its initiation: its receipt keeps the reserved identities for reconciliation
       reconcile: Effect.map(currentGuide(payload, binding), (stored): GuideDispatch => ({_tag: "Stored", record: stored ?? reservation.record ?? record})),
@@ -629,14 +630,14 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     // the reply's records stay separate statements, as at baseline: they close or settle the reserved attempt and a fallback
     // send they continue is rechecked in its own admission section
     const rejectedResult = Effect.fnUntraced(function* (latest: GuideRecord, cause: unknown): Effect.fn.Return<GuideRecord, TeamDenied | SupervisionStoreError> {
-      if (cause instanceof SupervisorRpcError && cause.outcome === "rejected" && !cause.definiteRejection) {
+      if (cause instanceof T3RequestError && cause.outcome === "rejected" && !cause.definiteRejection) {
         const notSent: GuideRecord = {...changedAttempt(latest, attemptIndex, "not_sent", "native_transport_not_sent"),
           status: "not_sent", reason: "native_transport_not_sent"};
         yield* save(payload, binding, evidenceItemId, notSent);
         yield* team.setRequestState(binding, binding.threadId, record.requestId, 0, "settled");
         return notSent;
       }
-      const definite = cause instanceof SupervisorRpcError && cause.definiteRejection;
+      const definite = cause instanceof T3RequestError && cause.definiteRejection;
       if (definite && attemptIndex === 0 && attempt.routedThreadId === record.targetThreadId) {
         const rejected = {...changedAttempt(latest, attemptIndex, "rejected", "native_steer_rejected"), status: "needs_fallback" as const,
           reason: "native_steer_rejected"};
@@ -651,7 +652,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         yield* save(payload, binding, evidenceItemId, needsEscalation);
         return yield* finishRootEscalation(payload, binding, evidenceItemId, needsEscalation, true);
       }
-      const reason = cause instanceof SupervisorRpcError && cause.dispatchCommandFailure
+      const reason = cause instanceof T3RequestError && cause.dispatchCommandFailure
         ? "dispatch_failure_replay_requires_reconciliation" : "original_send_requires_reconciliation";
       const uncertain: GuideRecord = {...changedAttempt(latest, attemptIndex, "uncertain", reason), status: "uncertain", reason};
       yield* save(payload, binding, evidenceItemId, uncertain);
@@ -664,7 +665,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
         (cause) => Effect.flatMap(otherwiseLatest, (current) => rejectedResult(current, Cause.squash(cause)))));
     const first = dispatchFailure(dispatch.exit);
     if (first === null) return yield* accepted(prepared, Effect.succeed(prepared));
-    if (!(first instanceof SupervisorRpcError) || !first.dispatchCommandFailure) return yield* rejectedResult(prepared, first);
+    if (!(first instanceof T3RequestError) || !first.dispatchCommandFailure) return yield* rejectedResult(prepared, first);
     // a received dispatch-command failure: exactly one replay of the identical command, reserved durably before it is sent
     // again; like the baseline it rechecks no guard after the awaited reply (L-02)
     const replayState: {record: GuideRecord | null; reserved: boolean} = {record: null, reserved: false};
@@ -688,7 +689,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
           yield* save(payload, binding, evidenceItemId, replayState.record);
         }));
         if (!replayState.reserved || !replayState.record) return {_tag: "Answer", value: {_tag: "Stored", record: replayState.record ?? prepared}};
-        return rpc ? {_tag: "Initiate", initiate: initiate(rpc, command, cancel)} : {_tag: "Answer", value: unavailableDispatch};
+        return yield* steer(command, cancel);
       }),
       reconcile: Effect.map(currentGuide(payload, binding), (stored): GuideDispatch => ({_tag: "Stored", record: stored ?? replayState.record ?? prepared})),
     });
@@ -708,7 +709,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     const binding = proof.binding;
     const prior = yield* receipt(payload, binding);
     if (prior && prior.hash !== workflowRequestHash(payload)) return fail("operation_id_conflict");
-    if (!rpc) return fail("native_guidance_unavailable");
+    if (!commands) return fail("native_guidance_unavailable");
     if (payload.supervisorThreadId === binding.threadId) return fail("helper_guidance_only_use_main_dialogue");
     // the reads and records of the guide itself fall back to guidance_native_read_unavailable, as the baseline caught them; a
     // continued fallback, an escalation and a send fail the caller, as the baseline returned them unawaited
@@ -856,7 +857,7 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
 export class SupervisorTeamController extends Context.Service<SupervisorTeamController, SupervisorTeamControllerShape>()("t3-supervisor/SupervisorTeamController") {
   static readonly make = makeSupervisorTeamController;
   static readonly layer = (options: SupervisorTeamControllerOptions = {}): Layer.Layer<SupervisorTeamController, GuidanceStoreError,
-    WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore |
+    T3Native | WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore |
     SupervisorConversationStore> =>
     Layer.effect(SupervisorTeamController, makeSupervisorTeamController(options));
 }

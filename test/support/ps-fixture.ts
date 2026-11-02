@@ -13,16 +13,18 @@ import { Store, type StoreShape } from "../../src/store.js";
 import { SupervisionControl } from "../../src/supervision-control.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { SupervisionTeamLive } from "../../src/supervision-live.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError } from "../../src/supervisor-native.js";
+import { NativeOperateRpc, NativeShell, SupervisorRpcError } from "../../src/supervisor-native.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorTeamStore, type TeamBinding } from "../../src/supervisor-team-store.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
+import { T3Native } from "../../src/t3-native/index.js";
 import type { MessageInfo, ProjectInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
 import { effectiveIndex } from "../project-definitions-fixture.js";
 import {
   dataDirectory, definitionsService, interpretationSubmitter, nativeClient, openStores, type ConversationStores,
 } from "./g1a-conversation.js";
 import { execute as executeSql, query as querySql } from "./g12-stores.js";
+import { fakeNative } from "./native-access.js";
 import type { InterpretationSubmitResponse } from "../../src/interpretation-submission.js";
 import { submissionArguments, turnItemAnswer, type SubmissionItemOptions } from "./interpretation-submit.js";
 import { WorkflowNativeAccess, WorkflowWriteController, type WorkflowNativeAccessShape } from "../../src/workflow-write-controller.js";
@@ -303,6 +305,8 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
   let unknownDispatchMatching: ((payload: Record<string, unknown>) => boolean) | null = null;
   let providerDisabledDispatchMatching: ((payload: Record<string, unknown>) => boolean) | null = null;
   let acceptedDispatchesWithoutRun = 0;
+  // the sequence T3 commits each accepted message dispatch at
+  let dispatchSequence = 20;
   let unknownLaunchResponses = 0;
   let launchFailuresBeforeCreate = 0;
   let durableLaunchRejections = 0;
@@ -401,7 +405,8 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
         unknownLaunchResponses -= 1;
         throw new Error("simulated lost launch response after native creation");
       }
-      return { accepted: true };
+      // the pinned launch result: the thread, its projection and whether an existing thread was resumed
+      return { threadId, projection: projections.get(threadId), resumed: existing };
     }
     if (tag === "orchestration.dispatchCommand" && payload.type === "message.dispatch") {
       if (providerDisabledDispatches > 0) {
@@ -422,13 +427,14 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
       }
       const projection = projections.get(String(payload.threadId));
       assert.ok(projection);
+      dispatchSequence += 1;
       if (acceptedDispatchesWithoutRun > 0) {
         acceptedDispatchesWithoutRun -= 1;
-        return { accepted: true };
+        return { sequence: dispatchSequence };
       }
       addSupervisorRequest(projection, payload);
       delete projection.thread.settledAt;
-      return { accepted: true };
+      return { sequence: dispatchSequence };
     }
     if (tag === "orchestration.dispatchCommand" && payload.type === "thread.model-selection.set") {
       const projection = projections.get(String(payload.threadId));
@@ -477,13 +483,15 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     const workflows = Context.get(workflowContext, WorkflowStateStore);
     const base = Context.merge(current.context, workflowContext).pipe(Context.add(SupervisionScopeService, scope));
     const loader = {load: (projectId: string, threadId: string | null = null) => Effect.mapError(definitions.load(projectId, threadId), (error) => error instanceof Error ? error : new Error(String(error)))};
+    const shell = NativeShell.of({baseline: activationSnapshot, threads: Effect.die(new Error("unused native lineage read"))});
+    // the run's T3Native over the same fakes, built once and given to every service beside them
+    const native = yield* fakeNative({t3, read: readRpc, shell, operate: operateRpc, baseUrl: config.t3Url});
     const teamContext = yield* Layer.build(SupervisionTeamLive({baseUrl: config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
       Layer.succeedContext(base), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitionsService(loader)),
-      Layer.succeed(NativeRpc, readRpc), Layer.succeed(NativeOperateRpc, operateRpc), FetchHttpClient.layer)))).pipe(Effect.orDie);
+      Layer.succeed(NativeOperateRpc, operateRpc), Layer.succeed(T3Native, native), FetchHttpClient.layer)))).pipe(Effect.orDie);
     const locks = yield* Layer.build(ScopeLocks.layer);
-    const shell = NativeShell.of({baseline: activationSnapshot, threads: Effect.die(new Error("unused native lineage read"))});
     const clients = Context.merge(Context.merge(base, teamContext), locks).pipe(Context.add(Store, {catalog} as unknown as StoreShape),
-      Context.add(T3Client, t3), Context.add(NativeRpc, readRpc), Context.add(NativeShell, shell), Context.add(NativeOperateRpc, operateRpc));
+      Context.add(T3Native, native));
     const control = yield* SupervisionControl.make.pipe(Effect.provide(clients));
     const {service} = yield* ProjectSupervisor.makeUnit({definitions: definitionsAccessOf(definitions)}).pipe(
       Effect.provideService(SupervisionControl, control), Effect.provide(clients));

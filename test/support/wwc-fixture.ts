@@ -18,6 +18,7 @@ import { SupervisorTeamController, type SupervisorTeamControllerOptions } from "
 import { readTeamViewData, supervisorTeamView } from "../../src/supervisor-team-view.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/supervisor-workflow.js";
 import { T3Client, T3TransportError } from "../../src/t3.js";
+import { T3Native } from "../../src/t3-native/index.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import type { WorkflowOwner } from "../../src/workflow-state-contract.js";
@@ -26,6 +27,7 @@ import { workflowToolNames } from "../../src/workflow-write-evidence.js";
 import { forkObserved } from "./clock-sleeps.js";
 import { atWallClock, definitionsService, t3Projections, wallClock } from "./g1a-conversation.js";
 import { temporaryDirectory } from "./g12-stores.js";
+import { fakeNative } from "./native-access.js";
 import { effectiveIndex, projectIndex } from "../project-definitions-fixture.js";
 import { openWwcStores, sqlRun, type WwcStores } from "./wwc-stores.js";
 
@@ -283,12 +285,17 @@ export const openTeam = (fixture: WwcFixture, write: WorkflowWriteController["Se
   options: SupervisorTeamControllerOptions = {}) => Effect.gen(function* () {
   const built = builtWrites.get(write);
   if (!built) return yield* Effect.die(new Error("not a workflow write controller"));
+  const t3 = t3Projections((threadId) => {
+    const current = fixture.projections.get(threadId);
+    return current ? Effect.succeed(current) : Effect.fail(new T3TransportError("missing projection", 404));
+  });
+  // as before, the helper transport is given no operate client and the team controller the test's one, each through its own T3Native
+  const transportNative = yield* fakeNative({t3, baseUrl: "http://unused.invalid", http: rejectingFetch});
+  const controllerNative = yield* fakeNative({t3, operate: rpc, baseUrl: "http://unused.invalid", http: rejectingFetch});
   const transport = yield* HelperTransport.make({baseUrl: "http://unused.invalid"}).pipe(
     Effect.provideService(SupervisionGate, built.gate),
-    Effect.provideService(T3Client, t3Projections((threadId) => {
-      const current = fixture.projections.get(threadId);
-      return current ? Effect.succeed(current) : Effect.fail(new T3TransportError("missing projection", 404));
-    })),
+    Effect.provideService(T3Client, t3),
+    Effect.provideService(T3Native, transportNative),
     Effect.provide(rejectingFetch),
     Effect.provide(built.context),
     Effect.orDie,
@@ -299,7 +306,7 @@ export const openTeam = (fixture: WwcFixture, write: WorkflowWriteController["Se
     Effect.provideService(WorkflowNativeAccess, built.native),
     Effect.provideService(SupervisionGate, built.gate),
     Effect.provideService(HelperTransport, transport),
-    (effect) => rpc ? Effect.provideService(effect, NativeOperateRpc, rpc) : effect,
+    Effect.provideService(T3Native, controllerNative),
     Effect.orDie,
   );
 });

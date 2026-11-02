@@ -19,6 +19,7 @@ import { T3Client, type T3ClientShape, type T3TransportError } from "../../src/t
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { temporaryDataDirectory } from "./guidance-store-services.js";
+import { fakeNativeLayer } from "./native-access.js";
 
 // the team runtime, the helper transport and the conversation of the g3 suites, each built from its production layer over the
 // supervision stores of a temporary guidance database; the native side is a set of small effect fakes: the T3 projection
@@ -155,10 +156,14 @@ export const helperTransportUnit = (options: HelperTransportUnitOptions): Effect
     workflowEditingEnabled: () => Effect.succeed(true),
   });
   const http = FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, options.fetch ?? globalThis.fetch)));
-  const native = options.rpc ? Layer.succeed(NativeOperateRpc, operateRpc(options.rpc)) : Layer.empty;
+  const t3 = t3Projections(options.projection);
+  const operate = options.rpc ? operateRpc(options.rpc) : null;
+  const native = operate ? Layer.succeed(NativeOperateRpc, operate) : Layer.empty;
+  // the unit's T3Native over the same fakes and webhook fetch, its helper webhook paths resolved against the unit's base url
+  const access = fakeNativeLayer({t3, operate, baseUrl: options.baseUrl, http});
   const context = yield* Layer.build(HelperTransport.layer({baseUrl: options.baseUrl}).pipe(Layer.provide(Layer.mergeAll(
-    Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionGate, parts.gate), Layer.succeed(T3Client, t3Projections(options.projection)),
-    http, native)))).pipe(Effect.orDie);
+    Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionGate, parts.gate), Layer.succeed(T3Client, t3),
+    http, native, access)))).pipe(Effect.orDie);
   const transport = Context.get(context, HelperTransport);
   return {...transport, ...parts, transport, options};
 });
@@ -192,10 +197,12 @@ export const teamRuntimeUnit = (options: TeamRuntimeUnitOptions): Effect.Effect<
   const parts = unit ?? (yield* admission(options.stores, openGuard));
   const stopped = options.supervisionStopped;
   const scope = new SupervisionScope(unitSettings, {guidance: options.stores.guidance, supervisors: options.stores.store, policy: unusedPolicy}, true);
+  const t3 = t3Projections(options.projection);
   const context = yield* Layer.build(SupervisorTeamRuntime.layer({stopped: (_guard, mainThreadId) => Effect.sync(() => stopped?.(mainThreadId) === true)}).pipe(
     Layer.provide(Layer.mergeAll(
       Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionScopeService, scope), Layer.succeed(SupervisionGate, parts.gate),
-      Layer.succeed(T3Client, t3Projections(options.projection)),
+      // the runtime's T3Native over the same projections: as before, the runtime is given no read or operate client
+      fakeNativeLayer({t3, baseUrl: unitSettings.t3Url}),
       transport ? Layer.succeed(HelperTransport, transport) : Layer.empty,
       options.requests ? Layer.succeed(SupervisorConversationStore, options.requests) : Layer.empty))));
   return Context.get(context, SupervisorTeamRuntime);
@@ -237,17 +244,21 @@ export const supervisorConversationUnit = (options: SupervisorConversationUnitOp
   const gate = yield* makeSupervisionGate(scope).pipe(Effect.provide(stores.context));
   const projectOf = (mainThreadId: string) => Effect.map(stores.store.bindings(), (bindings) => bindings.find((item) => item.mainThreadId === mainThreadId)?.projectId ?? "");
   const runtimeParts = yield* admission(stores, openGuard);
+  const t3 = t3Projections(options.projection);
+  const operate = options.rpc ? operateRpc(options.rpc) : null;
   const team = yield* Layer.build(SupervisorTeamRuntime.layer({stopped: (_guard, mainThreadId) => Effect.gen(function* () {
     return callbacks.supervisionStopped(mainThreadId) || !callbacks.enabled(yield* projectOf(mainThreadId), mainThreadId);
   })}).pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(stores.context), Layer.succeed(SupervisionScopeService, scope), Layer.succeed(SupervisionGate, runtimeParts.gate),
-    Layer.succeed(T3Client, t3Projections(options.projection)),
+    // the runtime's T3Native over the same projections: as before, the runtime is given no read or operate client
+    fakeNativeLayer({t3, baseUrl: unitSettings.t3Url}),
     options.helperTransport ? Layer.succeed(HelperTransport, options.helperTransport) : Layer.empty))));
   const teamRuntime = Context.get(team, SupervisorTeamRuntime);
   const built = yield* Layer.build(SupervisorConversation.layer.pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(stores.context), Layer.succeed(SupervisionScopeService, scope), Layer.succeed(SupervisionGate, gate),
-    Layer.succeed(T3Client, t3Projections(options.projection)), Layer.succeed(SupervisorTeamRuntime, teamRuntime),
-    options.rpc ? Layer.succeed(NativeOperateRpc, operateRpc(options.rpc)) : Layer.empty))));
+    Layer.succeed(SupervisorTeamRuntime, teamRuntime),
+    // the conversation's T3Native over the same projections and operate client
+    fakeNativeLayer({t3, operate, baseUrl: unitSettings.t3Url})))));
   const conversation: SupervisorConversationShape = Context.get(built, SupervisorConversation);
   return {...conversation, conversation, teamRuntime, callbacks, requests: stores.requests, monitor: stores.monitor};
 });

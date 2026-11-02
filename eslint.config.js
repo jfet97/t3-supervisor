@@ -42,19 +42,9 @@ const t3Boundary = {
   // one module per line: each migration deletes exactly its own lines
   transitional: [
     "src/git-probe.ts",
-    "src/guidance.ts",
     "src/project-definitions.ts",
     "src/project-files.ts",
-    "src/project-supervisor.ts",
-    "src/supervision-control.ts",
-    "src/supervisor-compaction.ts",
-    "src/supervisor-conversation.ts",
     "src/supervisor-helper-transport.ts",
-    "src/supervisor-lifecycle.ts",
-    "src/supervisor-planning-controller.ts",
-    "src/supervisor-team-controller.ts",
-    "src/supervisor-team-runtime.ts",
-    "src/workflow-write-controller.ts",
   ],
 };
 

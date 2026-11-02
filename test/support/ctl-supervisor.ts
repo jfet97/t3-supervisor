@@ -15,10 +15,12 @@ import { SupervisionControl } from "../../src/supervision-control.js";
 import { SupervisionScope, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { SupervisionTeamLive } from "../../src/supervision-live.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
+import { NativeOperateRpc, NativeShell, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
 import { T3Client, type T3ClientShape } from "../../src/t3.js";
+import { T3Native } from "../../src/t3-native/index.js";
 import type { SupervisorSettings } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
+import { fakeNative } from "./native-access.js";
 
 // a thrown or failed activation read is an uncertain native call, as the baseline shell reported it; an interruption still propagates
 export const asRpcBaseline = (read: () => Effect.Effect<SupervisorBaseline, unknown>): Effect.Effect<SupervisorBaseline, SupervisorRpcError> =>
@@ -105,15 +107,17 @@ export const ctlSupervisor = (options: CtlSupervisorOptions) => Effect.gen(funct
   const workflows = Context.get(workflowContext, WorkflowStateStore);
   const base = Context.merge(stores.context, workflowContext).pipe(Context.add(SupervisionScopeService, scope));
   const t3 = t3Client(options.projection, options.snapshotSequence ?? 20);
+  const shell = NativeShell.of({baseline: options.baseline, threads: Effect.die(new Error("unused native lineage read"))});
+  // the run's T3Native over the same fakes, built once and given to every service beside them
+  const native = yield* fakeNative({t3, read: options.read, shell, operate: options.operate, baseUrl: config.t3Url});
   const team = yield* Layer.build(SupervisionTeamLive({baseUrl: config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(base), Layer.succeed(T3Client, t3),
     options.definitions ? Layer.succeed(ProjectDefinitions, teamDefinitions(options.definitions)) : Layer.empty,
-    Layer.succeed(NativeRpc, options.read), options.operate ? Layer.succeed(NativeOperateRpc, options.operate) : Layer.empty, FetchHttpClient.layer)))).pipe(Effect.orDie);
+    options.operate ? Layer.succeed(NativeOperateRpc, options.operate) : Layer.empty,
+    Layer.succeed(T3Native, native), FetchHttpClient.layer)))).pipe(Effect.orDie);
   const locks = yield* Layer.build(ScopeLocks.layer);
-  const shell = NativeShell.of({baseline: options.baseline, threads: Effect.die(new Error("unused native lineage read"))});
   const clients = Context.merge(Context.merge(base, team), locks).pipe(Context.add(Store, {catalog: options.catalog} as StoreShape),
-    Context.add(T3Client, t3), Context.add(NativeRpc, options.read), Context.add(NativeShell, shell),
-    (context) => options.operate ? Context.add(context, NativeOperateRpc, options.operate) : context);
+    Context.add(T3Native, native));
   const control = yield* SupervisionControl.make.pipe(Effect.provide(clients));
   const {service} = yield* ProjectSupervisor.makeUnit(options.definitions ? {definitions: accessOf(options.definitions)} : {}).pipe(
     Effect.provideService(SupervisionControl, control), Effect.provide(clients));

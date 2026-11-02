@@ -5,16 +5,17 @@ import { ProjectDefinitions } from "../../src/project-definitions.js";
 import { ProjectSupervisorStore } from "../../src/project-supervisor-store.js";
 import { SupervisionGate, SupervisionScope, SupervisionScopeService } from "../../src/supervision-gate.js";
 import { HelperTransport } from "../../src/supervisor-helper-transport.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, type NativeRpcShape } from "../../src/supervisor-native.js";
+import { NativeOperateRpc, NativeShell, type NativeRpcShape } from "../../src/supervisor-native.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
-import { T3Client, type T3TransportError } from "../../src/t3.js";
+import { T3Client, type T3ClientShape, type T3TransportError } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../../src/workflow-write-controller.js";
 import type { SupervisionStores } from "./g11-stores.js";
+import { fakeNativeLayer } from "./native-access.js";
 
 // the team controller of the g11 suites over its production layers, as src/supervision-live.ts composes a run: the workflow
 // state store over the scope's workflow-editing predicate, the admission gate over the scope predicates, the workflow native
@@ -42,17 +43,19 @@ const settings = (dataDirectory: string): SupervisorSettings =>
 
 const unused = (client: string) => Effect.die(new Error(`unused native ${client}`));
 
-// the read clients of the workflow native access and the helper transport over the fake
-const readClients = (native: TeamNative) => Layer.mergeAll(
-  Layer.succeed(NativeShell, {baseline: unused("shell baseline"), threads: Effect.suspend(native.listThreads)}),
-  Layer.succeed(T3Client, {watchThread: () => Effect.never, descriptor: () => unused("T3 descriptor"), watch: () => unused("T3 watch"),
-    projection: (threadId) => Effect.map(Effect.suspend(() => native.projection(threadId)), (projection) => ({snapshotSequence: 0, projection}))}),
-  Layer.succeed(NativeRpc, {
+// the read clients of the workflow native access and the helper transport over the fake, and the run's T3Native over them and the operate client
+const readClients = (native: TeamNative, operate: NativeRpcShape | null | undefined) => {
+  const shell = NativeShell.of({baseline: unused("shell baseline"), threads: Effect.suspend(native.listThreads)});
+  const t3: T3ClientShape = {watchThread: () => Effect.never, descriptor: () => unused("T3 descriptor"), watch: () => unused("T3 watch"),
+    projection: (threadId) => Effect.map(Effect.suspend(() => native.projection(threadId)), (projection) => ({snapshotSequence: 0, projection}))};
+  const read = {
     call: (tag, payload) => tag === "orchestration.getTurnItem" ? Effect.map(native.turnItem(String(payload.itemId)), (item) => ({item})) : unused(tag),
     initiate: (tag) => unused(tag),
-  } satisfies NativeRpcShape),
+  } satisfies NativeRpcShape;
   // the helper transport's webhook client; no suite posts
-  FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, () => Promise.reject(new Error("no webhook POST in the team controller suites"))))));
+  const http = FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, () => Promise.reject(new Error("no webhook POST in the team controller suites")))));
+  return Layer.mergeAll(Layer.succeed(T3Client, t3), fakeNativeLayer({t3, read, shell, operate, baseUrl: "http://unused.invalid", http}), http);
+};
 
 export type TeamControllerOptions = {
   // the operate client; without one no guidance is dispatched
@@ -80,7 +83,7 @@ export const teamControllers = (stores: SupervisionStores, policy: ThreadPolicyS
       Layer.provideMerge(workflows),
       Layer.provideMerge(scope),
       Layer.provideMerge(options.freshTeam ? Layer.fresh(SupervisorTeamStore.layer) : Layer.empty),
-      Layer.provideMerge(Layer.mergeAll(readClients(native), options.rpc ? Layer.succeed(NativeOperateRpc, options.rpc) : Layer.empty,
+      Layer.provideMerge(Layer.mergeAll(readClients(native, options.rpc), options.rpc ? Layer.succeed(NativeOperateRpc, options.rpc) : Layer.empty,
         options.definitions ? Layer.succeed(ProjectDefinitions, options.definitions) : Layer.empty,
         options.conversation ? Layer.succeed(SupervisorConversation, options.conversation) : Layer.empty,
         Layer.succeed(ThreadPolicyStore, policy), Layer.succeedContext(stores.context))));

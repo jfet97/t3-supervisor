@@ -106,6 +106,8 @@ const served = (projection: Projection): Projection => {
 
 const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
   let sequence = 100;
+  // the thread identities launched so far: launching one again resumes it
+  const launched = new Set<string>();
   const reads = new Map<string, number>();
   const deliveries: Array<Record<string, unknown>> = [];
   const deliveryDetails = new Map<string, Record<string, unknown>>();
@@ -122,7 +124,16 @@ const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
       const settled = peer.projections.get(String(input.threadId));
       if (settled) settled.thread.settledAt = new Date().toISOString();
     }
-    if (entry.tag === "orchestration.dispatchCommand" || entry.tag === "orchestration.launchThread") return {value: {sequence: ++sequence}};
+    if (entry.tag === "orchestration.launchThread") {
+      // the pinned launch result: the thread with its projection (a fresh thread's when the case keeps none) and whether it was resumed
+      const threadId = String(input.threadId);
+      const projection = peer.projections.get(threadId);
+      const resumed = launched.has(threadId);
+      launched.add(threadId);
+      return {value: {threadId, projection: projection ? served(projection) : {thread: {id: threadId, title: String(input.title), projectId: String(input.projectId),
+        lineage: {parentThreadId: null, relationshipToParent: null}}, runs: [], messages: []}, resumed, sequence: ++sequence}};
+    }
+    if (entry.tag === "orchestration.dispatchCommand") return {value: {sequence: ++sequence}};
     if (entry.tag === "scheduledTasks.subscribe") return {stream: [{tasks: peer.tasks}]};
     if (entry.tag === "scheduledTasks.upsert") return Effect.andThen(peer.onUpsert ?? Effect.void, Effect.sync(() => {
       const task = {...input, createdAt: "2026-10-16T10:00:00Z", webhook: {path: hookPath, url: null}};

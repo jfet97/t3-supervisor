@@ -10,7 +10,9 @@ import { logEvent } from "./logging.js";
 import { SupervisorOwnership } from "./project-supervisor-store.js";
 import { makeStore, Store, type StoreStats } from "./store.js";
 import { NativeEnvelope } from "./native-envelope.js";
+import { NativeRpc, NativeShell } from "./supervisor-native.js";
 import { T3Client } from "./t3.js";
+import { T3Native } from "./t3-native/index.js";
 import { policyDbLayer } from "./db.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
@@ -80,7 +82,9 @@ export const runSupervisor = Effect.gen(function* () {
   const config = yield* SupervisorConfig;
   const status = yield* SupervisorStatusRef;
   const store = yield* Store;
+  // the root's T3 client is only handed to each supervision run; the root's own environment read and catalog watch go through T3Native
   const t3 = yield* T3Client;
+  const native = yield* T3Native;
   const update = (change: (current: SupervisorStatus) => Partial<SupervisorStatus>) =>
     SubscriptionRef.update(status, (current) => ({ ...current, ...change(current) }));
   yield* Layer.build(healthServer);
@@ -106,7 +110,7 @@ export const runSupervisor = Effect.gen(function* () {
   }).pipe((effect) => guard(effect, "maintenance"), Effect.forever);
   yield* Effect.forkScoped(maintenance);
 
-  const descriptor = yield* t3.descriptor().pipe(
+  const descriptor = yield* native.orchestration.environment.pipe(
     Effect.tapError(() => update(() => ({ lastErrorPhase: "t3_authentication" }))),
     Effect.retry(Schedule.spaced("10 seconds")),
   );
@@ -139,7 +143,7 @@ export const runSupervisor = Effect.gen(function* () {
     const cursor = yield* store.cursor("active");
     // a cursor left by a partial stream is not an archive bootstrap, so the next open asks for a full snapshot
     const resume = covered === null || cursor === 0 ? undefined : cursor;
-    yield* t3.watch(resume, (item) => store.ingest(item).pipe(
+    yield* native.orchestration.watchShell(resume, (item) => store.ingest(item).pipe(
       Effect.flatMap((outcome) => outcome.connected ? update(() => ({ t3Connected: true })) : Effect.void),
     ));
   }).pipe(
@@ -159,10 +163,18 @@ const readT3Token = (path: string) => FileSystem.FileSystem.use((files) => files
   Effect.mapError(() => new T3TokenUnavailable()),
 );
 
-const t3Client = Layer.unwrap(Effect.gen(function* () {
+/**
+ * The root's T3 access over the read token, read once: the T3 client each supervision run is handed, and a read-only T3Native over
+ * that same client, with the read credential's native client and shell reads, for the root's environment read and catalog watch. The
+ * operate, project-write, commit and probe families stay absent, as wherever their credential is not configured.
+ */
+const rootAccess = Layer.unwrap(Effect.gen(function* () {
   const config = yield* SupervisorConfig;
-  const token = yield* readT3Token(config.t3TokenFile);
-  return T3Client.layer({ baseUrl: config.t3Url, token: Redacted.value(token) });
+  const token = Redacted.value(yield* readT3Token(config.t3TokenFile));
+  const read = { baseUrl: config.t3Url, token };
+  return T3Native.layer({ baseUrl: config.t3Url, read }).pipe(
+    Layer.provide(NativeShell.layer(read).pipe(Layer.provideMerge(NativeRpc.layer(read)))),
+    Layer.provideMerge(T3Client.layer(read)));
 }));
 
 // the native transport, built once for the process: the shared websocket envelope, the platform crypto and the fetch
@@ -172,16 +184,19 @@ export type NativeTransport = NativeEnvelope | Crypto.Crypto | HttpClient.HttpCl
 
 const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(config.dataDirectory)));
 
-export type SupervisorServices = DashboardUpdates | SupervisorConfig | SupervisorStatusRef | Store | T3Client | ThreadPolicyStore | SupervisorOwnership | NativeTransport | FileSystem.FileSystem;
+export type SupervisorServices = DashboardUpdates | SupervisorConfig | SupervisorStatusRef | Store | T3Client | T3Native | ThreadPolicyStore | SupervisorOwnership |
+  NativeTransport | FileSystem.FileSystem;
 
 // the process's thread-policy store on its own PolicyDb client (thread-settings.sqlite3), seeded from the configured excluded chats
 const threadPolicy = Layer.unwrap(SupervisorConfig.useSync((config) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)))));
 
-// the root services over the configuration, acquired in today's order: ownership, thread policy, the native transport and
-// the T3 client over the read token, then the catalog and the status; they release in reverse. Each supervision run reloads
-// the permanent ownership into the process's set when its guidance stores are acquired
+/**
+ * The root services over the configuration, acquired in today's order: ownership, thread policy, the native transport and the T3
+ * access over the read token, then the catalog and the status; they release in reverse. Each supervision run reloads the permanent
+ * ownership into the process's set when its guidance stores are acquired.
+ */
 export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRef.layer).pipe(
-  Layer.provideMerge(t3Client),
+  Layer.provideMerge(rootAccess),
   Layer.provideMerge(NativeTransportLive),
   Layer.provideMerge(threadPolicy),
   Layer.provideMerge(SupervisorOwnership.layer),

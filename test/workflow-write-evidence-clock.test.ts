@@ -5,10 +5,9 @@ import { TestClock } from "effect/testing";
 import { GuidanceDb } from "../src/db.js";
 import { defaultSupervisorModel } from "../src/project-supervisor-store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService } from "../src/supervision-gate.js";
-import { SupervisorRpcError } from "../src/supervisor-native.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import { WorkflowStateStore } from "../src/workflow-state-store.js";
-import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
+import { WorkflowNativeAccess, WorkflowNativeItemUnavailable, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
 import { forkObserved } from "./support/clock-sleeps.js";
 import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory } from "./support/psx-stores.js";
@@ -46,7 +45,7 @@ it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection 
   const native = WorkflowNativeAccess.of({
     listThreads: () => Effect.succeed([thread("main-workflows", "project-workflows"), thread(binding.threadId, "project-workflows")]),
     projection: () => Effect.map(Clock.currentTimeMillis, (now) => {polls.push(now);return projection;}),
-    getTurnItem: () => Effect.flatMap(Clock.currentTimeMillis, (now) => {details.push(now);return Effect.fail(new SupervisorRpcError("uncertain"));}),
+    getTurnItem: () => Effect.flatMap(Clock.currentTimeMillis, (now) => {details.push(now);return Effect.fail(new WorkflowNativeItemUnavailable());}),
   });
   const gate = yield* makeSupervisionGate({scopeEnabled: () => Effect.succeed(true), supervisionStopped: () => Effect.succeed(false),
     workflowEditingEnabled: () => Effect.succeed(true)}).pipe(Effect.provideService(GuidanceDb, stores.sql));

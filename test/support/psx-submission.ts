@@ -4,7 +4,7 @@ import { ProjectSupervisorStore, type TaskRecord } from "../../src/project-super
 import { GuidanceDb } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScopeService, type SupervisionScopeStores } from "../../src/supervision-gate.js";
-import { T3TransportError } from "../../src/t3.js";
+import { T3ReadError } from "../../src/t3-native/index.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { MessageInfo, Projection, RunInfo, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
@@ -147,7 +147,7 @@ const writeController = (stores: SupervisionScopeStores & {readonly sql: Guidanc
       listThreads: () => Effect.succeed([]),
       projection: (threadId) => {
         const projection = projections.get(threadId);
-        return projection ? Effect.succeed(projection) : Effect.fail(new T3TransportError("missing projection", 404));
+        return projection ? Effect.succeed(projection) : Effect.fail(new T3ReadError({operation: "orchestration/thread", message: "missing projection", httpStatus: 404}));
       },
       getTurnItem: ({threadId, itemId}) => Effect.succeed({item: submissionDetail(projections.get(threadId), itemId)}),
     })),

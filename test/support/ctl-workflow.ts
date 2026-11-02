@@ -249,12 +249,14 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
     operations.push({tag, payload});
     if (tag === "orchestration.launchThread") {
       const threadId = String(payload.threadId);
+      const resumed = projections.has(threadId);
       projections.set(threadId, emptySupervisorProjection(threadId, payload.modelSelection as SupervisorModelSelection));
-      return {accepted: true};
+      // the pinned launch result: the thread, its projection and whether an existing thread was resumed
+      return {threadId, projection: projections.get(threadId), resumed};
     }
     if (tag === "orchestration.dispatchCommand" && payload.type === "message.dispatch") {
       const commandId = String(payload.commandId);
-      if (commandIds.has(commandId)) return {accepted: true};
+      if (commandIds.has(commandId)) return {sequence: operations.length};
       if (dispatchFailure === "unknown") {
         dispatchFailure = null;
         throw new Error("simulated lost dispatch response");
@@ -268,7 +270,7 @@ export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapsho
       assert.ok(launched);
       addSupervisorRequest(launched, payload);
       delete launched.thread.settledAt;
-      return {accepted: true};
+      return {sequence: operations.length};
     }
     throw new Error(`unexpected fake operation: ${tag}`);
   };

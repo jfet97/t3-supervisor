@@ -8,13 +8,15 @@ import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorConversationStore } from "../../src/supervisor-conversation-store.js";
 import { SupervisorLifecycle } from "../../src/supervisor-lifecycle.js";
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
-import { NativeOperateRpc, type NativeRpcShape, type SupervisorRpcError } from "../../src/supervisor-native.js";
+import type { NativeRpcShape, SupervisorRpcError } from "../../src/supervisor-native.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
-import { T3Client, type T3ClientShape, type T3TransportError } from "../../src/t3.js";
+import type { T3ClientShape, T3TransportError } from "../../src/t3.js";
+import { T3Native } from "../../src/t3-native/index.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { admissionLayer, guidanceClient, policyClient, runConfig, supervisorIds } from "./g12-stores.js";
+import { fakeNativeLayer } from "./native-access.js";
 
 // one process of the scope-lifecycle suites: the production lifecycle beside the production conversation, admission gate,
 // scope predicates, thread policy and supervision stores of a temporary data directory, each built from its production layer
@@ -53,15 +55,19 @@ export const operateRpc = (call: OperateCall): NativeRpcShape => ({
 // the stores in the production order over the run's clients, the workflow state store whose owner check admits every scope (as
 // the baseline suites constructed it), the scope predicates over the thread policy with their admission gate, then the
 // conversation and the lifecycle with the operate credential and no helper team
-const processLayer = (directory: string, natives: LifecycleNatives) => SupervisorLifecycle.layer.pipe(
-  Layer.provideMerge(SupervisorConversation.layer),
-  Layer.provideMerge(admissionLayer(true)),
-  Layer.provideMerge(WorkflowStateStore.layerWith(() => Effect.succeed(true))),
-  Layer.provideMerge(SupervisionStoresLive),
-  Layer.provideMerge(GuidanceStore.layer),
-  Layer.provideMerge(Layer.mergeAll(supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()), runConfig(directory),
-    Layer.succeed(T3Client, t3Projections(natives.read)), Layer.succeed(NativeOperateRpc, operateRpc(natives.rpc)))),
-);
+const processLayer = (directory: string, natives: LifecycleNatives) => {
+  const t3 = t3Projections(natives.read);
+  const operate = operateRpc(natives.rpc);
+  return SupervisorLifecycle.layer.pipe(
+    Layer.provideMerge(SupervisorConversation.layer),
+    Layer.provideMerge(admissionLayer(true)),
+    Layer.provideMerge(WorkflowStateStore.layerWith(() => Effect.succeed(true))),
+    Layer.provideMerge(SupervisionStoresLive),
+    Layer.provideMerge(GuidanceStore.layer),
+    Layer.provideMerge(Layer.mergeAll(supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()), runConfig(directory),
+      fakeNativeLayer({t3, operate}))),
+  );
+};
 
 const services = (directory: string, natives: LifecycleNatives, clients: Context.Context<GuidanceDb | PolicyDb>) =>
   processLayer(directory, natives).pipe(Layer.provideMerge(Layer.succeedContext(clients)));
@@ -106,8 +112,8 @@ export const openLifecycleProcess = (directory: string, natives: LifecycleNative
  */
 export const lifecycleOver = (process: LifecycleProcess, natives: LifecycleNatives): Effect.Effect<SupervisorLifecycle["Service"], never, Scope.Scope> =>
   Effect.map(Layer.build(SupervisorLifecycle.layer.pipe(Layer.provide(Layer.mergeAll(
-    Layer.succeedContext(Context.omit(WorkflowStateStore, T3Client, NativeOperateRpc, SupervisorLifecycle)(process.context)),
-    Layer.succeed(T3Client, t3Projections(natives.read)), Layer.succeed(NativeOperateRpc, operateRpc(natives.rpc)))))),
+    Layer.succeedContext(Context.omit(WorkflowStateStore, T3Native, SupervisorLifecycle)(process.context)),
+    fakeNativeLayer({t3: t3Projections(natives.read), operate: operateRpc(natives.rpc)}))))),
   (context) => Context.get(context, SupervisorLifecycle));
 
 /**

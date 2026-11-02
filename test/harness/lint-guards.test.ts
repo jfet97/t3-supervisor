@@ -129,7 +129,7 @@ describe("lint guards", () => {
       `import { record, sameModel } from "./supervisor-native.js";\nexport const helpers = [record, sameModel];\n`,
     ]) expect(await lint("src/lint-guard-probe.ts", code)).not.toContain(boundaryOwner);
     // a module still on the transport keeps its listed exemption until its migration removes it; an unlisted module is refused
-    expect(await lint("src/project-supervisor.ts", transport[0]!)).not.toContain(boundaryOwner);
+    expect(await lint("src/supervisor-helper-transport.ts", transport[0]!)).not.toContain(boundaryOwner);
     expect(await lint("src/supervisor-awareness.ts", transport[0]!)).toContain(boundaryOwner);
   });
 
