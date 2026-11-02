@@ -1,5 +1,13 @@
 # T3 Supervisor
 
+## 0.0.25
+
+### Patch Changes
+
+- 1cb588e: Restore helper channels on the pinned T3 nightly by reading the scheduled-task subscription's first snapshot and releasing the connection.
+
+  The guidance session now requires both orchestration:read and orchestration:operate. The Docker development environment issues these scopes automatically; existing installations must reissue an operate-only guidance session before using helpers.
+
 ## 0.0.24
 
 ### Patch Changes
