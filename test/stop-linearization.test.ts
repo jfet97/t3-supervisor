@@ -763,7 +763,7 @@ it.live("helper (CT-INT-03 H4c): a Settings Stop requested during the transport'
   if (stopping) yield* Fiber.join(stopping);
   assert.equal(committedDuringRead, true, "the Stop did not wait for the send's unrelated network read");
   assert.equal(stateAtStop, "sending", "the Stop lands after the runtime admitted the request to the transport");
-  assert.deepEqual(f.peer.log.slice(stopIndex + 1).map(routeOf), ["scheduledTasks.list", "scheduledTasks.upsert"]);
+  assert.deepEqual(f.peer.log.slice(stopIndex + 1).map(routeOf), ["scheduledTasks.subscribe", "scheduledTasks.upsert"]);
   assert.equal(fetches, 0);
   assert.deepEqual(webhookPosts(f.peer), []);
   assert.equal(yield* helperReceipt(f), null);

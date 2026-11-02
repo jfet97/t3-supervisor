@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, FileSystem, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -172,7 +173,10 @@ export const nativeCall = (handle: NativeHandler) => (tag: string, payload: Read
 export const nativeClient = (handle: NativeHandler): NativeRpcShape => {
   const call = nativeCall(handle);
   return {
-    call: (tag, payload) => call(tag, payload),
+    call: (tag, payload, _cancel, response) => Effect.suspend(() => {
+      assert.equal(response, tag === "scheduledTasks.subscribe" ? "firstChunk" : undefined);
+      return call(tag, payload);
+    }),
     initiate: (tag, payload) => Effect.map(Effect.exit(call(tag, payload)), (exit) => ({sent: Effect.succeed(true), result: exit, release: Effect.void})),
   };
 };

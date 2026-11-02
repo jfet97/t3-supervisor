@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Console, Data, Effect, Exit, FileSystem, Layer, Option, Schema, Scope, Stream } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
+import { NativeEnvelope } from "../src/native-envelope.js";
+import { helperTaskSnapshot } from "../src/supervisor-helper-transport.js";
+import { NativeOperateRpc } from "../src/supervisor-native.js";
 import { groupAlive, tsxLoader } from "../test/support/cli-process.js";
 import { freePort, httpGet, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "../test/support/g8-process.js";
 import { cacheHome, checkoutInputs, cleanRuns, createRun, isolatedEnv, repositoryRoot, toolPath, type RunFolder } from "./local-run.js";
@@ -37,7 +40,7 @@ export type T3Release = typeof t3Release;
  */
 export const credentials = [
   {name: "read", variable: "T3_TOKEN_FILE", scopes: ["orchestration:read", "filesystem:read"]},
-  {name: "guidance", variable: "T3_GUIDANCE_TOKEN_FILE", scopes: ["orchestration:operate"]},
+  {name: "guidance", variable: "T3_GUIDANCE_TOKEN_FILE", scopes: ["orchestration:read", "orchestration:operate"]},
   {name: "project-write", variable: "T3_PROJECT_WRITE_TOKEN_FILE", scopes: ["filesystem:read", "filesystem:write"]},
   {name: "project-commit", variable: "T3_PROJECT_COMMIT_TOKEN_FILE", scopes: ["source-control:write"]},
   {name: "git-probe", variable: "T3_GIT_PROBE_TOKEN_FILE", scopes: ["terminal:operate"]},
@@ -384,6 +387,14 @@ export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
         onSome: (current) => `t3Connected ${current.t3Connected}, ${current.store.projects} project(s), ${current.store.threads} conversation(s)`});
     }}));
   yield* check("read credential reaches both shell snapshots", yield* probeWith(stack, read.file), "scripts/probe-t3.ts with orchestration:read + filesystem:read");
+
+  const guidance = stack.sessions.find((session) => session.credential.name === "guidance")!;
+  const guidanceBearer = (yield* fs.readFileString(guidance.file)).trim();
+  const snapshot = yield* NativeOperateRpc.use((rpc) => helperTaskSnapshot(rpc)).pipe(
+    Effect.provide(NativeOperateRpc.layer({baseUrl: stack.t3.url, token: guidanceBearer}).pipe(Layer.provide(NativeEnvelope.layer))), Effect.exit);
+  yield* check("helper channel reads a streamed scheduler snapshot", Exit.isSuccess(snapshot) && snapshot.value.length === 0,
+    Exit.isSuccess(snapshot) ? `${snapshot.value.length} tasks; orchestration:read + orchestration:operate; first Chunk consumed without waiting for Exit`
+      : "scheduledTasks.subscribe did not supply a valid bounded snapshot");
 
   const bearer = (yield* fs.readFileString(stack.run.dir("supervisor", "access", "workflow-mcp-token"))).trim();
   const listed = yield* listTools(stack, bearer);

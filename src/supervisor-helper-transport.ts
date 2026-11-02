@@ -146,6 +146,11 @@ const storedRow = <A>(guard: (value: unknown) => value is A, row: unknown): A | 
 type NativeDelivery = {id: string; outcome: string; renderedPrompt?: string};
 // the scheduled-task list was unreadable, so channel ownership cannot be checked
 class ChannelsUnavailable extends Data.TaggedError("ChannelsUnavailable") {}
+
+// one validated scheduler snapshot, shared with the published-T3 compatibility check; the socket ends on its first value
+export const helperTaskSnapshot = (operate: NativeRpcShape, cancel?: Deferred.Deferred<void>): Effect.Effect<ReadonlyArray<Record<string, unknown>>, SupervisorRpcError | ChannelsUnavailable> =>
+  Effect.flatMap(operate.call("scheduledTasks.subscribe", {}, cancel, "firstChunk"),
+    (result) => isTaskList(result) ? Effect.succeed(result.tasks) : Effect.fail(new ChannelsUnavailable()));
 // a caller's cancel completed during an awaited read: it ends like the aborted read it replaces
 class Cancelled extends Data.TaggedError("Cancelled") {}
 
@@ -235,8 +240,6 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       ...(keptContradiction ? {contradicted: true as const, state: "rejected" as const} : {})};
     yield* db`INSERT INTO supervisor_helper_deliveries VALUES(${binding.threadId},${binding.generation},${value.messageId},${JSON.stringify(next)}) ON CONFLICT(owner_thread_id,owner_generation,message_id) DO UPDATE SET document=excluded.document`;
   }));
-  const tasks = (operate: NativeRpcShape, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<ReadonlyArray<Record<string, unknown>>, SupervisorRpcError | ChannelsUnavailable> =>
-    Effect.flatMap(operate.call("scheduledTasks.list", {}, cancel), (result) => isTaskList(result) ? Effect.succeed(result.tasks) : Effect.fail(new ChannelsUnavailable()));
   // native delivery detail is evidence for this attempt only when it reproduces the exact durable request: same
   // delivery and task, POST JSON, the exact untruncated body and byte count, and no missing template fields.
   const exactDetail = (value: Delivery, detail: unknown, deliveryId: string, summary: Record<string, unknown>): Record<string, unknown> | null => {
@@ -311,7 +314,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
       yield* saveChannel(binding, current);
     }
     const taskId = current.taskId;
-    let task = (yield* tasks(operate, cancel)).find(item => item.id === taskId);
+    let task = (yield* helperTaskSnapshot(operate, cancel)).find(item => item.id === taskId);
     if (task && !owned(task, current, binding)) return null;
     if (!task && current.state !== "creating") return null;
     if (task && task.enabled !== true) return null;
@@ -551,7 +554,7 @@ const makeHelperTransport = (options: HelperTransportOptions) => Effect.gen(func
     if (!rpc) return false;
     const operate = rpc;
     return yield* Effect.gen(function* () {
-      const task = (yield* tasks(operate, cancel)).find(item => item.id === current.taskId);
+      const task = (yield* helperTaskSnapshot(operate, cancel)).find(item => item.id === current.taskId);
       if (task && !owned(task, current, binding)) return false;
       yield* saveChannel(binding, {...current, state: "retiring"});
       if (task) yield* operate.call("scheduledTasks.delete", {id: current.taskId}, cancel);

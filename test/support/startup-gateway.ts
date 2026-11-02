@@ -197,7 +197,7 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
   const operate: PeerRoutes = {rpc: (entry) => {
     if (entry.tag === "server.getConfig") return {value: modelConfig};
     // empty answers so a stray list does not hold the cycle; this harness does not exercise those paths
-    if (entry.tag === "scheduledTasks.list") return {value: {tasks: []}};
+    if (entry.tag === "scheduledTasks.subscribe") return {stream: [{tasks: []}]};
     if (entry.tag === "vcs.listRefs") return {value: {isRepo: false, refs: []}};
     /* The checkout as T3 serves it: a missing path has no metadata entry (as test/project-definition-initialization.test.ts
      * scripts it), and listing or reading a missing path fails with ENOENT (failureExit in

@@ -2137,7 +2137,7 @@ it.effect("a handover_release contradicted by a pre-existing frame is never fail
   let posts = 0;
   const tasks: Record<string, unknown>[] = [];
   const rpc: RpcHandler = (tag, input) => {
-    if (tag === "scheduledTasks.list") return Effect.succeed({tasks});
+    if (tag === "scheduledTasks.subscribe") return Effect.succeed({tasks});
     if (tag === "scheduledTasks.upsert") {
       const task = {...input, createdAt: "2026-10-16T10:00:00Z", webhook: {path: "/api/hooks/fixture/fixture-only-token", url: null}};
       tasks.splice(0, tasks.length, task);

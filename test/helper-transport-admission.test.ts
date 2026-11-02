@@ -82,8 +82,11 @@ const peer = (mode: "held" | number) => Effect.acquireRelease(Effect.gen(functio
 const scheduler = (handle: (tag: string, payload: Record<string, unknown>) => Effect.Effect<unknown, SupervisorRpcError>): NativeRpcShape => {
   const call = (tag: string, payload: Readonly<Record<string, unknown>>) => Effect.suspend(() => handle(tag, {...payload}));
   return {
-    call: (tag, payload, cancel) => cancel === undefined ? call(tag, payload)
-      : Effect.raceFirst(call(tag, payload), Effect.andThen(Deferred.await(cancel), Effect.fail(new SupervisorRpcError("uncertain")))),
+    call: (tag, payload, cancel, response) => Effect.suspend(() => {
+      assert.equal(response, tag === "scheduledTasks.subscribe" ? "firstChunk" : undefined);
+      return cancel === undefined ? call(tag, payload)
+        : Effect.raceFirst(call(tag, payload), Effect.andThen(Deferred.await(cancel), Effect.fail(new SupervisorRpcError("uncertain"))));
+    }),
     initiate: (tag, payload) => Effect.map(Effect.exit(call(tag, payload)), (exit) => ({sent: Effect.succeed(true), result: exit, release: Effect.void})),
   };
 };
@@ -109,7 +112,7 @@ const fixtureWith = (mode: "held" | number) => Effect.gen(function* () {
   const tasks: Record<string, unknown>[] = [];
   const rpc = scheduler((tag, payload) => Effect.suspend((): Effect.Effect<unknown, SupervisorRpcError> => {
     rpcs.push(tag);
-    if (tag === "scheduledTasks.list") return Effect.succeed({ tasks });
+    if (tag === "scheduledTasks.subscribe") return Effect.succeed({ tasks });
     if (tag === "scheduledTasks.upsert") {
       const task = { ...payload, createdAt: "2026-10-16T10:00:00Z", webhook: { path: webhookPath, url: null } };
       tasks.splice(0, tasks.length, task);return Effect.succeed({ task });

@@ -17,7 +17,7 @@ import { freePort, runProcess } from "./support/g8-process.js";
 it("each Supervisor credential is a separate T3 session with exactly the scopes its calls need", () => {
   assert.deepEqual(credentials.map(({name, variable, scopes}) => [name, variable, [...scopes]]), [
     ["read", "T3_TOKEN_FILE", ["orchestration:read", "filesystem:read"]],
-    ["guidance", "T3_GUIDANCE_TOKEN_FILE", ["orchestration:operate"]],
+    ["guidance", "T3_GUIDANCE_TOKEN_FILE", ["orchestration:read", "orchestration:operate"]],
     ["project-write", "T3_PROJECT_WRITE_TOKEN_FILE", ["filesystem:read", "filesystem:write"]],
     ["project-commit", "T3_PROJECT_COMMIT_TOKEN_FILE", ["source-control:write"]],
     ["git-probe", "T3_GIT_PROBE_TOKEN_FILE", ["terminal:operate"]],
