@@ -39,7 +39,7 @@ export const forbiddenNatives = (catalog: Pick<StoreShape, "catalog">) => {
 
 /** The run's services over the stores of the configuration's data directory, the process's policy store and the natives. */
 export const supervisionRun = (config: SupervisorConfig, natives: ReturnType<typeof forbiddenNatives>) =>
-  SupervisionLive({ operateRpcAvailable: true, baseUrl: config.t3Url }).pipe(
+  SupervisionLive({ operateRpcAvailable: true }).pipe(
     Layer.provideMerge(natives),
     Layer.provideMerge(Layer.mergeAll(supervisionStoresLayer(config.dataDirectory), policyLayer(config), Layer.succeed(Configuration, config))),
     // the run's own ids draw from the platform crypto

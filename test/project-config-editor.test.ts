@@ -9,7 +9,7 @@ import {NativeEnvelope} from "../src/native-envelope.js";
 import {ProjectConfigEditorService, type ProjectConfigWriter} from "../src/project-config-editor.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
 import type {ProjectConfigSave} from "../src/project-definitions-contract.js";
-import {ProjectFileError, ProjectWriter} from "../src/project-files.js";
+import {ProjectFileError} from "../src/project-files.js";
 import {forgeDashboardToken} from "../src/service-auth.js";
 import {cancelAfter, within} from "./support/g5a-bounds.js";
 import {guidanceUi} from "./support/service-auth-harness.js";
@@ -17,6 +17,7 @@ import type {GuidanceRuntime} from "../src/guidance.js";
 import type {SupervisorConfig} from "../src/types.js";
 import {requiredReferences, type DefinitionReference} from "../src/project-definitions-contract.js";
 import {indexEntry, indexSource, makeDefinitionFixture, projectIndex, stepSource, workflowSource} from "./project-definitions-fixture.js";
+import {nativeProjectWriter} from "./support/native-file-access.js";
 
 const localIndex = (required: readonly DefinitionReference[] = []) =>
   projectIndex({steps: ["local-step", "second-step"], workflows: ["local-flow"], required});
@@ -215,7 +216,7 @@ it.live("native project writer checks the regular project.yaml target and writes
     else value = null;
     socket.send(JSON.stringify({_tag: "Exit", requestId: request.id, exit: {_tag: "Success", value}}));
   }));
-  const writer = yield* ProjectWriter.make({baseUrl: `http://127.0.0.1:${address.port}`, token: "fixture"}).pipe(Effect.provide(NativeEnvelope.layer));
+  const writer = yield* nativeProjectWriter(`http://127.0.0.1:${address.port}`, "fixture").pipe(Effect.provide(NativeEnvelope.layer));
   // the calls share one cancel trigger that completes after 5 s
   const cancel = yield* cancelAfter("5 seconds");
   assert.equal(yield* writer.checkProjectConfigFile("/workspace", cancel), true);

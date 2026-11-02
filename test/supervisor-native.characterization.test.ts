@@ -5,10 +5,11 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { NativeRpc, SupervisorRpcError } from "../src/supervisor-native.js";
 import { makeT3Client, T3Client, T3TransportError } from "../src/t3.js";
-import { ProjectCommitter, ProjectFileError, ProjectFiles } from "../src/project-files.js";
+import { ProjectFileError } from "../src/project-files.js";
 import { GitProbeError } from "../src/git-probe.js";
 import { fakeT3 } from "./support/c1-git-probe-peer.js";
 import { probeGuidance } from "./support/g10-probe-guidance.js";
+import { nativeProjectCommitter, nativeProjectFiles } from "./support/native-file-access.js";
 
 /* Every client here talks to a real loopback T3 peer (ws or http sockets), so the tests are it.live; the request and
  * handshake deadlines of CT-NATIVE-01 run on the TestClock in test/native-rpc.test.ts as NRPC-03.
@@ -60,8 +61,8 @@ const gitProbePeer = (...args: Parameters<typeof fakeT3>) => Effect.acquireRelea
 
 // the production native clients on the shared envelope
 const nativeRpc = (baseUrl: string, token: string) => NativeRpc.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer));
-const projectFiles = (baseUrl: string, token: string) => ProjectFiles.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer));
-const projectCommitter = (baseUrl: string, token: string) => ProjectCommitter.make({ baseUrl, token }).pipe(Effect.provide(NativeEnvelope.layer));
+const projectFiles = (baseUrl: string, token: string) => nativeProjectFiles(baseUrl, token).pipe(Effect.provide(NativeEnvelope.layer));
+const projectCommitter = (baseUrl: string, token: string) => nativeProjectCommitter(baseUrl, token).pipe(Effect.provide(NativeEnvelope.layer));
 
 // a call's outcome as a value, and whether a forked call has settled
 const outcomeOf = <A, E>(call: Effect.Effect<A, E>) => Effect.match(call, { onSuccess: (value) => ({ value }), onFailure: (error) => ({ error }) });

@@ -6,6 +6,7 @@ import {
 } from "./native-envelope.js";
 import type { SupervisorModelInfo, SupervisorModelSelection } from "./project-supervisor-contract.js";
 import type { SupervisorBaseline } from "./project-supervisor-store.js";
+import { HelperTaskList } from "./t3-native/contracts.js";
 import type { ThreadInfo } from "./types.js";
 
 // the classification callers reconcile on; the message never carries a credential, url or native body
@@ -102,6 +103,14 @@ export class NativeRpc extends Context.Service<NativeRpc, NativeRpcShape>()("t3-
 export class NativeOperateRpc extends Context.Service<NativeOperateRpc, NativeRpcShape>()("t3-supervisor/NativeOperateRpc") {
   static readonly layer = (endpoint: NativeEndpoint): Layer.Layer<NativeOperateRpc, never, NativeEnvelope> => Layer.effect(NativeOperateRpc, makeNativeRpc(endpoint));
 }
+
+// the scheduled-task list was unreadable: not a record holding an array of task objects
+export class ChannelsUnavailable extends Data.TaggedError("ChannelsUnavailable") {}
+const isTaskList = Schema.is(HelperTaskList);
+// one validated scheduler snapshot for T3Native and the published-T3 check; the socket ends on its first value
+export const helperTaskSnapshot = (operate: NativeRpcShape, cancel?: Deferred.Deferred<void>): Effect.Effect<ReadonlyArray<Record<string, unknown>>, SupervisorRpcError | ChannelsUnavailable> =>
+  Effect.flatMap(operate.call("scheduledTasks.subscribe", {}, cancel, "firstChunk"),
+    (result) => isTaskList(result) ? Effect.succeed(result.tasks) : Effect.fail(new ChannelsUnavailable()));
 
 const maxShellBytes = 8 * 1024 * 1024;
 const maxShellThreads = 10_000;

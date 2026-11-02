@@ -4,8 +4,9 @@ import {Effect} from "effect";
 import {WebSocketServer} from "ws";
 import {NativeEnvelope} from "../src/native-envelope.js";
 import {ProjectDefinitions} from "../src/project-definitions.js";
-import {ProjectFileError, ProjectFiles, type FreshGitInfo, type GitOperationState} from "../src/project-files.js";
+import {ProjectFileError, type FreshGitInfo, type GitOperationState, type ProjectFiles} from "../src/project-files.js";
 import {cancelAfter, within} from "./support/g5a-bounds.js";
+import {nativeProjectFiles} from "./support/native-file-access.js";
 
 function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: string | null; worktreeBranchAfterFirstWrite?: string | null;
   initialChangedPaths?: string[]; unexpectedPathAfterSecondWrite?: string; extraSetupFileAfterSecondWrite?: string;
@@ -63,7 +64,7 @@ function fixture(options: {isRepo?: boolean; branch?: string | null; worktree?: 
     projects: [{project: {id: "project", title: "Project", workspaceRoot: "/workspace"}, available: true}],
     threads: [{id: "main-thread", projectId: "project", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}}],
   })};
-  const t3 = {projection: (threadId: string) => Effect.succeed({snapshotSequence: 1, projection: {
+  const t3 = {thread: (threadId: string) => Effect.succeed({snapshotSequence: 1, projection: {
     thread: {id: threadId, projectId: "project", title: "Main", lineage: {parentThreadId: null, relationshipToParent: null}, worktreePath: options.worktree ?? "/worktrees/feature"},
     runs: [], messages: [],
   }})};
@@ -333,7 +334,7 @@ it.live("native Git operation inspection follows a worktree .git pointer with ex
     socket.send(JSON.stringify({_tag: "Exit", requestId: request.id, exit: failure ? {_tag: "Failure", cause: failure} : {_tag: "Success", value}}));
   }));
   // the native file client over the peer; each inspection's cancel trigger completes after 5 s
-  const files = yield* ProjectFiles.make({baseUrl: `http://127.0.0.1:${address.port}`, token: "fixture"}).pipe(Effect.provide(NativeEnvelope.layer));
+  const files = yield* nativeProjectFiles(`http://127.0.0.1:${address.port}`, "fixture").pipe(Effect.provide(NativeEnvelope.layer));
   assert.deepEqual(yield* files.gitOperationState!("/workspace", yield* cancelAfter("5 seconds")), {status: "in_progress", marker: "MERGE_HEAD"});
   assert.deepEqual(yield* files.gitOperationState!("/worktrees/feature", yield* cancelAfter("5 seconds")), {status: "safe"});
   assert.ok(requests.some(request => request.tag === "projects.readFile" && request.payload.relativePath === "/repo/main/.git/worktrees/feature/MERGE_HEAD"));

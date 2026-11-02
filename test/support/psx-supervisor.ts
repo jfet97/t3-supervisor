@@ -132,7 +132,7 @@ export const assembleSupervisor = (input: AssembleInput) => Effect.gen(function*
   const shell = NativeShell.of({baseline: input.baseline, threads: Effect.die(new Error("unused native lineage read"))});
   // the run's T3Native over the same fakes, built once and given to every service beside them
   const native = yield* fakeNative({t3, read: input.read, shell, operate: input.operate, baseUrl: input.config.t3Url});
-  const team = yield* Layer.build(SupervisionTeamLive({baseUrl: input.config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
+  const team = yield* Layer.build(SupervisionTeamLive.pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(base), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitions),
     Layer.succeed(NativeOperateRpc, input.operate), Layer.succeed(T3Native, native), FetchHttpClient.layer)))).pipe(Effect.orDie);
   const builtLocks = yield* Layer.build(ScopeLocks.layer);

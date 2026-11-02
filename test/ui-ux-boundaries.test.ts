@@ -19,7 +19,7 @@ it.effect("checkout inventory groups normalized folders, preserves every working
   const paths = [null, null, null, "/worktrees/feature", "/worktrees/feature/.", "/worktrees/no-branch"];
   const threads = paths.map((_, i) => ({id: `chat-${i}`, projectId: f.projectId, title: i === 5 ? "branch-looking-title" : `Chat ${i}`, lineage: {parentThreadId: null, relationshipToParent: null}}));
   const definitions = yield* ProjectDefinitions.make({source: {catalog: () => Effect.succeed({projects: [{project: {id: f.projectId, title: "Project", workspaceRoot: f.root}, available: true}], threads})},
-    t3: {projection: id => Effect.succeed({snapshotSequence: 1, projection: {thread: {...threads.find(thread => thread.id === id)!, worktreePath: paths[Number(id.split("-")[1])]}, runs: [], messages: []}})},
+    t3: {thread: id => Effect.succeed({snapshotSequence: 1, projection: {thread: {...threads.find(thread => thread.id === id)!, worktreePath: paths[Number(id.split("-")[1])]}, runs: [], messages: []}})},
     files: {...f.projectFiles, vcsInfo: path => Effect.succeed({isRepo: true, branch: path.endsWith("no-branch") ? null : path === f.root ? "main" : "feature", changedPaths: []})}, options: f.definitionOptions});
   const targets = yield* definitions.checkoutTargets(f.projectId);
   assert.equal(targets.length, 3);
@@ -86,7 +86,7 @@ it("conversation labels name engagement and keep explicit stop and disable seman
 
 it.effect("read-only inventory retains an independent root when a conversation binding is unreadable, while setup and chat loading stay strict", () => Effect.gen(function*() {
   const f = makeDefinitionFixture();
-  const definitions = yield* f.makeDefinitions({t3: {projection: id => f.t3.projection(id).pipe(Effect.map(value => ({...value, projection: {...value.projection, thread: {...value.projection.thread, worktreePath: undefined}}})))}});
+  const definitions = yield* f.makeDefinitions({t3: {thread: id => f.t3.thread(id).pipe(Effect.map(value => ({...value, projection: {...value.projection, thread: {...value.projection.thread, worktreePath: undefined}}})))}});
   const inventory = yield* definitions.checkoutInventory(f.projectId);
   assert.equal(inventory.available, true); assert.equal(inventory.complete, false);
   assert.equal(inventory.targets.length, 1); assert.equal(inventory.targets[0]!.workspaceRoot, f.root);

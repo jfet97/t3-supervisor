@@ -32,20 +32,12 @@ const boundarySyntax = [
   { selector: "TemplateElement[value.raw=/^\\/(api\\/(orchestration|hooks)|\\.well-known\\/t3)\\//]", message: boundaryMessage },
 ];
 /*
- * Outside the boundary: the integration itself and the legacy transport modules it wraps, the composition root that wires the
- * clients, and (transitional) the production modules not yet migrated onto T3Native; each migration removes its own entries and
- * the last one leaves the list empty. Tests, fixtures, support and scripts are outside src and never guarded.
+ * Outside the boundary: the integration itself and the legacy transport modules it wraps, and the composition root that wires the
+ * clients. Tests, fixtures, support and scripts are outside src and never guarded.
  */
 const t3Boundary = {
   adapter: ["src/t3-native/**/*.ts", "src/native-envelope.ts", "src/supervisor-native.ts", "src/t3.ts", "src/t3-projection-stream.ts"],
   composition: ["src/guidance-application.ts", "src/supervisor.ts"],
-  // one module per line: each migration deletes exactly its own lines
-  transitional: [
-    "src/git-probe.ts",
-    "src/project-definitions.ts",
-    "src/project-files.ts",
-    "src/supervisor-helper-transport.ts",
-  ],
 };
 
 // only src/db.ts and its database worker src/db-worker-serve.ts open SQLite clients (plan 3.2); src/db.ts, as the SQL layer
@@ -107,7 +99,7 @@ export default tseslint.config(
   },
   { files: ["src/**/*.ts", "src/**/*.tsx"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: true, nodeSqlite: true, timers: true, boundary: true }),
     "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: false, boundary: true }), ...timerRules } },
-  { files: [...t3Boundary.adapter, ...t3Boundary.composition, ...t3Boundary.transitional], rules: {
+  { files: [...t3Boundary.adapter, ...t3Boundary.composition], rules: {
     "no-restricted-imports": restrictedImports({ sqlite: true, ws: true, nodeSqlite: true, timers: true }),
     "no-restricted-syntax": runSyntax({ runMain: false, fiberRuntimes: false }) } },
   { files: ["ui/src/**/*.ts", "ui/src/**/*.tsx"], rules: { "no-restricted-imports": restrictedImports({ sqlite: true, ws: false, nodeSqlite: true, timers: true }),

@@ -11,11 +11,11 @@ import { SupervisorConversation, type SupervisorConversationShape } from "../../
 import { SupervisorConversationStore, type SupervisorConversationStoreShape } from "../../src/supervisor-conversation-store.js";
 import { HelperTransport, type HelperTransportShape } from "../../src/supervisor-helper-transport.js";
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
-import { NativeOperateRpc, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
+import { SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { SupervisorTeamRuntime, type SupervisorTeamRuntimeShape } from "../../src/supervisor-team-runtime.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
-import { T3Client, type T3ClientShape, type T3TransportError } from "../../src/t3.js";
+import type { T3ClientShape, T3TransportError } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { temporaryDataDirectory } from "./guidance-store-services.js";
@@ -158,12 +158,10 @@ export const helperTransportUnit = (options: HelperTransportUnitOptions): Effect
   const http = FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, options.fetch ?? globalThis.fetch)));
   const t3 = t3Projections(options.projection);
   const operate = options.rpc ? operateRpc(options.rpc) : null;
-  const native = operate ? Layer.succeed(NativeOperateRpc, operate) : Layer.empty;
   // the unit's T3Native over the same fakes and webhook fetch, its helper webhook paths resolved against the unit's base url
   const access = fakeNativeLayer({t3, operate, baseUrl: options.baseUrl, http});
-  const context = yield* Layer.build(HelperTransport.layer({baseUrl: options.baseUrl}).pipe(Layer.provide(Layer.mergeAll(
-    Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionGate, parts.gate), Layer.succeed(T3Client, t3),
-    http, native, access)))).pipe(Effect.orDie);
+  const context = yield* Layer.build(HelperTransport.layer.pipe(Layer.provide(Layer.mergeAll(
+    Layer.succeedContext(options.stores.context), Layer.succeed(SupervisionGate, parts.gate), access)))).pipe(Effect.orDie);
   const transport = Context.get(context, HelperTransport);
   return {...transport, ...parts, transport, options};
 });

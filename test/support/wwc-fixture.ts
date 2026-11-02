@@ -17,7 +17,7 @@ import { NativeOperateRpc, SupervisorRpcError, type NativeRpcShape } from "../..
 import { SupervisorTeamController, type SupervisorTeamControllerOptions } from "../../src/supervisor-team-controller.js";
 import { readTeamViewData, supervisorTeamView } from "../../src/supervisor-team-view.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/supervisor-workflow.js";
-import { T3Client, T3TransportError } from "../../src/t3.js";
+import { T3TransportError } from "../../src/t3.js";
 import { T3Native } from "../../src/t3-native/index.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
@@ -292,11 +292,9 @@ export const openTeam = (fixture: WwcFixture, write: WorkflowWriteController["Se
   // as before, the helper transport is given no operate client and the team controller the test's one, each through its own T3Native
   const transportNative = yield* fakeNative({t3, baseUrl: "http://unused.invalid", http: rejectingFetch});
   const controllerNative = yield* fakeNative({t3, operate: rpc, baseUrl: "http://unused.invalid", http: rejectingFetch});
-  const transport = yield* HelperTransport.make({baseUrl: "http://unused.invalid"}).pipe(
+  const transport = yield* HelperTransport.make.pipe(
     Effect.provideService(SupervisionGate, built.gate),
-    Effect.provideService(T3Client, t3),
     Effect.provideService(T3Native, transportNative),
-    Effect.provide(rejectingFetch),
     Effect.provide(built.context),
     Effect.orDie,
   );

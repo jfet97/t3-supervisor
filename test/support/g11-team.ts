@@ -78,7 +78,7 @@ export const teamControllers = (stores: SupervisionStores, policy: ThreadPolicyS
       WorkflowStateStore.layerWith((projectId, mainThreadId) => current.workflowEditingEnabled(projectId, mainThreadId))));
     const controllers = SupervisorTeamController.layer().pipe(
       Layer.provideMerge(WorkflowWriteController.layer({maxEvidenceWaitMs: 0})),
-      Layer.provideMerge(Layer.mergeAll(HelperTransport.layer({baseUrl: "http://unused.invalid"}), WorkflowNativeAccess.layer)),
+      Layer.provideMerge(Layer.mergeAll(HelperTransport.layer, WorkflowNativeAccess.layer)),
       Layer.provideMerge(SupervisionGate.layer),
       Layer.provideMerge(workflows),
       Layer.provideMerge(scope),

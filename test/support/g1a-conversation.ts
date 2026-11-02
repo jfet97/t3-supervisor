@@ -341,7 +341,7 @@ export const projectSupervisorUnit = Effect.fnUntraced(function* (options: Proje
   // the run's T3Native over the same fakes, built once and given to every service beside them
   const native = yield* fakeNative({t3, read: options.read, shell, operate: options.operate, baseUrl: options.config.t3Url});
   // the team services get the read credential as the root provides it (an interpretation submission's item detail)
-  const team = yield* Layer.build(SupervisionTeamLive({baseUrl: options.config.t3Url}).pipe(Layer.provide(Layer.mergeAll(
+  const team = yield* Layer.build(SupervisionTeamLive.pipe(Layer.provide(Layer.mergeAll(
     Layer.succeedContext(base), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitionsService(options.definitions)),
     options.operate ? Layer.succeed(NativeOperateRpc, options.operate) : Layer.empty,
     Layer.succeed(T3Native, native), FetchHttpClient.layer)))).pipe(Effect.orDie);

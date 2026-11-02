@@ -5,8 +5,7 @@ import { Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
 import { FetchHttpClient, HttpClient, type HttpClientResponse } from "effect/http";
 import { TestClock } from "effect/testing";
 import { NativeEnvelope } from "../src/native-envelope.js";
-import { helperTaskSnapshot } from "../src/supervisor-helper-transport.js";
-import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError } from "../src/supervisor-native.js";
+import { helperTaskSnapshot, NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError } from "../src/supervisor-native.js";
 import { envelopePeer, hungPeer, type PeerFrame } from "./support/envelope-peer.js";
 
 // target regressions of the ported native services (WP-S4-NATIVE): the sent boundary, interruption and the effect-clock deadlines

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 // entries and the workflow MCP adapter, the suites run no Effect.run* outside the child, worker and fixture-server entries
 // and the runner harness, extension loading stays banned, the suites never import node:test, and src and ui/src start no
 // raw timer, import node:sqlite only in src/db.ts and run no Effect.run* in ui/src; production modules reach T3 only through
-// src/t3-native/index.ts, apart from the integration itself, the composition root and the listed modules not yet migrated
+// src/t3-native/index.ts, apart from the integration itself and the composition root
 
 // every reported message of the file, one per line
 const lint = async (filePath: string, code: string): Promise<string> => {
@@ -128,8 +128,7 @@ describe("lint guards", () => {
       `import { T3Native } from "./t3-native/index.js";\nexport const service = T3Native;\n`,
       `import { record, sameModel } from "./supervisor-native.js";\nexport const helpers = [record, sameModel];\n`,
     ]) expect(await lint("src/lint-guard-probe.ts", code)).not.toContain(boundaryOwner);
-    // a module still on the transport keeps its listed exemption until its migration removes it; an unlisted module is refused
-    expect(await lint("src/supervisor-helper-transport.ts", transport[0]!)).not.toContain(boundaryOwner);
+    // a production module outside the integration and the composition root is refused, as the probe is
     expect(await lint("src/supervisor-awareness.ts", transport[0]!)).toContain(boundaryOwner);
   });
 

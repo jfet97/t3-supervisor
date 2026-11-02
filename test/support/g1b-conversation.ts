@@ -369,7 +369,7 @@ export const openProjectSupervisor = (process: ConversationProcess, fake: FakeT3
     const layer = ProjectSupervisor.layer({ definitions: { load: (projectId, threadId) => fake.definitions.load(projectId, threadId) } }).pipe(
       Layer.provide(stamped),
       Layer.provideMerge(SupervisionControl.layer.pipe(Layer.provide(stamped))),
-      Layer.provideMerge(SupervisionTeamLive({ baseUrl: natives.settings.t3Url })),
+      Layer.provideMerge(SupervisionTeamLive),
       Layer.provideMerge(SupervisionScopeLive(true)),
       Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, Layer.succeed(SupervisorConfig, natives.settings), Layer.succeed(Store, catalog),
         Layer.succeed(T3Client, fake.supervisorT3), Layer.succeed(NativeOperateRpc, fake.operate),

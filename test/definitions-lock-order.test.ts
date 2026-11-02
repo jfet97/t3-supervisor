@@ -82,8 +82,8 @@ const numberedBranches = (f: Fixture, record: Record) => {
   return {files, entered: Deferred.await(entered), release: Deferred.succeed(release, undefined)};
 };
 // the conversation's checkout read is the last step before a setup waits for its root's lock
-const recordingProjection = (f: Fixture, record: Record) => ({projection: (threadId: string) =>
-  f.t3.projection(threadId).pipe(Effect.tap(() => record(`projection:${threadId}`)))});
+const recordingProjection = (f: Fixture, record: Record) => ({thread: (threadId: string) =>
+  f.t3.thread(threadId).pipe(Effect.tap(() => record(`projection:${threadId}`)))});
 const staleAt = (turn: number) => ({status: "stale", workspaceRoot: "/workspace", branch: `branch-${turn}`, path: ".t3-supervisor",
   message: "The selected checkout branch changed. Reload checkout choices before setup."});
 

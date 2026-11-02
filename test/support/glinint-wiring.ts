@@ -134,10 +134,10 @@ const intRunLayer = (input: IntRunInput, config: SupervisorSettings) => {
   const definitions = input.definitions;
   const supervisor = Layer.effectContext(Effect.map(ProjectSupervisor.makeUnit(definitions ? {definitions: {load: (projectId, threadId) => definitions(projectId, threadId)}} : {}),
     (unit) => Context.make(ProjectSupervisor, unit.service).pipe(Context.add(IntSupervisorSeams, unit.seams))));
-  // SupervisionLive({operateRpcAvailable: true, baseUrl}) with the supervisor's seams
+  // SupervisionLive({operateRpcAvailable: true}) with the supervisor's seams
   return supervisor.pipe(
     Layer.provideMerge(SupervisionControllersLive({})),
-    Layer.provideMerge(SupervisionTeamLive({baseUrl: config.t3Url})),
+    Layer.provideMerge(SupervisionTeamLive),
     Layer.provideMerge(SupervisionScopeLive(true)),
     Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),
     Layer.provideMerge(Layer.mergeAll(access, stores, policy, fetch)),
