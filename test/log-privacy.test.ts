@@ -19,6 +19,7 @@ import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "..
 import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { startFakeT3, untilTraffic, type FakeT3Options } from "./support/cli-fake-t3.js";
+import { fakeNativeLayer } from "./support/native-access.js";
 import { fingerprint, leakedSecrets } from "./support/cli-process.js";
 import { cancelAfter, onLiveClock } from "./support/g11-http.js";
 import { temporaryDirectory } from "./support/g11-stores.js";
@@ -125,10 +126,13 @@ const config = (dataDirectory: string, uiPort?: number): SupervisorConfig => ({
 // the status service of a run, its SubscriptionRef created as the root creates it
 const liveStatus = (settings: SupervisorConfig) => Effect.flatMap(Clock.currentTimeMillis, (now) => SubscriptionRef.make(createStatus(settings, now)));
 
-// the services of the run: the given catalog and T3 client, the status and the root thread-policy (on its own client of the
-// data directory) and ownership services
+/**
+ * The services of the run: the given catalog and T3 client with the root's read-only T3Native over that client, the status and the
+ * root thread-policy (on its own client of the data directory) and ownership services.
+ */
 const services = (settings: SupervisorConfig, status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, base: Layer.Layer<Store | T3Client, unknown>) => Layer.mergeAll(
-  base, Layer.succeed(SupervisorStatusRef, status), ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory))), SupervisorOwnership.layer,
+  Layer.unwrap(Effect.map(Effect.service(T3Client), (client) => fakeNativeLayer({ t3: client, baseUrl: settings.t3Url }))).pipe(Layer.provideMerge(base)),
+  Layer.succeed(SupervisorStatusRef, status), ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory))), SupervisorOwnership.layer,
   NativeTransportLive, DashboardUpdates.layer,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)), Layer.provideMerge(NodeFileSystem.layer));
 

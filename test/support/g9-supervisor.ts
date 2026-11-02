@@ -9,16 +9,18 @@ import { NativeTransportLive, SupervisorStatusRef, type SupervisorStatus } from 
 import { T3Client, type T3ClientShape } from "../../src/t3.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { SupervisorSettings } from "../../src/types.js";
+import { fakeNativeLayer } from "./native-access.js";
 
 // the root services of a supervisor run over a fake T3 client, and the test seams the supervisor suites observe it through
 
 /**
- * The services of the run: the catalog, the fake T3 client, the status, the thread-policy store on the run's PolicyDb
- * client (thread-settings.sqlite3), the ownership set and the native transport, over the configuration.
+ * The services of the run: the catalog, the fake T3 client with the root's read-only T3Native over it, the status, the thread-policy
+ * store on the run's PolicyDb client (thread-settings.sqlite3), the ownership set and the native transport, over the configuration.
  */
 export const rootServices = (settings: SupervisorSettings, status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, client: T3ClientShape) =>
   Layer.mergeAll(
-    makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), Layer.succeed(SupervisorStatusRef, status),
+    makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), fakeNativeLayer({t3: client, baseUrl: settings.t3Url}),
+    Layer.succeed(SupervisorStatusRef, status),
     ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory)), Layer.provide(NodeFileSystem.layer)),
     SupervisorOwnership.layer, NativeTransportLive, NodeFileSystem.layer,
   ).pipe(Layer.provideMerge(DashboardUpdates.layer), Layer.provideMerge(Layer.succeed(Configuration, settings)));
