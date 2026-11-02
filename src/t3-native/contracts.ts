@@ -36,24 +36,29 @@ export const NativeRecord = Schema.declare((value: unknown): value is NativeReco
 
 // ---- build ----
 
-/** A T3 build this Supervisor was verified against, with the operations that build is recorded as lacking */
-export const VerifiedBuild = Schema.Struct({
+/**
+ * A T3 build a pinned reference profile was captured from (its contracts read from that build's published source), with the
+ * operations that profile records as absent. It is a captured reference, not a claim that every operation or provider workflow was
+ * tested live on that build.
+ */
+export const ReferenceBuild = Schema.Struct({
   serverVersion: NonBlank,
   // where the pin is kept
   source: Schema.String,
   absent: Schema.Array(T3Operation),
 });
-export type VerifiedBuild = typeof VerifiedBuild.Type;
+export type ReferenceBuild = typeof ReferenceBuild.Type;
 
 /**
  * What an environment descriptor selects. serverVersion is metadata T3 reported over HTTP; native requests open their own sockets,
- * so it is not proof of the build that executes them. An unknown build is not verified and keeps the same implementation.
+ * so it is not proof of the build that executes them. `referenceBuild` says only that the reported version is the build a reference
+ * profile was captured from; any other build keeps the same implementation.
  */
 export const BuildFacts = Schema.Struct({
   environmentId: Schema.String,
   serverVersion: Schema.String,
   orchestrationProtocolVersion: ProtocolVersion,
-  verified: Schema.Boolean,
+  referenceBuild: Schema.Boolean,
 });
 export type BuildFacts = typeof BuildFacts.Type;
 
@@ -118,20 +123,25 @@ export const TurnItemRequest = Schema.Struct({threadId: Id, itemId: Id});
 export type TurnItemRequest = typeof TurnItemRequest.Type;
 
 const OptionalNullableString = Schema.optionalKey(NullableString);
+// the identity and graph fields of the pinned build's turn items (orchestration.getTurnItem); the rest stays native
 const TurnItemFields = Schema.Struct({
-  id: Schema.String,
+  id: Id,
   type: Schema.String,
-  threadId: Schema.String,
+  threadId: Id,
+  runId: OptionalNullableString,
   nodeId: OptionalNullableString,
+  parentItemId: OptionalNullableString,
+  providerThreadId: OptionalNullableString,
   providerTurnId: OptionalNullableString,
   toolName: OptionalNullableString,
   inputTruncated: Schema.optionalKey(Schema.Boolean),
   truncated: Schema.optionalKey(Schema.Boolean),
+  outputOmitted: Schema.optionalKey(Schema.Boolean),
 });
 const isTurnItem = Schema.is(TurnItemFields);
 /**
- * One turn item with its typed native identity and truncation flags, kept whole: its tool `input` stays the native value (an object,
- * or JSON text the verifier decodes) within the verifiers' bounds (workflowToolInputMaxBytes, workflowTurnItemDetailMaxBytes)
+ * One turn item with its typed native identity, graph and truncation fields, kept whole: its tool `input` stays the native value (an
+ * object, or JSON text the verifier decodes) within the verifiers' bounds (workflowToolInputMaxBytes, workflowTurnItemDetailMaxBytes)
  */
 export type TurnItem = typeof TurnItemFields.Type & NativeRecord;
 export const TurnItem = Schema.declare((value: unknown): value is TurnItem => isTurnItem(value));
@@ -164,8 +174,17 @@ const isShellStreamItem = Schema.is(ShellStreamFields);
 export type ShellStreamItem = typeof ShellStreamFields.Type & NativeRecord;
 export const ShellStreamItem = Schema.declare((value: unknown): value is ShellStreamItem => isShellStreamItem(value));
 
+const CatalogThreadFields = Schema.Struct({id: Id, title: Schema.String, lineage: NativeRecord});
+const isCatalogThread = Schema.is(CatalogThreadFields);
+/**
+ * An archived thread of a shell archive cut, kept whole and checked exactly as the catalog store reads every thread it ingests: a
+ * non-empty id, a title and a lineage object. Its lineage values stay native, so a relationship an unknown build adds is not refused.
+ */
+export type CatalogThread = typeof CatalogThreadFields.Type & NativeRecord;
+export const CatalogThread = Schema.declare((value: unknown): value is CatalogThread => isCatalogThread(value));
+
 /** The archived half of one live shell snapshot, read from its own unary request before the snapshot is handed on */
-export const ShellArchiveCut = Schema.Struct({snapshotSequence: Sequence, threads: Schema.Array(Schema.Unknown)});
+export const ShellArchiveCut = Schema.Struct({snapshotSequence: Sequence, threads: Schema.Array(CatalogThread)});
 export type ShellArchiveCut = typeof ShellArchiveCut.Type;
 
 /** What the shell watch hands its consumer: an active item, with its archive cut for a non-enrichment snapshot */
@@ -215,42 +234,110 @@ export type OrchestrationCommand = typeof OrchestrationCommand.Type;
 export const LaunchThread = Schema.Struct({commandId: Id, threadId: Id, projectId: Id, title: Schema.String, modelSelection: ModelSelection});
 export type LaunchThread = typeof LaunchThread.Type;
 
-const CommandReceiptFields = Schema.Struct({sequence: Schema.Int});
+const CommandReceiptFields = Schema.Struct({sequence: Sequence});
 const isCommandReceipt = Schema.is(CommandReceiptFields);
-/** T3's acceptance of a dispatched command: the orchestration sequence it was recorded at, kept whole */
+/** T3's acceptance of a dispatched command (orchestration.dispatchCommand): the sequence it was committed at, kept whole */
 export type CommandReceipt = typeof CommandReceiptFields.Type & NativeRecord;
 export const CommandReceipt = Schema.declare((value: unknown): value is CommandReceipt => isCommandReceipt(value));
 
-const LaunchReceiptFields = Schema.Struct({threadId: Schema.optionalKey(Schema.String), sequence: Schema.optionalKey(Schema.Int)});
+const LaunchReceiptFields = Schema.Struct({threadId: Id, projection: NativeRecord, resumed: Schema.Boolean, sequence: Schema.optionalKey(Sequence)});
 const isLaunchReceipt = Schema.is(LaunchReceiptFields);
-/** T3's acceptance of a launch, kept whole; the caller confirms the launched thread by reading it back */
+/**
+ * T3's launch result on the pinned build (orchestration.launchThread): the thread, its projection, whether an existing thread was
+ * resumed, and the initial message's sequence when there was one. Kept whole; the projection stays the native value, and the caller
+ * confirms the launched thread by reading it back.
+ */
 export type LaunchReceipt = typeof LaunchReceiptFields.Type & NativeRecord;
 export const LaunchReceipt = Schema.declare((value: unknown): value is LaunchReceipt => isLaunchReceipt(value));
 
 // ---- helper ----
 
-/** A scheduled task or a webhook delivery as T3 records it, kept whole for the helper transport's own exact checks */
-export type HelperTask = NativeRecord;
-export type WebhookDelivery = NativeRecord;
+/**
+ * A runtime mode on the pinned build's wire; a mode a helper thread already carries is sent back exactly as read, so a value outside
+ * the pinned set stays a string rather than a refusal
+ */
+export const RuntimeMode = Schema.Union([Schema.Literals(["approval-required", "auto-accept-edits", "auto", "full-access"]), NonBlank]);
+export type RuntimeMode = typeof RuntimeMode.Type;
+/** An interaction mode on the pinned build's wire, open as RuntimeMode is */
+export const InteractionMode = Schema.Union([Schema.Literals(["default", "plan"]), NonBlank]);
+export type InteractionMode = typeof InteractionMode.Type;
 
-export const HelperTaskList = Schema.Struct({tasks: Schema.Array(NativeRecord)});
+const OptionSelection = Schema.Struct({id: Schema.String, value: Schema.Union([Schema.String, Schema.Boolean])});
+const NativeModelSelectionFields = Schema.Struct({instanceId: Schema.String, model: Schema.String, options: Schema.optionalKey(Schema.Array(OptionSelection))});
+const isNativeModelSelection = Schema.is(NativeModelSelectionFields);
+/** A thread's or a task's model selection as the pinned build writes it (provider instance, model and option choices), kept whole */
+export type NativeModelSelection = typeof NativeModelSelectionFields.Type & NativeRecord;
+export const NativeModelSelection = Schema.declare((value: unknown): value is NativeModelSelection => isNativeModelSelection(value));
+
+const HelperTaskScheduleFields = Schema.Struct({type: Schema.optionalKey(Schema.String)});
+const isHelperTaskSchedule = Schema.is(HelperTaskScheduleFields);
+const HelperTaskSchedule = Schema.declare((value: unknown): value is typeof HelperTaskScheduleFields.Type & NativeRecord => isHelperTaskSchedule(value));
+const HelperTaskWebhookFields = Schema.Struct({path: Schema.optionalKey(Schema.String)});
+const isHelperTaskWebhook = Schema.is(HelperTaskWebhookFields);
+const HelperTaskWebhook = Schema.declare((value: unknown): value is typeof HelperTaskWebhookFields.Type & NativeRecord => isHelperTaskWebhook(value));
+// the pinned build's scheduled task fields the helper transport reads; a key may be absent, and a webhook may be null
+const HelperTaskFields = Schema.Struct({
+  id: Id,
+  threadId: OptionalNullableString,
+  projectId: Schema.optionalKey(Schema.String),
+  prompt: Schema.optionalKey(Schema.String),
+  schedule: Schema.optionalKey(HelperTaskSchedule),
+  enabled: Schema.optionalKey(Schema.Boolean),
+  createdAt: Schema.optionalKey(Schema.String),
+  modelSelection: Schema.optionalKey(NativeModelSelection),
+  runtimeMode: Schema.optionalKey(RuntimeMode),
+  interactionMode: Schema.optionalKey(InteractionMode),
+  webhook: Schema.optionalKey(Schema.NullOr(HelperTaskWebhook)),
+});
+const isHelperTask = Schema.is(HelperTaskFields);
+/**
+ * A scheduled task as T3 records it, kept whole: every task of the scheduler, the helper's webhook tasks among them. It declares
+ * exactly the fields the helper transport reads, typed as the pinned build writes them; the transport's own ownership and readiness
+ * checks keep their authority.
+ */
+export type HelperTask = typeof HelperTaskFields.Type & NativeRecord;
+export const HelperTask = Schema.declare((value: unknown): value is HelperTask => isHelperTask(value));
+
+// the pinned build's delivery summary and detail fields the helper transport reads (the outcome is an open string there too)
+const WebhookDeliveryFields = Schema.Struct({
+  id: Id,
+  taskId: Schema.optionalKey(Schema.String),
+  outcome: Schema.optionalKey(Schema.String),
+  method: Schema.optionalKey(Schema.String),
+  contentType: OptionalNullableString,
+  bodyBytes: Schema.optionalKey(Sequence),
+  receivedAt: Schema.optionalKey(Schema.String),
+  body: Schema.optionalKey(Schema.String),
+  bodyTruncated: Schema.optionalKey(Schema.Boolean),
+  missingFields: Schema.optionalKey(Schema.Array(Schema.String)),
+  renderedPrompt: OptionalNullableString,
+});
+const isWebhookDelivery = Schema.is(WebhookDeliveryFields);
+/**
+ * A webhook delivery as T3's delivery log records it (a list summary or its detail), kept whole. It declares exactly the fields the
+ * helper transport reads; the transport's exact body, byte, outcome and rendering checks keep their authority.
+ */
+export type WebhookDelivery = typeof WebhookDeliveryFields.Type & NativeRecord;
+export const WebhookDelivery = Schema.declare((value: unknown): value is WebhookDelivery => isWebhookDelivery(value));
+
+export const HelperTaskList = Schema.Struct({tasks: Schema.Array(HelperTask)});
 export const WebhookDeliveriesRequest = Schema.Struct({taskId: Id});
 export type WebhookDeliveriesRequest = typeof WebhookDeliveriesRequest.Type;
-export const WebhookDeliveryList = Schema.Struct({deliveries: Schema.Array(NativeRecord)});
+export const WebhookDeliveryList = Schema.Struct({deliveries: Schema.Array(WebhookDelivery)});
 export const WebhookDeliveryRequest = Schema.Struct({taskId: Id, deliveryId: Id});
 export type WebhookDeliveryRequest = typeof WebhookDeliveryRequest.Type;
-export const WebhookDeliveryDetail = Schema.Struct({delivery: NativeRecord});
+export const WebhookDeliveryDetail = Schema.Struct({delivery: WebhookDelivery});
 
 /**
  * The helper's webhook task, created or updated under the caller's deterministic command identity: an enabled webhook task on the
- * project root, created by the system. The model selection and modes are the helper thread's own native values.
+ * project root, created by the system. The model selection and modes are the helper thread's own, sent exactly as read.
  */
 export const HelperTaskUpsert = Schema.Struct({
   taskId: Id, requireExisting: Schema.Boolean, commandId: Id, title: Schema.String, prompt: Schema.String, projectId: Id, threadId: Id,
-  modelSelection: Schema.Unknown, runtimeMode: Schema.Unknown, interactionMode: Schema.Unknown,
+  modelSelection: NativeModelSelection, runtimeMode: RuntimeMode, interactionMode: InteractionMode,
 });
 export type HelperTaskUpsert = typeof HelperTaskUpsert.Type;
-export const HelperTaskUpsertReply = Schema.Struct({task: NativeRecord});
+export const HelperTaskUpsertReply = Schema.Struct({task: HelperTask});
 export const HelperTaskDelete = Schema.Struct({taskId: Id});
 export type HelperTaskDelete = typeof HelperTaskDelete.Type;
 

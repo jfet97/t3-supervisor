@@ -19,6 +19,7 @@ import { ProjectSupervisorStore } from "./project-supervisor-store.js";
 import { ProjectSupervisor } from "./project-supervisor.js";
 import { NativeOperateRpc, NativeRpc, NativeShell } from "./supervisor-native.js";
 import { SupervisionControl } from "./supervision-control.js";
+import { T3Native } from "./t3-native/index.js";
 import { SupervisionLive, SupervisionStoresLive } from "./supervision-live.js";
 import { Store, type StoreShape } from "./store.js";
 import { T3Client } from "./t3.js";
@@ -52,12 +53,27 @@ export const runGuidanceApplication = (
     const commitToken = commitPath && existsSync(commitPath) ? yield* Effect.tryPromise(() => readFile(commitPath, "utf8")) : "";
     const probePath = config.gitProbeTokenFile;
     const probeToken = probePath && existsSync(probePath) ? yield* Effect.tryPromise(() => readFile(probePath, "utf8")) : "";
+    const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
     // the native file, writer, commit, probe and rpc clients run on the root native transport (one envelope, crypto and fetch
     // client per process, d-08); the probe draws its ids from the platform crypto and keeps its pending sessions in the guidance
     // metadata
     const nativeClients = yield* Effect.context<NativeTransport>();
     const endpoint = (token: string) => ({baseUrl: config.t3Url, token});
-    const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim())), Context.merge(nativeClients, guidance)) : undefined;
+    // the run's native access, built once in its scope before any client of it is used: one native client per credential with the
+    // shell reads on the read client, the T3 client, and T3Native as a facade over these same instances; a credential without a token
+    // leaves its client and its T3Native family unconstructed
+    const nativeAccess = yield* Layer.build(T3Native.layer({
+      baseUrl: config.t3Url, read: endpoint(readToken.trim()),
+      ...(writeToken.trim() ? {projectWrite: endpoint(writeToken.trim())} : {}),
+      ...(commitToken.trim() ? {commit: endpoint(commitToken.trim())} : {}),
+      ...(probeToken.trim() ? {probe: endpoint(probeToken.trim())} : {}),
+    }).pipe(Layer.provideMerge(Layer.mergeAll(
+      NativeShell.layer(endpoint(readToken.trim())).pipe(Layer.provideMerge(NativeRpc.layer(endpoint(readToken.trim())))),
+      operateToken.trim() ? NativeOperateRpc.layer(endpoint(operateToken.trim())) : Layer.empty,
+      Layer.succeed(T3Client, t3),
+    ))));
+    const native = Context.merge(nativeClients, nativeAccess);
+    const gitProbe = probeToken.trim() ? yield* Effect.provide(GitProbe.make(endpoint(probeToken.trim())), Context.merge(native, guidance)) : undefined;
     const cleanupGitProbe = gitProbe ? gitProbe.cleanup.pipe(
       Effect.catch(() => logEvent("native_git_probe_cleanup_unavailable")),
     ) : Effect.void;
@@ -67,15 +83,15 @@ export const runGuidanceApplication = (
     // into the process's set here, before the run reads or filters the catalog (cc-ownership)
     const stores = yield* Layer.build(SupervisionStoresLive.pipe(Layer.provideMerge(Layer.succeedContext(guidance)), Layer.provide(SupervisorIds.layer)));
     const supervisionStore = Context.get(stores, ProjectSupervisorStore);
-    const projectWriter = writeToken.trim() ? yield* Effect.provide(ProjectWriter.make(endpoint(writeToken.trim())), nativeClients) : undefined;
-    const commitWriter = commitToken.trim() ? yield* Effect.provide(ProjectCommitter.make(endpoint(commitToken.trim())), nativeClients) : undefined;
+    const projectWriter = writeToken.trim() ? yield* Effect.provide(ProjectWriter.make(endpoint(writeToken.trim())), native) : undefined;
+    const commitWriter = commitToken.trim() ? yield* Effect.provide(ProjectCommitter.make(endpoint(commitToken.trim())), native) : undefined;
     const setupWriter = projectWriter ? {
       writeFile: projectWriter.writeFile,
       ...(commitWriter ? {commitFiles: commitWriter.commitFiles} : {}),
     } : undefined;
     const managedScratchRoot = config.managedScratchRoot && posix.isAbsolute(config.managedScratchRoot) ? posix.normalize(config.managedScratchRoot) : null;
     // the definitions and the config editor are built once in the supervision run scope
-    const definitions = yield* ProjectDefinitions.make({source, t3, files: yield* Effect.provide(ProjectFiles.make(endpoint(readToken.trim())), nativeClients), options: {
+    const definitions = yield* ProjectDefinitions.make({source, t3, files: yield* Effect.provide(ProjectFiles.make(endpoint(readToken.trim())), native), options: {
       globalRoot: "~",
       recordCheckoutObservation: supervisionStore.recordCheckoutObservation,
       useGlobalDefinitions: () => supervisionStore.useGlobalDefinitions(),
@@ -86,14 +102,9 @@ export const runGuidanceApplication = (
     }});
     const editor = projectWriter ? yield* ProjectConfigEditorService.make({definitions, writer: projectWriter,
       onSaved: (snapshot, expectedRevision) => supervisionStore.recordDefinitionUserSave(snapshot, expectedRevision)}) : undefined;
-    const operateToken = config.guidanceTokenFile && existsSync(config.guidanceTokenFile) ? yield* Effect.tryPromise(() => readFile(config.guidanceTokenFile!, "utf8")) : "";
-    // the root's native clients of the run: one native client per credential with the shell reads on the read client, the
-    // catalog, the T3 client and the definitions
-    const clients = Layer.mergeAll(
-      NativeShell.layer(endpoint(readToken.trim())).pipe(Layer.provideMerge(NativeRpc.layer(endpoint(readToken.trim())))),
-      operateToken.trim() ? NativeOperateRpc.layer(endpoint(operateToken.trim())) : Layer.empty,
-      Layer.succeed(Store, source), Layer.succeed(T3Client, t3), Layer.succeed(ProjectDefinitions, definitions),
-    );
+    // the clients of the run's services: its native access (the same instances the constructors above received), the catalog and
+    // the definitions
+    const clients = Layer.mergeAll(Layer.succeedContext(nativeAccess), Layer.succeed(Store, source), Layer.succeed(ProjectDefinitions, definitions));
     // the services of the supervision run, one layer graph built once in this scope over those clients and the run's stores: the
     // supervisor's scope predicates with the admission gate that guards with them, the team services, the Start/Stop control, the
     // workflow controllers and the project supervisor

@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 // (barrel or any subpath), only src/native-envelope.ts may import ws in src, src runs no Effect.run* outside the process
 // entries and the workflow MCP adapter, the suites run no Effect.run* outside the child, worker and fixture-server entries
 // and the runner harness, extension loading stays banned, the suites never import node:test, and src and ui/src start no
-// raw timer, import node:sqlite only in src/db.ts and run no Effect.run* in ui/src
+// raw timer, import node:sqlite only in src/db.ts and run no Effect.run* in ui/src; production modules reach T3 only through
+// src/t3-native/index.ts, apart from the integration itself, the composition root and the listed modules not yet migrated
 
 // every reported message of the file, one per line
 const lint = async (filePath: string, code: string): Promise<string> => {
@@ -100,6 +101,36 @@ describe("lint guards", () => {
     expect(await lint("src/db.ts", code)).not.toContain(nodeSqliteOwner);
     expect(await lint("ui/src/lint-guard-probe.ts", `import { Effect } from "effect";\nexport const value = Effect.runSync(Effect.succeed(1));\n`))
       .toContain("effects in src run in their caller's fiber; Effect.run* stays in the entries and the workflow MCP adapter (plan 3.9)");
+  });
+
+  it("keeps T3 behind src/t3-native/index.ts: no transport client, private module, native tag or T3 API path outside it", { timeout: 30_000 }, async () => {
+    const boundaryOwner = "production modules reach T3 only through src/t3-native/index.ts (T3Native); transport clients, native tags and T3 API paths stay behind it";
+    const transport = [
+      `import { NativeRpc } from "./supervisor-native.js";\nexport const service = NativeRpc;\n`,
+      `import type { NativeRpcShape } from "./supervisor-native.js";\nexport type Shape = NativeRpcShape;\n`,
+      `import { T3Client } from "./t3.js";\nexport const service = T3Client;\n`,
+      `import { NativeEnvelope } from "./native-envelope.js";\nexport const service = NativeEnvelope;\n`,
+      `import { makeFiles } from "./t3-native/internal/files.js";\nexport const files = makeFiles;\n`,
+      `import { T3Native } from "./t3-native/service.js";\nexport const service = T3Native;\n`,
+      `export const tag = "orchestration.dispatchCommand";\n`,
+      `export const tag = "subscribeVcsStatus";\n`,
+      `export const path = "/api/orchestration/shell";\n`,
+      "export const path = (id: string) => `/api/orchestration/threads/${id}`;\n",
+    ];
+    for (const code of transport) {
+      expect(await lint("src/lint-guard-probe.ts", code)).toContain(boundaryOwner);
+      // the integration itself, the composition root, the suites and the scripts keep their access
+      for (const file of ["src/t3-native/internal/lint-guard-probe.ts", "src/guidance-application.ts", "src/supervisor.ts", "test/lint-guard-probe.test.ts",
+        "scripts/lint-guard-probe.ts"]) expect(await lint(file, code)).not.toContain(boundaryOwner);
+    }
+    // the public surface and the domain helpers stay importable
+    for (const code of [
+      `import { T3Native } from "./t3-native/index.js";\nexport const service = T3Native;\n`,
+      `import { record, sameModel } from "./supervisor-native.js";\nexport const helpers = [record, sameModel];\n`,
+    ]) expect(await lint("src/lint-guard-probe.ts", code)).not.toContain(boundaryOwner);
+    // a module still on the transport keeps its listed exemption until its migration removes it; an unlisted module is refused
+    expect(await lint("src/project-supervisor.ts", transport[0]!)).not.toContain(boundaryOwner);
+    expect(await lint("src/supervisor-awareness.ts", transport[0]!)).toContain(boundaryOwner);
   });
 
   it("rejects extension loading and node:test", { timeout: 30_000 }, async () => {

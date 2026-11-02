@@ -45,12 +45,12 @@ export class T3InvalidInput extends Schema.TaggedError<T3InvalidInput>()("T3Inva
   override readonly message: string = "The T3 request is invalid.";
 }
 
-/** A verified build records this operation as absent; never returned for an unknown build */
+/** The reference profile of the reported build records this operation as absent; never returned for any other build */
 export class T3Unsupported extends Schema.TaggedError<T3Unsupported>()("T3Unsupported", {
   operation: T3Operation,
   serverVersion: Schema.String,
 }) {
-  override readonly message: string = "The verified T3 build does not support this operation.";
+  override readonly message: string = "The reported T3 build does not offer this operation.";
 }
 
 const fileErrorMessage = (code: FileFailure, scope: FileScope): string => code === "permission_required"

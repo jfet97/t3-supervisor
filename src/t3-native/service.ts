@@ -1,13 +1,22 @@
-import { Context, type Deferred, type Effect } from "effect";
+import { Context, Crypto, Effect, Layer, Option, Ref, type Deferred } from "effect";
+import { HttpClient } from "effect/http";
+import { NativeEnvelope } from "../native-envelope.js";
 import type { SupervisorModelInfo } from "../project-supervisor-contract.js";
+import { NativeOperateRpc, NativeRpc, NativeShell } from "../supervisor-native.js";
+import { T3Client } from "../t3.js";
 import type { ThreadInfo } from "../types.js";
+import { referenceBuilds } from "./build.js";
+import { makeFiles } from "./internal/files.js";
+import { makeHelper } from "./internal/helper.js";
+import { makeOrchestration } from "./internal/orchestration.js";
+import { makeTerminal } from "./internal/terminal.js";
 import type {
   BuildFacts, CommandReceipt, CommitOutcome, CommitRequest, DirectoryListing, FileContents, FileMetadata, HelperTask, HelperTaskDelete,
-  HelperTaskUpsert, LaunchReceipt, LaunchThread, ListEntriesRequest, MetadataRequest, OrchestrationCommand, ReadFileRequest, ShellBaseline,
-  ShellSourceItem, T3Environment, T3Operation, TerminalAttachEvent, TerminalAttachExit, TerminalAttachRequest, TerminalCloseRequest,
-  TerminalOpenRequest, TerminalSnapshot, TerminalWriteRequest, ThreadSnapshot, ThreadStreamItem, TurnItemReply, TurnItemRequest, VcsRefs,
-  VcsRequest, VcsStatus, VerifiedBuild, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryRequest, WebhookPost, WebhookReply,
-  WriteFileReceipt, WriteFileRequest,
+  HelperTaskUpsert, LaunchReceipt, LaunchThread, ListEntriesRequest, MetadataRequest, OrchestrationCommand, ReadFileRequest, ReferenceBuild,
+  ShellBaseline, ShellSourceItem, T3Environment, T3Operation, TerminalAttachEvent, TerminalAttachExit, TerminalAttachRequest,
+  TerminalCloseRequest, TerminalOpenRequest, TerminalSnapshot, TerminalWriteRequest, ThreadSnapshot, ThreadStreamItem, TurnItemReply,
+  TurnItemRequest, VcsRefs, VcsRequest, VcsStatus, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryRequest, WebhookPost,
+  WebhookReply, WriteFileReceipt, WriteFileRequest,
 } from "./contracts.js";
 import type {
   T3FileError, T3InvalidInput, T3ReadError, T3RequestError, T3TerminalError, T3Unsupported, T3WebhookError,
@@ -40,7 +49,8 @@ export interface T3Command<I, A, E> {
 }
 
 export interface T3BuildFamily {
-  readonly verifiedBuilds: ReadonlyArray<VerifiedBuild>;
+  // the builds the reference profile was captured from; not a claim of live tests of every operation on them
+  readonly referenceBuilds: ReadonlyArray<ReferenceBuild>;
   // the facts of the last environment this service read; null before its first read
   readonly observed: Effect.Effect<BuildFacts | null>;
 }
@@ -153,5 +163,50 @@ export interface T3NativeShape {
   readonly terminal: T3TerminalFamily | null;
 }
 
+/** A credential's endpoint: the T3 base url and the credential's bearer token */
+export interface T3Endpoint {
+  readonly baseUrl: string | URL;
+  readonly token: string;
+}
+
+/** The credentials of one supervision run; an absent optional credential leaves its family unconstructed (null) */
+export interface T3NativeCredentials {
+  // the T3 base url the helper webhook paths resolve against
+  readonly baseUrl: string;
+  // the read credential of the file reads; its native client, shell reads and T3 client are the provided services
+  readonly read: T3Endpoint;
+  readonly projectWrite?: T3Endpoint | undefined;
+  readonly commit?: T3Endpoint | undefined;
+  readonly probe?: T3Endpoint | undefined;
+}
+
+// the client instances and process transport T3Native wraps
+export type T3NativeClients = T3Client | NativeRpc | NativeShell | NativeEnvelope | HttpClient.HttpClient | Crypto.Crypto;
+
+// a facade over the run's own client instances: the T3 client, the read credential's native client with its shell reads and the
+// operate credential's client when configured, plus the shared envelope, crypto and HTTP client of the process; it builds no client,
+// memo or heartbeat of its own. The operate client's presence gates the commands and the helper family exactly as before
+const makeT3Native = (credentials: T3NativeCredentials): Effect.Effect<T3NativeShape, never, T3NativeClients> => Effect.gen(function* () {
+  const t3 = yield* T3Client;
+  const read = yield* NativeRpc;
+  const shell = yield* NativeShell;
+  const operate = Option.getOrNull(yield* Effect.serviceOption(NativeOperateRpc));
+  const envelope = yield* NativeEnvelope;
+  const http = yield* HttpClient.HttpClient;
+  const crypto = yield* Crypto.Crypto;
+  const observed = yield* Ref.make<BuildFacts | null>(null);
+  return T3Native.of({
+    build: {referenceBuilds, observed: Ref.get(observed)},
+    orchestration: makeOrchestration({t3, read, shell, operate, observed}),
+    helper: operate === null ? null : makeHelper({operate, http, baseUrl: credentials.baseUrl, observed}),
+    files: makeFiles(envelope, {read: credentials.read, projectWrite: credentials.projectWrite, commit: credentials.commit}),
+    terminal: credentials.probe === undefined ? null : makeTerminal(envelope, credentials.probe, crypto),
+  });
+});
+
 /** The typed T3 integration: business code reaches T3 only through this service */
-export class T3Native extends Context.Service<T3Native, T3NativeShape>()("t3-supervisor/T3Native") {}
+export class T3Native extends Context.Service<T3Native, T3NativeShape>()("t3-supervisor/T3Native") {
+  static readonly make: (credentials: T3NativeCredentials) => Effect.Effect<T3NativeShape, never, T3NativeClients> = makeT3Native;
+  static readonly layer = (credentials: T3NativeCredentials): Layer.Layer<T3Native, never, T3NativeClients> =>
+    Layer.effect(T3Native, makeT3Native(credentials));
+}
