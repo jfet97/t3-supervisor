@@ -3,7 +3,7 @@ import { HttpClient, HttpClientRequest } from "effect/http";
 import type { NativeRpcShape } from "../../supervisor-native.js";
 import { selectTranslation } from "../build.js";
 import {
-  HelperTask, HelperTaskDelete, HelperTaskList, HelperTaskUpsert, HelperTaskUpsertReply, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryDetail,
+  HelperTask, HelperTaskDelete, HelperTaskList, HelperTaskUpsert, HelperTaskUpsertReply, isHelperWebhookPath, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryDetail,
   WebhookDeliveryList, WebhookDeliveryRequest, WebhookPost, webhookBody, type NativeRecord, type BuildFacts, type HelperTaskView,
   type T3Operation, type WebhookDeliveryView, type WebhookReply,
 } from "../contracts.js";
@@ -45,7 +45,7 @@ const isPostReply = Schema.is(Schema.Struct({deliveryId: Schema.String}));
 
 // the webhook URL of a task path: a hook path on the T3 origin itself, without a query or fragment
 const webhookEndpoint = (path: string, baseUrl: string): URL | null => {
-  if (!path.startsWith("/api/hooks/")) return null;
+  if (!isHelperWebhookPath(path)) return null;
   try {
     const endpoint = new URL(path, baseUrl);
     return endpoint.origin !== new URL(baseUrl).origin || endpoint.search || endpoint.hash ? null : endpoint;

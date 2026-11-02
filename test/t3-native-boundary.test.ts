@@ -7,7 +7,7 @@ import { NativeEnvelope } from "../src/native-envelope.js";
 import { NativeOperateRpc, NativeRpc, NativeShell } from "../src/supervisor-native.js";
 import { T3Client, type T3ClientOptions } from "../src/t3.js";
 import {
-  T3FileError, T3InvalidInput, T3Native, T3ReadError, T3RequestError, T3TerminalError, T3WebhookError, webhookBody, type OrchestrationCommand,
+  isHelperWebhookPath, T3FileError, T3InvalidInput, T3Native, T3ReadError, T3RequestError, T3TerminalError, T3WebhookError, webhookBody, type OrchestrationCommand,
   type T3InFlight, type TerminalAttachEvent, type TurnItemView,
 } from "../src/t3-native/index.js";
 import { canonicalJson, recognisedWorkflowCallArguments, verifyWorkflowToolEvidence } from "../src/workflow-write-evidence.js";
@@ -71,6 +71,11 @@ describe("T3Native at the native boundary", () => {
     const peer = yield* intPeer();
     const native = yield* nativeOf(peer);
     const commands = native.orchestration.commands!;
+    // readiness keeps the hook prefix; preparation refuses a query or fragment before sending
+    assert.equal(isHelperWebhookPath("/elsewhere"), false);
+    assert.equal(isHelperWebhookPath("/api/hooks/accepted"), true);
+    assert.equal(isHelperWebhookPath("/api/hooks/accepted?token=1"), true);
+    assert.equal(isHelperWebhookPath("/api/hooks/accepted#fragment"), true);
     const failures: ReadonlyArray<unknown> = [
       yield* Effect.flip(commands.dispatchCommand.prepare({_tag: "MessageDispatch", commandId: "", messageId: "m", threadId: "t", text: "x",
         dispatchMode: {type: "queue_after_active"}})),
@@ -84,6 +89,7 @@ describe("T3Native at the native boundary", () => {
       yield* Effect.flip(native.orchestration.watchThread("t", 1.5, () => Effect.void)),
       yield* Effect.flip(native.helper!.postWebhook.prepare({path: "/elsewhere", batchId: "b", text: "x"})),
       yield* Effect.flip(native.helper!.postWebhook.prepare({path: "/api/hooks/accepted?token=1", batchId: "b", text: "x"})),
+      yield* Effect.flip(native.helper!.postWebhook.prepare({path: "/api/hooks/accepted#fragment", batchId: "b", text: "x"})),
       yield* Effect.flip(native.helper!.webhookDeliveries({taskId: ""})),
       yield* Effect.flip(native.files.read.readFile({cwd: "/checkout", relativePath: "a\\b"})),
       yield* Effect.flip(native.files.write!.writeFile({cwd: "/checkout", relativePath: ".t3-supervisor/../outside", contents: "x"})),

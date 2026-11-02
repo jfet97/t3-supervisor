@@ -377,6 +377,9 @@ export type HelperTaskDelete = typeof HelperTaskDelete.Type;
 export const WebhookPost = Schema.Struct({path: Schema.String, batchId: Schema.String, text: Schema.String});
 export type WebhookPost = typeof WebhookPost.Type;
 
+/** The channel-readiness prefix check; command preparation separately checks the origin, query and fragment. */
+export const isHelperWebhookPath = (path: string): boolean => path.startsWith("/api/hooks/");
+
 /** The exact request body of a helper webhook POST; receipts and native delivery detail are compared against these bytes */
 export const webhookBody = (post: Pick<WebhookPost, "batchId" | "text">): string => JSON.stringify({batchId: post.batchId, text: post.text});
 
