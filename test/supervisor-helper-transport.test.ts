@@ -44,7 +44,7 @@ const fixture = Effect.gen(function* () {
     lastPostedBody: null as string | null, renderWrapper: null as ((text: string) => string) | null};
   const rpc: RpcHandler = (tag, input) => {
     calls.push(tag);
-    if (tag === "scheduledTasks.list") return Effect.succeed({tasks});
+    if (tag === "scheduledTasks.subscribe") return Effect.succeed({tasks});
     if (tag === "scheduledTasks.upsert") {
       const task = {...input, ...(state.disableChannel ? {enabled: false} : {}), createdAt: "2026-10-16T10:00:00Z",
         webhook: {path: "/api/hooks/fixture/fixture-only-token", url: null}};
@@ -653,7 +653,7 @@ it.effect("a stop committed while the transport lists the helper's channel leave
   // only the transport's first channel list is held
   let hold = true;
   const rpc = f.options.rpc!;
-  const transport = yield* helperTransportUnit({...f.options, rpc: (tag, input) => tag === "scheduledTasks.list" && hold
+  const transport = yield* helperTransportUnit({...f.options, rpc: (tag, input) => tag === "scheduledTasks.subscribe" && hold
     ? Effect.gen(function* () {hold = false;yield* Deferred.succeed(listed, undefined);yield* Deferred.await(gate);return yield* rpc(tag, input);})
     : rpc(tag, input)});
   const r = yield* teamRuntime(f, transport, {supervisionStopped: () => stopped});
@@ -1952,7 +1952,7 @@ const loopbackFixture = (baseUrl: string) => Effect.gen(function* () {
   runs: [], messages: [], runtimeRequests: []};
   const tasks: Record<string, unknown>[] = [];
   const rpc: RpcHandler = (tag, input) => {
-    if (tag === "scheduledTasks.list") return Effect.succeed({tasks});
+    if (tag === "scheduledTasks.subscribe") return Effect.succeed({tasks});
     if (tag === "scheduledTasks.upsert") {
       const task = {...input, createdAt: "2026-10-16T10:00:00Z", webhook: {path: webhookPath, url: `${baseUrl}${webhookPath}`}};
       tasks.splice(0, tasks.length, task);return Effect.succeed({task});

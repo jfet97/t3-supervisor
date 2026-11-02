@@ -85,10 +85,18 @@ own stops the container; `./dev logs` shows why.
 | Credential | T3 scopes |
 | --- | --- |
 | `T3_TOKEN_FILE` | `orchestration:read`, `filesystem:read` |
-| `T3_GUIDANCE_TOKEN_FILE` | `orchestration:operate` |
+| `T3_GUIDANCE_TOKEN_FILE` | `orchestration:read`, `orchestration:operate` |
 | `T3_PROJECT_WRITE_TOKEN_FILE` | `filesystem:read`, `filesystem:write` |
 | `T3_PROJECT_COMMIT_TOKEN_FILE` | `source-control:write` |
 | `T3_GIT_PROBE_TOKEN_FILE` | `terminal:operate` |
+
+The guidance session needs both orchestration scopes: the pinned T3 authorizes
+`scheduledTasks.subscribe` with `orchestration:read` and exposes webhook paths only
+with `orchestration:operate`. The environment issues both on its next start. Other
+installations must reissue an operate-only guidance session with both scopes; a
+read-only session cannot deliver helper messages. See the pinned T3's
+[authorization map](https://github.com/pingdotgg/t3code/blob/v0.1.7-nightly.20261101.4016/apps/server/src/auth/RpcAuthorization.ts)
+and [webhook visibility](https://github.com/pingdotgg/t3code/blob/v0.1.7-nightly.20261101.4016/apps/server/src/ws.ts).
 
 ## Providers
 
@@ -501,6 +509,8 @@ in the cache volume, with an environment built from nothing, then:
 
 - T3's descriptor reports the pinned version, and Supervisor ingests its catalog;
 - the read credential reaches both shell snapshots through `scripts/probe-t3.ts`;
+- the guidance credential reads one valid helper-channel task snapshot through
+  `scheduledTasks.subscribe`, then releases the socket without waiting for the stream to end;
 - the workflow MCP route answers its own bearer directly and refuses a wrong,
   empty or T3 bearer;
 - a conversation in a disposable project, started through T3's thread CLI, gets

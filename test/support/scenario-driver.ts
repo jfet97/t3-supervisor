@@ -123,7 +123,7 @@ const scenarioRoutes = (peer: PeerState): PeerRoutes[] => {
       if (settled) settled.thread.settledAt = new Date().toISOString();
     }
     if (entry.tag === "orchestration.dispatchCommand" || entry.tag === "orchestration.launchThread") return {value: {sequence: ++sequence}};
-    if (entry.tag === "scheduledTasks.list") return {value: {tasks: peer.tasks}};
+    if (entry.tag === "scheduledTasks.subscribe") return {stream: [{tasks: peer.tasks}]};
     if (entry.tag === "scheduledTasks.upsert") return Effect.andThen(peer.onUpsert ?? Effect.void, Effect.sync(() => {
       const task = {...input, createdAt: "2026-10-16T10:00:00Z", webhook: {path: hookPath, url: null}};
       peer.tasks.splice(0, peer.tasks.length, task);

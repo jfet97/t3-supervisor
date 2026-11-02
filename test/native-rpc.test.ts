@@ -5,6 +5,7 @@ import { Deferred, Effect, Exit, Fiber, Layer, Option, Stream } from "effect";
 import { FetchHttpClient, HttpClient, type HttpClientResponse } from "effect/http";
 import { TestClock } from "effect/testing";
 import { NativeEnvelope } from "../src/native-envelope.js";
+import { helperTaskSnapshot } from "../src/supervisor-helper-transport.js";
 import { NativeOperateRpc, NativeRpc, NativeShell, SupervisorRpcError } from "../src/supervisor-native.js";
 import { envelopePeer, hungPeer, type PeerFrame } from "./support/envelope-peer.js";
 
@@ -18,6 +19,8 @@ const client = (baseUrl: string) => NativeRpc.make({ baseUrl, token });
 const dispatch = (baseUrl: string, cancel?: Deferred.Deferred<void>) =>
   Effect.flatMap(client(baseUrl), (rpc) => rpc.call("orchestration.dispatchCommand", { commandId: "command-a" }, cancel));
 const classification = (error: SupervisorRpcError) => [error.outcome, error.definiteRejection, error.providerDisabled, error.dispatchCommandFailure];
+const taskSnapshot = (baseUrl: string, cancel?: Deferred.Deferred<void>) => NativeOperateRpc.use((rpc) => helperTaskSnapshot(rpc, cancel)).pipe(
+  Effect.provide(NativeOperateRpc.layer({baseUrl, token})));
 
 const serve = (handler: (request: IncomingMessage, response: ServerResponse) => void) => Effect.acquireRelease(Effect.gen(function* () {
   const server = createServer(handler);
@@ -131,6 +134,118 @@ describe("NativeRpc", () => {
       Effect.catchTag("SupervisorRpcError", (failure) => Effect.succeed(classification(failure))));
     assert.deepEqual(caught, ["uncertain", false, false, true]);
   }), { timeout: 10_000 });
+});
+
+describe("helper task subscription", () => {
+  it.live("takes the first streamed snapshot with the operate credential and closes without an Ack or Exit", () => Effect.gen(function* () {
+    const tasks = [{id: "owned-helper-channel", threadId: "helper", enabled: true}];
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag !== "Request") return;
+      if (frame.tag !== "scheduledTasks.subscribe") {
+        socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: {_tag: "Failure"}}));
+        return;
+      }
+      socket.send(JSON.stringify([
+        {_tag: "Chunk", requestId: "another-request", values: [{tasks: []}]},
+        {_tag: "Ping"},
+        {_tag: "Chunk", requestId: frame.id, values: [{tasks}, {tasks: []}]},
+      ]));
+    });
+    assert.deepEqual(yield* taskSnapshot(peer.baseUrl), tasks);
+    yield* peer.closed;
+    assert.equal(peer.upgrades.length, 1);
+    assert.equal(peer.upgrades[0]?.authorization, `Bearer ${token}`);
+    assert.equal(peer.frames[0]?.frame.tag, "scheduledTasks.subscribe");
+    assert.deepEqual(peer.frames[0]?.frame.payload, {});
+    assert.deepEqual(peer.frames.map(({frame}) => frame._tag), ["Request", "Pong"]);
+  }).pipe(provided));
+
+  it.live("fails closed on malformed or absent snapshots and preserves native failure classification", () => Effect.gen(function* () {
+    const cases = [
+      {frame: {_tag: "Chunk", values: []}, expected: ["SupervisorRpcError", "uncertain", false]},
+      {frame: {_tag: "Chunk", values: [{tasks: "malformed"}, {tasks: []}]}, expected: ["ChannelsUnavailable"]},
+      {frame: {_tag: "Chunk", values: [{tasks: [null]}]}, expected: ["ChannelsUnavailable"]},
+      {frame: {_tag: "Exit", exit: {_tag: "Failure", cause: {_tag: "Fail", error: {_tag: "ScheduledTaskError"}}}},
+        expected: ["SupervisorRpcError", "uncertain", false]},
+      {frame: {_tag: "Exit", exit: {_tag: "Failure", cause: {_tag: "Fail", error: {_tag: "ThreadManagementProviderInstanceDisabledError"}}}},
+        expected: ["SupervisorRpcError", "rejected", true]},
+      {frame: {_tag: "Exit", exit: null}, expected: ["SupervisorRpcError", "uncertain", false]},
+    ];
+    for (const testCase of cases) {
+      const peer = yield* envelopePeer((socket, frame) => {
+        if (frame._tag === "Request") socket.send(JSON.stringify({...testCase.frame, requestId: frame.id}));
+      });
+      const error = yield* Effect.flip(taskSnapshot(peer.baseUrl));
+      assert.deepEqual(error._tag === "SupervisorRpcError" ? [error._tag, error.outcome, error.definiteRejection] : [error._tag], testCase.expected);
+      yield* peer.closed;
+      assert.equal(peer.frames.length, 1, "a failed snapshot neither retries nor writes another frame");
+    }
+    const malformed = yield* envelopePeer((socket, frame) => {if (frame._tag === "Request") socket.send("{");});
+    const malformedError = yield* Effect.flip(taskSnapshot(malformed.baseUrl));
+    assert.equal(malformedError._tag, "SupervisorRpcError");
+    if (malformedError._tag === "SupervisorRpcError") assert.equal(malformedError.outcome, "uncertain");
+    yield* malformed.closed;
+    const dropped = yield* envelopePeer((socket, frame) => {if (frame._tag === "Request") socket.terminate();});
+    const error = yield* Effect.flip(taskSnapshot(dropped.baseUrl));
+    assert.equal(error._tag, "SupervisorRpcError");
+    if (error._tag === "SupervisorRpcError") assert.equal(error.outcome, "uncertain");
+    yield* dropped.closed;
+  }).pipe(provided));
+
+  it.live("rejects a successful Exit without a streamed snapshot", () => Effect.gen(function* () {
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag === "Request") socket.send(JSON.stringify({_tag: "Exit", requestId: frame.id, exit: {_tag: "Success", value: {tasks: []}}}));
+    });
+    const error = yield* Effect.flip(taskSnapshot(peer.baseUrl));
+    assert.equal(error._tag, "SupervisorRpcError");
+    if (error._tag === "SupervisorRpcError") assert.equal(error.outcome, "uncertain");
+    yield* peer.closed;
+    assert.equal(peer.frames.length, 1);
+  }).pipe(provided));
+
+  it.live("cancels before connection or after send and releases an interrupted snapshot without another frame", () => Effect.gen(function* () {
+    const early = yield* envelopePeer();
+    const cancelled = yield* Deferred.make<void>();
+    yield* Deferred.succeed(cancelled, undefined);
+    const before = yield* Effect.flip(taskSnapshot(early.baseUrl, cancelled));
+    assert.equal(before._tag, "SupervisorRpcError");
+    if (before._tag === "SupervisorRpcError") assert.equal(before.outcome, "rejected");
+    assert.equal(early.tcpConnections(), 0);
+
+    const peer = yield* envelopePeer();
+    const cancel = yield* Deferred.make<void>();
+    const fiber = yield* Effect.forkChild(Effect.flip(taskSnapshot(peer.baseUrl, cancel)));
+    yield* peer.frame(isRequest);
+    yield* Deferred.succeed(cancel, undefined);
+    const after = yield* Fiber.join(fiber);
+    assert.equal(after._tag, "SupervisorRpcError");
+    if (after._tag === "SupervisorRpcError") assert.equal(after.outcome, "uncertain");
+    yield* peer.closed;
+    assert.equal(peer.frames.length, 1);
+
+    const interrupted = yield* envelopePeer();
+    const waiting = yield* Effect.forkChild(taskSnapshot(interrupted.baseUrl));
+    yield* interrupted.frame(isRequest);
+    yield* Fiber.interrupt(waiting);
+    yield* interrupted.closed;
+    assert.equal(interrupted.frames.length, 1);
+  }).pipe(provided));
+
+  it.effect("bounds a stream with no snapshot at 20 seconds even when unrelated chunks arrive", () => Effect.gen(function* () {
+    const peer = yield* envelopePeer((socket, frame) => {
+      if (frame._tag === "Request") socket.send(JSON.stringify({_tag: "Chunk", requestId: "another-request", values: [{tasks: []}]}));
+    });
+    const waiting = yield* Effect.forkChild(Effect.flip(taskSnapshot(peer.baseUrl)));
+    yield* peer.frame(isRequest);
+    yield* TestClock.adjust("19999 millis");
+    assert.equal(waiting.pollUnsafe(), undefined);
+    yield* TestClock.adjust("1 millis");
+    const error = yield* Fiber.join(waiting);
+    assert.equal(error._tag, "SupervisorRpcError");
+    if (error._tag === "SupervisorRpcError") assert.equal(error.outcome, "uncertain");
+    yield* peer.closed;
+    assert.equal(peer.frames.length, 1);
+  }).pipe(provided));
 });
 
 describe("NativeShell", () => {

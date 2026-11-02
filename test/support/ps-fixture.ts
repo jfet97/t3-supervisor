@@ -374,7 +374,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
   });
   const operateRpc = nativeClient((tag, payload) => {
     operations.push({ tag, payload: {...payload} });
-    if (tag === "scheduledTasks.list") return {tasks: scheduledTasks};
+    if (tag === "scheduledTasks.subscribe") return {tasks: scheduledTasks};
     if (tag === "scheduledTasks.delete") {
       scheduledTasks = scheduledTasks.filter(task => task.id !== payload.id);
       return {deleted: true};

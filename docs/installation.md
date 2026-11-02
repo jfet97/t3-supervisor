@@ -30,6 +30,12 @@ Additional credentials enable capabilities separately:
 | `T3_PROJECT_COMMIT_TOKEN_FILE` | Explicit project setup commits |
 | `T3_GIT_PROBE_TOKEN_FILE` | Git preflight checks for project setup |
 
+On the pinned T3 nightly, the guidance credential requires both
+`orchestration:read` and `orchestration:operate`: helper channels read the task
+subscription and use its protected webhook path. Reissue an existing operate-only
+guidance session with both scopes before using helpers. The separate read credential
+does not replace this requirement.
+
 Each credential must be issued by T3 with the corresponding permissions. Missing
 optional access remains unavailable in the dashboard; it does not grant broader
 authority. See [project definitions](project-definitions.md) and

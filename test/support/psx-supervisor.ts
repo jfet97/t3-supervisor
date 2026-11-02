@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, Exit, FileSystem, Layer, Scope } from "effect";
@@ -256,7 +257,7 @@ export const makeFixture = (initial: ReadonlyArray<{threadId: string; projectId:
     };
     const defaultOperate = (tag: string, payload: Record<string, unknown>): Effect.Effect<unknown, SupervisorRpcError> => {
       if (unknownDispatches > 0) {unknownDispatches -= 1; return Effect.fail(new SupervisorRpcError("uncertain"));}
-      if (tag === "scheduledTasks.list") return Effect.succeed({tasks: []});
+      if (tag === "scheduledTasks.subscribe") return Effect.succeed({tasks: []});
       if (tag === "orchestration.launchThread") return Effect.sync(() => {
         const threadId = String(payload.threadId);
         if (!projections.has(threadId)) projections.set(threadId, emptySupervisorProjection(threadId, String(payload.projectId), payload.modelSelection as SupervisorModelSelection));
@@ -291,7 +292,10 @@ export const makeFixture = (initial: ReadonlyArray<{threadId: string; projectId:
       return Effect.fail(new SupervisorRpcError("uncertain"));
     };
     const operate: NativeRpcShape = {
-      call: (tag, payload) => settleRpc(defaultOperate(tag, {...payload})),
+      call: (tag, payload, _cancel, response) => Effect.suspend(() => {
+        assert.equal(response, tag === "scheduledTasks.subscribe" ? "firstChunk" : undefined);
+        return settleRpc(defaultOperate(tag, {...payload}));
+      }),
       initiate: (tag, payload) => Effect.sync(() => {
         const recorded = {...payload};
         operations.push({tag, payload: recorded});

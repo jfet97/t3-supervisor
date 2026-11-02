@@ -94,7 +94,7 @@ export const startInterpretationFixture = (options: {mainThreadId?: string; noPr
     const projections = native.projections;
     const operate: PeerRoutes = {rpc: (entry) => {
       if (entry.tag === "server.getConfig") return {value: modelConfig};
-      if (entry.tag === "scheduledTasks.list") return {value: {tasks: []}};
+      if (entry.tag === "scheduledTasks.subscribe") return {stream: [{tasks: []}]};
       if (entry.tag !== "orchestration.dispatchCommand") return undefined;
       const payload = entry.payload;
       return Effect.gen(function* () {

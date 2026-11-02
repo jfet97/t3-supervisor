@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -100,7 +101,10 @@ export const rpcUncertain = (): SupervisorRpcError => new SupervisorRpcError("un
 
 /** The operate client over the fake scheduler: a call is the handler's effect; an initiation runs it when the request is committed. */
 export const operateRpc = (handle: RpcHandler): NativeRpcShape => ({
-  call: (tag, payload) => Effect.suspend(() => handle(tag, {...payload})),
+  call: (tag, payload, _cancel, response) => Effect.suspend(() => {
+    assert.equal(response, tag === "scheduledTasks.subscribe" ? "firstChunk" : undefined);
+    return handle(tag, {...payload});
+  }),
   initiate: (tag, payload) => Effect.map(Effect.exit(Effect.suspend(() => handle(tag, {...payload}))), (exit) => ({
     sent: Effect.succeed(true), result: exit, release: Effect.void,
   })),

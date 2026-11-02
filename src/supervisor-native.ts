@@ -39,8 +39,8 @@ export interface NativeRpcInFlight {
 }
 
 export interface NativeRpcShape {
-  // one bounded request on its own socket; a completed cancel ends it at the sent boundary, an interruption writes nothing more
-  readonly call: (tag: string, payload: Readonly<Record<string, unknown>>, cancel?: Deferred.Deferred<void>) => Effect.Effect<unknown, SupervisorRpcError>;
+  // one bounded request on its own socket; firstChunk takes one stream value and releases without waiting for Exit
+  readonly call: (tag: string, payload: Readonly<Record<string, unknown>>, cancel?: Deferred.Deferred<void>, response?: "firstChunk") => Effect.Effect<unknown, SupervisorRpcError>;
   // commits the request synchronously, for admission sections that must know whether it left before they yield
   readonly initiate: (tag: string, payload: Readonly<Record<string, unknown>>, cancel?: Deferred.Deferred<void>) => Effect.Effect<NativeRpcInFlight>;
 }
@@ -67,7 +67,7 @@ const classified = <A>(effect: Effect.Effect<A, NativeEnvelopeError | Supervisor
 
 const makeNativeRpc = (endpoint: NativeEndpoint): Effect.Effect<NativeRpcShape, never, NativeEnvelope> => Effect.gen(function* () {
   const envelope = yield* NativeEnvelope;
-  // 8 MiB frames, 5 s handshake, 20 s for the whole call, chunks ignored
+  // 8 MiB frames, 5 s handshake, 20 s for the whole call; unary calls ignore chunks
   const native = (tag: string, payload: Readonly<Record<string, unknown>>, cancel: Deferred.Deferred<void> | undefined): NativeCall<unknown, SupervisorRpcError> => ({
     endpoint,
     request: { id: "supervisor", tag, payload },
@@ -78,7 +78,15 @@ const makeNativeRpc = (endpoint: NativeEndpoint): Effect.Effect<NativeRpcShape, 
     onExit: settle(tag),
   });
   return {
-    call: (tag, payload, cancel) => classified(envelope.call(native(tag, payload, cancel))),
+    call: (tag, payload, cancel, response) => classified(envelope.call({
+      ...native(tag, payload, cancel),
+      ...(response === "firstChunk" ? {
+        onChunk: (values: ReadonlyArray<unknown>) => values.length > 0
+          ? Effect.succeed(NativeStep.done(values[0])) : Effect.fail(new SupervisorRpcError("uncertain")),
+        // a stream that ended before its first value did not supply a snapshot
+        onExit: (exit: NativeExit) => exit._tag === "Success" ? Effect.fail(new SupervisorRpcError("uncertain")) : settle(tag)(exit),
+      } : {}),
+    })),
     initiate: (tag, payload, cancel) => Effect.map(envelope.initiate(native(tag, payload, cancel)),
       (flight) => ({ sent: flight.sent, result: classified(flight.result), release: flight.release })),
   };
