@@ -14,8 +14,8 @@ import type {
   BuildFacts, CommandReceipt, CommitOutcome, CommitRequest, DirectoryListing, FileContents, FileMetadata, HelperTask, HelperTaskDelete,
   HelperTaskUpsert, LaunchReceipt, LaunchThread, ListEntriesRequest, MetadataRequest, OrchestrationCommand, ReadFileRequest, ReferenceBuild,
   ShellBaseline, ShellSourceItem, T3Environment, T3Operation, TerminalAttachEvent, TerminalAttachExit, TerminalAttachRequest,
-  TerminalCloseRequest, TerminalOpenRequest, TerminalSnapshot, TerminalWriteRequest, ThreadSnapshot, ThreadStreamItem, TurnItemReply,
-  TurnItemRequest, VcsRefs, VcsRequest, VcsStatus, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryRequest, WebhookPost,
+  TerminalCloseRequest, TerminalOpenRequest, TerminalSnapshot, TerminalWriteRequest, ThreadSnapshot, ThreadStreamItem, TurnItemRequest,
+  TurnItemView, VcsRefs, VcsRequest, VcsStatus, WebhookDeliveriesRequest, WebhookDelivery, WebhookDeliveryRequest, WebhookPost,
   WebhookReply, WriteFileReceipt, WriteFileRequest,
 } from "./contracts.js";
 import type {
@@ -67,7 +67,8 @@ export interface T3OrchestrationFamily {
   readonly shellThreads: Effect.Effect<ReadonlyArray<ThreadInfo>, T3RequestError>;
   // the models T3 advertises now, normalized as T3 exposes them to its composer
   readonly config: Effect.Effect<ReadonlyArray<SupervisorModelInfo>, T3RequestError>;
-  readonly turnItem: (request: TurnItemRequest, cancel?: Deferred.Deferred<void>) => Effect.Effect<TurnItemReply, T3RequestError | T3InvalidInput>;
+  // the reply's item as the verifiers receive it; only a reply that is not a record with an `item` key fails, as uncertain
+  readonly turnItem: (request: TurnItemRequest, cancel?: Deferred.Deferred<void>) => Effect.Effect<TurnItemView, T3RequestError | T3InvalidInput>;
   // the shell subscription from a cursor; a snapshot's archive cut is read on its own socket and must match the live snapshot
   readonly watchShell: <E = never, R = never>(cursor: number | undefined, onItem: (item: ShellSourceItem) => Effect.Effect<void, E, R>) =>
     Effect.Effect<never, T3ReadError | T3InvalidInput | E, R>;

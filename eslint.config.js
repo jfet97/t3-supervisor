@@ -35,10 +35,22 @@ const boundarySyntax = [
 const t3Boundary = {
   adapter: ["src/t3-native/**/*.ts", "src/native-envelope.ts", "src/supervisor-native.ts", "src/t3.ts", "src/t3-projection-stream.ts"],
   composition: ["src/guidance-application.ts", "src/supervisor.ts"],
+  // one module per line: each migration deletes exactly its own lines
   transitional: [
-    "src/git-probe.ts", "src/guidance.ts", "src/project-definitions.ts", "src/project-files.ts", "src/project-supervisor.ts", "src/supervision-control.ts",
-    "src/supervisor-compaction.ts", "src/supervisor-conversation.ts", "src/supervisor-helper-transport.ts", "src/supervisor-lifecycle.ts",
-    "src/supervisor-planning-controller.ts", "src/supervisor-team-controller.ts", "src/supervisor-team-runtime.ts", "src/workflow-write-controller.ts",
+    "src/git-probe.ts",
+    "src/guidance.ts",
+    "src/project-definitions.ts",
+    "src/project-files.ts",
+    "src/project-supervisor.ts",
+    "src/supervision-control.ts",
+    "src/supervisor-compaction.ts",
+    "src/supervisor-conversation.ts",
+    "src/supervisor-helper-transport.ts",
+    "src/supervisor-lifecycle.ts",
+    "src/supervisor-planning-controller.ts",
+    "src/supervisor-team-controller.ts",
+    "src/supervisor-team-runtime.ts",
+    "src/workflow-write-controller.ts",
   ],
 };
 

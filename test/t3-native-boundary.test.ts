@@ -8,10 +8,11 @@ import { NativeOperateRpc, NativeRpc, NativeShell } from "../src/supervisor-nati
 import { T3Client, type T3ClientOptions } from "../src/t3.js";
 import {
   T3FileError, T3InvalidInput, T3Native, T3ReadError, T3RequestError, T3TerminalError, T3WebhookError, webhookBody, type OrchestrationCommand,
-  type T3InFlight, type TerminalAttachEvent,
+  type T3InFlight, type TerminalAttachEvent, type TurnItemView,
 } from "../src/t3-native/index.js";
-import { canonicalJson, recognisedWorkflowCallArguments } from "../src/workflow-write-evidence.js";
+import { canonicalJson, recognisedWorkflowCallArguments, verifyWorkflowToolEvidence } from "../src/workflow-write-evidence.js";
 import { httpRequests, intPeer, json, rpcRequests, type IntNativePeer, type PeerRpcEntry, type RpcAnswer } from "./support/int-native-peer.js";
+import * as fx from "./support/s6e-prep-interpretation.js";
 
 // T3Native at the native boundary (it.live): the production service over the production clients of each credential, on real loopback
 // sockets to the scripted peer. Each case asserts the typed answer, the native requests per route and credential, and the
@@ -180,8 +181,8 @@ describe("T3Native at the native boundary", () => {
       assert.equal(peer.connections.length, 3);
     }), {timeout: 10_000});
 
-  it.live("T3N-B04: a turn item keeps every native key, so the evidence recognition refuses an extra wrapper key and an extra argument key mismatches",
-    () => Effect.gen(function* () {
+  it.live("T3N-B04: a present turn item is never a read failure and keeps every native key; only a reply without an item is uncertain", () =>
+    Effect.gen(function* () {
       const call = (input: unknown) => ({id: "item-1", type: "dynamic_tool", threadId: "thread-1", runId: null, nodeId: "node-1", parentItemId: null,
         providerThreadId: "provider-thread", providerTurnId: "provider-turn", toolName: "mcpx.mcpx_call_tool", input, ordinal: 4, status: "completed",
         nativeItemRef: {driver: "codex", nativeId: "exec-1", strength: "strong"}, future: {kept: [1, 2]}});
@@ -191,29 +192,86 @@ describe("T3Native at the native boundary", () => {
         ["wrapper", call({name: target, arguments: {threadId: "thread-2"}, extra: true})],
         ["argument", call({name: target, arguments: {threadId: "thread-2", extra: true}})],
         ["text", call(JSON.stringify({threadId: "thread-2"}))],
+        ["numeric-node", {...call({name: target, arguments: {threadId: "thread-2"}}), nodeId: 7}],
         ["array", []],
       ]);
-      const peer = yield* intPeer([{rpc: (entry) => entry.tag === "orchestration.getTurnItem"
-        ? {value: {item: items.get(String(entry.payload.itemId)) ?? null}} : undefined}]);
+      const replies = new Map<string, unknown>([["unwrapped", items.get("exact")], ["text-reply", "not a record"]]);
+      const peer = yield* intPeer([{rpc: (entry) => {
+        if (entry.tag !== "orchestration.getTurnItem") return undefined;
+        const itemId = String(entry.payload.itemId);
+        return {value: replies.has(itemId) ? replies.get(itemId) : {item: items.get(itemId) ?? null}};
+      }}]);
       const native = yield* nativeOf(peer);
-      const read = (itemId: string) => Effect.map(native.orchestration.turnItem({threadId: "thread-1", itemId}), (reply) => reply.item);
-      const recognised = (itemId: string) => Effect.map(read(itemId), (item) => {
-        assert.ok(item !== null);
-        return recognisedWorkflowCallArguments(item, "read");
+      const view = (itemId: string) => native.orchestration.turnItem({threadId: "thread-1", itemId});
+      const present = (itemId: string) => Effect.map(view(itemId), (read) => {
+        assert.ok(read._tag !== "Absent");
+        return read;
       });
-      const exact = yield* read("exact");
+      const recognised = (itemId: string) => Effect.map(present(itemId), (read) => recognisedWorkflowCallArguments(read.item, "read"));
+      const exact = yield* present("exact");
       // the same native value, every key in its order
-      assert.equal(JSON.stringify(exact), JSON.stringify(items.get("exact")));
+      assert.equal(exact._tag, "Item");
+      assert.equal(JSON.stringify(exact.item), JSON.stringify(items.get("exact")));
       assert.deepEqual(rpcRequests(peer, "orchestration.getTurnItem")[0], {kind: "rpc", tag: "orchestration.getTurnItem", authorization: "Bearer read-token",
         payload: {threadId: "thread-1", itemId: "exact"}});
+      // the evidence recognition still sees the native input: an extra wrapper key is refused, an extra argument key mismatches
       assert.equal(canonicalJson(yield* recognised("exact")), canonicalJson({threadId: "thread-2"}));
       assert.equal(yield* recognised("wrapper"), null);
       assert.notEqual(canonicalJson(yield* recognised("argument")), canonicalJson({threadId: "thread-2"}));
-      assert.equal((yield* read("text"))?.input, JSON.stringify({threadId: "thread-2"}));
-      assert.equal(yield* read("absent"), null);
-      const malformed = yield* Effect.flip(read("array"));
-      assert.ok(malformed instanceof T3RequestError && malformed.malformedReply);
+      assert.equal((yield* present("text")).item.input, JSON.stringify({threadId: "thread-2"}));
+      // an identity field outside the pinned types is still the received evidence, whole, for the verifiers to decide
+      const nonconforming = yield* present("numeric-node");
+      assert.equal(nonconforming._tag, "Nonconforming");
+      assert.equal(JSON.stringify(nonconforming.item), JSON.stringify(items.get("numeric-node")));
+      // no item, or an item that is not an object: the callers' pending path
+      assert.deepEqual([yield* view("absent"), yield* view("array")], [{_tag: "Absent"}, {_tag: "Absent"}]);
+      // a reply that is not a record with an item key is the only unusable answer, uncertain
+      for (const itemId of ["unwrapped", "text-reply"]) {
+        const malformed = yield* Effect.flip(view(itemId));
+        assert.ok(malformed instanceof T3RequestError);
+        assert.deepEqual(classification(malformed),
+          {outcome: "uncertain", definiteRejection: false, providerDisabled: false, dispatchCommandFailure: false, malformedReply: true});
+      }
     }), {timeout: 10_000});
+
+  it.live("T3N-B12: the turn item view hands the unchanged evidence verifier the decisions main makes from the raw reply", () => Effect.gen(function* () {
+    const args = fx.plainArguments();
+    const state = fx.proofState(args);
+    const projection = fx.proofProjection(state);
+    const replied = new Map<string, unknown>([
+      ["valid", state.item],
+      ["numeric-node", {...state.item, nodeId: 7}],
+      ["numeric-run", {...state.item, runId: 7}],
+      ["array", []],
+    ]);
+    const peer = yield* intPeer([{rpc: (entry) => entry.tag === "orchestration.getTurnItem"
+      ? {value: {item: replied.get(String(entry.payload.itemId)) ?? null}} : undefined}]);
+    const native = yield* nativeOf(peer);
+    // main hands the verifier the reply's item as received; T3Native hands it the view's item, null when absent
+    const verify = (detail: unknown) => verifyWorkflowToolEvidence({projection, supervisorThreadId: fx.rootThreadId, itemId: "tool-item", detail,
+      tool: "interpretation", arguments: args});
+    const pinned: ReadonlyArray<readonly [string, TurnItemView["_tag"], unknown]> = [
+      ["valid", "Item", "verified"],
+      ["numeric-node", "Nonconforming", {status: "denied", reason: "native_item_identity_mismatch"}],
+      ["numeric-run", "Nonconforming", {status: "pending", reason: "native_input_incomplete"}],
+      ["missing", "Absent", {status: "pending", reason: "native_item_unavailable"}],
+      ["array", "Absent", {status: "pending", reason: "native_item_unavailable"}],
+    ];
+    for (const [itemId, tag, decision] of pinned) {
+      const read = yield* native.orchestration.turnItem({threadId: fx.rootThreadId, itemId});
+      assert.equal(read._tag, tag, itemId);
+      const throughView = verify(read._tag === "Absent" ? null : read.item);
+      const fromMain = verify(structuredClone(replied.get(itemId) ?? null));
+      assert.deepEqual(throughView, fromMain, itemId);
+      if (decision === "verified") {
+        assert.equal(throughView.status, "verified");
+        assert.ok(read._tag !== "Absent");
+        // every key kept and the canonical input untouched
+        assert.equal(JSON.stringify(read.item), JSON.stringify(state.item));
+        assert.equal(canonicalJson(read.item.input), canonicalJson(args));
+      } else assert.deepEqual(throughView, decision, itemId);
+    }
+  }), {timeout: 10_000});
 
   it.live("T3N-B05: a watch acknowledges a chunk only after its consumer ingested it; a failing consumer, an unknown kind or an archive mismatch get no Ack",
     () => Effect.gen(function* () {

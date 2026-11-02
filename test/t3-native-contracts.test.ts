@@ -38,15 +38,16 @@ describe("T3Native contracts", () => {
       assert.equal(Exit.isSuccess(yield* Effect.exit(selectTranslation("helper/postWebhook", buildFacts(environment("9.9.9"), profile), profile))), true);
     }));
 
-  it("T3N-02: a turn item keeps every native key, its tool input stays the native value and only its identity fields are refused", () => {
+  it("T3N-02: a conforming turn item keeps every native key and its native tool input; only its typed identity fields decide conformance", () => {
     const item = {id: "item-1", type: "dynamic_tool", threadId: "thread-1", runId: null, nodeId: "node-1", parentItemId: null, providerThreadId: "provider-thread",
       providerTurnId: "provider-turn", toolName: "mcpx.mcpx_call_tool", input: {name: "t3-supervisor-workflows__workflow_read", arguments: {threadId: "t"}, extra: 1},
       ordinal: 4, status: "completed", nativeItemRef: {driver: "codex", nativeId: "exec-1", strength: "strong"}, future: {kept: [1, 2]}};
     kept(TurnItem, item);
     kept(TurnItem, {...item, input: JSON.stringify({threadId: "t"})});
     const isItem = Schema.is(TurnItem);
-    for (const refused of [{...item, id: ""}, {...item, threadId: 7}, {...item, nodeId: 7}, {...item, toolName: false}, {...item, outputOmitted: "yes"}, [item], null])
-      assert.equal(isItem(refused), false, JSON.stringify(refused));
+    // these do not conform; the turn item read still hands a present one to the verifiers whole (t3-native-boundary.test.ts)
+    for (const nonconforming of [{...item, id: ""}, {...item, threadId: 7}, {...item, nodeId: 7}, {...item, toolName: false}, {...item, outputOmitted: "yes"}, [item], null])
+      assert.equal(isItem(nonconforming), false, JSON.stringify(nonconforming));
   });
 
   it("T3N-03: stream items keep the shell's closed kinds and the thread's unknown events; an archived thread is checked as the store reads it", () => {

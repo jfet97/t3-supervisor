@@ -146,9 +146,20 @@ const isTurnItem = Schema.is(TurnItemFields);
 export type TurnItem = typeof TurnItemFields.Type & NativeRecord;
 export const TurnItem = Schema.declare((value: unknown): value is TurnItem => isTurnItem(value));
 
-/** T3's turn item reply: the item, or null where T3 has none */
-export const TurnItemReply = Schema.Struct({item: Schema.NullOr(TurnItem)});
-export type TurnItemReply = typeof TurnItemReply.Type;
+/**
+ * The item of a turn item reply as the verifiers receive it, never a read failure for an item that is present:
+ * - `Item`: an item whose identity, graph and truncation fields have the pinned build's types, kept whole;
+ * - `Nonconforming`: a present JSON object that breaks those types, kept whole exactly as received (the same value, never copied,
+ *   stripped or logged), so the existing verifiers keep their decisions, a numeric nodeId among them;
+ * - `Absent`: null or a value that is not an object, the callers' pending path.
+ * The detail size bound stays each caller's decision.
+ */
+export const TurnItemView = Schema.Union([
+  Schema.Struct({_tag: Schema.Literal("Item"), item: TurnItem}),
+  Schema.Struct({_tag: Schema.Literal("Nonconforming"), item: NativeRecord}),
+  Schema.Struct({_tag: Schema.Literal("Absent")}),
+]);
+export type TurnItemView = typeof TurnItemView.Type;
 
 // ---- orchestration watches ----
 

@@ -4,8 +4,8 @@ import type { T3ClientShape } from "../../t3.js";
 import type { JsonRecord, SourceItem, ThreadInfo } from "../../types.js";
 import { buildFacts, selectTranslation } from "../build.js";
 import {
-  CommandReceipt, LaunchReceipt, LaunchThread, OrchestrationCommand, ShellBaseline, ShellSourceItem, ShellThread, T3Environment, ThreadSnapshot,
-  ThreadStreamItem, TurnItemReply, TurnItemRequest, type BuildFacts, type T3Operation,
+  CommandReceipt, LaunchReceipt, LaunchThread, NativeRecord, OrchestrationCommand, ShellBaseline, ShellSourceItem, ShellThread, T3Environment,
+  ThreadSnapshot, ThreadStreamItem, TurnItem, TurnItemRequest, type BuildFacts, type T3Operation, type TurnItemView,
 } from "../contracts.js";
 import { T3InvalidInput, T3ReadError, T3RequestError } from "../errors.js";
 import type { T3Command, T3InFlight, T3OrchestrationFamily } from "../service.js";
@@ -34,13 +34,22 @@ const isThreadSnapshot: (value: unknown) => value is ThreadSnapshot = Schema.is(
 const isShellBaseline: (value: unknown) => value is ShellBaseline = Schema.is(ShellBaseline);
 const isShellThread: (value: unknown) => value is ThreadInfo = Schema.is(ShellThread);
 const isTurnItemRequest: (value: unknown) => value is TurnItemRequest = Schema.is(TurnItemRequest);
-const isTurnItemReply: (value: unknown) => value is TurnItemReply = Schema.is(TurnItemReply);
+const isNativeRecord: (value: unknown) => value is NativeRecord = Schema.is(NativeRecord);
+const isTurnItem: (value: unknown) => value is TurnItem = Schema.is(TurnItem);
 const isShellSourceItem: (value: unknown) => value is ShellSourceItem = Schema.is(ShellSourceItem);
 const isThreadStreamItem: (value: unknown) => value is ThreadStreamItem = Schema.is(ThreadStreamItem);
 const isLaunchThread: (value: unknown) => value is LaunchThread = Schema.is(LaunchThread);
 const isOrchestrationCommand: (value: unknown) => value is OrchestrationCommand = Schema.is(OrchestrationCommand);
 const isLaunchReceipt: (value: unknown) => value is LaunchReceipt = Schema.is(LaunchReceipt);
 const isCommandReceipt: (value: unknown) => value is CommandReceipt = Schema.is(CommandReceipt);
+
+// the reply's item as the verifiers receive it, the same value T3 sent; null for a reply that is not a record with an `item` key
+const turnItemView = (reply: unknown): TurnItemView | null => {
+  if (!isNativeRecord(reply) || !("item" in reply)) return null;
+  const item = reply.item;
+  if (!isNativeRecord(item)) return {_tag: "Absent"};
+  return isTurnItem(item) ? {_tag: "Item", item} : {_tag: "Nonconforming", item};
+};
 
 // the native command of a typed one: the fixed system origin of a message, and nothing the caller did not decide
 const nativeCommand = (command: OrchestrationCommand): Readonly<Record<string, unknown>> => {
@@ -112,12 +121,16 @@ export const makeOrchestration = ({t3, read, shell, operate, observed}: Orchestr
     }),
   );
 
-  const turnItem = (request: TurnItemRequest, cancel?: Deferred.Deferred<void>): Effect.Effect<TurnItemReply, T3RequestError | T3InvalidInput> => {
+  // a present item is never a read failure: whatever its fields, the verifiers decide it
+  const turnItem = (request: TurnItemRequest, cancel?: Deferred.Deferred<void>): Effect.Effect<TurnItemView, T3RequestError | T3InvalidInput> => {
     if (!isTurnItemRequest(request)) return Effect.fail(new T3InvalidInput({operation: "orchestration/turnItem"}));
     return Effect.flatMap(
       Effect.mapError(Effect.suspend(() => read.call("orchestration.getTurnItem", {threadId: request.threadId, itemId: request.itemId}, cancel)),
         (error) => requestError("orchestration/turnItem", error)),
-      (reply) => isTurnItemReply(reply) ? Effect.succeed(reply) : Effect.fail(malformedReply("orchestration/turnItem")));
+      (reply) => {
+        const view = turnItemView(reply);
+        return view === null ? Effect.fail(malformedReply("orchestration/turnItem")) : Effect.succeed(view);
+      });
   };
 
   // every item is checked before the consumer sees it; a failed check or ingestion fails the subscription before its chunk's Ack
