@@ -23,6 +23,10 @@ full validation of its parent on main. Static checks, build, package and contain
 smoke checks and the production startup integration still run on the new version,
 and the required aggregate `check` always runs. Any other change or uncertain
 evidence selects all four main shards and the harness too. Manual **Check Supervisor** dispatches default to full checks.
+Every version PR run, fast-tracked or fully validated, also runs the
+[published-T3 compatibility gate](docs/ci.md#version-pr-gate) from one frozen target
+lock, and `check` requires it; main reuses that gated run and never resolves T3 targets
+again.
 
 ### Version bot authentication
 
@@ -43,7 +47,7 @@ its separate credentials, environment and approval gates.
 
 | Channel | Trigger after publishing is enabled | Version | npm and image aliases |
 | --- | --- | --- | --- |
-| Stable | Successful main CI for the merged version PR, or explicit manual dispatch | Manifest version, e.g. `0.0.2` | `latest` |
+| Stable | Successful main CI for the merged version PR that reused its gated run ([version PR gate](docs/ci.md#version-pr-gate)), or explicit manual dispatch, which does not check that reuse | Manifest version, e.g. `0.0.2` | `latest` |
 | Nightly | Daily at 03:17 Europe/Rome for a new checked main commit, or manual dispatch | Next planned version plus commit timestamp and SHA | `nightly` |
 | Alpha | Manual dispatch | Next planned version plus commit timestamp and SHA | `alpha` |
 | Beta | Manual dispatch | Next planned version plus commit timestamp and SHA | `beta` |
@@ -73,7 +77,12 @@ the checked PR head and every full job passed in the latest matching run. For a
 fast-tracked version PR, main separately verifies its successful static checks and
 rederives both the exact release-only diff and the parent's full job evidence.
 Otherwise main runs the complete checks. See [CI policy](docs/ci.md).
-Successful main CI immediately releases only an approved version PR. The overnight
+Successful main CI immediately releases only an approved version PR, and only when main
+reused the version PR's run with its passed compatibility gate; a version merge that main
+had to validate in full publishes stable only by explicit dispatch. An explicit stable
+dispatch stays the existing manual path and does not check that reuse, so the gate does not
+cover every stable publication: whoever dispatches stable first confirms the version PR
+run's compatibility evidence. The overnight
 job handles nightly snapshots separately and retains the same exact-source checks.
 Stable requires consumed changesets;
 the absence of an existing Git tag alone never authorizes stable publication.

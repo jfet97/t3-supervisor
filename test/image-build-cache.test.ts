@@ -12,7 +12,8 @@ const attributes = (value: unknown): Record<string, string> | undefined => typeo
 
 const builds = ["check.yml", "release.yml"].flatMap(file => {
   const workflow = parse(readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), "utf8")) as Workflow;
-  return Object.values(workflow.jobs).flatMap(({ steps }) => steps
+  // a job that calls a reusable workflow has no steps of its own
+  return Object.values(workflow.jobs).flatMap(({ steps }) => (steps ?? [])
     .filter(step => step.uses?.startsWith("docker/build-push-action@"))
     .map(step => ({ file, step, from: attributes(step.with?.["cache-from"]), to: attributes(step.with?.["cache-to"]) })));
 });

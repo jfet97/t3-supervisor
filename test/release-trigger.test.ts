@@ -12,6 +12,9 @@ const sha = "a".repeat(40);
 const repository = "jfet97/t3-supervisor";
 const green = { id: 42, head_sha: sha, head_repository: { full_name: repository }, head_branch: "main", event: "push" };
 const nightly = { draft: false, prerelease: true, tag_name: "v0.0.3-nightly.20261024010000.gaaaaaaaaaaaa", target_commitish: sha };
+type Job = { name: string; conclusion: string; steps?: Array<{ name: string; conclusion: string }> };
+// main's plan records that it reused the version PR run with its published-T3 compatibility gate
+const reusedPlan = (conclusion: string): Job => ({ name: "plan", conclusion: "success", steps: [{ name: "Reuse the version PR compatibility evidence", conclusion }] });
 
 const fixture = () => ({
   event: "schedule",
@@ -20,7 +23,7 @@ const fixture = () => ({
   comparison: "ahead",
   candidates: [green],
   runs: [green],
-  jobs: [{ name: "check", conclusion: "success" }],
+  jobs: [{ name: "check", conclusion: "success" }, reusedPlan("success")] as Job[],
   versionPR: false,
   releases: [] as typeof nightly[],
   requested: sha,
@@ -91,6 +94,18 @@ it("ignores foreign CI and sources no longer on main, and still requires the agg
 it("ordinary green merges wait for overnight, while approved version PRs publish stable immediately", async () => {
   assert.deepEqual(await execute({ ...fixture(), event: "workflow_run" }), {});
   assert.equal((await execute({ ...fixture(), event: "workflow_run", versionPR: true })).channel, "stable");
+});
+
+it("publishes a version merge automatically only when main reused its version PR run with the compatibility gate, never after a new full run", async () => {
+  const unreused: Job[][] = [
+    [{ name: "check", conclusion: "success" }, reusedPlan("skipped")],
+    [{ name: "check", conclusion: "success" }, { name: "plan", conclusion: "success" }],
+    [{ name: "check", conclusion: "success" }],
+  ];
+  for (const jobs of unreused) await assert.rejects(execute({ ...fixture(), event: "workflow_run", versionPR: true, jobs }), /did not reuse the version PR run/u);
+  // an explicit stable dispatch stays the maintainer's decision, and nightly snapshots never depend on a version PR
+  assert.equal((await execute({ ...fixture(), event: "workflow_dispatch", channel: "stable", versionPR: true, jobs: [{ name: "check", conclusion: "success" }] })).channel, "stable");
+  assert.equal((await execute({ ...fixture(), jobs: [{ name: "check", conclusion: "success" }] })).channel, "nightly");
 });
 
 it("preserves explicit manual channels and exact-source checks", async () => {

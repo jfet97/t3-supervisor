@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {it} from "@effect/vitest";
-import {releaseOnlyChange, provePushValidation, proveReleaseRun, requiredFullJobs, type CiRun} from "../scripts/ci-proof.js";
+import {compatibilityGateJobs, releaseOnlyChange, provePushValidation, proveReleaseRun, requiredFullJobs, type CiRun} from "../scripts/ci-proof.js";
 import {parseRawChanges} from "../scripts/ci-evidence.js";
 
 const baseline = "a".repeat(40), head = "b".repeat(40), tree = "c".repeat(40);
@@ -10,7 +10,8 @@ const changed = (path: string, status = "M", oldMode = "100644", newMode = "1006
 const delta = () => ({parents: [baseline], basePackage: manifest, headPackage: manifest.replace('"0.0.4"', '"0.0.5"'), changes: [changed("package.json"), changed("CHANGELOG.md"), changed(".changeset/quiet-release.md", "D", "100644", "000000")]});
 const run = (event = "pull_request"): typeof CiRun.Type => ({id: 10, workflow_id: 42, head_sha: event === "push" ? baseline : head, head_branch: event === "push" ? "main" : "changeset-release/main", event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
 const fullJobs = () => requiredFullJobs.map(name => ({name, run_id: 10, conclusion: "success"}));
-const releaseSuccess = ["plan", "static", "arm64", "startup", "check"];
+// a release run's own checks and its published-T3 compatibility gate, beside the skipped suites
+const releaseSuccess: ReadonlyArray<string> = ["plan", "static", "arm64", "startup", "check", ...compatibilityGateJobs];
 const releaseJobs = () => [...releaseSuccess, "harness", "browser", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: 10, conclusion: releaseSuccess.includes(name) ? "success" : "skipped"}));
 const releaseProof = () => ({expected: {repository, workflowId: 42, head, branch: "changeset-release/main", tree}, headTree: tree, runs: [run()], jobs: releaseJobs()});
 
@@ -68,11 +69,14 @@ it("reuses only a complete release run with successful static checks and skipped
     assert.throws(() => proveReleaseRun({...releaseProof(), jobs: releaseJobs().filter(job => job.name !== name)}));
     assert.throws(() => proveReleaseRun({...releaseProof(), jobs: [...releaseJobs(), releaseJobs().find(job => job.name === name)!]}));
   }
-  // the native ARM64 artifact check runs on every new version, exactly like the static checks
-  for (const target of ["static", "arm64", "startup"]) {
+  // the native ARM64 artifact check and every job of the compatibility gate run on every new version, exactly like the static checks
+  for (const target of ["static", "arm64", "startup", ...compatibilityGateJobs]) {
     for (const conclusion of ["failure", "cancelled", "skipped", null]) assert.throws(() => proveReleaseRun({...releaseProof(), jobs: releaseJobs().map(job => job.name === target ? {...job, conclusion} : job)}));
   }
   assert.throws(() => proveReleaseRun({...releaseProof(), jobs: [...releaseJobs(), {name: "extra", run_id: 10, conclusion: "success"}]}));
+  // a release run from before the gate never proves the version, while the gate's skipped reproduction job changes nothing
+  assert.throws(() => proveReleaseRun({...releaseProof(), jobs: releaseJobs().filter(job => !job.name.startsWith("t3-compatibility / "))}));
+  assert.equal(proveReleaseRun({...releaseProof(), jobs: [...releaseJobs(), {name: "t3-compatibility / earlier-lock", run_id: 10, conclusion: "skipped"}]}).runId, 10);
   // the browser journeys skip on a version exactly like the suites; the full baseline already ran them
   for (const conclusion of ["success", "failure", "cancelled", null]) {
     assert.throws(() => proveReleaseRun({...releaseProof(), jobs: releaseJobs().map(job => job.name === "browser" ? {...job, conclusion} : job)}));

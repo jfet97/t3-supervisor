@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { it } from "@effect/vitest";
-import { newestPrRun, proveMergedValidation, requiredFullJobs, type CiRun } from "../scripts/ci-proof.js";
+import { compatibilityGateJobs, newestPrRun, proveMergedValidation, requiredFullJobs, versionBranch, type CiRun } from "../scripts/ci-proof.js";
 
 const head = "a".repeat(40);
 const tree = "b".repeat(40);
@@ -56,4 +56,19 @@ it("ignores runs for other heads, repositories, workflows and dispatch branches,
 it("rejects malformed proof rather than authorizing a skip", () => {
   assert.throws(() => proveMergedValidation({ ...proof(), headTree: "main" }));
   assert.throws(() => proveMergedValidation({ ...proof(), jobs: null }));
+});
+
+it("proves a version branch run only together with its whole passing published-T3 compatibility gate, which no other branch needs", () => {
+  const version = { ...expected, branch: versionBranch };
+  const gate = () => compatibilityGateJobs.map((name) => ({ name, run_id: 10, conclusion: "success" as string | null }));
+  assert.equal(proveMergedValidation(proof()).runId, 10);
+  assert.throws(() => proveMergedValidation({ ...proof(), expected: version }), /full validation/u);
+  assert.deepEqual(proveMergedValidation({ ...proof(), expected: version, jobs: [...proof().jobs, ...gate()] }), { runId: 10, tree });
+  for (const name of compatibilityGateJobs) {
+    for (const conclusion of ["failure", "cancelled", "skipped", null]) {
+      const jobs = [...proof().jobs, ...gate().map((job) => job.name === name ? { ...job, conclusion } : job)];
+      assert.throws(() => proveMergedValidation({ ...proof(), expected: version, jobs }), /full validation/u, `${name} ${String(conclusion)}`);
+    }
+    assert.throws(() => proveMergedValidation({ ...proof(), expected: version, jobs: [...proof().jobs, ...gate().filter((job) => job.name !== name)] }), /full validation/u, name);
+  }
 });

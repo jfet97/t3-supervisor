@@ -4,7 +4,8 @@ Development and testing run in this repository's Docker environment. The host ne
 Docker with the Compose plugin and nothing else: no Node, pnpm or Nix, no existing T3
 or Supervisor, and no login or configuration from the host. `./dev` is the host entry
 point; every command runs in containers built from `docker/dev/Dockerfile`, which holds
-Node 24.22.1 at the production image's pinned digest, pnpm 12.14.0, Git, Codex 0.166.0
+Node 24.22.1 at the production image's pinned digest, pnpm 12.14.0, Git, Debian's
+`python3` (Supervisor's Git probe runs its helper with it in a T3 terminal), Codex 0.166.0
 and Claude Code 2.1.316. The checkout is mounted at `/workspace`, so source edits apply
 directly. Images never contain source, credentials or state.
 
@@ -501,13 +502,15 @@ other workspace projects. The trial changes no other project, chat, chat Stop or
 ## Disposable published-T3 check
 
 ```sh
-./dev check [--keep]
+./dev check [--keep] [--t3-lock <file> --slot <stable|nightly|nightly-1|nightly-2|all>]
 ```
 
-The check starts the pinned T3 and Supervisor from this checkout in a fresh run folder
-in the cache volume, with an environment built from nothing, then:
+The check starts a published T3, the pin or a target of a lock (below), and Supervisor
+from this checkout in a fresh run folder in the cache volume, with an environment built
+from nothing, then:
 
-- T3's descriptor reports the pinned version, and Supervisor ingests its catalog;
+- T3's descriptor reports the version of the release the check installed, and
+  Supervisor ingests its catalog;
 - the read credential reaches both shell snapshots through `scripts/probe-t3.ts`;
 - the guidance credential reads one valid helper-channel task snapshot through
   `scheduledTasks.subscribe`, then releases the socket without waiting for the stream to end;
@@ -524,11 +527,62 @@ in the cache volume, with an environment built from nothing, then:
   reads with the valid read credential, so an outage cannot pass as a refusal;
 - after the stop, no port, process group or run folder remains.
 
-It prints one result per check and a JSON summary with the T3 pin and this checkout's
-commit and whether its tree was clean, removes the run folder unless
-`--keep` is given, and exits non-zero on any failure. `./dev pnpm dev:stack clean`
-removes the marked run folders whose creating process ended; it never touches an
-unmarked folder.
+It prints one result per check and a JSON summary with the T3 release and this checkout's
+commit and whether its tree was clean, and the time each stage took: the runtime install
+(a cache hit, or the download, its verification and unpacking), T3's start until its
+descriptor answers, session issuing, the disposable project, Supervisor's start until it
+is healthy, each check and the teardown. It removes the run folder unless `--keep` is
+given and exits non-zero on any failure. A run passes only when every check ran and
+passed: a download, checksum or start failure is reported as that failure with every
+check not run, and a check that could not complete is reported as not run, as is each
+later check of the running stack, while the teardown check still runs. `./dev pnpm
+dev:stack clean` removes the marked run folders whose creating process ended; it never
+touches an unmarked folder.
+
+### Published T3 targets
+
+Besides the pin, the check runs against published T3 builds in four fixed slots:
+
+| Slot | Build |
+| --- | --- |
+| `stable` | the latest official stable release: the release GitHub designates as the latest full release, which must be a published `v<major>.<minor>.<patch>` that is not a prerelease |
+| `nightly`, `nightly-1`, `nightly-2` | the latest three distinct nightlies: the highest `v<major>.<minor>.<patch>-nightly.<date>.<build>` prereleases by version precedence, never by publication time |
+
+```sh
+./dev pnpm dev:targets resolve --out <file>
+./dev check --t3-lock <file> --slot <stable|nightly|nightly-1|nightly-2|all>
+```
+
+`resolve` takes `stable` from the release GitHub designates as pingdotgg/t3code's latest
+full release, never from another listed stable, and reads the release list page by page
+only until it holds three nightlies, at most three pages; drafts and every other tag, such
+as previews and Android betas, are ignored. It writes a lock that freezes the builds for every
+run that uses it: each slot's version, tag, publication time, download base and the
+SHA-256 of its `linux-x64` and `linux-arm64` archives, taken from that release's own
+`SHA256SUMS` and compared with the digests GitHub lists, with the time and source of the
+resolution. A lock under `/cache`, the cache volume, is seen by both `./dev pnpm` and
+`./dev check` and leaves the checkout clean.
+
+A reply of another shape, no designated latest release or one that is not a published
+stable `v<major>.<minor>.<patch>`, fewer than three nightlies, a missing archive or
+`SHA256SUMS`, a missing checksum line or a digest that disagrees fails the resolution as
+invalid; a network error, a timeout or an HTTP error such as GitHub's rate limit fails it
+as unavailable. Nothing falls back to another build, the pin or an earlier lock. The resolver
+sends `GITHUB_TOKEN`, when its environment has one, as a bearer only with its two metadata
+requests to GitHub's API, for the designated latest release and for the release list, never
+with a download, and never prints or writes it. `./dev` passes the host's
+`T3SUP_DEV_GITHUB_TOKEN`, when set, into the toolchain container as `GITHUB_TOKEN` and into
+no other service; without it a resolution through `./dev pnpm` is unauthenticated.
+
+`--slot` runs one slot, or with `all` the four one after another, each in its own
+disposable stack sharing the runtime cache. A failing slot does not stop the next, every
+slot is reported, and the check exits non-zero unless every slot passed. The check
+validates the lock before anything starts: the four slots in order, distinct versions,
+nightlies in descending order, a stable tag and both Linux digests. Its JSON summary names
+each slot's version and the lock file's SHA-256. Ordinary `./dev up` and `./dev check`
+stay on the pinned release. CI runs these slots as a daily canary, as a manual
+reproduction from a frozen lock and as the version PR's gate
+([published-T3 compatibility](ci.md#published-t3-compatibility)).
 
 ## Evidence labels
 

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Console, Data, Effect, Exit, FileSystem, Layer, Option, Schema, Scope, Stream } from "effect";
+import { Cause, Clock, Console, Data, Effect, Exit, FileSystem, Layer, Option, Schema, Scope, Stream } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { helperTaskSnapshot } from "../src/supervisor-native.js";
@@ -10,12 +10,14 @@ import { NativeOperateRpc } from "../src/supervisor-native.js";
 import { groupAlive, tsxLoader } from "../test/support/cli-process.js";
 import { freePort, httpGet, portState, runProcess, startProcess, waitForHttp, type RunningProcess } from "../test/support/g8-process.js";
 import { cacheHome, checkoutInputs, cleanRuns, createRun, isolatedEnv, repositoryRoot, toolPath, type RunFolder } from "./local-run.js";
+import { decodeTargetLock, TargetLockError, targetRelease, targetSlots, type TargetSlot } from "./t3-targets.js";
 
 /*
-  `pnpm dev:stack`: an unmodified published T3 at a pinned version beside Supervisor from this checkout, each with its own
-  state and loopback ports in one fresh run folder (docs/local-stack.md). T3 issues every Supervisor credential through its
-  own CLI with the scopes that credential needs; the stack never reads or writes T3's databases, never contacts another T3
-  and never copies a login. Stopping it stops Supervisor, revokes the sessions, stops T3 and removes the run folder.
+  `pnpm dev:stack`: an unmodified published T3, the pinned release or one slot of a target lock (scripts/t3-targets.ts), beside
+  Supervisor from this checkout, each with its own state and loopback ports in one fresh run folder (docs/local-stack.md). T3
+  issues every Supervisor credential through its own CLI with the scopes that credential needs; the stack never reads or
+  writes T3's databases, never contacts another T3 and never copies a login. Stopping it stops Supervisor, revokes the
+  sessions, stops T3 and removes the run folder.
 */
 
 /**
@@ -73,17 +75,18 @@ const download = (url: string, file: string) => Effect.gen(function* () {
 }).pipe(Effect.provide(fetchClient));
 
 /**
- * The pinned T3 executable in `cacheRoot`, downloaded once per version and platform: the archive must match the pinned
- * digest before it is unpacked, and a folder is used only with its completion marker naming that digest.
+ * The release's T3 executable in `cacheRoot`, downloaded once per version and platform, and whether it was installed already:
+ * the archive must match the release's digest before it is unpacked, and a folder is used only with its completion marker
+ * naming that digest.
  */
-export const ensureRuntime = (cacheRoot: string, release: T3Release = t3Release, platform: string = platformKey()) => Effect.gen(function* () {
+export const installRuntime = (cacheRoot: string, release: T3Release = t3Release, platform: string = platformKey()) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const digest = release.archives[platform];
   if (digest === undefined) return yield* failure(`no pinned T3 ${release.version} archive for ${platform}`);
   const target = join(cacheRoot, `t3-${release.version}-${platform}`);
   const executable = join(target, "t3");
   const installed = yield* fs.readFileString(join(target, completeMarker)).pipe(Effect.option);
-  if (Option.isSome(installed) && installed.value.trim() === digest) return executable;
+  if (Option.isSome(installed) && installed.value.trim() === digest) return {executable, cached: true};
   yield* fs.makeDirectory(cacheRoot, {recursive: true});
   const staging = yield* fs.makeTempDirectory({directory: cacheRoot, prefix: `t3-${release.version}-${platform}.staging-`});
   yield* Effect.gen(function* () {
@@ -94,14 +97,18 @@ export const ensureRuntime = (cacheRoot: string, release: T3Release = t3Release,
     if (actual !== digest) return yield* failure(`${name} has SHA-256 ${actual}, not the pinned ${digest}; nothing was installed`);
     const unpacked = yield* runProcess("tar", ["-xzf", archive, "-C", staging, "--strip-components=1"],
       {env: {PATH: toolPath(["tar", "gzip"], process.env.PATH ?? "")}, cwd: staging, timeoutMs: 300_000});
-    if (unpacked.code !== 0) return yield* failure(`could not unpack ${name}: ${unpacked.stderr.trim()}`);
+    if (unpacked.code !== 0) return yield* failure(`could not unpack ${name} (exit ${String(unpacked.code)})`);
     yield* fs.remove(archive);
     yield* fs.writeFileString(join(staging, completeMarker), `${digest}\n`);
     if (yield* fs.exists(target)) yield* fs.remove(target, {recursive: true});
     yield* fs.rename(staging, target);
   }).pipe(Effect.ensuring(Effect.ignore(fs.remove(staging, {recursive: true}))));
-  return executable;
+  return {executable, cached: false};
 });
+
+/** The pinned T3 executable in `cacheRoot`, or that of another release, installed as installRuntime installs it. */
+export const ensureRuntime = (cacheRoot: string, release: T3Release = t3Release, platform: string = platformKey()) =>
+  Effect.map(installRuntime(cacheRoot, release, platform), (runtime) => runtime.executable);
 
 export const defaultCacheRoot = (): string => join(cacheHome(), "t3-supervisor", "local-stack");
 
@@ -115,7 +122,7 @@ export interface T3Cli {
 
 export const t3Command = (cli: T3Cli, args: ReadonlyArray<string>, timeoutMs = 60_000) => Effect.gen(function* () {
   const result = yield* runProcess(cli.executable, [...args, "--base-dir", cli.baseDir], {env: cli.env, cwd: cli.cwd, timeoutMs});
-  if (result.code !== 0) return yield* failure(`t3 ${args.slice(0, 3).join(" ")} exited ${String(result.code)}: ${result.stderr.trim().slice(0, 400)}`);
+  if (result.code !== 0) return yield* failure(`t3 ${args.slice(0, 3).join(" ")} exited ${String(result.code)}`);
   return result.stdout;
 });
 
@@ -198,6 +205,8 @@ export interface RunningStack {
   readonly cli: T3Cli;
   readonly t3: {
     readonly url: string; readonly port: number; readonly version: string; readonly protocol: number;
+    // the published release the stack installed, whose version the descriptor must report
+    readonly release: T3Release;
     // the current T3 process: a restart replaces it
     readonly process: RunningProcess;
     /* Stops T3 as a crash or an upgrade restart would, then starts it again over the same data directory and port, where the
@@ -217,53 +226,83 @@ const Descriptor = Schema.Struct({environmentId: Schema.String, orchestrationPro
 export const decodeDescriptor = (body: string) => Schema.decodeUnknownEffect(Schema.fromJsonString(Descriptor))(body)
   .pipe(Effect.mapError(() => failure("the T3 descriptor has an unexpected shape")));
 
+/** One stage of a stack run, timed on Effect's Clock: its name, duration and completion, and how it went where that varies. */
+export interface StageTiming {
+  readonly stage: string;
+  readonly durationMs: number;
+  readonly ok: boolean;
+  readonly detail?: string;
+}
+
+// `effect` as one named stage of `stages`; a stage that fails is recorded before its failure goes on
+const timed = <A, E, R>(stages: Array<StageTiming>, stage: string, effect: Effect.Effect<A, E, R>, detail?: (value: A) => string) =>
+  Effect.gen(function* () {
+    const start = yield* Clock.currentTimeMillis;
+    const exit = yield* Effect.exit(effect);
+    const durationMs = (yield* Clock.currentTimeMillis) - start;
+    stages.push(Exit.isSuccess(exit) && detail !== undefined ? {stage, durationMs, ok: true, detail: detail(exit.value)} : {stage, durationMs, ok: Exit.isSuccess(exit)});
+    return yield* exit;
+  });
+
 /**
- * Starts the stack in the caller's scope. Closing the scope stops Supervisor, revokes every issued session, stops T3 and
- * removes the run folder unless `keep` is set, in that order.
+ * Starts the stack of `release`, the pin unless another is given, in the caller's scope, and records each stage's time in
+ * `stages` when given. Closing the scope stops Supervisor, revokes every issued session, stops T3 and removes the run folder
+ * unless `keep` is set, in that order.
  */
-export const startStack = (options: {readonly cacheRoot: string; readonly keep: boolean}) => Effect.gen(function* () {
+export const startStack = (options: {readonly cacheRoot: string; readonly keep: boolean; readonly release?: T3Release;
+  readonly stages?: Array<StageTiming>}) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
+  const release = options.release ?? t3Release;
+  const stages = options.stages ?? [];
   const assets = join(repositoryRoot, "ui-dist");
   if (!(yield* fs.exists(join(assets, "index.html")))) return yield* failure("the dashboard is not built; run `pnpm build` first");
-  const executable = yield* ensureRuntime(options.cacheRoot);
+  const {executable} = yield* timed(stages, "runtime install", installRuntime(options.cacheRoot, release),
+    (runtime) => runtime.cached ? "cache hit" : "download + verify + unpack");
   const run = yield* createRun("stack", {keep: options.keep});
   for (const folder of ["home", "tmp", "t3", "projects", "supervisor", "secrets"]) yield* fs.makeDirectory(run.dir(folder), {recursive: true});
   yield* fs.chmod(run.dir("secrets"), 0o700);
   const cli: T3Cli = {executable, baseDir: run.dir("t3"), env: t3Environment(run), cwd: run.dir("projects")};
   const t3Port = yield* freePort;
+  const t3Url = `http://127.0.0.1:${t3Port}`;
   // T3's processes live in a scope of their own, closed where the first one's was, so a restarted T3 keeps the teardown order
   const t3Scope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(t3Scope, Exit.void));
   const startT3 = startProcess(executable, serveArguments(run, t3Port), {env: cli.env, cwd: cli.cwd}).pipe(Scope.provide(t3Scope));
-  const server = {current: yield* startT3};
-  yield* Effect.addFinalizer(() => stop(server.current));
-  const t3Url = `http://127.0.0.1:${t3Port}`;
-  const t3Ready = waitForHttp(`${t3Url}/.well-known/t3/environment`, (status) => status === 200, 90_000, () => server.current.child.exitCode === null);
-  const reply = yield* t3Ready;
-  const descriptor = yield* decodeDescriptor(reply.body);
-  if (descriptor.orchestrationProtocolVersion !== orchestrationProtocol)
-    return yield* failure(`T3 ${descriptor.serverVersion} serves orchestration protocol ${descriptor.orchestrationProtocolVersion}; Supervisor reads protocol ${orchestrationProtocol}`);
+  const t3Ready = (server: {readonly current: RunningProcess}) => waitForHttp(`${t3Url}/.well-known/t3/environment`, (status) => status === 200, 90_000,
+    () => server.current.child.exitCode === null);
+  // the stage ends once T3's descriptor answers with an orchestration protocol Supervisor reads
+  const {server, descriptor} = yield* timed(stages, "T3 start", Effect.gen(function* () {
+    const server = {current: yield* startT3};
+    yield* Effect.addFinalizer(() => stop(server.current));
+    const descriptor = yield* decodeDescriptor((yield* t3Ready(server)).body);
+    if (descriptor.orchestrationProtocolVersion !== orchestrationProtocol)
+      return yield* failure(`T3 ${descriptor.serverVersion} serves orchestration protocol ${descriptor.orchestrationProtocolVersion}; Supervisor reads protocol ${orchestrationProtocol}`);
+    return {server, descriptor};
+  }));
   // each session's revocation is registered as soon as it exists, so a failure halfway through issuing revokes the earlier ones
-  const sessions = yield* Effect.forEach(credentials, (credential) => issueSession(cli, credential,
+  const sessions = yield* timed(stages, "session issuing", Effect.forEach(credentials, (credential) => issueSession(cli, credential,
     {file: run.dir("secrets", `t3-${credential.name}-token`), ttl: sessionTtl, label: `t3-supervisor-local-${credential.name}`}).pipe(
-    Effect.tap((session) => Effect.addFinalizer(() => Effect.ignore(t3Command(cli, ["auth", "session", "revoke", session.sessionId]))))));
-  const project = yield* disposableProject(cli, run);
+    Effect.tap((session) => Effect.addFinalizer(() => Effect.ignore(t3Command(cli, ["auth", "session", "revoke", session.sessionId])))))));
+  const project = yield* timed(stages, "disposable project", disposableProject(cli, run));
   const [uiPort, healthPort] = [yield* freePort, yield* freePort];
   const env = isolatedEnv(run.path, ["git"], process.env, {
     DATA_DIRECTORY: run.dir("supervisor"), T3_URL: t3Url, UI_ASSETS_DIRECTORY: assets,
     UI_HOST: "127.0.0.1", UI_PORT: String(uiPort), HEALTH_HOST: "127.0.0.1", HEALTH_PORT: String(healthPort),
     ...Object.fromEntries(sessions.map((session) => [session.credential.variable, session.file])),
   });
-  const supervisor = yield* startProcess(process.execPath, ["--import", tsxLoader, join(repositoryRoot, "src", "main.ts")], {env, cwd: repositoryRoot});
-  yield* Effect.addFinalizer(() => stop(supervisor));
   const healthUrl = `http://127.0.0.1:${healthPort}/health`;
-  yield* waitForHttp(healthUrl, (status) => status === 200, 90_000, () => supervisor.child.exitCode === null);
-  return {run, cli, t3: {url: t3Url, port: t3Port, version: descriptor.serverVersion, protocol: descriptor.orchestrationProtocolVersion,
+  const supervisor = yield* timed(stages, "Supervisor start", Effect.gen(function* () {
+    const supervisor = yield* startProcess(process.execPath, ["--import", tsxLoader, join(repositoryRoot, "src", "main.ts")], {env, cwd: repositoryRoot});
+    yield* Effect.addFinalizer(() => stop(supervisor));
+    yield* waitForHttp(healthUrl, (status) => status === 200, 90_000, () => supervisor.child.exitCode === null);
+    return supervisor;
+  }));
+  return {run, cli, t3: {url: t3Url, port: t3Port, version: descriptor.serverVersion, protocol: descriptor.orchestrationProtocolVersion, release,
     get process() {return server.current;},
     stop: Effect.suspend(() => stop(server.current)),
     start: Effect.gen(function* () {
       server.current = yield* startT3;
-      yield* t3Ready;
+      yield* t3Ready(server);
     })},
     supervisor: {url: `http://127.0.0.1:${uiPort}`, healthUrl, ports: [uiPort, healthPort], process: supervisor}, sessions, project} satisfies RunningStack;
 });
@@ -283,7 +322,34 @@ export interface CheckResult {
   readonly name: string;
   readonly ok: boolean;
   readonly detail: string;
+  // the check's own work on Effect's Clock, from the end of the check before it; a check that never ran has none
+  readonly durationMs?: number;
+  // set on a check that never ran or could not complete: it fails, so a run never passes on a skipped check
+  readonly notRun?: true;
 }
+
+/** The checks of a running stack in the order they run; the teardown check follows once the stack stopped. */
+export const checkNames = ["published T3 descriptor", "Supervisor ingests the T3 catalog", "read credential reaches both shell snapshots",
+  "helper channel reads a streamed scheduler snapshot", "workflow MCP answers its bearer directly", "workflow MCP refuses other bearers",
+  "trivial no-contact conversation stays untouched", "Supervisor recovers after a T3 restart", "valid token without orchestration:read is refused",
+  "forged token is refused", "revoked read session is refused for new requests"] as const;
+export const teardownCheck = "teardown leaves nothing running";
+type CheckName = typeof checkNames[number];
+
+const notRun = (name: string, reason: string): CheckResult => ({name, ok: false, detail: reason, notRun: true});
+
+// the message of a failure or defect for a report, never the raw cause
+const causeMessage = (cause: Cause.Cause<unknown>): string => {
+  const error = Cause.squash(cause);
+  return error instanceof LocalStackError ? error.message : "the operation failed without a safe diagnostic";
+};
+
+// retain cancellation while observing ordinary failures for the check report
+const observedExit = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.gen(function* () {
+  const exit = yield* Effect.exit(effect);
+  if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause)) return yield* Effect.failCause(exit.cause);
+  return exit;
+});
 
 const Health = Schema.Struct({t3Connected: Schema.Boolean, store: Schema.Struct({projects: Schema.Number, threads: Schema.Number})});
 const Verdict = Schema.Struct({verified: Schema.Boolean});
@@ -363,35 +429,52 @@ const ThreadShown = Schema.Struct({messages: Schema.Array(Schema.Struct({role: S
 /**
  * The early risky path against the running stack: the published descriptor, Supervisor's native reads, the authenticated
  * workflow MCP route and its refusals, a trivial no-contact conversation, recovery after a T3 restart, scope refusals and a
- * revoked credential.
- * The no-contact conversation is created through T3's thread CLI and has no provider to run it.
+ * revoked credential, in the order of checkNames.
+ * The no-contact conversation is created through T3's thread CLI and has no provider to run it. A step that fails or dies
+ * reports its check and every later one as not run; only an interruption ends the checks without a result.
  */
 export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
-  const fs = yield* FileSystem.FileSystem;
   const results: CheckResult[] = [];
-  const check = (name: string, ok: boolean, detail: string) => Effect.sync(() => { results.push({name, ok, detail}); });
+  const outcome = yield* Effect.exit(checkSequence(stack, results));
+  if (Exit.isFailure(outcome)) {
+    if (Cause.hasInterrupts(outcome.cause)) return yield* Effect.failCause(outcome.cause);
+    const reason = causeMessage(outcome.cause);
+    const pending = checkNames.filter((name) => !results.some((result) => result.name === name));
+    results.push(...pending.map((name, index) => notRun(name, index === 0 ? `could not complete: ${reason}` : "an earlier check could not complete")));
+  }
+  return results;
+});
+
+// the checks in order, each timed from the end of the one before it; a step that fails ends the sequence
+const checkSequence = (stack: RunningStack, results: Array<CheckResult>) => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  let since = yield* Clock.currentTimeMillis;
+  const check = (name: CheckName, ok: boolean, detail: string) => Effect.gen(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    results.push({name, ok, detail, durationMs: now - since});
+    since = now;
+  });
   const read = stack.sessions.find((session) => session.credential.name === "read")!;
   const probe = stack.sessions.find((session) => session.credential.name === "git-probe")!;
 
-  yield* check("published T3 descriptor", stack.t3.version === t3Release.version && stack.t3.protocol === orchestrationProtocol,
-    `serverVersion ${stack.t3.version}, orchestration protocol ${stack.t3.protocol}`);
-  const health = yield* waitForHttp(stack.supervisor.healthUrl, (status, body) => {
+  yield* check("published T3 descriptor", stack.t3.version === stack.t3.release.version && stack.t3.protocol === orchestrationProtocol,
+    `serverVersion ${stack.t3.version}${stack.t3.version === stack.t3.release.version ? "" : ` where T3 ${stack.t3.release.version} was installed`}, ` +
+    `orchestration protocol ${stack.t3.protocol}`);
+  // the wait dies at its bound or when Supervisor exits, so its exit, not an option, tells a failed check from a passed one
+  const health = yield* observedExit(waitForHttp(stack.supervisor.healthUrl, (status, body) => {
     if (status !== 200) return false;
     const parsed = Schema.decodeUnknownOption(Schema.fromJsonString(Health))(body);
     return Option.isSome(parsed) && parsed.value.t3Connected && parsed.value.store.projects >= 1;
-  }, 75_000, () => stack.supervisor.process.child.exitCode === null).pipe(Effect.option);
-  yield* check("Supervisor ingests the T3 catalog", Option.isSome(health), Option.match(health, {onNone: () => "health never listed the project",
-    onSome: (value) => {
-      const parsed = Schema.decodeUnknownOption(Schema.fromJsonString(Health))(value.body);
-      return Option.match(parsed, {onNone: () => "health unreadable",
-        onSome: (current) => `t3Connected ${current.t3Connected}, ${current.store.projects} project(s), ${current.store.threads} conversation(s)`});
-    }}));
+  }, 75_000, () => stack.supervisor.process.child.exitCode === null));
+  yield* check("Supervisor ingests the T3 catalog", Exit.isSuccess(health), Exit.isFailure(health) ? "health never listed the project"
+    : Option.match(Schema.decodeUnknownOption(Schema.fromJsonString(Health))(health.value.body), {onNone: () => "health unreadable",
+      onSome: (current) => `t3Connected ${current.t3Connected}, ${current.store.projects} project(s), ${current.store.threads} conversation(s)`}));
   yield* check("read credential reaches both shell snapshots", yield* probeWith(stack, read.file), "scripts/probe-t3.ts with orchestration:read + filesystem:read");
 
   const guidance = stack.sessions.find((session) => session.credential.name === "guidance")!;
   const guidanceBearer = (yield* fs.readFileString(guidance.file)).trim();
   const snapshot = yield* NativeOperateRpc.use((rpc) => helperTaskSnapshot(rpc)).pipe(
-    Effect.provide(NativeOperateRpc.layer({baseUrl: stack.t3.url, token: guidanceBearer}).pipe(Layer.provide(NativeEnvelope.layer))), Effect.exit);
+    Effect.provide(NativeOperateRpc.layer({baseUrl: stack.t3.url, token: guidanceBearer}).pipe(Layer.provide(NativeEnvelope.layer))), observedExit);
   yield* check("helper channel reads a streamed scheduler snapshot", Exit.isSuccess(snapshot) && snapshot.value.length === 0,
     Exit.isSuccess(snapshot) ? `${snapshot.value.length} tasks; orchestration:read + orchestration:operate; first Chunk consumed without waiting for Exit`
       : "scheduledTasks.subscribe did not supply a valid bounded snapshot");
@@ -426,7 +509,7 @@ export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
    */
   const readBearer = (yield* fs.readFileString(read.file)).trim();
   const supervisorAlive = () => stack.supervisor.process.child.exitCode === null;
-  const healthWhere = (accept: (status: number, health: typeof Health.Type) => boolean, timeoutMs: number) => Effect.exit(waitForHttp(stack.supervisor.healthUrl,
+  const healthWhere = (accept: (status: number, health: typeof Health.Type) => boolean, timeoutMs: number) => observedExit(waitForHttp(stack.supervisor.healthUrl,
     (status, body) => Option.exists(Schema.decodeUnknownOption(Schema.fromJsonString(Health))(body), (health) => accept(status, health)), timeoutMs, supervisorAlive));
   yield* stack.t3.stop;
   const degraded = yield* healthWhere((status, health) => status === 503 && !health.t3Connected, 60_000);
@@ -445,7 +528,7 @@ export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
     `T3 threads ${afterRestart.length}; Supervisor records ${JSON.stringify(recordsAfterRestart)}`);
 
   // each refusal is T3's own 401 or 403 on the native shell route, between positive controls on the same route
-  const refusal = (name: string, bearer: string, detail: string) => Effect.gen(function* () {
+  const refusal = (name: CheckName, bearer: string, detail: string) => Effect.gen(function* () {
     const control = yield* nativeAccess(stack.t3.url, readBearer);
     const access = yield* nativeAccess(stack.t3.url, bearer);
     yield* check(name, control.kind === "granted" && access.kind === "refused", `${detail}: ${describeAccess(access)}; read credential ${describeAccess(control)}`);
@@ -460,45 +543,117 @@ export const runChecks = (stack: RunningStack) => Effect.gen(function* () {
     Option.isSome(descriptor) && descriptor.value.status === 200,
   `before ${describeAccess(beforeRevoke)}, after ${describeAccess(revoked)}, T3 descriptor ${Option.match(descriptor, {onNone: () => "unreachable",
     onSome: (value) => `HTTP ${value.status}`})}; T3 0.1.6 kept an already open subscription, so Supervisor stops before revocation`);
-  return results;
 });
 
 // the stack's ports and processes once its scope closed
 const released = (stack: RunningStack, keep: boolean) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
+  const start = yield* Clock.currentTimeMillis;
   const ports = yield* Effect.forEach([stack.t3.port, ...stack.supervisor.ports], portState);
   const processes = [stack.t3.process.pid, stack.supervisor.process.pid].filter(groupAlive);
   const folder = yield* fs.exists(stack.run.path);
-  return {name: "teardown leaves nothing running", ok: ports.every((state) => state === "refused") && processes.length === 0 && folder === keep,
-    detail: `ports ${ports.join(",")}, live process groups ${processes.length}, run folder ${folder ? "kept" : "removed"}`} satisfies CheckResult;
+  return {name: teardownCheck, ok: ports.every((state) => state === "refused") && processes.length === 0 && folder === keep,
+    detail: `ports ${ports.join(",")}, live process groups ${processes.length}, run folder ${folder ? "kept" : "removed"}`,
+    durationMs: (yield* Clock.currentTimeMillis) - start} satisfies CheckResult;
+});
+
+/** One stack run: the release it ran, each stage's time, every check in order and, when it could not complete, why. */
+export interface StackReport {
+  readonly release: T3Release;
+  readonly passed: boolean;
+  readonly failure?: string;
+  readonly totalMs: number;
+  readonly stages: ReadonlyArray<StageTiming>;
+  readonly results: ReadonlyArray<CheckResult>;
+}
+
+/*
+  A disposable stack of `release` with every check, then the teardown check, each printed as it ends. A start that fails is
+  reported as that failure with every check not run, and a check that could not complete is not run, as is each check after
+  it. The run passes only when every check ran and passed.
+*/
+export const checkStack = (options: {readonly cacheRoot: string; readonly keep: boolean; readonly release: T3Release}) => Effect.gen(function* () {
+  const startedAt = yield* Clock.currentTimeMillis;
+  const stages: Array<StageTiming> = [];
+  const run = yield* Effect.scoped(Effect.gen(function* () {
+    const started = yield* Effect.exit(startStack({...options, stages}));
+    if (Exit.isFailure(started)) {
+      if (Cause.hasInterrupts(started.cause)) return yield* Effect.failCause(started.cause);
+      const failed = stages.find((stage) => !stage.ok);
+      return {stack: undefined, failure: `${failed === undefined ? "the start" : failed.stage} failed: ${causeMessage(started.cause)}`,
+        results: [], stopping: yield* Clock.currentTimeMillis};
+    }
+    yield* Console.log(summary(started.value));
+    const results = yield* runChecks(started.value);
+    return {stack: started.value, failure: undefined, results, stopping: yield* Clock.currentTimeMillis};
+  }));
+  stages.push({stage: "teardown", durationMs: (yield* Clock.currentTimeMillis) - run.stopping, ok: true});
+  const results: CheckResult[] = run.stack === undefined ? [...checkNames, teardownCheck].map((name) => notRun(name, "the stack did not start"))
+    : [...run.results, yield* released(run.stack, options.keep)];
+  const incomplete = results.find((result) => result.notRun === true);
+  const failure = run.failure ?? (incomplete === undefined ? undefined : `${incomplete.name}: ${incomplete.detail}`);
+  if (run.failure !== undefined) yield* Console.log(`T3 ${options.release.version} did not start: ${run.failure}`);
+  for (const result of results) yield* Console.log(`${result.notRun === true ? "NOT RUN" : result.ok ? "PASS" : "FAIL"}  ${result.name}: ${result.detail}`);
+  return {release: options.release, passed: failure === undefined && results.length === checkNames.length + 1 && results.every((result) => result.ok),
+    ...(failure === undefined ? {} : {failure}), totalMs: (yield* Clock.currentTimeMillis) - startedAt, stages, results} satisfies StackReport;
 });
 
 // the persistent environment (scripts/dev-environment.ts) is where T3 and Supervisor run for development; this disposable
 // stack exists only for its end-to-end check, which `./dev check` runs inside the development container
-const usage = "usage: pnpm dev:stack --check [--keep] [--cache-dir <path>] | pnpm dev:stack clean";
+const usage = `usage: pnpm dev:stack --check [--keep] [--cache-dir <path>] [--t3-lock <file> --slot <${[...targetSlots, "all"].join("|")}>]` +
+  " | pnpm dev:stack clean";
+
+// a run's outcome after its inputs in the JSON summary
+const reportFields = (report: StackReport) => ({passed: report.passed, ...(report.failure === undefined ? {} : {failure: report.failure}),
+  totalMs: report.totalMs, stages: report.stages, results: report.results});
 
 const main = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
   const args = process.argv.slice(2);
   if (args[0] === "clean" && args.length === 1) {
     const {removed, live} = yield* cleanRuns();
     return yield* Console.log(`removed ${removed.length} finished run folder(s)${removed.map((path) => `\n  ${path}`).join("")}` +
       `${live.length ? `\nkept ${live.length} run folder(s) of running processes` : ""}`);
   }
+  const valued = ["--cache-dir", "--t3-lock", "--slot"];
   const flag = (name: string) => args.includes(name);
   const value = (name: string) => {const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined;};
-  const unknown = args.filter((arg, index) => !["--check", "--keep", "--cache-dir"].includes(arg) && args[index - 1] !== "--cache-dir");
+  const unknown = args.filter((arg, index) => !["--check", "--keep", ...valued].includes(arg) && !valued.includes(args[index - 1] ?? ""));
   if (unknown.length || !flag("--check")) return yield* failure(`${unknown.length ? `unknown argument ${unknown[0]}\n` : ""}${usage}`);
-  const keep = flag("--keep");
-  const outcome = yield* Effect.scoped(Effect.gen(function* () {
-    const stack = yield* startStack({cacheRoot: value("--cache-dir") ?? defaultCacheRoot(), keep});
-    yield* Console.log(summary(stack));
-    return {stack, results: yield* runChecks(stack)};
-  }));
-  const results = [...outcome.results, yield* released(outcome.stack, keep)];
-  for (const result of results) yield* Console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}: ${result.detail}`);
-  // the outcome with its inputs: the T3 pin and this checkout's commit and whether its tree was clean
-  yield* Console.log(JSON.stringify({t3: t3Release.version, supervisor: yield* checkoutInputs, passed: results.every((result) => result.ok), results}));
-  if (!results.every((result) => result.ok)) return yield* failure("the local stack check failed");
+  const lockFile = value("--t3-lock");
+  const slot = value("--slot");
+  const slots = targetSlots.filter((name) => slot === "all" || name === slot);
+  if ((lockFile === undefined) !== (slot === undefined) || (slot !== undefined && slots.length === 0))
+    return yield* failure(`--t3-lock and --slot go together, the slot one of ${[...targetSlots, "all"].join(", ")}\n${usage}`);
+  const options = {cacheRoot: value("--cache-dir") ?? defaultCacheRoot(), keep: flag("--keep")};
+  if (lockFile === undefined) {
+    const report = yield* checkStack({...options, release: t3Release});
+    // the outcome with its inputs: the T3 pin and this checkout's commit and whether its tree was clean
+    yield* Console.log(JSON.stringify({t3: t3Release.version, supervisor: yield* checkoutInputs, ...reportFields(report)}));
+    if (!report.passed) return yield* failure("the local stack check failed");
+    return;
+  }
+  // the lock is read once, so every slot runs from the same bytes, whose SHA-256 the summary names
+  const bytes = yield* fs.readFile(lockFile).pipe(Effect.mapError(() => new TargetLockError({message: `target lock ${lockFile} could not be read`})));
+  const lock = yield* decodeTargetLock(new TextDecoder().decode(bytes), `target lock ${lockFile}`);
+  const lockInput = {file: lockFile, sha256: createHash("sha256").update(bytes).digest("hex")};
+  const reports: Array<{readonly slot: TargetSlot; readonly report: StackReport}> = [];
+  for (const target of slots) {
+    const release = targetRelease(lock, target);
+    yield* Console.log(`T3 target ${target}: ${release.version} from ${lockFile} (SHA-256 ${lockInput.sha256})`);
+    const report = yield* checkStack({...options, release});
+    if (slots.length > 1) yield* Console.log(`slot ${target} ${report.passed ? "passed" : "failed"} with T3 ${release.version}`);
+    reports.push({slot: target, report});
+  }
+  const supervisor = yield* checkoutInputs;
+  const failed = reports.filter(({report}) => !report.passed).map(({slot: target}) => target);
+  // the outcome with its inputs: each slot's T3 release, the lock's SHA-256 and this checkout's commit and whether its tree was clean
+  const [only] = reports;
+  yield* Console.log(JSON.stringify(only !== undefined && reports.length === 1
+    ? {t3: only.report.release.version, slot: only.slot, lock: lockInput, supervisor, ...reportFields(only.report)}
+    : {lock: lockInput, supervisor, passed: failed.length === 0,
+      slots: reports.map(({slot: target, report}) => ({slot: target, t3: report.release.version, ...reportFields(report)}))}));
+  if (failed.length > 0) return yield* failure(`the local stack check failed for ${failed.join(", ")}`);
 });
 
 if (import.meta.main) NodeRuntime.runMain(main.pipe(Effect.tapError((error) => Console.error(error.message)), Effect.provide(NodeFileSystem.layer)),

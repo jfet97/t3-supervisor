@@ -1,5 +1,5 @@
-# The images of the Docker development environment (docs/local-stack.md). `development`: Node, pnpm, Git, jq and the pinned
-# provider CLIs. `e2e`: the same toolchain plus the headless Chromium of the pinned Playwright library, for the browser
+# The images of the Docker development environment (docs/local-stack.md). `development`: Node, pnpm, Git, jq, Python 3 and the
+# pinned provider CLIs. `e2e`: the same toolchain plus the headless Chromium of the pinned Playwright library, for the browser
 # journeys (docs/testing.md). Source, credentials and state are never part of either; they come from the mounted checkout and
 # the named volumes.
 FROM node:24.22.1-bookworm-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205 AS development
@@ -17,9 +17,10 @@ ENV T3SUP_DEV_CONTAINER=1 \
     DISABLE_AUTOUPDATER=1 \
     PATH=/opt/providers/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# jq: the tests run the release workflow's own shell steps, which use it
+# jq: the tests run the release workflow's own shell steps, which use it. python3: Supervisor's Git probe (src/git-probe.ts) runs
+# its helper in a T3 terminal with `/usr/bin/env python3`, importing base64, json, os, subprocess, sys, selectors and time
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bash ca-certificates git gzip jq less openssh-client procps tar \
+ && apt-get install -y --no-install-recommends bash ca-certificates git gzip jq less openssh-client procps python3 tar \
  && rm -rf /var/lib/apt/lists/*
 
 # pnpm 12 fetches its native executable on first use; fetching it here, for this image's architecture, leaves the

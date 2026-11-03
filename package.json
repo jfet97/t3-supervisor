@@ -35,6 +35,7 @@
     "dev:ui": "vite build --watch",
     "dev:fixture": "node --import tsx scripts/dev-fixture.ts",
     "dev:stack": "node --import tsx scripts/local-stack.ts",
+    "dev:targets": "node --import tsx scripts/t3-targets.ts",
     "test:suites": "node --import tsx scripts/run-tests.ts"
   },
   "dependencies": {
