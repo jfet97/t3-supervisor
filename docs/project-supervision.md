@@ -659,7 +659,10 @@ finding keeps its review duty unfinished: it requires the agreed check or review
 operative's own correction, prescribes no implementation, locator, type or sanitization
 strategy, and adds no hold that is not a genuine human limit or the agreed plan.
 The assistant that calls `supervision_stop` judges that a genuine human asked to stop, in
-any language; the service does not interpret the words. It verifies deterministically that
+any language; the service does not interpret the words. Only a request to stop supervising
+the chat is a stop: investigating or pausing the task is not, so supervision stays on for later work
+in that chat, and a root that has read no such request never calls `supervision_stop`. The
+service verifies deterministically that
 the cited message is that human's original native message, that the caller's own native
 call belongs to it, and that the message names no second chat (the caller's own, a child
 chat or another Supervisor conversation; only the target's own Supervisor conversation may
