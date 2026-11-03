@@ -170,6 +170,8 @@ it("the compose file publishes loopback ports only and mounts the checkout and t
     assert.equal(env.T3SUP_DEV_DATA, "/data");
   }
   assert.deepEqual(compose.services.env?.ports?.length, 3);
+  assert.equal(compose.services.env?.environment.GITHUB_TOKEN, undefined);
+  assert.equal(compose.services.tools?.environment.GITHUB_TOKEN, "${T3SUP_DEV_GITHUB_TOKEN:-}");
   // the browser journeys see the checkout, its dependencies and the shared caches: never a sign-in, T3 data or this
   // environment's Supervisor data, and they publish nothing
   assert.ok(e2e);

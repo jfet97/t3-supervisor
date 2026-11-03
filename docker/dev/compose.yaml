@@ -13,7 +13,7 @@ x-development: &development
   working_dir: /workspace
   security_opt: [no-new-privileges:true]
   cap_drop: [ALL]
-  environment:
+  environment: &development-environment
     LANG: C.UTF-8
     HOME: /credentials/home
     XDG_CONFIG_HOME: /credentials/home/.config
@@ -68,6 +68,9 @@ services:
 
   tools:
     <<: *development
+    environment:
+      <<: *development-environment
+      GITHUB_TOKEN: ${T3SUP_DEV_GITHUB_TOKEN:-}
     profiles: [tools]
     command: ["bash"]
     ports:
