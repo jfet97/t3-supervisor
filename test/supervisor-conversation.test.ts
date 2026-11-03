@@ -16,7 +16,7 @@ import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contr
 import { WorkflowPlanGroupSchema, WorkflowProposal } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { supervisionInterpretationSubmitToolDefinition } from "../src/workflow-write-controller.js";
-import { externalContributionFences, firstObservedOrdinal, preparedAcceptanceRecord, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
+import { externalContributionFences, firstObservedOrdinal, notAStop, preparedAcceptanceRecord, stopRequestCondition, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
 import { buildProjectDefinitionReviewRequest, extractApprovedProjectDefinitions } from "../src/supervisor-definition-review.js";
 import { interpretationRules, localThreadToolRules, prepareWorkflowRequest, proportionatePlanRule, stepEntryGuidance, toolRouteReminder, proposalContextFromDefinitions, proposalContextMatches, validateWorkflowPlan, workflowInterpretationOutcome, type WorkflowPlanValue } from "../src/supervisor-workflow.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
@@ -6390,6 +6390,18 @@ it.effect("the bootstrap carries discovery and the Stop route before its first r
   assert.ok(core.length < 3_400, `root core ${core.length}`);
 }));
 
+it.effect("the bootstrap Stop route is conditional on a genuine human stop request and excludes investigation and pauses", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture({now: baseTime});
+  const notice = fixture.conversation.rootNotice({...fixture.binding, mainThreadId: "00000000-0000-4000-8000-000000000001",
+    threadId: "supervisor-root:00000000-0000-4000-8000-000000000002"})!;
+  // the notice reaches a root before it read any message or instruction, so its Stop route must name the shared condition first
+  const condition = notice.indexOf(stopRequestCondition);
+  assert.ok(condition >= 0 && condition < notice.indexOf("supervision_stop"), "the Stop route starts from the genuine human stop request");
+  assert.ok(notice.includes(notAStop), "the Stop route excludes investigation and pauses");
+  const section = yield* sectionText(fixture, "stop_start");
+  assert.ok(section.includes(stopRequestCondition) && section.includes(notAStop), "section stop_start states the same condition and exclusion");
+}));
+
 // native proof 2026-10-23 (VM, two models): both roots read definitions through a gateway call, then refused to submit, reading "never
 // through a script or code-mode wrapper" as forbidding that same call. The rendered request, the interpretation rules and the tool
 // description now state the operation only: the model calls the tools exposed to it, with one neutral gateway reminder before the first reader and in the core
@@ -7324,10 +7336,10 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
   console.log(`EXCHANGE AUDIT (rendered paths)\n${exchangeTable(rows)}`);
   // transport neutrality on every rendered path: no gateway product, wrapper or recipe is named
   for (const sample of samples) assert.doesNotMatch(sample.text, /mcpx|t3-supervisor-workflows|code-mode|functions\.exec/iu, sample.label);
-  // the first wake of an instructions version carries the full notice, whose discovery route the core also states; every later routine
+  // the first wake carries discovery and the conditional Stop boundary before the reader that also states them; every later routine
   // wake, liveness wake, repair wake and definition review wake repeats nothing of the reference and carries no rows, handles or templates
   const row = (label: string) => rows.find(item => item.label === label)!;
-  const route = Buffer.byteLength(toolRouteReminder, "utf8");
+  const route = Buffer.byteLength([toolRouteReminder, stopRequestCondition, notAStop].join(" "), "utf8");
   for (const label of ["root notice, full (first wake of an instructions version)", "interpretation request, task a", "routine check-in, first wake", "definition review wake, dispatched, first change"])
     assert.ok(row(label).ruleBytes <= route, `${label} repeats ${row(label).ruleBytes} bytes of the reference`);
   // one line each: identities, counts, read route, the short outcome reference and the marker
