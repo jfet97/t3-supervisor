@@ -6,10 +6,11 @@ import type { T3Release } from "./local-stack.js";
 
 /*
   `pnpm dev:targets`: the published T3 builds a compatibility run checks, in four fixed slots (docs/local-stack.md): `stable`,
-  the latest official stable release, and `nightly`, `nightly-1` and `nightly-2`, the latest three distinct nightlies of
-  pingdotgg/t3code by version precedence. `resolve` reads GitHub's release list once and writes a lock that freezes the four
-  builds with their Linux archive digests from each release's own SHA256SUMS; `pnpm dev:stack --check --t3-lock` runs them.
-  A missing build, artifact or checksum fails the resolution: nothing falls back to another build, the pin or an earlier lock.
+  the release GitHub designates as pingdotgg/t3code's latest full release, and `nightly`, `nightly-1` and `nightly-2`, its
+  latest three distinct nightlies by version precedence. `resolve` reads that designation and at most three pages of GitHub's
+  release list once and writes a lock that freezes the four builds with their Linux archive digests from each release's own
+  SHA256SUMS; `pnpm dev:stack --check --t3-lock` runs them. A missing build, artifact or checksum fails the resolution:
+  nothing falls back to another build, the pin or an earlier lock.
 */
 
 export const targetSlots = ["stable", "nightly", "nightly-1", "nightly-2"] as const;

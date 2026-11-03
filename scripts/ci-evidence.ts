@@ -37,7 +37,9 @@ export interface CiEvidenceOptions {
   readonly git?: (arguments_: readonly string[]) => Effect.Effect<string, unknown>;
   readonly loadPolicy?: (baseline: string) => Effect.Effect<Policy, unknown, Scope.Scope>;
 }
-export type CiPlan = {readonly mode: "full" | "reuse" | "release"; readonly runId?: number; readonly baselineRunId?: number; readonly from?: string; readonly to?: string};
+/** `compatibility`: main's reuse covers a version branch run, whose proof required its published-T3 compatibility gate. */
+export type CiPlan = {readonly mode: "full" | "reuse" | "release"; readonly runId?: number; readonly baselineRunId?: number; readonly from?: string; readonly to?: string;
+  readonly compatibility?: true};
 
 // git and github are bounded foreign adapters; policy decisions remain synchronous and Schema-checked
 const gitCommand = (args: readonly string[]) => Effect.try(() => execFileSync("git", [...args], {encoding: "utf8", maxBuffer: 8 * 1024 * 1024}));
@@ -119,7 +121,7 @@ export const planCi = (options: CiEvidenceOptions): Effect.Effect<CiPlan> => Eff
     const jobs = yield* jobsOf(run.id);
     const fresh = yield* currentRun(pr.head.sha, run);
     const proof = yield* Effect.try(() => policy.proveMergedValidation({expected, headTree, runs: fresh, jobs}));
-    return {...proof, jobs};
+    return {...proof, jobs, branch: pr.head.ref};
   });
   const releaseProof = (head: string) => Effect.gen(function* () {
     yield* fetch(head);
@@ -148,9 +150,11 @@ export const planCi = (options: CiEvidenceOptions): Effect.Effect<CiPlan> => Eff
 
   if (context.eventName === "push" && context.ref === "refs/heads/main") {
     const full = yield* Effect.result(fullPrProof(context.sha, currentPolicy));
-    if (full._tag === "Success") return {mode: "reuse", runId: full.success.runId} as const;
+    // a version branch run is reused only with the published-T3 compatibility gate its proof required; main never resolves T3 targets
+    if (full._tag === "Success") return full.success.branch === currentPolicy.versionBranch
+      ? {mode: "reuse", runId: full.success.runId, compatibility: true} as const : {mode: "reuse", runId: full.success.runId} as const;
     const pr = yield* associated(context.sha);
-    if (pr.head.ref !== "changeset-release/main") return {mode: "full"} as const;
+    if (pr.head.ref !== currentPolicy.versionBranch) return {mode: "full"} as const;
     yield* fetch(pr.head.sha);
     const expected = {repository, workflowId: workflow.id, head: pr.head.sha, branch: pr.head.ref, tree: yield* tree(context.sha)};
     const headTree = yield* tree(pr.head.sha), runs = yield* runsAt(pr.head.sha), run = currentPolicy.newestPrRun(runs, expected);
@@ -158,12 +162,12 @@ export const planCi = (options: CiEvidenceOptions): Effect.Effect<CiPlan> => Eff
     const jobs = yield* jobsOf(run.id), fresh = yield* currentRun(pr.head.sha, run);
     const proof = yield* Effect.try(() => currentPolicy.proveReleaseRun({expected, headTree, runs: fresh, jobs}));
     const baseline = yield* releaseProof(pr.head.sha);
-    return {mode: "reuse", runId: proof.runId, baselineRunId: baseline.baselineRunId} as const;
+    return {mode: "reuse", runId: proof.runId, baselineRunId: baseline.baselineRunId, compatibility: true} as const;
   }
   const pr = context.payload.pull_request;
   if (context.eventName === "pull_request") {
-    if (!pr || pr.head.repo?.full_name !== repository || pr.base.ref !== "main" || pr.head.ref !== "changeset-release/main") return {mode: "full"} as const;
-  } else if (context.eventName !== "workflow_dispatch" || options.validation !== "auto" || context.ref !== "refs/heads/changeset-release/main") return {mode: "full"} as const;
+    if (!pr || pr.head.repo?.full_name !== repository || pr.base.ref !== "main" || pr.head.ref !== currentPolicy.versionBranch) return {mode: "full"} as const;
+  } else if (context.eventName !== "workflow_dispatch" || options.validation !== "auto" || context.ref !== `refs/heads/${currentPolicy.versionBranch}`) return {mode: "full"} as const;
   const proof = yield* releaseProof(pr?.head.sha ?? context.sha);
   return {mode: "release", baselineRunId: proof.baselineRunId, from: proof.from, to: proof.to} as const;
 })).pipe(Effect.catch(() => Effect.succeed({mode: "full"} as const)));

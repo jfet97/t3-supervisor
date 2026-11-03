@@ -6,7 +6,8 @@ import { parse } from "yaml";
 /*
   ARM64 images are built and run on native ARM64 runners in both the PR check and the release, and AMD64 images on x64
   runners; no workflow emulates another architecture. The release assembles its immutable version only from variants that
-  ran natively, and publishes nothing before that verification.
+  ran natively, and publishes nothing before that verification. The published-T3 compatibility slots run the same way: each
+  on a native runner of its architecture that first checks it.
 */
 
 type Step = { name?: string; id?: string; uses?: string; run?: string; if?: string; env?: Record<string, unknown>; with?: Record<string, unknown> };
@@ -14,6 +15,7 @@ type Job = { "runs-on": string; needs?: string | string[]; environment?: string;
 const workflow = (file: string) => parse(readFileSync(new URL(`../.github/workflows/${file}`, import.meta.url), "utf8")) as { jobs: Record<string, Job> };
 const check = workflow("check.yml");
 const release = workflow("release.yml");
+const compatibility = workflow("compatibility.yml");
 const arm64Runner = "ubuntu-24.04-arm";
 const needs = (job: Job) => typeof job.needs === "string" ? [job.needs] : job.needs ?? [];
 const stepIndex = (job: Job, predicate: (step: Step) => boolean) => {
@@ -23,9 +25,10 @@ const stepIndex = (job: Job, predicate: (step: Step) => boolean) => {
 };
 
 it("no workflow emulates, and every image build targets one architecture on a runner of that architecture", () => {
-  for (const [file, { jobs }] of [["check.yml", check], ["release.yml", release]] as const) {
+  for (const [file, { jobs }] of [["check.yml", check], ["release.yml", release], ["compatibility.yml", compatibility]] as const) {
     for (const [name, job] of Object.entries(jobs)) {
-      for (const step of job.steps) {
+      // a job that calls a reusable workflow, such as check.yml's compatibility gate, has no steps of its own
+      for (const step of job.steps ?? []) {
         assert.ok(!step.uses?.startsWith("docker/setup-qemu-action"), `${file} ${name} sets up an emulator`);
         if (!step.uses?.startsWith("docker/build-push-action")) continue;
         const platform = step.with?.platforms ?? (job["runs-on"] === arm64Runner ? "linux/arm64" : "linux/amd64");
@@ -33,7 +36,7 @@ it("no workflow emulates, and every image build targets one architecture on a ru
         assert.equal(job["runs-on"] === arm64Runner, platform === "linux/arm64", `${file} ${name} builds ${platform} on ${job["runs-on"]}`);
       }
       // a job that runs an image runs the one architecture its runner has
-      const smokes = job.steps.filter((step) => step.run?.includes("smoke-release.ts image"));
+      const smokes = (job.steps ?? []).filter((step) => step.run?.includes("smoke-release.ts image"));
       for (const step of smokes) {
         const platform = String(step.env?.SMOKE_PLATFORM ?? (step.run?.match(/SMOKE_PLATFORM=(?:"?\$platform"?|(linux\/\w+))/u)?.[1] ?? ""));
         if (job["runs-on"] === arm64Runner) assert.ok(step.run!.includes("linux/arm64") || platform === "linux/arm64", `${file} ${name}`);
@@ -80,4 +83,16 @@ it("the release verifies the ARM64 variant natively, assembles only verified var
   for (const name of ["Publish the immutable package with provenance", "Verify the package channel and advance only the selected image channel",
     "Publish release notes and immutable artifacts"]) assert.ok(stepIndex(publish, (step) => step.name === name) > verify, name);
   assert.ok(assemble < verify);
+});
+
+it("the compatibility slots run on a native runner of their own architecture, which each checks first", () => {
+  const { lock, slot } = compatibility.jobs;
+  assert.ok(lock && slot);
+  // the runner comes from the slot selection: x64 on the x64 runner, ARM64 on the native ARM64 runner
+  assert.equal(slot["runs-on"], "${{ matrix.runner }}");
+  const selection = String(lock.steps.find((step) => step.id === "plan")?.run);
+  assert.match(selection, /x64\) runner=ubuntu-latest ;; arm64\) runner=ubuntu-24\.04-arm ;;/u);
+  assert.equal(slot.steps[0]!.id, "native");
+  assert.match(String(slot.steps[0]!.run), /arm64\) test "\$\(uname -m\)" = aarch64 ;;/u);
+  assert.match(String(slot.steps[0]!.run), /x64\) test "\$\(uname -m\)" = x86_64 ;;/u);
 });

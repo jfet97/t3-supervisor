@@ -35,6 +35,7 @@ jobs:
       pull-requests: read
     outputs:
       mode: ${{ steps.proof.outputs.mode }}
+      compatibility: ${{ steps.proof.outputs.compatibility }}
     steps:
       - name: Select evidence lookup
         id: scope
@@ -43,13 +44,16 @@ jobs:
           VALIDATION: ${{ inputs.validation || 'full' }}
         with:
           script: |
-            // ordinary PRs and manual full dispatches need no source lookup before their full checks
+            /* Ordinary PRs and manual full dispatches need no source lookup before their full checks. Only a run of the version branch,
+             * its PR or a dispatch on it, calls the published-T3 compatibility gate; no other run resolves T3 targets. */
             const pr = context.payload.pull_request;
             const repository = `${context.repo.owner}/${context.repo.repo}`;
-            const release = context.eventName === 'pull_request'
+            const versionBranch = context.eventName === 'pull_request'
               ? pr?.head.ref === 'changeset-release/main' && pr?.head.repo?.full_name === repository && pr?.base.ref === 'main'
-              : context.eventName === 'workflow_dispatch' && process.env.VALIDATION === 'auto' && context.ref === 'refs/heads/changeset-release/main';
+              : context.eventName === 'workflow_dispatch' && context.ref === 'refs/heads/changeset-release/main';
+            const release = versionBranch && (context.eventName === 'pull_request' || process.env.VALIDATION === 'auto');
             core.setOutput('needed', String((context.eventName === 'push' && context.ref === 'refs/heads/main') || release));
+            core.setOutput('compatibility', versionBranch ? 'gate' : 'none');
       - uses: actions/checkout@v4
         if: ${{ steps.scope.outputs.needed == 'true' }}
         with:
@@ -63,9 +67,11 @@ jobs:
         env:
           VALIDATION: ${{ inputs.validation || 'full' }}
           EVIDENCE_NEEDED: ${{ steps.scope.outputs.needed }}
+          COMPATIBILITY: ${{ steps.scope.outputs.compatibility }}
         with:
           script: |
             core.setOutput('mode', 'full');
+            core.setOutput('compatibility', process.env.COMPATIBILITY);
             if (process.env.EVIDENCE_NEEDED !== 'true') return;
             try {
               const { pathToFileURL } = require('node:url');
@@ -75,19 +81,28 @@ jobs:
               const { runCiPlan } = await tsImport('./scripts/ci-evidence.ts', root);
               const plan = await runCiPlan({ github, context, validation: process.env.VALIDATION });
               core.setOutput('mode', plan.mode);
+              // main reuses a version branch run only with that run's published-T3 compatibility gate and frozen T3 lock
+              if (plan.compatibility) core.setOutput('compatibility', 'reused');
               if (plan.mode === 'full') {
                 core.notice('Complete validation selected: release-only equivalence and full source evidence were not both proven.');
                 return;
               }
               const link = id => `[run ${id}](https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${id})`;
+              const gate = plan.compatibility ? ', including its published-T3 compatibility gate and the frozen T3 lock it keeps as its t3-lock artifact' : '';
               const detail = plan.mode === 'release'
                 ? `Release ${plan.from} → ${plan.to}: full baseline ${link(plan.baselineRunId)}; static, package and container checks still run on this version.`
-                : `Exact merged tree reuses ${link(plan.runId)}.${plan.baselineRunId ? ` Full release baseline: ${link(plan.baselineRunId)}.` : ''}`;
+                : `Exact merged tree reuses ${link(plan.runId)}${gate}.${plan.baselineRunId ? ` Full release baseline: ${link(plan.baselineRunId)}.` : ''}`;
               await core.summary.addHeading(plan.mode === 'release' ? 'Release metadata fast track' : 'Exact validation reused').addRaw(detail).write();
             } catch {
               core.setOutput('mode', 'full');
+              core.setOutput('compatibility', process.env.COMPATIBILITY);
               core.notice('Validation evidence unavailable; running complete checks.');
             }
+      # publication reads this step: a merged version PR publishes stable automatically only after main reused that PR's checked run, whose
+      # published-T3 compatibility gate passed from its frozen lock; main never resolves T3 targets itself
+      - name: Reuse the version PR compatibility evidence
+        if: ${{ steps.proof.outputs.compatibility == 'reused' }}
+        run: echo "main reuses the version PR run with its published-T3 compatibility gate and frozen T3 lock"
 
   static:
     needs: plan
@@ -243,15 +258,29 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # the published-T3 compatibility gate (docs/ci.md): only a version branch run calls compatibility.yml, which resolves one frozen T3 lock and
+  # runs every slot on x64 and the stable and newest nightly slots also on native ARM64. Ordinary PRs never call it, and main only reuses
+  # the version PR run's verdict; actions: read is the ceiling for the reproduction job of that workflow, which never runs here
+  t3-compatibility:
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/compatibility.yml
+    with:
+      gate: true
+
   check:
     if: ${{ always() }}
-    needs: [plan, static, arm64, main, harness, startup, browser]
+    needs: [plan, static, arm64, main, harness, startup, browser, t3-compatibility]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
       - name: Require every validation job to pass
         env:
           MODE: ${{ needs.plan.outputs.mode }}
+          COMPATIBILITY: ${{ needs.plan.outputs.compatibility }}
           PLAN_RESULT: ${{ needs.plan.result }}
           STATIC_RESULT: ${{ needs.static.result }}
           ARM64_RESULT: ${{ needs.arm64.result }}
@@ -259,9 +288,23 @@ jobs:
           HARNESS_RESULT: ${{ needs.harness.result }}
           STARTUP_RESULT: ${{ needs.startup.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
+          COMPATIBILITY_RESULT: ${{ needs.t3-compatibility.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$STARTUP_RESULT" = success
+          # a version branch run requires its compatibility gate; every other run never calls it, and only main's reuse inherits it
+          case "$COMPATIBILITY" in
+            gate)
+              test "$MODE" != reuse
+              test "$COMPATIBILITY_RESULT" = success
+              ;;
+            reused)
+              test "$MODE" = reuse
+              test "$COMPATIBILITY_RESULT" = skipped
+              ;;
+            none) test "$COMPATIBILITY_RESULT" = skipped ;;
+            *) exit 1 ;;
+          esac
           case "$MODE" in
             reuse)
               test "$STATIC_RESULT" = skipped
@@ -271,6 +314,7 @@ jobs:
               test "$BROWSER_RESULT" = skipped
               ;;
             release)
+              test "$COMPATIBILITY" = gate
               test "$STATIC_RESULT" = success
               test "$ARM64_RESULT" = success
               test "$MAIN_RESULT" = skipped

@@ -13,8 +13,8 @@ import { freePort } from "./support/g8-process.js";
 
 /*
   The published T3 targets (scripts/t3-targets.ts): the slot selection over small release lists shaped like pingdotgg/t3code's
-  list of 2026-11-03, the resolution against a loopback stand-in for GitHub's release list and release downloads, and the
-  lock's validation. No request leaves the loopback interface.
+  list of 2026-11-03, the resolution against a loopback stand-in for GitHub's designated latest release, release list and
+  release downloads, and the lock's validation. No request leaves the loopback interface.
 */
 
 const digestOf = (text: string): string => createHash("sha256").update(text).digest("hex");
@@ -59,8 +59,8 @@ interface Reply {
 }
 
 /*
-  A loopback stand-in for GitHub's release list and downloads: it answers each path from `routes`, built once its origin is
-  known, and records each request's path and Authorization header.
+  A loopback stand-in for GitHub's latest release, release list and downloads: it answers each path from `routes`, built once
+  its origin is known, and records each request's path and Authorization header.
 */
 const github = (routes: (origin: string) => Readonly<Record<string, Reply>>) => Effect.acquireRelease(Effect.gen(function* () {
   const requests: Array<{readonly path: string; readonly authorization: string | undefined}> = [];
@@ -105,8 +105,8 @@ const withAssets = (origin: string, entry: typeof cohort[number], sums: string):
 });
 
 /*
-  GitHub's routes for the cohort: the release list as one page and each release's SHA256SUMS. `sums` replaces a release's
-  SHA256SUMS before GitHub's digest of it is taken; `edit` changes a release as the list shows it.
+  GitHub's routes for the cohort: its designated latest release, the release list as one page and each release's SHA256SUMS.
+  `sums` replaces a release's SHA256SUMS before GitHub's digest of it is taken; `edit` changes a release as both show it.
 */
 const routesFor = (origin: string, change: {readonly sums?: Readonly<Record<string, string>>; readonly edit?: (release: PublishedRelease) => PublishedRelease} = {}):
   Record<string, Reply> => {

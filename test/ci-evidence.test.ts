@@ -15,7 +15,9 @@ const repository = "jfet97/t3-supervisor";
 const manifest = '{\n  "name": "@jfet97/t3-supervisor",\n  "version": "0.0.4"\n}\n';
 const run = (id: number, head_sha: string, event: string, branch: string): typeof policy.CiRun.Type => ({id, workflow_id: 42, head_sha, head_branch: branch, event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
 const full = (id: number) => policy.requiredFullJobs.map(name => ({name, run_id: id, conclusion: "success"}));
-const release = (id: number) => ["plan", "static", "arm64", "startup", "check", "harness", "browser", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "arm64", "startup", "check"].includes(name) ? "success" : "skipped"}));
+// the version branch's published-T3 compatibility gate as check.yml's reusable workflow call lists it; its reproduction job never runs there
+const gate = (id: number) => [...policy.compatibilityGateJobs.map(name => ({name, run_id: id, conclusion: "success"})), {name: "t3-compatibility / earlier-lock", run_id: id, conclusion: "skipped"}];
+const release = (id: number) => [...["plan", "static", "arm64", "startup", "check", "harness", "browser", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "arm64", "startup", "check"].includes(name) ? "success" : "skipped"})), ...gate(id)];
 const pr = (merge: string | null, head: string, branch: string) => ({merged_at: merge ? "2026-10-25T00:00:00Z" : null, merge_commit_sha: merge, base: {ref: "main"}, head: {sha: head, ref: branch, repo: {full_name: repository}}});
 const rawChange = (path: string, status = "M") => `:100644 ${status === "D" ? "000000" : "100644"} ${B} ${status === "D" ? "0".repeat(40) : H} ${status}\0${path}\0`;
 
@@ -122,11 +124,34 @@ it.effect("missing baseline policy never lets the implementing PR approve its ow
 
 it.effect("main independently rederives a fast release and baseline, while ordinary full PR reuse remains valid", () => Effect.gen(function*() {
   const f = fixture(), context = {...f.context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}};
-  assert.deepEqual(yield* planCi({...f, context}), {mode: "reuse", runId: 30, baselineRunId: 10});
-  f.jobs.set(30, full(30));
-  assert.deepEqual(yield* planCi({...f, context}), {mode: "reuse", runId: 30});
+  assert.deepEqual(yield* planCi({...f, context}), {mode: "reuse", runId: 30, baselineRunId: 10, compatibility: true});
+  f.jobs.set(30, [...full(30), ...gate(30)]);
+  assert.deepEqual(yield* planCi({...f, context}), {mode: "reuse", runId: 30, compatibility: true});
   f.jobs.set(30, release(30));f.state.raw += rawChange("scripts/ci-proof.ts");
   assert.deepEqual(yield* planCi({...f, context}), {mode: "full"});
+  // an ordinary merged PR is reused without any compatibility gate, which it never ran
+  const ordinary = fixture();
+  ordinary.runs.set(H, [run(30, H, "pull_request", "feature")]);
+  ordinary.jobs.set(30, full(30));
+  const merged = {...ordinary, github: {rest: {...ordinary.github.rest, repos: {...ordinary.github.rest.repos,
+    listPullRequestsAssociatedWithCommit: async () => ({data: [pr(M, H, "feature")]})}}}};
+  assert.deepEqual(yield* planCi({...merged, context}), {mode: "reuse", runId: 30});
+}));
+
+it.effect("main never reuses a version branch run without its whole passing published-T3 compatibility gate, in full or release mode", () => Effect.gen(function*() {
+  const context = {...fixture().context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}};
+  for (const [label, jobs] of [
+    ["release run before the gate", release(30).filter(job => !job.name.startsWith("t3-compatibility / "))],
+    ["release run with a failed slot", release(30).map(job => job.name === "t3-compatibility / nightly-2 on x64" ? {...job, conclusion: "failure"} : job)],
+    ["release run with a skipped ARM64 slot", release(30).map(job => job.name === "t3-compatibility / stable on arm64" ? {...job, conclusion: "skipped"} : job)],
+    ["release run with a cancelled lock", release(30).map(job => job.name === "t3-compatibility / lock" ? {...job, conclusion: "cancelled"} : job)],
+    ["full run before the gate", full(30)],
+    ["full run with a failed slot", [...full(30), ...gate(30).map(job => job.name === "t3-compatibility / nightly on arm64" ? {...job, conclusion: "failure"} : job)]],
+  ] as const) {
+    const f = fixture();
+    f.jobs.set(30, [...jobs]);
+    assert.deepEqual(yield* planCi({...f, context}), {mode: "full"}, label);
+  }
 }));
 
 it.effect("main rejects a different merged tree or an unsuccessful latest release validation", () => Effect.gen(function*() {
@@ -152,19 +177,45 @@ it.live("loads the baseline TypeScript policy through the real scoped adapter an
 
 it.effect("the actual scope adapter preserves default full dispatch and selects only same-repository release metadata candidates", () => Effect.gen(function*() {
   const script = workflow.jobs.plan.steps[0].with.script as string;
-  for (const [eventName, ref, validation, pull, expected] of [
-    ["workflow_dispatch", "refs/heads/changeset-release/main", "full", undefined, "false"],
-    ["workflow_dispatch", "refs/heads/changeset-release/main", "auto", undefined, "true"],
-    ["workflow_dispatch", "refs/heads/feature", "auto", undefined, "false"],
-    ["pull_request", "refs/pull/21/merge", "full", pr(null, H, "changeset-release/main"), "true"],
-    ["pull_request", "refs/pull/21/merge", "full", pr(null, H, "feature"), "false"],
-    ["push", "refs/heads/main", "full", undefined, "true"],
+  const fork = {...pr(null, H, "changeset-release/main"), head: {...pr(null, H, "changeset-release/main").head, repo: {full_name: "fork/t3-supervisor"}}};
+  const otherBase = {...pr(null, H, "changeset-release/main"), base: {ref: "release"}};
+  // only a run of the version branch, its PR or a dispatch on it, calls the published-T3 compatibility gate; an ordinary PR never does
+  for (const [eventName, ref, validation, pull, expected, compatibility] of [
+    ["workflow_dispatch", "refs/heads/changeset-release/main", "full", undefined, "false", "gate"],
+    ["workflow_dispatch", "refs/heads/changeset-release/main", "auto", undefined, "true", "gate"],
+    ["workflow_dispatch", "refs/heads/feature", "auto", undefined, "false", "none"],
+    ["workflow_dispatch", "refs/heads/main", "full", undefined, "false", "none"],
+    ["pull_request", "refs/pull/21/merge", "full", pr(null, H, "changeset-release/main"), "true", "gate"],
+    ["pull_request", "refs/pull/21/merge", "full", pr(null, H, "feature"), "false", "none"],
+    ["pull_request", "refs/pull/21/merge", "full", fork, "false", "none"],
+    ["pull_request", "refs/pull/21/merge", "full", otherBase, "false", "none"],
+    ["push", "refs/heads/main", "full", undefined, "true", "none"],
   ] as const) {
     const outputs: Record<string, string> = {};
     yield* Effect.tryPromise(() => runInNewContext(`(async()=>{${script}})()`, {context: {eventName, ref, repo: {owner: "jfet97", repo: "t3-supervisor"}, payload: {pull_request: pull}}, process: {env: {VALIDATION: validation}}, core: {setOutput: (key: string, value: string) => {outputs[key] = value;}}}));
-    assert.equal(outputs.needed, expected);
+    assert.deepEqual(outputs, {needed: expected, compatibility}, `${eventName} ${ref} ${pull?.head.ref ?? ""}`);
   }
   assert.equal(workflow.on.workflow_dispatch.inputs.validation.default, "full");
+}));
+
+it.live("an ordinary PR keeps exactly its current jobs, and only the version branch calls the compatibility gate, which main never runs", () => Effect.sync(() => {
+  const jobs = workflow.jobs as Record<string, {if?: string; needs?: unknown; uses?: string; with?: Record<string, unknown>; permissions?: Record<string, string>}>;
+  const suites = "${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' && needs.plan.outputs.mode != 'release' }}";
+  assert.deepEqual(Object.fromEntries(Object.entries(jobs).map(([name, job]) => [name, job.if ?? null])), {
+    plan: null, static: "${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' }}", arm64: "${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' }}",
+    main: suites, harness: suites, startup: "${{ always() && !cancelled() }}", browser: suites,
+    "t3-compatibility": "${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}", check: "${{ always() }}",
+  });
+  const compatibility = jobs["t3-compatibility"]!;
+  assert.equal(compatibility.uses, "./.github/workflows/compatibility.yml");
+  assert.deepEqual(compatibility.with, {gate: true});
+  assert.deepEqual(compatibility.permissions, {contents: "read", actions: "read"});
+  assert.equal(compatibility.needs, "plan");
+  assert.ok((jobs.check!.needs as Array<string>).includes("t3-compatibility"));
+  assert.equal(workflow.jobs.plan.outputs.compatibility, "${{ steps.proof.outputs.compatibility }}");
+  // publication reads the plan step that records main's reuse of the version PR's compatibility evidence
+  const reuse = (workflow.jobs.plan.steps as Array<{name?: string; if?: string}>).find(step => step.name === "Reuse the version PR compatibility evidence");
+  assert.equal(reuse?.if, "${{ steps.proof.outputs.compatibility == 'reused' }}");
 }));
 
 it.live("the actual aggregate shell rejects missing proof, a skipped or failed static or native ARM64 check, failed suites or browser journeys, a skipped or failed startup and unknown modes", () => Effect.sync(() => {
@@ -200,8 +251,24 @@ it.live("the actual aggregate shell rejects missing proof, a skipped or failed s
     ["reuse", "success", "skipped", "skipped", "skipped", "skipped", "success", "success", false],
   ] as const) {
     const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, ARM64_RESULT: arm64,
-      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup, BROWSER_RESULT: browser}});
+      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup, BROWSER_RESULT: browser,
+      COMPATIBILITY: mode === "release" ? "gate" : "none", COMPATIBILITY_RESULT: mode === "release" ? "success" : "skipped"}});
     assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, arm64, main, harness, startup, browser}));
+  }
+  // a version branch run requires its compatibility gate in full and release mode, and only it runs in release mode; any other run never calls it, and main only reuses it
+  const passing = {full: ["success", "success", "success", "success", "success"], release: ["success", "success", "skipped", "skipped", "skipped"],
+    reuse: ["skipped", "skipped", "skipped", "skipped", "skipped"]} as const;
+  for (const [mode, compatibility, result, succeeds] of [
+    ["full", "none", "skipped", true], ["full", "none", "success", false], ["full", "none", "failure", false], ["release", "none", "skipped", false],
+    ["full", "gate", "success", true], ["release", "gate", "success", true], ["full", "gate", "failure", false], ["release", "gate", "failure", false],
+    ["release", "gate", "cancelled", false], ["release", "gate", "skipped", false], ["full", "gate", "", false], ["reuse", "gate", "success", false],
+    ["reuse", "reused", "skipped", true], ["reuse", "reused", "success", false], ["full", "reused", "skipped", false], ["release", "reused", "skipped", false],
+    ["reuse", "none", "skipped", true], ["reuse", "none", "success", false], ["full", "", "skipped", false], ["release", "other", "skipped", false],
+  ] as const) {
+    const [stat, arm64, main, harness, browser] = passing[mode];
+    const aggregate = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: "success", STATIC_RESULT: stat, ARM64_RESULT: arm64,
+      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: "success", BROWSER_RESULT: browser, COMPATIBILITY: compatibility, COMPATIBILITY_RESULT: result}});
+    assert.equal(aggregate.status === 0, succeeds, JSON.stringify({mode, compatibility, result}));
   }
   // the browser journeys run through the contributors' own entry and are selected exactly where the suites are
   assert.equal(workflow.jobs.browser.if, workflow.jobs.harness.if);

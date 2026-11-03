@@ -28,6 +28,22 @@ export const MergeProof = Schema.Struct({
 // run can never supply this proof
 export const requiredFullJobs = ["static", "arm64", "main (1/4)", "main (2/4)", "main (3/4)", "main (4/4)", "harness", "startup", "browser", "check"] as const;
 
+/** The generated version PR's branch: its runs alone call the published-T3 compatibility gate. */
+export const versionBranch = "changeset-release/main";
+
+/*
+  The version PR's published-T3 compatibility gate (docs/ci.md): check.yml's `t3-compatibility` job calls compatibility.yml, whose jobs
+  GitHub names after that caller: the frozen lock, the dashboard build for every slot, every slot on x64 and the stable and newest nightly
+  slots on native ARM64. A run of the version branch proves its tree only together with each of them, so main and the automatic stable
+  publication reuse that run's frozen-lock evidence and never resolve T3 targets again (an explicit stable dispatch does not check it);
+  no other branch ever runs them.
+*/
+export const compatibilityGateJobs = [
+  "t3-compatibility / lock", "t3-compatibility / assets",
+  "t3-compatibility / stable on x64", "t3-compatibility / nightly on x64", "t3-compatibility / nightly-1 on x64", "t3-compatibility / nightly-2 on x64",
+  "t3-compatibility / stable on arm64", "t3-compatibility / nightly on arm64",
+] as const;
+
 export const newestPrRun = (runs: ReadonlyArray<typeof CiRun.Type>, expected: typeof MergeProof.Type.expected) =>
   runs.filter((run) => run.workflow_id === expected.workflowId && run.head_sha === expected.head &&
     run.repository.full_name === expected.repository && run.head_repository?.full_name === expected.repository &&
@@ -39,7 +55,8 @@ export const proveMergedValidation = (input: unknown): { readonly runId: number;
   if (headTree !== expected.tree) throw new Error("merged files differ from the checked PR head");
   const run = newestPrRun(runs, expected);
   if (!run || run.status !== "completed" || run.conclusion !== "success") throw new Error("latest PR validation is not successful");
-  for (const name of requiredFullJobs) {
+  // a version branch run proves its tree only together with its published-T3 compatibility gate
+  for (const name of expected.branch === versionBranch ? [...requiredFullJobs, ...compatibilityGateJobs] : requiredFullJobs) {
     const matches = jobs.filter((job) => job.name === name);
     if (matches.length !== 1 || matches[0]!.run_id !== run.id || matches[0]!.conclusion !== "success") {
       throw new Error("full validation job is missing or unsuccessful");
@@ -125,14 +142,17 @@ export const provePushValidation = (input: unknown): {readonly runId: number} =>
   return {runId: run.id};
 };
 
-/** Main rechecks the release diff and baseline separately; this proves only that version's static validation. */
+/**
+ * Main rechecks the release diff and baseline separately; this proves only that version's static validation and its published-T3
+ * compatibility gate, which every release run calls.
+ */
 export const proveReleaseRun = (input: unknown): {readonly runId: number; readonly tree: string} => {
   const {expected, headTree, runs, jobs} = Schema.decodeUnknownSync(MergeProof)(input);
   if (new Set(jobs.map(job => job.name)).size !== jobs.length) throw new Error("duplicate release job");
   if (headTree !== expected.tree) throw new Error("merged files differ from the checked release head");
   const run = newestPrRun(runs, expected);
   if (!run || run.status !== "completed" || run.conclusion !== "success") throw new Error("latest release validation is not successful");
-  const releaseJobs = ["plan", "static", "arm64", "startup", "check"];
+  const releaseJobs: ReadonlyArray<string> = ["plan", "static", "arm64", "startup", "check", ...compatibilityGateJobs];
   for (const name of releaseJobs) {
     const matches = jobs.filter(job => job.name === name);
     if (matches.length !== 1 || matches[0]!.run_id !== run.id || matches[0]!.conclusion !== "success") throw new Error("release validation job is missing or unsuccessful");

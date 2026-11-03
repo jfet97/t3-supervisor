@@ -79,6 +79,11 @@ jobs:
             const prs = await github.paginate(github.rest.repos.listPullRequestsAssociatedWithCommit, { ...context.repo, commit_sha: sha, per_page: 100 });
             const versionPR = prs.some(pr => pr.merged_at && pr.merge_commit_sha === sha && pr.base.ref === 'main' && pr.head.ref === 'changeset-release/main' && pr.head.repo?.full_name === `${context.repo.owner}/${context.repo.repo}`);
             if (automatic && !versionPR) return;
+            /* A merged version PR publishes stable automatically only when main reused that PR's checked run with its published-T3
+             * compatibility gate and frozen lock (docs/ci.md); main never resolves T3 targets, so a version merge it had to validate
+             * in full publishes stable only by an explicit dispatch. */
+            const reused = jobs.some(job => job.name === 'plan' && job.steps?.some(step => step.name === 'Reuse the version PR compatibility evidence' && step.conclusion === 'success'));
+            if (automatic && !reused) throw new Error('main did not reuse the version PR run and its compatibility evidence');
             if (scheduled) {
               const releases = await github.paginate(github.rest.repos.listReleases, { ...context.repo, per_page: 100 });
               if (releases.some(release => !release.draft && release.prerelease && release.tag_name.includes('-nightly.') && release.target_commitish === sha)) {

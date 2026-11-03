@@ -43,12 +43,16 @@ duplicate.
 | 2. Replays and real boundaries | the main suite: short deterministic runs over the real Supervisor graph (`test/support/startup-gateway.ts`) or the production-wired run with its dashboard and workflow MCP endpoint (`test/support/scenario-driver.ts`), with real sockets, processes and SQLite files and the scripted native peer | how Supervisor answers a given native event sequence: authority, receipts, uncertain effects, no duplicate sends, races committed at a peer hook and the native traffic per route |
 | 3. Browser journeys | `./dev e2e`; CI job `browser` | that a user completes the workflow through the rendered controls, and the durable state it leaves |
 | 4. Scripted soaks | `./dev soak`: the Supervisor process against a fake T3 on the wall clock, no model | service, resource and disconnect behavior over time |
-| 5. Published-T3 compatibility | the pinned published T3 with Supervisor (`./dev check`, `./dev up`); no provider | startup, native access and scopes, credentials, MCP transport, persistence, no-contact, recovery after a T3 restart and cleanup against the pinned T3 |
+| 5. Published-T3 compatibility | a published T3, the pin or a slot of a frozen target lock, with Supervisor: `./dev check` and the cohort probe, and `./dev up` on the pin; no provider | startup, native access and scopes, credentials, MCP transport, persistence, no-contact, recovery after a T3 restart and cleanup against that T3 build; with the cohort probe, a provider-free set of native operations against it ([CI](ci.md#published-t3-compatibility)) |
 | 6. Provider trials | the signed-in local Docker profile | actual model behavior |
 
 Types 1 to 4 never reach a real T3 or a model, so they prove nothing about either; type
-5 proves nothing about a model. Observations from types 2 to 4 carry the `fixture`
-label, type 5 `local stack` and type 6 `provider`
+5 proves nothing about a model. Its cohort probe exercises the listed provider-free native
+operations, not every native function, and leaves to type 6 model answers, the Stop of a
+running turn, the cancellation of a genuinely queued run (its idle thread Stop does not
+prove it), real check-in turn items, helper model and tool behavior after delivery, and
+compaction. Observations from types 2 to 4 carry the `fixture` label, type 5
+`local stack` and type 6 `provider`
 ([evidence labels](local-stack.md#evidence-labels)). `TestClock` never stands in for
 socket, process, browser or native delivery.
 
@@ -80,15 +84,21 @@ personal credentials, so provider runs never happen there.
 
 | Placement | When | What | Credentials |
 | --- | --- | --- | --- |
-| Required PR CI | every ordinary PR, through the `check` aggregate | types 1 and 2 in the main shards, the startup integration, and the browser journeys (type 3) in the `browser` job | none |
-| Extended runs | explicitly invoked before a release whose inputs they cover, or when one of those inputs changes; never scheduled | the scripted soaks (type 4) and the published-T3 compatibility runs (type 5), as a manually dispatched CI run or the same `./dev` commands locally | none |
+| Required PR CI | every ordinary PR, through the `check` aggregate | types 1 and 2 in the main shards, the startup integration, and the browser journeys (type 3) in the `browser` job; never type 5 | none |
+| Version PR gate | only the version PR (`changeset-release/main`), through its `check` aggregate; main and the automatic stable publication reuse its verdict, which an explicit stable dispatch does not check | type 5 against the four published target slots on x64 and the stable and newest nightly slots on native ARM64, from one frozen lock | the automatic read-only workflow token, for GitHub's release metadata only |
+| Daily canary | every day; advisory, never part of `check` and never a release gate | type 5 against the four published target slots on x64, from one frozen lock | the automatic read-only workflow token, for GitHub's release metadata only |
+| Extended runs | explicitly invoked before a release whose inputs they cover, or when one of those inputs changes; never scheduled | the scripted soaks (type 4) and the published-T3 check of the pin (type 5), as a manually dispatched CI run or the same `./dev` commands locally | none |
 | Provider acceptance | locally, when a change touches what a provider trial covers | provider trials (type 6) in the signed-in Docker profile through `./dev trial`, each with a disposable project and chat of its own | that profile's private volume, never exported |
 
 Extended runs start through `./dev soak` and `./dev check` or the manually dispatched
 `extended` workflow ([CI](ci.md#extended-runs)); provider trials start through
 `./dev trial` in the running environment ([development environment](local-stack.md#provider-trials)).
 Neither gates ordinary PRs, and neither becomes a release gate without an explicit
-decision.
+decision. The published target slots run in the **Published T3 compatibility** workflow
+([CI](ci.md#published-t3-compatibility)), which is no extended run: the daily canary, a
+manual reproduction from a new or an earlier frozen lock, and the version PR gate, the one
+explicit decision that makes type 5 a release gate, for the version PR and the automatic
+stable publication; an explicit stable dispatch does not check it.
 
 - Inputs that call for extended runs: the T3 pin; the native adapter, envelope and
   protocol reads; restart, reconnect and credential renewal.
@@ -121,11 +131,12 @@ profile, but each trial owns disposable projects and actors; it never reuses, ed
 resets a person's everyday conversations.
 
 Record the exact inputs with every live observation: the Supervisor commit and whether
-the tree was clean, the T3 pin, the provider and model T3 selected and their settings,
-the prompt version and, for a browser, the dashboard asset hashes. A provider CLI found
-in the environment need not be the runtime T3 runs: record the runtime version T3
-reports, and any CLI version found apart, labelled unverified. Evidence expires
-when one of these inputs changes; run it again rather than carrying it forward.
+the tree was clean, the T3 pin or the slot and the SHA-256 of its frozen lock, the
+provider and model T3 selected and their settings, the prompt version and, for a browser,
+the dashboard asset hashes. A provider CLI found in the environment need not be the
+runtime T3 runs: record the runtime version T3 reports, and any CLI version found apart,
+labelled unverified. Evidence expires when one of these inputs changes; run it again
+rather than carrying it forward.
 
 ## Browser journeys
 
@@ -239,10 +250,10 @@ build a parser of English prompt or reply text.
 
 ## Running tests
 
-CI owns the complete main, harness and browser suites ([CI policy](ci.md)); extended
-runs and provider trials follow [where tests run](#where-tests-run). While editing, run
-focused files in Docker, for example `./dev pnpm test test/config.test.ts` or
-`./dev e2e test/e2e/chat-stop-enable.test.ts`.
+CI owns the complete main, harness and browser suites, the daily published-T3 canary and
+the version PR gate ([CI policy](ci.md)); extended runs and provider trials follow
+[where tests run](#where-tests-run). While editing, run focused files in Docker, for
+example `./dev pnpm test test/config.test.ts` or `./dev e2e test/e2e/chat-stop-enable.test.ts`.
 
 ## Increments
 
@@ -307,7 +318,7 @@ increment N or retire. "To classify" marks an owner that is not decided yet.
 | Production startup chain | The production graph launches a root, serves its own controllers through the MCP gateway and carries a needed-work startup through interpretation to the operative's read of the proposal. | replay: `startup-integration.test.ts` | `supervision-live.test.ts`, `initial-worktree-startup.test.ts`, `dev-fixture.test.ts` | keep | the existing real-graph replay; `./dev fixture` runs the same chain |
 | Logging privacy | Logs, errors and responses carry fixed messages, codes and classifications, never tokens, native bodies, webhook URLs or raw causes. | boundary: `log-privacy.test.ts` (CT-REDACT-01) | `logging.test.ts`, `harness/private-assert.test.ts`, `service-auth-layer.test.ts`, `interpretation-submission.test.ts` (CT-ISUB-18), `supervisor-helper-transport.test.ts` (CT-HTX-04: the webhook token never reaches a stored document or file), `guidance-ui.test.ts` (GUI-03), `workflow-mcp-lifecycle.test.ts` (MCP-LIFE-08) | keep | |
 | Prompt texts | Rendered prompts compose shared fragments once, name the right tools, fields and actors, stay within their budgets and exclude sensitive or pushed data. | unit: `prompt-contracts.test.ts` | `supervisor-read-traffic.test.ts`, `exchange-audit.test.ts`, `workflow-write-controller.characterization.test.ts` (CT-WWC-06), `supervisor-workflow.characterization.test.ts` (CT-SW-01), payload-bound cases in `supervisor-conversation.test.ts` and `supervisor-helper-transport.test.ts` | keep | shared composition, tool/schema references, actor boundaries, budgets and sensitive exclusions; requests compare decoded handles instead of prose lengths or hashes; canonical plan and seeded-ID goldens remain; model behavior belongs to provider trials |
-| Release and CI policy | Verdict reuse and the release fast track accept only exact, directly proven full evidence; images build natively per architecture, and a version is never published from another source. | unit: `ci-evidence.test.ts` | `ci-proof.test.ts`, `release-ci-proof.test.ts`, `release-policy.test.ts`, `release-trigger.test.ts`, `release-arm64-gate.test.ts`, `native-arm64-ci.test.ts`, `image-build-cache.test.ts`, `release-smoke.test.ts` | keep | the `browser` job joins full validation in increment 1 |
+| Release and CI policy | Verdict reuse and the release fast track accept only exact, directly proven full evidence; images build natively per architecture, and a version is never published from another source. Only the version PR runs the published-T3 compatibility gate, every slot from one frozen lock, and main and the automatic stable publication reuse its verdict without resolving again; an explicit stable dispatch does not check it. | unit: `ci-evidence.test.ts` | `ci-proof.test.ts`, `release-ci-proof.test.ts`, `release-policy.test.ts`, `release-trigger.test.ts`, `release-arm64-gate.test.ts`, `native-arm64-ci.test.ts`, `image-build-cache.test.ts`, `release-smoke.test.ts`, `compatibility-workflow.test.ts` (the workflow's own selection, lock record, dashboard, shared per-job runtime and judge steps over stand-in files) | keep | the `browser` job joins full validation in increment 1; the version PR gate and the daily canary run `compatibility.yml` |
 | Development environment | The Docker environment issues least-scope revocable T3 sessions, installs only the pinned T3 digest, keeps provider logins in its own volume and removes only its own marked run folders. | unit: `dev-environment.test.ts` | `local-stack.test.ts`, `local-run.test.ts`, `dev-fixture.test.ts`; `./dev check` | keep | the suite holds the guard rails; `./dev check` is the live boundary |
 | Provider trial verdicts | A trial passes only on its scenario's required observed sequence with gapless evidence, fails only on a contradiction of Supervisor's own rules, is inconclusive when the awaited event did not happen and keeps its requests uncoached. | unit: `provider-trial-oracles.test.ts` | `provider-trial.test.ts` (plans, the first three scenarios and No Project Stop, evidence gaps, receipts, the workflow MCP registration and the workload's definitions through Supervisor's own parsers) | keep | the trials themselves run only through `./dev trial` ([development environment](local-stack.md#provider-trials)) |
 | Runner harness and test support | The runner fails on async leaks, unbounded tests and blocked workers, keeps tokens out of reports, and the test peers and processes release what they hold. | harness: `harness/*.test.ts` (`pnpm test:harness`) | `fake-t3-wait.test.ts`, `process-output-limit.test.ts` | keep | |
