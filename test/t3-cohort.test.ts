@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Effect, Ref, Result } from "effect";
+import { Effect, FileSystem, Ref, Result } from "effect";
+import { t3Release } from "../scripts/local-stack.js";
 import {
   accepted, afterAnswer, afterFailure, classifyFailure, classifyGitProbe, confirmed, contradicted, harness, idle, inconclusive, initiated, judgeDelivery,
-  makeLedger, notRun, parseArguments, passedOf, plannedSteps, porcelainPaths, refuted, rejected, sendOnce, stated, stepOperations, uncertain, worst,
+  makeLedger, notRun, parseArguments, passedOf, plannedSteps, porcelainPaths, refuted, rejected, releaseOf, sendOnce, stated, stepOperations, uncertain, worst,
   type DeliveryObservation, type OutcomeClass, type StepEvidence,
 } from "../scripts/t3-cohort.js";
+import { downloadBase } from "../scripts/t3-targets.js";
 import {
   T3FileError, T3InvalidInput, T3ReadError, T3RequestError, T3TerminalError, T3Unsupported, T3WebhookError, type CommandReceipt, type NativeRecord,
   type T3PreparedCommand,
@@ -213,3 +218,36 @@ it("the probe's arguments", () => {
     ["--probe", "--check"], ["--probe", "--cache-dir"], ["--probe", "--probe"]])
     assert.equal(parseArguments(args)._tag, "Invalid");
 });
+
+it.live("a lock is read once: the slot's release comes from the bytes whose SHA-256 the report names", () => Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const folder = yield* fs.makeTempDirectoryScoped();
+  const file = join(folder, "t3-targets.json");
+  const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
+  const digest = (seed: number) => seed.toString(16).padStart(64, "0");
+  const target = (slot: string, version: string, seed: number) => ({slot, version, tag: `v${version}`, publishedAt: "2026-11-03T00:00:00Z",
+    baseUrl: downloadBase, archives: {"linux-x64": digest(seed), "linux-arm64": digest(seed + 1)}});
+  const text = `${JSON.stringify({resolvedAt: "2026-11-03T00:00:00.000Z", source: "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100",
+    targets: [target("stable", "1.2.3", 1), target("nightly", "1.2.4-nightly.20261103.30", 3), target("nightly-1", "1.2.4-nightly.20261102.29", 5),
+      target("nightly-2", "1.2.4-nightly.20261102.28", 7)]}, null, 2)}\n`;
+  yield* fs.writeFileString(file, text);
+  let reads = 0;
+  const read = yield* releaseOf({file, slot: "nightly-1"}).pipe(Effect.provideService(FileSystem.FileSystem, {...fs,
+    readFile: (path) => fs.readFile(path).pipe(Effect.tap(() => Effect.andThen(Effect.sync(() => {reads += 1;}), fs.writeFileString(path, "{}")))),
+  }));
+  assert.equal(reads, 1);
+  assert.equal(yield* fs.readFileString(file), "{}", "the file changed after the selected bytes were read");
+  assert.deepEqual(read.lock, {file, sha256: sha256(text)});
+  assert.equal(Result.isSuccess(read.release) ? read.release.success.version : null, "1.2.4-nightly.20261102.29");
+  // a lock that does not decode is still named by its bytes, and fails the run
+  yield* fs.writeFileString(file, "{}");
+  const broken = yield* releaseOf({file, slot: "stable"});
+  assert.deepEqual(broken.lock, {file, sha256: sha256("{}")});
+  assert.equal(Result.isFailure(broken.release), true);
+  const missing = yield* releaseOf({file: join(folder, "absent.json"), slot: "stable"});
+  assert.equal(missing.lock, null);
+  assert.equal(Result.isFailure(missing.release), true);
+  const pinned = yield* releaseOf(null);
+  assert.equal(pinned.lock, null);
+  assert.equal(Result.isSuccess(pinned.release) ? pinned.release.success.version : null, t3Release.version);
+}).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)));

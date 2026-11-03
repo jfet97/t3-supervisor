@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { join, posix } from "node:path";
 import { NodeCrypto, NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Cause, Clock, Console, Context, Crypto, Data, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Ref, Result, Schedule, Schema } from "effect";
@@ -23,7 +24,7 @@ import { groupAlive, type ProcessResult } from "../test/support/cli-process.js";
 import { portState, runProcess } from "../test/support/g8-process.js";
 import { checkoutInputs } from "./local-run.js";
 import { defaultCacheRoot, LocalStackError, startStack, t3Release, type RunningStack, type T3Release } from "./local-stack.js";
-import { readTargetLock, targetRelease, TargetSlot } from "./t3-targets.js";
+import { decodeTargetLock, targetRelease, TargetSlot } from "./t3-targets.js";
 
 /*
   `node --import tsx scripts/t3-cohort.ts --probe`: the provider-free feasibility probe of one real published T3. It starts its own
@@ -1127,9 +1128,17 @@ export interface ProbeOptions {
   readonly lock: {readonly file: string; readonly slot: TargetSlot} | null;
 }
 
+/** A lock a run used: its path as given and the SHA-256 of the exact bytes the run read once, as `./dev check --t3-lock` names it */
+export interface LockInput {
+  readonly file: string;
+  readonly sha256: string;
+}
+
 export interface ProbeReport {
   readonly requested: string | null;
   readonly reported: string | null;
+  // null for the pinned release, or for a lock whose bytes could not be read
+  readonly lock: LockInput | null;
   readonly steps: ReadonlyArray<StepEvidence>;
   readonly passed: boolean;
 }
@@ -1137,15 +1146,23 @@ export interface ProbeReport {
 const evidenceLine = (evidence: StepEvidence): string =>
   `${evidence.outcome.toUpperCase().padEnd(12)} ${evidence.name} (${evidence.elapsedMs} ms): ${evidence.detail}`;
 
-// the pinned release, or the release of a slot of a target lock
-const releaseOf = (lock: ProbeOptions["lock"]): Effect.Effect<Result.Result<T3Release, string>, never, FileSystem.FileSystem> => {
-  if (lock === null) return Effect.succeed(Result.succeed(t3Release));
+/**
+ * The pinned release, or the release of a slot of a target lock decoded from the lock's bytes, read once; the lock is named by
+ * those exact bytes' SHA-256 whenever they could be read, also when they do not decode
+ */
+export const releaseOf = (lock: ProbeOptions["lock"]): Effect.Effect<{readonly lock: LockInput | null; readonly release: Result.Result<T3Release, string>},
+  never, FileSystem.FileSystem> => Effect.gen(function* () {
+  if (lock === null) return {lock: null, release: Result.succeed(t3Release)};
   const {file, slot} = lock;
-  return readTargetLock(file).pipe(
-    Effect.flatMap((value) => Effect.try({try: () => targetRelease(value, slot), catch: () => `the target lock has no usable ${slot} target`})),
-    Effect.mapError((error) => typeof error === "string" ? error : `the target lock could not be read: ${error.message.slice(0, 300)}`),
-    Effect.result);
-};
+  const fs = yield* FileSystem.FileSystem;
+  const bytes = yield* Effect.result(fs.readFile(file));
+  if (Result.isFailure(bytes)) return {lock: null, release: Result.fail(`target lock ${file} could not be read`)};
+  const input = {file, sha256: createHash("sha256").update(bytes.success).digest("hex")};
+  const decoded = yield* Effect.result(decodeTargetLock(new TextDecoder().decode(bytes.success), `target lock ${file}`));
+  if (Result.isFailure(decoded)) return {lock: input, release: Result.fail(decoded.failure.message.slice(0, 300))};
+  const release = yield* Effect.result(Effect.try({try: () => targetRelease(decoded.success, slot), catch: () => `the target lock has no usable ${slot} target`}));
+  return {lock: input, release};
+});
 
 /** One probe run against one published T3; every step reports as it ends, and nothing of the stack is left afterwards */
 export const runProbe = (options: ProbeOptions) => Effect.gen(function* () {
@@ -1160,12 +1177,12 @@ export const runProbe = (options: ProbeOptions) => Effect.gen(function* () {
     for (const name of yield* unreported(stackStarted)) yield* report({name, operations: stepOperations[name], ...notRun(reason), elapsedMs: 0});
   });
   const started = yield* Clock.monotonicTimeNanos;
-  const release = yield* releaseOf(options.lock);
+  const {lock: lockInput, release} = yield* releaseOf(options.lock);
   if (Result.isFailure(release)) {
     yield* report({name: "stack", operations: stepOperations.stack, ...harness(release.failure), elapsedMs: yield* elapsedSince(started)});
     yield* skipRest("the stack did not start", false);
     const steps = yield* Ref.get(recorded);
-    return {requested: null, reported: null, steps, passed: passedOf(steps)} satisfies ProbeReport;
+    return {requested: null, reported: null, lock: lockInput, steps, passed: passedOf(steps)} satisfies ProbeReport;
   }
   const requested = release.success;
   const ran = yield* Effect.scoped(Effect.gen(function* () {
@@ -1206,16 +1223,16 @@ export const runProbe = (options: ProbeOptions) => Effect.gen(function* () {
   else yield* report({name: "teardown", operations: stepOperations.teardown, ...(yield* teardownEvidence(ran.stack, options.keep)),
     elapsedMs: yield* elapsedSince(ran.closing)});
   const steps = yield* Ref.get(recorded);
-  return {requested: requested.version, reported: ran === null ? null : ran.stack.t3.version, steps, passed: passedOf(steps)} satisfies ProbeReport;
+  return {requested: requested.version, reported: ran === null ? null : ran.stack.t3.version, lock: lockInput, steps, passed: passedOf(steps)} satisfies ProbeReport;
 });
 
 const main = Effect.gen(function* () {
   const parsed = parseArguments(process.argv.slice(2));
   if (parsed._tag === "Invalid") return yield* new CohortProbeError({message: `${parsed.message}\n${usage}`});
   const outcome = yield* runProbe({cacheRoot: parsed.cacheDir ?? defaultCacheRoot(), keep: parsed.keep, lock: parsed.lock});
-  // the outcome with its inputs: the requested and reported T3, the slot, and this checkout's commit and whether its tree was clean
+  // the outcome with its inputs: the requested and reported T3, the slot, the lock's SHA-256, and this checkout's commit and whether its tree was clean
   const supervisor = yield* checkoutInputs.pipe(Effect.catchDefect(() => Effect.succeed({revision: null, clean: null})));
-  yield* Console.log(JSON.stringify({t3: outcome.requested, reported: outcome.reported, slot: parsed.lock?.slot ?? null, supervisor,
+  yield* Console.log(JSON.stringify({t3: outcome.requested, reported: outcome.reported, slot: parsed.lock?.slot ?? null, lock: outcome.lock, supervisor,
     passed: outcome.passed, steps: outcome.steps}));
   if (!outcome.passed) return yield* new CohortProbeError({message: "the T3 cohort probe did not pass"});
 });
