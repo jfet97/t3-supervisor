@@ -23,10 +23,9 @@ const digestOf = (text: string): string => createHash("sha256").update(text).dig
 const published = (tag: string, prerelease: boolean, publishedAt: string, more: Partial<PublishedRelease> = {}): PublishedRelease =>
   ({tag_name: tag, draft: false, prerelease, published_at: publishedAt, assets: [], ...more});
 
-it("the slots take the highest versions by precedence, not the latest publication, and ignore drafts and other tags", () => {
-  /* The draft, the nightly tag not marked prerelease, the stable tag marked prerelease, the preview, the Android beta and the
-     other prerelease count for nothing; a higher patch outranks a later date, and builds and minor versions compare as numbers. */
-  const selection = selectTargets([
+it("the designated stable is kept and nightly versions use precedence, ignoring drafts and other channels", () => {
+  const stable = published("v0.1.6", false, "2026-10-31T10:52:24Z");
+  const selection = selectTargets(stable, [
     published("v0.1.7-nightly.20261103.4120", true, "2026-11-03T10:00:00Z", {draft: true}),
     published("android-beta-735", true, "2026-11-03T09:30:00Z"),
     published("v0.1.6-preview.20261030.3948", true, "2026-11-03T09:00:00Z"),
@@ -37,23 +36,20 @@ it("the slots take the highest versions by precedence, not the latest publicatio
     published("v0.1.7-nightly.20261102.4093", true, "2026-11-02T09:48:59Z"),
     published("v0.1.8-nightly.20261101.1", true, "2026-11-01T01:00:00Z"),
     published("v0.1.9", true, "2026-11-01T00:30:00Z"),
-    published("v0.1.6", false, "2026-10-31T10:52:24Z"),
-    published("v0.1.5", false, "2026-10-29T13:08:50Z"),
     published("v0.1.10", false, "2026-10-01T00:00:00Z"),
   ]);
   assert.deepEqual("selected" in selection ? selection.selected.map((entry) => entry.tag_name) : selection,
-    ["v0.1.10", "v0.1.8-nightly.20261101.1", "v0.1.7-nightly.20261102.4093", "v0.1.7-nightly.20261102.4080"]);
+    ["v0.1.6", "v0.1.8-nightly.20261101.1", "v0.1.7-nightly.20261102.4093", "v0.1.7-nightly.20261102.4080"]);
 });
 
-it("a list without a stable release or with fewer than three distinct nightlies fills no slot", () => {
+it("fewer than three distinct nightlies never fills the window", () => {
   const nightlies = ["v0.1.7-nightly.20261103.4119", "v0.1.7-nightly.20261103.4106", "v0.1.7-nightly.20261102.4093"]
     .map((tag) => published(tag, true, "2026-11-03T08:49:52Z"));
   const stable = published("v0.1.6", false, "2026-10-31T10:52:24Z");
-  assert.deepEqual(selectTargets(nightlies), {missing: "no stable release"});
-  assert.deepEqual(selectTargets([stable, ...nightlies.slice(0, 2)]), {missing: "fewer than 3 nightly releases (2)"});
-  assert.deepEqual(selectTargets([stable, nightlies[0]!, nightlies[0]!, nightlies[1]!]), {missing: "fewer than 3 nightly releases (2)"});
-  assert.deepEqual(selectTargets([published("v0.1.6", true, "2026-10-31T10:52:24Z"), published("v0.1.6-preview.20261030.3948", true, "2026-10-30T21:40:34Z")]),
-    {missing: "no stable release and fewer than 3 nightly releases (0)"});
+  assert.deepEqual(selectTargets(stable, nightlies.slice(0, 2)), {missing: "fewer than 3 nightly releases (2)"});
+  assert.deepEqual(selectTargets(stable, [nightlies[0]!, nightlies[0]!, nightlies[1]!]), {missing: "fewer than 3 nightly releases (2)"});
+  assert.deepEqual(selectTargets(stable, [published("v0.1.6", true, "2026-10-31T10:52:24Z"),
+    published("v0.1.6-preview.20261030.3948", true, "2026-10-30T21:40:34Z")]), {missing: "fewer than 3 nightly releases (0)"});
 });
 
 interface Reply {
@@ -84,6 +80,7 @@ const github = (routes: (origin: string) => Readonly<Record<string, Reply>>) => 
 }), ({server}) => Effect.callback<void>((resume) => {server.close(() => resume(Effect.void)); server.closeAllConnections();}));
 
 const listPath = "/repos/pingdotgg/t3code/releases?per_page=100";
+const latestPath = "/repos/pingdotgg/t3code/releases/latest";
 
 // the stable release and the three nightlies GitHub listed on 2026-11-03, newest first, with a preview among them
 const cohort = [
@@ -117,6 +114,7 @@ const routesFor = (origin: string, change: {readonly sums?: Readonly<Record<stri
   const releases = cohort.map((entry) => (change.edit ?? ((same: PublishedRelease) => same))(withAssets(origin, entry, sums[entry.tag]!)));
   return {
     [listPath]: {body: JSON.stringify(releases)},
+    [latestPath]: {body: JSON.stringify(releases.find((release) => !release.prerelease))},
     ...Object.fromEntries(cohort.map((entry) => [`/download/${entry.tag}/SHA256SUMS`, {body: sums[entry.tag]!}])),
   };
 };
@@ -124,8 +122,13 @@ const routesFor = (origin: string, change: {readonly sums?: Readonly<Record<stri
 const resolveFrom = (origin: string, token: Option.Option<Redacted.Redacted<string>> = Option.none()) =>
   resolveTargets({source: `${origin}${listPath}`, token}).pipe(Effect.provide(FetchHttpClient.layer));
 
-it.live("a resolution freezes the four slots with their SHA256SUMS digests and sends the token to the release list only", () => Effect.gen(function* () {
-  const site = yield* github((origin) => routesFor(origin));
+it.live("a resolution freezes the four slots with their SHA256SUMS digests and sends the token only to the latest-release and list APIs", () => Effect.gen(function* () {
+  const site = yield* github((origin) => {
+    const routes = routesFor(origin);
+    const releases = JSON.parse(routes[listPath]!.body) as Array<PublishedRelease>;
+    routes[listPath] = {body: JSON.stringify([...releases, published("v99.0.0", false, "2026-11-03T10:00:00Z")])};
+    return routes;
+  });
   const lock = yield* resolveFrom(site.origin, Option.some(Redacted.make("test-token")));
   assert.deepEqual(lock.targets.map(({slot, version, tag, publishedAt, baseUrl}) => ({slot, version, tag, publishedAt, baseUrl})), [
     {slot: "stable", version: "0.1.6", tag: "v0.1.6", publishedAt: "2026-10-31T10:52:24Z", baseUrl: downloadBase},
@@ -139,13 +142,13 @@ it.live("a resolution freezes the four slots with their SHA256SUMS digests and s
   assert.equal(lock.source, `${site.origin}${listPath}`);
   assert.ok(Number.isFinite(Date.parse(lock.resolvedAt)));
   assert.deepEqual(site.requests.map(({path, authorization}) => [path, authorization ?? null]),
-    [[listPath, "Bearer test-token"], ...lock.targets.map((target) => [`/download/${target.tag}/SHA256SUMS`, null])]);
+    [[latestPath, "Bearer test-token"], [listPath, "Bearer test-token"], ...lock.targets.map((target) => [`/download/${target.tag}/SHA256SUMS`, null])]);
   assert.doesNotMatch(JSON.stringify(lock), /test-token/u);
   assert.deepEqual(yield* decodeTargetLock(JSON.stringify(lock)), lock);
 
   const anonymous = yield* github((origin) => routesFor(origin));
   yield* resolveFrom(anonymous.origin);
-  assert.equal(anonymous.requests.length, 5);
+  assert.equal(anonymous.requests.length, 6);
   assert.ok(anonymous.requests.every((request) => request.authorization === undefined));
 }));
 
@@ -173,7 +176,7 @@ it.live("a missing archive or SHA256SUMS, a missing checksum line or a digest Gi
 
 it.live("GitHub refusing, failing or gone is unavailable, and a reply of another shape is invalid", () => Effect.gen(function* () {
   const listReply = (reply: Reply) => Effect.gen(function* () {
-    const site = yield* github(() => ({[listPath]: reply}));
+    const site = yield* github((origin) => ({...routesFor(origin), [listPath]: reply}));
     return yield* Effect.flip(resolveFrom(site.origin));
   });
   const limited = yield* listReply({status: 403, headers: {"x-ratelimit-remaining": "0"}, body: "{\"message\":\"API rate limit exceeded for 192.0.2.1\"}"});
@@ -199,8 +202,7 @@ it.live("GitHub refusing, failing or gone is unavailable, and a reply of another
 const page = (number: number) => `/repositories/1/releases?per_page=100&page=${number}`;
 const linkTo = (origin: string, number: number) => ({link: `<${origin}${page(number)}>; rel="next", <${origin}${page(9)}>; rel="last"`});
 
-it.live("the release list is read page by page only until the slots are filled, and never past its third page", () => Effect.gen(function* () {
-  // the cohort's prereleases on the first page and its stable release on the second, or behind two empty pages
+it.live("stable comes from its designation even beyond three pages; only the nightly search is bounded", () => Effect.gen(function* () {
   const paged = (pages: ReadonlyArray<"nightlies" | "stable" | "empty">) => github((origin) => {
     const routes = routesFor(origin);
     const releases = JSON.parse(routes[listPath]!.body) as Array<PublishedRelease>;
@@ -208,16 +210,35 @@ it.live("the release list is read page by page only until the slots are filled, 
     return {...routes, ...Object.fromEntries(pages.map((content, index) => [index === 0 ? listPath : page(index + 1),
       {body: JSON.stringify(bodies[content]), ...(index + 1 < pages.length ? {headers: linkTo(origin, index + 2)} : {})}]))};
   });
-  const twoPages = yield* paged(["nightlies", "stable", "empty"]);
-  const lock = yield* resolveFrom(twoPages.origin);
+  const oldStable = yield* paged(["nightlies", "empty", "empty", "stable"]);
+  const lock = yield* resolveFrom(oldStable.origin);
   assert.deepEqual(lock.targets.map((target) => target.tag),
     ["v0.1.6", "v0.1.7-nightly.20261103.4119", "v0.1.7-nightly.20261103.4106", "v0.1.7-nightly.20261102.4093"]);
-  assert.deepEqual(twoPages.requests.map((request) => request.path).filter((path) => !path.startsWith("/download/")), [listPath, page(2)]);
-
-  const fourPages = yield* paged(["nightlies", "empty", "empty", "stable"]);
+  assert.deepEqual(oldStable.requests.map((request) => request.path).filter((path) => !path.startsWith("/download/")), [latestPath, listPath]);
+  const twoPages = yield* paged(["empty", "nightlies", "stable"]);
+  yield* resolveFrom(twoPages.origin);
+  assert.deepEqual(twoPages.requests.map((request) => request.path).filter((path) => !path.startsWith("/download/")), [latestPath, listPath, page(2)]);
+  const fourPages = yield* paged(["empty", "empty", "empty", "nightlies"]);
   const failure = yield* Effect.flip(resolveFrom(fourPages.origin));
-  assert.deepEqual([failure._tag, failure.message], ["TargetsInvalid", "the 4 releases on 3 page(s) of the release list hold no stable release"]);
-  assert.deepEqual(fourPages.requests.map((request) => request.path), [listPath, page(2), page(3)]);
+  assert.deepEqual([failure._tag, failure.message], ["TargetsInvalid", "the 0 releases on 3 page(s) of the release list hold fewer than 3 nightly releases (0)"]);
+  assert.deepEqual(fourPages.requests.map((request) => request.path), [latestPath, listPath, page(2), page(3)]);
+}));
+
+it.live("an absent or invalid stable designation never falls back to a listed stable", () => Effect.gen(function* () {
+  const reply = (value: Reply) => Effect.gen(function* () {
+    const site = yield* github((origin) => ({...routesFor(origin), [latestPath]: value}));
+    const failure = yield* Effect.flip(resolveFrom(site.origin));
+    assert.deepEqual(site.requests.map((request) => request.path), [latestPath]);
+    return failure;
+  });
+  assert.equal((yield* reply({status: 404, body: "not found"}))._tag, "TargetsInvalid");
+  for (const status of [403, 502]) assert.equal((yield* reply({status, body: "unavailable"}))._tag, "TargetsUnavailable");
+  assert.equal((yield* reply({body: "{}"})).message, "the latest full release is not GitHub's release JSON");
+  for (const change of [{draft: true}, {prerelease: true}, {tag_name: "v0.1.6-preview.20261030.3948"}]) {
+    const release = {...published("v0.1.6", false, "2026-10-31T10:52:24Z"), ...change};
+    assert.equal((yield* reply({body: JSON.stringify(release)})).message,
+      "the designated latest full release is not a published stable v<major>.<minor>.<patch>");
+  }
 }));
 
 // a valid lock of the cohort, as `resolve` writes it

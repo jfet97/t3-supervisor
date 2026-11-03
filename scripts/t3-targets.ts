@@ -120,39 +120,32 @@ const PublishedRelease = Schema.Struct({tag_name: Schema.String, draft: Schema.B
 /** One release of GitHub's release list, reduced to what a resolution reads. */
 export type PublishedRelease = typeof PublishedRelease.Type;
 const decodeReleasePage = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(PublishedRelease)));
+const decodeLatestRelease = Schema.decodeUnknownEffect(Schema.fromJsonString(PublishedRelease));
 
-/**
- * The releases of the four slots in slot order, or what the releases read so far lack. Only published releases count: the
- * stable slot takes the highest non-prerelease `v<major>.<minor>.<patch>`, the nightly slots the three highest distinct
- * prerelease `v<major>.<minor>.<patch>-nightly.<date>.<build>`, by version precedence and never by publication time. Drafts and
- * every other tag, such as previews and Android betas, are ignored.
- */
-export const selectTargets = (releases: ReadonlyArray<PublishedRelease>): {readonly selected: ReadonlyArray<PublishedRelease>} | {readonly missing: string} => {
-  const ranked = (pattern: RegExp, prerelease: boolean) => {
-    const found = new Map<string, {readonly release: PublishedRelease; readonly order: ReadonlyArray<string>}>();
-    for (const release of releases) {
-      const order = precedence(pattern, release.tag_name);
-      if (!release.draft && release.prerelease === prerelease && order !== undefined && !found.has(release.tag_name)) found.set(release.tag_name, {release, order});
-    }
-    return [...found.values()].sort((left, right) => comparePrecedence(right.order, left.order)).map((entry) => entry.release);
-  };
-  const [stable] = ranked(stableTag, false);
-  const nightlies = ranked(nightlyTag, true).slice(0, 3);
-  if (stable !== undefined && nightlies.length === 3) return {selected: [stable, ...nightlies]};
-  return {missing: [...(stable === undefined ? ["no stable release"] : []), ...(nightlies.length < 3 ? [`fewer than 3 nightly releases (${nightlies.length})`] : [])].join(" and ")};
+/** The designated stable release and the three highest distinct nightly versions, or the missing nightly count. */
+export const selectTargets = (stable: PublishedRelease, releases: ReadonlyArray<PublishedRelease>):
+  {readonly selected: ReadonlyArray<PublishedRelease>} | {readonly missing: string} => {
+  const found = new Map<string, {readonly release: PublishedRelease; readonly order: ReadonlyArray<string>}>();
+  for (const release of releases) {
+    const order = precedence(nightlyTag, release.tag_name);
+    if (!release.draft && release.prerelease && order !== undefined && !found.has(release.tag_name)) found.set(release.tag_name, {release, order});
+  }
+  const nightlies = [...found.values()].sort((left, right) => comparePrecedence(right.order, left.order)).slice(0, 3).map((entry) => entry.release);
+  return nightlies.length === 3 ? {selected: [stable, ...nightlies]} : {missing: `fewer than 3 nightly releases (${nightlies.length})`};
 };
 
 const downloadHeaders = {"User-Agent": "t3-supervisor-targets"};
 const apiHeaders = {...downloadHeaders, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"};
 
-// one GET answered with HTTP 200 and read in full within the bound; any other outcome is unavailability, never a reason to choose another build
+// one bounded GET; a missing stable designation is invalid, while transport failures never select another build
 const fetched = <A>(url: string, request: HttpClientRequest.HttpClientRequest,
-  read: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, HttpClientError.HttpClientError>) => Effect.gen(function* () {
+  read: (response: HttpClientResponse.HttpClientResponse) => Effect.Effect<A, HttpClientError.HttpClientError>, notFound?: TargetsInvalid) => Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
   const response = yield* client.execute(request).pipe(Effect.mapError((error) => error.reason._tag === "InvalidUrlError"
     ? invalid(`the release list names a malformed URL: ${url}`) : unavailable(`GET ${url} failed (${error.reason._tag})`)));
   if (response.status !== 200) {
     yield* Effect.ignore(response.arrayBuffer);
+    if (response.status === 404 && notFound !== undefined) return yield* notFound;
     const limited = Option.exists(Headers.get(response.headers, "x-ratelimit-remaining"), (remaining) => remaining === "0");
     return yield* unavailable(`GET ${url} returned HTTP ${response.status}${limited ? "; GitHub's API rate limit is exhausted, and GITHUB_TOKEN raises it" : ""}`);
   }
@@ -212,28 +205,36 @@ const lockTarget = (slot: TargetSlot, release: PublishedRelease) => Effect.gen(f
 });
 
 /**
- * Resolves the four slots from GitHub's release list, following its pages only until the slots are filled and never past the
- * third, then reads each selected release's SHA256SUMS. `token`, when given, is sent as a bearer on the release list's requests
- * only, never on a download. `source` names another first page, such as a test's loopback stand-in.
+ * Resolves stable from GitHub's designated latest full release and the nightlies from at most three recent release pages,
+ * then reads each selected release's SHA256SUMS. The optional token reaches only these API metadata requests, never downloads.
+ * `source` names another first list page, such as a test's loopback stand-in.
  */
 export const resolveTargets = (options: {readonly token: Option.Option<Redacted.Redacted<string>>; readonly source?: string}) => Effect.gen(function* () {
   const source = options.source ?? releasesUrl;
   const origin = new URL(source).origin;
+  const apiRequest = (url: string) => {
+    const request = HttpClientRequest.get(url).pipe(HttpClientRequest.setHeaders(apiHeaders));
+    return Option.match(options.token, {onNone: () => request, onSome: (token) => HttpClientRequest.bearerToken(request, token)});
+  };
+  const latestUrl = new URL("/repos/pingdotgg/t3code/releases/latest", source).href;
+  const latest = yield* fetched(latestUrl, apiRequest(latestUrl), (response) => response.text,
+    invalid("pingdotgg/t3code has no designated latest full release"));
+  const stable = yield* decodeLatestRelease(latest.body).pipe(Effect.mapError(() => invalid("the latest full release is not GitHub's release JSON")));
+  if (stable.draft || stable.prerelease || !stableTag.test(stable.tag_name))
+    return yield* invalid("the designated latest full release is not a published stable v<major>.<minor>.<patch>");
   const releases: Array<PublishedRelease> = [];
   let next: string | undefined = source;
   let pages = 0;
-  let selection = selectTargets(releases);
+  let selection = selectTargets(stable, releases);
   while ("missing" in selection && next !== undefined && pages < maxPages) {
     const url: string = next;
-    const request = HttpClientRequest.get(url).pipe(HttpClientRequest.setHeaders(apiHeaders));
-    const page = yield* fetched(url, Option.match(options.token, {onNone: () => request, onSome: (token) => HttpClientRequest.bearerToken(request, token)}),
-      (response) => response.text);
+    const page = yield* fetched(url, apiRequest(url), (response) => response.text);
     pages += 1;
     const listed = yield* decodeReleasePage(page.body).pipe(Effect.mapError(() => invalid(`page ${pages} of the release list is not GitHub's release JSON`)));
     releases.push(...listed);
     next = nextPage(page.headers);
     if (next !== undefined && !next.startsWith(`${origin}/`)) return yield* invalid("the release list links its next page outside GitHub's API");
-    selection = selectTargets(releases);
+    selection = selectTargets(stable, releases);
   }
   if ("missing" in selection) return yield* invalid(`the ${releases.length} releases on ${pages} page(s) of the release list hold ${selection.missing}`);
   const targets = yield* Effect.forEach(selection.selected, (release, index) => lockTarget(targetSlots[index]!, release));
@@ -249,7 +250,7 @@ const main = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const [command, option, out, ...rest] = process.argv.slice(2);
   if (command !== "resolve" || option !== "--out" || out === undefined || out === "" || rest.length > 0) return yield* new UsageError({message: usage});
-  // GITHUB_TOKEN raises GitHub's rate limit; it stays redacted, goes only to the release list and is never printed or written
+  // GITHUB_TOKEN raises GitHub's rate limit; it stays redacted, goes only to metadata API requests and is never printed or written
   const token = Option.map(Option.filter(Option.fromNullishOr(process.env.GITHUB_TOKEN), (value) => value.trim() !== ""), (value) => Redacted.make(value.trim()));
   const lock = yield* resolveTargets({token}).pipe(Effect.provide(FetchHttpClient.layer),
     Effect.tapError((error) => Console.log(JSON.stringify({outcome: outcome(error), message: error.message}))));
