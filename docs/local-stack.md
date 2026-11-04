@@ -96,18 +96,16 @@ The guidance session needs both orchestration scopes: the pinned T3 authorizes
 with `orchestration:operate`. The environment issues both on its next start. Other
 installations must reissue an operate-only guidance session with both scopes; a
 read-only session cannot deliver helper messages. See the pinned T3's
-[authorization map](https://github.com/pingdotgg/t3code/blob/v0.1.7-nightly.20261101.4016/apps/server/src/auth/RpcAuthorization.ts)
-and [webhook visibility](https://github.com/pingdotgg/t3code/blob/v0.1.7-nightly.20261101.4016/apps/server/src/ws.ts).
+[authorization map](https://github.com/pingdotgg/t3code/blob/v0.1.8-nightly.20261104.4165/apps/server/src/auth/RpcAuthorization.ts)
+and [webhook visibility](https://github.com/pingdotgg/t3code/blob/v0.1.8-nightly.20261104.4165/apps/server/src/ws.ts).
 
 ## Providers
 
-The daily environment pins T3 `0.1.7-nightly.20261101.4016`, which predates the
+The daily environment pins T3 `0.1.8-nightly.20261104.4165`, which includes the
 attached-child subscription fix in [PR #23456](https://github.com/pingdotgg/t3code/pull/23456).
-It cannot establish same-provider helper reuse after parent settlement. That
-provider proof needs a separately approved update of the signed-in environment to
-a fixed published build, such as stable `0.1.7` or nightly
-`0.1.7-nightly.20261103.4119` or later. The automatic compatibility window and its
-provider-free checks do not upgrade this saved profile or prove model completion.
+Recreate an older running environment with `./dev recreate` to load the pin while
+keeping its saved profile. Provider-free compatibility checks do not prove model
+completion or same-provider helper reuse after parent settlement.
 
 Sign in afresh inside the environment; the same account may be used again. Never copy a
 login, credential, MCP registration or state from the host or another installation.
