@@ -26,11 +26,11 @@ import { decodeTargetLock, TargetLockError, targetRelease, targetSlots, type Tar
  * downloads. The development container is Linux on the host's architecture, so no other platform is needed.
  */
 export const t3Release = {
-  version: "0.1.7-nightly.20261101.4016",
+  version: "0.1.8-nightly.20261104.4165",
   baseUrl: "https://github.com/pingdotgg/t3code/releases/download",
   archives: {
-    "linux-arm64": "89d73a21f14f0e645f7d584ce3185b5f35ff41297ccae108961be906b86dc405",
-    "linux-x64": "fc3fe3abaa1aff2284e9f3144df150d4d16ef284134d247cefdd0e248ff7972d",
+    "linux-arm64": "bb8510dea5b23c5bc0aebc8bc6f45354af6efcd121ba087c373ef80949cf20b9",
+    "linux-x64": "48c9e2b4ff9deb851c903f3d59b5d5b874a5653858795f577df54a9e098f445e",
   } as Readonly<Record<string, string>>,
 };
 export type T3Release = typeof t3Release;

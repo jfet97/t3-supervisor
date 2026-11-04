@@ -25,10 +25,9 @@ import { WorkflowNativeAccess, WorkflowWriteController } from "./workflow-write-
 // shell, the operate client when configured, the catalog, the T3 client, the definitions and the native transport); released in
 // reverse, the project supervisor first and the supervision stores last
 
-// one supervision run: whether the operate credential is configured, and the configured helper provider instance
+// one supervision run: whether the operate credential is configured
 export interface SupervisionRun {
   readonly operateRpcAvailable: boolean;
-  readonly helperProviderInstanceId?: string | undefined;
 }
 
 // the supervision stores on the run's guidance client, acquired in the baseline constructor order over the guidance store: the
@@ -59,18 +58,17 @@ export const SupervisionTeamLive = SupervisorLifecycle.layer.pipe(
 
 // the Start/Stop control, the workflow proof and scope reads on the read credential, and the workflow write and team
 // controllers over the team services
-export const SupervisionControllersLive = (run: Pick<SupervisionRun, "helperProviderInstanceId">) =>
-  SupervisorPlanningController.layer.pipe(
-    Layer.provideMerge(SupervisorTeamController.layer(run.helperProviderInstanceId ? {helperProviderInstanceId: run.helperProviderInstanceId} : {})),
-    Layer.provideMerge(WorkflowWriteController.layer()),
-    Layer.provideMerge(Layer.mergeAll(SupervisionControl.layer, WorkflowNativeAccess.layer)),
-  );
+export const SupervisionControllersLive = SupervisorPlanningController.layer.pipe(
+  Layer.provideMerge(SupervisorTeamController.layer()),
+  Layer.provideMerge(WorkflowWriteController.layer()),
+  Layer.provideMerge(Layer.mergeAll(SupervisionControl.layer, WorkflowNativeAccess.layer)),
+);
 
 // the whole run over its supervision stores (SupervisionStoresLive, built first by the caller): the per-scope locks, the ids and the
 // interpretation wake (signalled by the intake, served by the project supervisor), the scope predicates, the team services, the
 // controllers and the project supervisor
 export const SupervisionLive = (run: SupervisionRun) => ProjectSupervisor.layer().pipe(
-  Layer.provideMerge(SupervisionControllersLive(run)),
+  Layer.provideMerge(SupervisionControllersLive),
   Layer.provideMerge(SupervisionTeamLive),
   Layer.provideMerge(SupervisionScopeLive(run.operateRpcAvailable)),
   Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),

@@ -19,7 +19,7 @@ usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
   status              containers, health and the provider CLIs' sign-in status
   logs [ARGS]         the T3 and Supervisor log (docker compose logs)
   shell               an interactive shell in the toolchain container
-  pnpm ARGS           pnpm in the toolchain container, for example ./dev pnpm test test/config.test.ts
+  pnpm ARGS           pnpm in the toolchain container, for example ./dev pnpm test test/config.characterization.test.ts
   login codex|claude [ARGS]   sign in to a provider CLI; the login stays in the credentials volume
   pair                a one-time link that opens this environment's T3 in the browser
   sign-in             a one-time Supervisor dashboard sign-in token

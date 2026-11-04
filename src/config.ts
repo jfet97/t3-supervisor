@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Config, ConfigProvider, Context, Effect, Layer, Option, Schema } from "effect";
+import { Config, ConfigProvider, Context, Effect, Layer, Option } from "effect";
 import { InvalidConfiguration } from "./errors.js";
 import type { SupervisorSettings } from "./types.js";
 
@@ -13,9 +13,6 @@ export const loadDataDirectory = (): string => dataDirectoryFrom(process.env.DAT
 
 // the process environment, read when called; empty values stay values, as `??` keeps them today (D-06)
 export const environment = (): ConfigProvider.ConfigProvider => ConfigProvider.fromEnv({ preserveEmptyStrings: true });
-
-// trimmed, then at most 256 characters without whitespace
-const HelperProviderInstanceId = Schema.Trim.check(Schema.makeFilter((id: string) => id.length <= 256 && !/\s/u.test(id)));
 
 const defaultUiAssetsDirectory = fileURLToPath(new URL("../ui-dist", import.meta.url));
 
@@ -34,7 +31,6 @@ const supervisorConfig = Config.all({
   excludedThreadIds: list("EXCLUDED_THREAD_IDS", (id) => id.trim()),
   healthPort: numeric("HEALTH_PORT", "9007"),
   healthHost: withDefault("HEALTH_HOST", "127.0.0.1"),
-  helperProviderInstanceId: optional("SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID"),
   uiPort: numeric("UI_PORT", "9008"),
   uiHost: withDefault("UI_HOST", "127.0.0.1"),
   workflowMcpHosts: list("WORKFLOW_MCP_HOSTS", (host) => host.trim().toLowerCase()),
@@ -63,20 +59,16 @@ export const validWorkflowMcpAlias = (alias: string): boolean => alias.length <=
 export const validWorkflowGatewayTool = (name: string): boolean => name.length <= 128 &&
   /^(?:[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*\.|mcp__[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*__)[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*$/u.test(name);
 
-// parsed from the current ConfigProvider; a malformed helper instance id, server alias or gateway tool name fails with its reason code and no value
+// parsed from the current ConfigProvider; a malformed server alias or gateway tool name fails with its reason code and no value
 const settings: Effect.Effect<SupervisorSettings, InvalidConfiguration> = Effect.gen(function* () {
-  const { helperProviderInstanceId: helperInput, workflowMcpBindHost, workflowMcpPort, managedScratchRoot, workflowMcpServerAliases,
+  const { workflowMcpBindHost, workflowMcpPort, managedScratchRoot, workflowMcpServerAliases,
     workflowMcpGatewayTools, ...parsed } =
     yield* supervisorConfig.pipe(Effect.mapError(() => new InvalidConfiguration({ reason: "invalid_configuration" })));
   if (!workflowMcpServerAliases.every(validWorkflowMcpAlias)) return yield* new InvalidConfiguration({ reason: "invalid_workflow_mcp_alias" });
   if (!workflowMcpGatewayTools.every(validWorkflowGatewayTool)) return yield* new InvalidConfiguration({ reason: "invalid_workflow_mcp_gateway_tool" });
-  // a blank value leaves helper isolation unset
-  const helperProviderInstanceId = helperInput === undefined ? "" : yield* Schema.decodeUnknownEffect(HelperProviderInstanceId)(helperInput)
-    .pipe(Effect.mapError(() => new InvalidConfiguration({ reason: "invalid_helper_provider_instance_id" })));
   return {
     ...parsed,
     // optional settings are absent unless set to a non-empty value
-    ...(helperProviderInstanceId ? { helperProviderInstanceId } : {}),
     ...(workflowMcpBindHost ? { workflowMcpBindHost } : {}),
     ...(workflowMcpPort ? { workflowMcpPort: Number(workflowMcpPort) } : {}),
     // unset or blank keeps the documented registrations; a list replaces them, matched exactly

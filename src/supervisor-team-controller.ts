@@ -3,7 +3,6 @@ import type { SqlError } from "effect/sql";
 import {isRecord, workflowRequestHash, workflowToolInputSize, workflowToolInputMaxBytes} from "./workflow-write-evidence.js";
 import {WorkflowNativeAccess, WorkflowWriteController, type WorkflowCallCancel, type WorkflowLocator, type WorkflowReadCancelled} from "./workflow-write-controller.js";
 import {resolveSupervisorScope} from "./supervisor-scope.js";
-import {modelSelection} from "./supervisor-native.js";
 import {canSupervisorContact, hasPendingOwnerInput, resolveSteerableRun} from "./supervisor-conversation.js";
 import {childOrigin} from "./supervisor-observation.js";
 import {GuidanceDb} from "./db.js";
@@ -181,11 +180,6 @@ type GuideDispatch =
   | {readonly _tag: "Stored"; readonly record: GuideRecord}
   | {readonly _tag: "AssignmentChanged"};
 
-export type SupervisorTeamControllerOptions = {
-  // the configured helper provider instance; without one, helper registration checks no provider isolation
-  readonly helperProviderInstanceId?: string | undefined;
-};
-
 // a store failure outside a step's catch-all escapes the call (a store refusal inside one is its fixed code); reconcile must
 // not run inside a guidance transaction, because a fallback guide send it continues is admitted
 export interface SupervisorTeamControllerShape {
@@ -200,7 +194,7 @@ export interface SupervisorTeamControllerShape {
 }
 
 /** Mediates team changes and guidance using the existing private database and native proof. */
-const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions = {}) => Effect.gen(function* () {
+const makeSupervisorTeamController = () => Effect.gen(function* () {
   const workflows = yield* WorkflowWriteController;
   // the binding store's ownership, the team and the conversation requests, and the run's guidance client for the tool receipts
   const supervisors = yield* ProjectSupervisorStore;
@@ -282,41 +276,6 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
     }
   });
 
-  // the provider isolation failure of a helper registration, after one stable service-attention event, or null when isolated;
-  // the event is no input of any send guard, so it is recorded outside the admission section as at baseline
-  const helperProviderIsolationFailure = (binding: BindingRecord, payload: Payload, root: Projection, child: Projection): Effect.Effect<string | null, SupervisionStoreError> => {
-    const configuredInstanceId = options.helperProviderInstanceId;
-    if (!configuredInstanceId) return Effect.succeed(null);
-    const rootSelection = modelSelection(root.thread.modelSelection);
-    const childSelection = modelSelection(child.thread.modelSelection);
-    const ownProviderThreads = (projection: Projection, ownerThreadId: string) => Array.isArray(projection.providerThreads)
-      ? projection.providerThreads.filter(row => isRecord(row) && row.appThreadId === ownerThreadId)
-      : [];
-    const rootProviderThreads = ownProviderThreads(root, root.thread.id);
-    const childProviderThreads = ownProviderThreads(child, child.thread.id);
-    const hasSession = (row: Record<string, unknown>): row is Record<string, unknown> & {providerSessionId: string} =>
-      typeof row.providerSessionId === "string" && row.providerSessionId.trim().length > 0;
-    const rootSessions = new Set(rootProviderThreads.filter(hasSession).map(row => row.providerSessionId));
-    const childSessionThreads = childProviderThreads.filter(hasSession);
-    const childSessions = new Set(childSessionThreads.map(row => row.providerSessionId));
-    const failIsolation = (reason: string): Effect.Effect<string, SupervisionStoreError> => {
-      const memberThreadId = String(payload.memberThreadId);
-      const eventIdentity = workflowRequestHash({supervisorThreadId: binding.threadId, bindingGeneration: binding.generation,
-        memberThreadId, taskId: payload.taskId, bootstrapRunId: payload.bootstrapRunId});
-      return Effect.as(team.serviceAttention(binding, {eventId: `helper-provider-isolation:${eventIdentity.slice(0, 32)}`,
-        memberThreadId: binding.threadId, targetThreadId: memberThreadId,
-        summary: `Helper ${memberThreadId} was not registered because its configured provider isolation could not be verified (${reason}). No helper membership or webhook was created, and no shared-session fallback occurred.`}), reason);
-    };
-
-    if (!rootSelection || rootSelection.instanceId === configuredInstanceId) return failIsolation("helper_provider_instance_matches_root");
-    if (!childSelection || childSelection.instanceId !== configuredInstanceId ||
-      childSessionThreads.some(row => row.providerInstanceId !== configuredInstanceId))
-      return failIsolation("helper_provider_instance_mismatch");
-    if (!rootSessions.size || !childSessions.size) return failIsolation("helper_provider_session_unavailable");
-    if ([...childSessions].some(sessionId => rootSessions.has(sessionId))) return failIsolation("helper_provider_session_shared");
-    return Effect.succeed(null);
-  };
-
   const verifyMember = Effect.fnUntraced(function* (binding: BindingRecord, payload: Payload, cancel: WorkflowCallCancel) {
     if (!id(payload.memberThreadId) || !id(payload.taskId) || !id(payload.bootstrapRunId)) return yield* new TeamDenied({reason: "invalid_registration"});
     const root = yield* native.projection(binding.threadId, cancel);
@@ -334,8 +293,6 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
       child.runs.filter(run => run.threadId === payload.memberThreadId).sort((a, b) => a.ordinal - b.ordinal)[0]?.id !== bootstrap.id ||
       !child.messages.some(message => message.id === bootstrap.userMessageId && message.runId === bootstrap.id && message.text === task.prompt))
       return yield* new TeamDenied({reason: "native_completed_bootstrap_not_verified"});
-    const isolation = yield* helperProviderIsolationFailure(binding, payload, root, child);
-    if (isolation) return yield* new TeamDenied({reason: isolation});
   });
 
   const call = Effect.fnUntraced(function* (input: unknown, cancel: WorkflowCallCancel): Effect.fn.Return<unknown, SupervisionStoreError> {
@@ -856,10 +813,10 @@ const makeSupervisorTeamController = (options: SupervisorTeamControllerOptions =
 // the team controller: team changes and helper guidance under verified native proof, receipts and the admission section
 export class SupervisorTeamController extends Context.Service<SupervisorTeamController, SupervisorTeamControllerShape>()("t3-supervisor/SupervisorTeamController") {
   static readonly make = makeSupervisorTeamController;
-  static readonly layer = (options: SupervisorTeamControllerOptions = {}): Layer.Layer<SupervisorTeamController, GuidanceStoreError,
+  static readonly layer = (): Layer.Layer<SupervisorTeamController, GuidanceStoreError,
     T3Native | WorkflowWriteController | WorkflowNativeAccess | SupervisionGate | HelperTransport | GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore |
     SupervisorConversationStore> =>
-    Layer.effect(SupervisorTeamController, makeSupervisorTeamController(options));
+    Layer.effect(SupervisorTeamController, makeSupervisorTeamController());
 }
 
 /**

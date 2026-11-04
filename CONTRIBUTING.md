@@ -61,7 +61,7 @@ New runs cancel older runs of this workflow for the same branch or pull request,
 including `main`; unrelated branches and pull requests run independently.
 
 While editing, run focused files through the watchdog, for example
-`./dev pnpm test test/config.test.ts`. Leave the final complete main and harness
+`./dev pnpm test test/config.characterization.test.ts`. Leave the final complete main and harness
 suites to GitHub CI. To reproduce one CI shard locally, use
 `./dev pnpm test --shard=1/4 --maxWorkers=1`. Native sharding assigns complete files
 deterministically, so all four shard indices are required for full coverage.

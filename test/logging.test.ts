@@ -61,7 +61,7 @@ it.effect("jsonLogger writes the same shape and never a cause, span or structure
 
 it.effect("reportFailure prints one classified line per failure, without its cause, and nothing for an interruption", () => Effect.gen(function* () {
   yield* reportFailure(Cause.fail(new T3TokenUnavailable()));
-  yield* reportFailure(Cause.fail(new InvalidConfiguration({ reason: "invalid_helper_provider_instance_id" })));
+  yield* reportFailure(Cause.fail(new InvalidConfiguration({ reason: "invalid_workflow_mcp_alias" })));
   yield* reportFailure(Cause.fail(new HttpServerError.ServeError({ cause: nested() })));
   yield* reportFailure(Cause.fail(new ListenerUnavailable({ reason: "dashboard_listener_unavailable" })));
   yield* reportFailure(Cause.fail(new ListenerUnavailable({ reason: "workflow_mcp_listener_unavailable" })));
@@ -70,7 +70,7 @@ it.effect("reportFailure prints one classified line per failure, without its cau
   const lines = yield* TestConsole.logLines;
   assert.deepEqual(lines, [
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"t3_token_unavailable"}`,
-    `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"invalid_helper_provider_instance_id"}`,
+    `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"invalid_workflow_mcp_alias"}`,
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"health_listener_unavailable"}`,
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"dashboard_listener_unavailable"}`,
     `{"time":"1970-01-01T00:00:00.000Z","event":"supervisor_failed","reason":"workflow_mcp_listener_unavailable"}`,

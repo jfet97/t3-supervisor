@@ -261,7 +261,6 @@ export interface ConversationUnitOptions {
   readonly workflows?: WorkflowStateStore["Service"] | undefined;
   // the helper team: the team runtime over its own open gate reads the conversation's stop and scope callbacks as its stop
   readonly team?: boolean | undefined;
-  readonly helperProviderInstanceId?: string | undefined;
   // the read credential's native reads (an interpretation submission's item detail)
   readonly read?: NativeRpcShape | undefined;
 }
@@ -274,8 +273,7 @@ export const conversationUnit = Effect.fnUntraced(function* (options: Conversati
   const {stores} = options;
   const callbacks: ConversationCallbacks = {projection: options.projection, eligible: options.eligible, enabled: options.enabled ?? (() => true),
     supervisionStopped: options.supervisionStopped ?? (() => Effect.succeed(false))};
-  const config: SupervisorSettings = {dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0,
-    ...(options.helperProviderInstanceId ? {helperProviderInstanceId: options.helperProviderInstanceId} : {})};
+  const config: SupervisorSettings = {dataDirectory: "", t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0};
   const scope = new CallbackScope(config, {guidance: stores.guidance, supervisors: stores.supervisors, policy: stores.policy}, callbacks);
   const context = options.workflows ? Context.add(stores.context, WorkflowStateStore, options.workflows) : stores.context;
   const gate = yield* makeSupervisionGate(scope).pipe(Effect.provide(context));

@@ -397,7 +397,6 @@ interface FixtureOptions {
   operativeActive?: boolean;
   settings?: { intervalMinutes: number; activityThreshold: number };
   queuePeerDuringNextSupervisorDispatch?: boolean;
-  helperProviderInstanceId?: string;
 }
 
 // the suite's fixture: one Supervisor binding of an operative main over the stores of a temporary data directory, the fake
@@ -606,7 +605,7 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
   });
   const workflows = yield* workflowStore(stores);
   const conversation = yield* conversationUnit({stores, operate, projection: readProjection, definitions: definitionLoader, eligible, enabled: () => true,
-    workflows, team: options.teamEnabled, helperProviderInstanceId: options.helperProviderInstanceId, read: readItems,
+    workflows, team: options.teamEnabled, read: readItems,
     supervisionStopped: threadId => Effect.map(threadPolicy.get(), (policy) => policy.excludedThreadIds.includes(threadId))});
   const apiConfig = {
     dataDirectory: directory,
@@ -614,7 +613,6 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
     t3TokenFile: "",
     excludedThreadIds: [],
     healthPort: 0,
-    ...(options.helperProviderInstanceId ? {helperProviderInstanceId: options.helperProviderInstanceId} : {}),
   } satisfies SupervisorConfig;
   const modelConfig = {
     providers: [{
@@ -783,7 +781,7 @@ const installNestedCatalog = Effect.fnUntraced(function* (fixture: Fixture, omit
 
 it.effect("a realistic nested catalog completes startup, introduction and exact acceptance without duplicated context", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock, {operativeActive: false, teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const fixture = yield* makeFixture(clock, {operativeActive: false, teamEnabled: true});
   const task = yield* installNestedCatalog(fixture);
   assert.equal(task.definitionSnapshot!.steps.length, 11);
   assert.equal(task.definitionSnapshot!.workflows.length, 5);
@@ -1382,18 +1380,14 @@ const appendOperativeAcceptance = Effect.fnUntraced(function* (fixture: Fixture,
 const observeAgreement = (fixture: Fixture, now: number) =>
   fixture.conversation.observe(fixture.threadList, now);
 
-it.effect("helper provider isolation is opt-in in root roles and names the configured helper instance", () => Effect.gen(function* () {
-  const clock = {now: baseTime};
-  // the Supervisor's own conversation as ProjectSupervisor builds it: with its helper team and the configured helper instance
-  const standard = yield* makeFixture(clock, {teamEnabled: true});
-  const roleFor = (conversation: Fixture["conversation"], binding: BindingRecord) => conversation.roleFor(binding);
-  const standardRole = yield* roleFor(standard.conversation, standard.binding);
-  assert.doesNotMatch(standardRole, /t3_thread_configure|target\.providerInstanceId/u);
-
-  const isolated = yield* makeFixture(clock, {helperProviderInstanceId: "supervisor-helpers-20348", teamEnabled: true});
-  const isolatedRole = yield* roleFor(isolated.conversation, isolated.binding);
-  assert.match(isolatedRole, /t3_thread_configure/u);
-  assert.match(isolatedRole, /target\.providerInstanceId to "supervisor-helpers-20348"/u);
+it.effect("root recruitment inherits normal native selection and keeps exact child registration proof", () => Effect.gen(function* () {
+  const fixture = yield* makeFixture({now: baseTime}, {teamEnabled: true});
+  const role = yield* fixture.conversation.roleFor(fixture.binding);
+  assert.match(role, /inherit this root's provider, model and options unless a configured T3 override is selected/u);
+  assert.match(role, /Register only the completed native child using its exact task\/thread\/run evidence/u);
+  assert.doesNotMatch(role, /target\.providerInstanceId|provider isolation|t3_thread_configure/u);
+  const index = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"});
+  assert.doesNotMatch(JSON.stringify(index), /provider isolation|"isolation"/u);
 }), { timeout: 60_000 });
 
 it.effect("the standing role states the proportionate planning rule once and the compact omit grammar", () => Effect.gen(function* () {
@@ -4825,7 +4819,7 @@ it.effect("a stopped chat reconciles its accepted check-in while project supervi
 it.effect("a stopped team chat settles despite review-only team events, but waits for an in-flight team effect", () => Effect.gen(function* () {
   for (const inflight of [false, true]) {
     const clock = yield* pinnedClock(baseTime);
-    const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+    const fixture = yield* makeFixture(clock, {teamEnabled: true});
     const binding = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!;
     const teamStore = fixture.teamStore;
     yield* teamStore.serviceAttention(binding, {eventId: "helper-result", memberThreadId: "helper-thread", summary: "A helper needs root attention."}, clock.now);
@@ -4853,7 +4847,7 @@ it.effect("a stopped team chat settles despite review-only team events, but wait
 it.effect("the full standing instructions permit every Supervisor tool they name, except the operative's own supervision_plan", () => Effect.gen(function* () {
   const routed = Object.values(workflowToolNames).flatMap((entry): readonly string[] => "mcpxTarget" in entry ? [entry.mcpxTarget] : []);
   for (const teamEnabled of [false, true]) {
-    const fixture = yield* makeFixture({now: baseTime}, teamEnabled ? {teamEnabled, helperProviderInstanceId: "isolated-helper-provider"} : {});
+    const fixture = yield* makeFixture({now: baseTime}, teamEnabled ? {teamEnabled} : {});
     const reference = yield* fixture.conversation.roleFor(fixture.binding);
     const index = (yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})) as unknown as {sections: Array<{id: string}>};
     const sections = new Set(index.sections.map(section => section.id));
@@ -4874,7 +4868,7 @@ it.effect("the full standing instructions permit every Supervisor tool they name
 // code (native proof 2026-10-23: a gateway call route exists where configured; code wrappers are not wanted)
 it.effect("the root instructions name operations and tools with one neutral gateway reminder and suggest no code, with and without a team", () => Effect.gen(function* () {
   for (const teamEnabled of [false, true]) {
-    const fixture = yield* makeFixture({now: baseTime}, teamEnabled ? {teamEnabled, helperProviderInstanceId: "isolated-helper-provider"} : {});
+    const fixture = yield* makeFixture({now: baseTime}, teamEnabled ? {teamEnabled} : {});
     const reference = yield* fixture.conversation.roleFor(fixture.binding);
     assert.equal(reference.split(toolRouteReminder).length - 1, 1, `team=${teamEnabled}`);
     assert.doesNotMatch(reference, /mcpx|MCPX|t3-supervisor-workflows|namespace prefix|\b(wrappers?|code-mode|functions\.exec|harness(es)?)\b/iu, `team=${teamEnabled}`);
@@ -4883,7 +4877,7 @@ it.effect("the root instructions name operations and tools with one neutral gate
 
 it.effect("helper lifecycle changes never change the standing-instructions version, so later wakes keep the compact core", () => Effect.gen(function* () {
   const clock = {now: baseTime};
-  const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const fixture = yield* makeFixture(clock, {teamEnabled: true});
   const binding = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!;
   const version = Effect.fnUntraced(function* () {return ((yield* fixture.conversation.readContextView(binding, {view: "instructions"})) as unknown as {version: string}).version;});
   const before = yield* version();
@@ -4948,15 +4942,15 @@ it.effect("the instructions version covers the full reference, so a reference-on
     const index = (yield* fixture.conversation.readContextView(normalized, {view: "instructions"})) as unknown as {version: string; sections: Array<{id: string; version: string}>};
     return {version: index.version, sections: index.sections, reference: yield* fixture.conversation.roleFor(normalized)};
   });
-  const shared = yield* viewOf(yield* makeFixture(clock, {teamEnabled: true}));
-  const isolated = yield* viewOf(yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"}));
-  assert.notEqual(shared.reference, isolated.reference, "the detailed reference differs");
-  assert.notEqual(shared.version, isolated.version, "the version names the full reference too");
-  // only the sections that differ change their own version: the isolation section is added and the team section names it
-  const versions = (view: typeof shared) => new Map(view.sections.map(section => [section.id, section.version]));
-  assert.deepEqual([...versions(isolated).keys()].filter(id => versions(shared).get(id) !== versions(isolated).get(id)), ["isolation", "team"]);
+  const solo = yield* viewOf(yield* makeFixture(clock));
+  const team = yield* viewOf(yield* makeFixture(clock, {teamEnabled: true}));
+  assert.notEqual(solo.reference, team.reference, "the detailed team reference differs");
+  assert.notEqual(solo.version, team.version, "the version names the full reference too");
+  // only the added team section changes its own version
+  const versions = (view: typeof solo) => new Map(view.sections.map(section => [section.id, section.version]));
+  assert.deepEqual([...versions(team).keys()].filter(id => versions(solo).get(id) !== versions(team).get(id)), ["team"]);
   // each shared fragment is in the reference once, and the helper's own watch is never in it
-  for (const view of [shared, isolated]) {
+  for (const view of [solo, team]) {
     const occurrences = (part: string) => view.reference.split(part).length - 1;
     for (const part of [localThreadToolRules, toolRouteReminder, messageReadRule, activeWatchInstructions, ownInboxInstructions, planningInstructions, proportionatePlanRule])
       assert.equal(occurrences(part), 1, part.slice(0, 40));
@@ -5200,7 +5194,7 @@ it.effect("a rejected Supervisor proposal gets one focused repair wake per rejec
 
 it.effect("wake budgets: every wake carries the short root notice and never the role, stable across helper settings", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const fixture = yield* makeFixture(clock, {teamEnabled: true});
   yield* installNestedCatalog(fixture);
   yield* appendNoticeForTask(fixture, (yield* fixture.projectStore.task(fixture.task.threadId))!, fixture.operative);
   const versionOf = Effect.fnUntraced(function* () {return ((yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"})) as unknown as {version: string}).version;});
@@ -7116,7 +7110,7 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
   const rows: ExchangeRow[] = [];
   const add = (sample: ExchangeSample) => {samples.push(sample);rows.push(measureExchange(sample));};
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const fixture = yield* makeFixture(clock, {teamEnabled: true});
   const task = yield* installNestedCatalog(fixture);
   const index = yield* fixture.conversation.readContextView(fixture.binding, {view: "instructions"});
   const core = String(index.core);
@@ -7362,7 +7356,7 @@ it.effect("exchange audit: every rendered root, operative and answer path is mea
 // acknowledgement; another Supervisor's request is denied and an unknown one is unavailable
 it.effect("workflow_read view request returns the root's own frozen check-in envelope, denies another Supervisor's request and stays readable after acknowledgement", () => Effect.gen(function* () {
   const clock = yield* pinnedClock(baseTime);
-  const fixture = yield* makeFixture(clock, {teamEnabled: true, helperProviderInstanceId: "isolated-helper-provider"});
+  const fixture = yield* makeFixture(clock, {teamEnabled: true});
   const task = yield* installNestedCatalog(fixture);
   yield* appendNoticeForTask(fixture, (yield* fixture.projectStore.task(task.threadId))!, fixture.operative);
   for (let index = 0; index < 3; index++) addCommandActivity(fixture.operative, `request-view-${index}`, "Work", clock.now + index);

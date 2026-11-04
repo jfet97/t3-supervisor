@@ -136,7 +136,7 @@ const intRunLayer = (input: IntRunInput, config: SupervisorSettings) => {
     (unit) => Context.make(ProjectSupervisor, unit.service).pipe(Context.add(IntSupervisorSeams, unit.seams))));
   // SupervisionLive({operateRpcAvailable: true}) with the supervisor's seams
   return supervisor.pipe(
-    Layer.provideMerge(SupervisionControllersLive({})),
+    Layer.provideMerge(SupervisionControllersLive),
     Layer.provideMerge(SupervisionTeamLive),
     Layer.provideMerge(SupervisionScopeLive(true)),
     Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),

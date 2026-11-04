@@ -13,7 +13,7 @@ const loadConfig = Effect.suspend(() => SupervisorConfig.useSync((config) => con
 // every variable loadConfig reads, plus the two that locate the default data directory
 const variables = [
   "DATA_DIRECTORY", "XDG_STATE_HOME", "HOME", "T3_URL", "T3_TOKEN_FILE", "EXCLUDED_THREAD_IDS", "HEALTH_PORT", "HEALTH_HOST",
-  "SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID", "UI_PORT", "UI_HOST", "WORKFLOW_MCP_HOSTS", "WORKFLOW_MCP_BIND_HOST",
+  "UI_PORT", "UI_HOST", "WORKFLOW_MCP_HOSTS", "WORKFLOW_MCP_BIND_HOST",
   "WORKFLOW_MCP_PORT", "WORKFLOW_MCP_SERVER_ALIASES", "WORKFLOW_MCP_GATEWAY_TOOLS", "UI_ASSETS_DIRECTORY", "T3_GUIDANCE_TOKEN_FILE", "T3_PROJECT_WRITE_TOKEN_FILE",
   "T3_PROJECT_COMMIT_TOKEN_FILE", "T3_GIT_PROBE_TOKEN_FILE", "T3_MANAGED_SCRATCH_ROOT",
 ] as const;
@@ -70,7 +70,6 @@ it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig go
     EXCLUDED_THREAD_IDS: " a, ,b ",
     HEALTH_PORT: "1234",
     HEALTH_HOST: "0.0.0.0",
-    SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: " helpers-1 ",
     UI_PORT: "5678",
     UI_HOST: "0.0.0.0",
     WORKFLOW_MCP_HOSTS: " Supervisor.Example:9008, ,[::1]:9009 ",
@@ -90,7 +89,6 @@ it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig go
     excludedThreadIds: ["a", "b"],
     healthPort: 1234,
     healthHost: "0.0.0.0",
-    helperProviderInstanceId: "helpers-1",
     uiPort: 5678,
     uiHost: "0.0.0.0",
     workflowMcpHosts: ["supervisor.example:9008", "[::1]:9009"],
@@ -107,20 +105,6 @@ it.effect("CT-CONFIG-01: every default and list parsing equals the loadConfig go
   // thread ids are trimmed and filtered but keep their case; only MCP hosts are lowercased
   assert.deepEqual((yield* withEnvironment({ EXCLUDED_THREAD_IDS: "Thread-A,thread-a" }, loadConfig)).excludedThreadIds,
     ["Thread-A", "thread-a"]);
-}), { timeout: 10_000 });
-
-it.effect("CT-CONFIG-02: whitespace inside the helper id fails while a blank helper id is unset", () => Effect.gen(function* () {
-  for (const invalid of ["a b", "a\tb", " a\nb "]) {
-    const failure: unknown = yield* Effect.flip(withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: invalid }, loadConfig));
-    assert.ok(failure instanceof Error && failure.message === "invalid_helper_provider_instance_id");
-  }
-  for (const blank of ["   ", "\t\n "]) {
-    const config = yield* withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: blank }, loadConfig);
-    assert.equal(config.helperProviderInstanceId, undefined);
-    assert.equal(Object.hasOwn(config, "helperProviderInstanceId"), false);
-  }
-  assert.equal((yield* withEnvironment({ SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "x".repeat(256) }, loadConfig)).helperProviderInstanceId,
-    "x".repeat(256));
 }), { timeout: 10_000 });
 
 it.effect("CT-CONFIG-03: empty-string and non-numeric values keep their baseline results", () => Effect.gen(function* () {
