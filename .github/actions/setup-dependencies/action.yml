@@ -11,6 +11,9 @@ runs:
       run: |
         corepack enable pnpm
         corepack prepare --activate
+    - name: Share one pnpm store with out-of-checkout installs
+      shell: bash
+      run: echo "PNPM_CONFIG_STORE_DIR=$HOME/.local/share/pnpm/store" >> "$GITHUB_ENV"
     - name: Locate the pnpm store
       id: store
       shell: bash
