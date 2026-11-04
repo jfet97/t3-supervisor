@@ -43,7 +43,7 @@ it("a failed child process with a token in its output", async () => {
 });
 
 it("a token in stderr fails the pattern match", () => {
-  privately("startup failure", [], () => assert.match(`Error: ${matchedStderr}\n`, /^Error: invalid_helper_provider_instance_id$/mu));
+  privately("startup failure", [], () => assert.match(`Error: ${matchedStderr}\n`, /^Error: invalid_workflow_mcp_alias$/mu));
 });
 
 it("a token in a non-json stdout line fails the event parse", () => {

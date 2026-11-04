@@ -84,7 +84,6 @@ export interface SupervisorSettings {
   excludedThreadIds: string[];
   healthPort: number;
   healthHost?: string;
-  helperProviderInstanceId?: string;
   uiPort?: number;
   uiHost?: string;
   workflowMcpHosts?: ReadonlyArray<string>;

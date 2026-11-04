@@ -2211,7 +2211,7 @@ it.effect("team registration requires a completed app-owned bootstrap and readin
     const beforeRegistrationReads = f.projectionCalls.length;
     assert.equal(((yield* controller.call(args)) as {status: string}).status, "ok");
     assert.deepEqual(f.projectionCalls.slice(beforeRegistrationReads), [f.supervisorThreadId, f.supervisorThreadId, "real-helper"],
-      "unset helper isolation preserves the existing native reads");
+      "registration reads the root authority and exact native child");
     const member = (yield* team.snapshot(f.binding)).members[0]!;
     const ready = {supervisorThreadId: member.threadId, bindingGeneration: f.binding.generation, memberEpoch: member.epoch, action: "ready", operationId: "ready-1"};
     assert.equal(((yield* controller.call(ready)) as {status: string}).status, "pending");
@@ -2223,64 +2223,53 @@ it.effect("team registration requires a completed app-owned bootstrap and readin
   } finally {yield* f.close;}
 }));
 
-it.effect("opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions", () => Effect.gen(function* () {
-  const configuredInstanceId = "supervisor-helpers-20348";
-  const register = (variant: "isolated" | "wrong-instance" | "same-instance" | "shared-session" | "missing-session" | "missing-owner") => Effect.gen(function* () {
+it.effect("helper registration accepts shared providers and sessions but rejects invalid native ownership", () => Effect.gen(function* () {
+  for (const variant of ["shared-session", "different-provider", "no-session-metadata", "wrong-parent", "fork", "task-origin", "task-owner", "bootstrap-owner"] as const) {
     const f = yield* makeFixture();
-    const team = f.team;
-    const reader = yield* openWrite(f, {team: true, maxEvidenceWaitMs: 0, loadDefinitions: f.loadDefinitions});
-    const controller = yield* openTeam(f, reader, null, {helperProviderInstanceId: configuredInstanceId});
-    const args = {...locator(f), action: "register", operationId: `register-${variant}`, memberThreadId: "isolated-helper",
-      taskId: `task-${variant}`, bootstrapRunId: `boot-${variant}`};
-    installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
-    f.projection.thread.modelSelection = {instanceId: variant === "same-instance" ? configuredInstanceId : "codex", model: "gpt-6-luna", options: []};
-    f.projection.subagents = [{id: args.taskId, threadId: f.supervisorThreadId, runId: "supervisor-run-current", origin: "app_owned",
-      childThreadId: args.memberThreadId, status: "completed", prompt: "Bootstrap ready", result: {summary: "Bootstrap complete."}}];
-    const child = makeProjection(args.memberThreadId, f.projectId);
-    child.thread.lineage = {parentThreadId: f.supervisorThreadId, relationshipToParent: "subagent"};
-    child.thread.forkedFrom = {type: "node", nodeId: args.taskId};
-    const childInstanceId = variant === "wrong-instance" ? "codex" : configuredInstanceId;
-    child.thread.modelSelection = {instanceId: childInstanceId, model: "gpt-6-luna", options: []};
-    child.runs = [{id: args.bootstrapRunId, threadId: args.memberThreadId, ordinal: 1, status: "completed", userMessageId: "bootstrap-message",
-      requestedAt: "2026-10-16T10:00:00Z", startedAt: null, completedAt: null, rootNodeId: "boot-root"}];
-    child.messages = [{id: "bootstrap-message", threadId: args.memberThreadId, runId: args.bootstrapRunId, nodeId: "boot-root", role: "user",
-      text: "Bootstrap ready", streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z"}];
-    const childSessionId = variant === "shared-session" ? "root-session" : variant === "missing-session" ? null : "helper-session";
-    const childOwner = variant === "missing-owner" ? null : args.memberThreadId;
-    child.providerThreads = [{id: "child-provider-thread", appThreadId: childOwner, providerSessionId: childSessionId,
-      providerInstanceId: childInstanceId}];
-    f.projection.providerThreads = [
-      {id: "root-provider-thread", appThreadId: f.supervisorThreadId, providerSessionId: "root-session", providerInstanceId: "codex"},
-      {id: "joined-child-provider-thread", appThreadId: args.memberThreadId, providerSessionId: childSessionId,
-        providerInstanceId: childInstanceId},
-    ];
-    f.projections.set(args.memberThreadId, child);
-    f.threads.push(child.thread);
     try {
-      return {f, team, result: (yield* controller.call(args)) as {status: string; reason?: string}};
-    } catch (cause) {
-      yield* f.close;throw cause;
-    }
-  });
-
-  for (const variant of ["isolated", "wrong-instance", "same-instance", "shared-session", "missing-session", "missing-owner"] as const) {
-    const {f, team, result} = yield* register(variant);
-    try {
-      if (variant === "isolated") {
-        assert.equal(result.status, "ok");
-        assert.equal((yield* team.snapshot(f.binding)).members.length, 1);
-      } else {
-        assert.deepEqual(result, {status: "denied", reason: variant === "same-instance" ? "helper_provider_instance_matches_root" :
-          variant === "shared-session" ? "helper_provider_session_shared" : variant === "missing-session" || variant === "missing-owner"
-            ? "helper_provider_session_unavailable" : "helper_provider_instance_mismatch"});
-        const snapshot = yield* team.snapshot(f.binding);
-        assert.equal(snapshot.members.length, 0, "rejected isolation evidence creates no member");
-        assert.equal(snapshot.notifications.length, 0, "rejected isolation evidence creates no helper notification");
-        assert.equal(snapshot.events.filter(event => event.kind === "service_attention" && event.targetThreadId === "isolated-helper").length, 1,
-          "the rejected helper attempt raises one root-attention event");
+      const reader = yield* openWrite(f, {team: true, maxEvidenceWaitMs: 0, loadDefinitions: f.loadDefinitions});
+      const controller = yield* openTeam(f, reader, null);
+      const args = {...locator(f), action: "register", operationId: `register-${variant}`, memberThreadId: "native-helper",
+        taskId: `task-${variant}`, bootstrapRunId: `boot-${variant}`};
+      installEvidence(f, args, {toolName: workflowToolNames.team.direct[0]});
+      const selection = {instanceId: "codex", model: "gpt-6-luna", options: [{id: "reasoningEffort", value: "high"}]};
+      f.projection.thread.modelSelection = selection;
+      f.projection.subagents = [{id: args.taskId, threadId: variant === "task-owner" ? "another-root" : f.supervisorThreadId,
+        runId: "supervisor-run-current", origin: variant === "task-origin" ? "provider_owned" : "app_owned",
+        childThreadId: args.memberThreadId, status: "completed", prompt: "Bootstrap ready", result: {summary: "Bootstrap complete."}}];
+      const child = makeProjection(args.memberThreadId, f.projectId);
+      child.thread.lineage = {parentThreadId: variant === "wrong-parent" ? "another-root" : f.supervisorThreadId,
+        relationshipToParent: variant === "fork" ? "fork" : "subagent"};
+      child.thread.forkedFrom = {type: "node", nodeId: args.taskId};
+      const childSelection = variant === "different-provider" ? {...selection, instanceId: "another-configured-provider"} : selection;
+      child.thread.modelSelection = childSelection;
+      child.runs = [{id: args.bootstrapRunId, threadId: variant === "bootstrap-owner" ? f.supervisorThreadId : args.memberThreadId,
+        ordinal: 1, status: "completed", userMessageId: "bootstrap-message", requestedAt: "2026-10-16T10:00:00Z",
+        startedAt: null, completedAt: null, rootNodeId: "boot-root"}];
+      child.messages = [{id: "bootstrap-message", threadId: args.memberThreadId, runId: args.bootstrapRunId, nodeId: "boot-root", role: "user",
+        text: "Bootstrap ready", streaming: false, createdAt: "2026-10-16T10:00:00Z", updatedAt: "2026-10-16T10:00:00Z"}];
+      if (variant !== "no-session-metadata") {
+        child.providerThreads = [{id: "child-provider-thread", appThreadId: args.memberThreadId, providerSessionId: "shared-session",
+          providerInstanceId: childSelection.instanceId}];
+        f.projection.providerThreads = [
+          {id: "root-provider-thread", appThreadId: f.supervisorThreadId, providerSessionId: "shared-session", providerInstanceId: "codex"},
+          ...child.providerThreads,
+        ];
       }
-      assert.equal(f.projectionCalls.filter(id => id === f.supervisorThreadId).length, 2);
-      assert.equal(f.projectionCalls.filter(id => id === "isolated-helper").length, 1);
+      f.projections.set(args.memberThreadId, child);
+      f.threads.push(child.thread);
+      const result = yield* controller.call(args);
+      const snapshot = yield* f.team.snapshot(f.binding);
+      if (["shared-session", "different-provider", "no-session-metadata"].includes(variant)) {
+        assert.equal((result as {status: string}).status, "ok", variant);
+        assert.equal(snapshot.members[0]?.threadId, args.memberThreadId, "native helper keeps its independent identity");
+        assert.equal(snapshot.members.length, 1);
+        assert.equal(snapshot.events.filter(event => event.kind === "service_attention").length, 0);
+      } else {
+        assert.deepEqual(result, {status: "denied", reason: "native_completed_bootstrap_not_verified"}, variant);
+        assert.equal(snapshot.members.length, 0, "invalid ownership creates no helper membership");
+        assert.equal(snapshot.notifications.length, 0, "invalid ownership creates no helper notification");
+      }
     } finally {yield* f.close;}
   }
 }), { timeout: 60_000 });

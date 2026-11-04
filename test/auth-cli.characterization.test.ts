@@ -51,14 +51,14 @@ it.live("CT-CLI-02: malformed --data-dir forms, extra arguments and a missing va
   }
 }).pipe(Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-it.live("CT-CLI-03: forge succeeds with an invalid helper instance id and a missing T3 token file because it loads no service configuration",
+it.live("CT-CLI-03: forge succeeds with an invalid workflow alias and a missing T3 token file because it loads no service configuration",
   () => Effect.gen(function* () {
     const cwd = yield* home;
     const state = join(cwd, "state");
     const auth = yield* openServiceAuth(state);
     const issued = yield* invoke(cwd, ["auth", "forge"], {
       DATA_DIRECTORY: state,
-      SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "invalid helper id",
+      WORKFLOW_MCP_SERVER_ALIASES: "invalid alias",
       T3_TOKEN_FILE: join(cwd, "missing-t3-token"),
     });
     privately("forge output", [issued.stdout.trim()], () =>

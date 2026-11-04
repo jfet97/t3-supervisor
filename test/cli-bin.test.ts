@@ -108,14 +108,14 @@ it.live("CT-MAIN-03: startup failures exit 1 with one classified line and no sta
       const invalidDataDirectory = join(harness.home, `invalid-${label.replace(/\W/gu, "-")}`);
       const invalid = yield* runProcess(process.execPath, ["--import", tsxLoader, ...entry], {
         cwd: harness.home, timeoutMs: exitTimeoutMs,
-        env: { ...harness.env, DATA_DIRECTORY: invalidDataDirectory, SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID: "a b" },
+        env: { ...harness.env, DATA_DIRECTORY: invalidDataDirectory, WORKFLOW_MCP_SERVER_ALIASES: "invalid alias" },
       });
       assert.deepEqual({ code: invalid.code, signal: invalid.signal }, { code: 1, signal: null }, label);
       assert.deepEqual(leakedSecrets(invalid.stdout + invalid.stderr, [harness.token]), [], label);
       // target rendering (BC-CLI-04): the configuration failure is one classified line naming its reason, without a stack
       privately(label, [harness.token], () => {
         assert.equal(invalid.stderr, "");
-        assert.deepEqual(classified(invalid.stdout), [{ event: "supervisor_failed", reason: "invalid_helper_provider_instance_id" }]);
+        assert.deepEqual(classified(invalid.stdout), [{ event: "supervisor_failed", reason: "invalid_workflow_mcp_alias" }]);
         assert.doesNotMatch(invalid.stdout, /^\s+at /mu);
       });
       assert.equal((yield* Effect.flip(fs.stat(invalidDataDirectory))).reason._tag, "NotFound", "configuration fails before any store opens");

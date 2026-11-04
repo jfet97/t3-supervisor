@@ -21,7 +21,7 @@ directly. Images never contain source, credentials or state.
 | `./dev status` | containers, health and the provider CLIs' sign-in status |
 | `./dev logs [-f]` | the T3 and Supervisor log |
 | `./dev shell` | an interactive shell in the toolchain container |
-| `./dev pnpm ARGS` | pnpm in the toolchain container, for example `./dev pnpm test test/config.test.ts` |
+| `./dev pnpm ARGS` | pnpm in the toolchain container, for example `./dev pnpm test test/config.characterization.test.ts` |
 | `./dev login codex`, `./dev login claude` | signs in to a provider CLI |
 | `./dev pair` | prints a one-time link that opens this environment's T3 in the browser |
 | `./dev sign-in` | prints a one-time Supervisor dashboard sign-in token |
@@ -100,6 +100,14 @@ read-only session cannot deliver helper messages. See the pinned T3's
 and [webhook visibility](https://github.com/pingdotgg/t3code/blob/v0.1.7-nightly.20261101.4016/apps/server/src/ws.ts).
 
 ## Providers
+
+The daily environment pins T3 `0.1.7-nightly.20261101.4016`, which predates the
+attached-child subscription fix in [PR #23456](https://github.com/pingdotgg/t3code/pull/23456).
+It cannot establish same-provider helper reuse after parent settlement. That
+provider proof needs a separately approved update of the signed-in environment to
+a fixed published build, such as stable `0.1.7` or nightly
+`0.1.7-nightly.20261103.4119` or later. The automatic compatibility window and its
+provider-free checks do not upgrade this saved profile or prove model completion.
 
 Sign in afresh inside the environment; the same account may be used again. Never copy a
 login, credential, MCP registration or state from the host or another installation.

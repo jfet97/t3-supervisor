@@ -473,10 +473,11 @@
   "CC-CONFIG": {
    "owner": "src/types.ts",
    "slice": "S2",
-   "invariant": "same env names, defaults and validation (invalid_helper_provider_instance_id); the mutable threadPolicy and supervisorOwnedThreadIds fields become services in the same commit as all readers.",
+   "invariant": "same env names, defaults and validation (invalid_workflow_mcp_alias); the mutable threadPolicy and supervisorOwnedThreadIds fields become services in the same commit as all readers.",
    "pins": [
-    "config.test.ts",
-    "CT-CONFIG-01..03"
+    "config.characterization.test.ts",
+    "CT-CONFIG-01",
+    "CT-CONFIG-03"
    ],
    "participants": [
     "src/cli.ts",
@@ -486,7 +487,7 @@
     "src/guidance.ts",
     "src/guidance-application.ts",
     "src/thread-policy.ts",
-    "test/config.test.ts",
+    "test/config.characterization.test.ts",
     "test/guidance.test.ts",
     "test/thread-policy.test.ts",
     "test/supervisor-ownership.test.ts",
@@ -2562,7 +2563,7 @@
   "CT-CLI-03": {
    "kind": "cli",
    "boundary": "real child process + real login.sqlite3",
-   "description": "forge with SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID invalid and T3_TOKEN_FILE missing still succeeds (forge does not load service config)",
+   "description": "forge with WORKFLOW_MCP_SERVER_ALIASES invalid and T3_TOKEN_FILE missing still succeeds (forge does not load service config)",
    "ownerFile": "src/cli.ts",
    "referencedBy": [],
    "phase": "s1-baseline",
@@ -2575,7 +2576,7 @@
    "disposition": "keep",
    "consolidateInto": null,
    "reuses": null,
-   "newObservation": "Invalid helper id + missing T3_TOKEN_FILE do not break forge.",
+   "newObservation": "Invalid workflow alias + missing T3_TOKEN_FILE do not break forge.",
    "suite": "test/auth-cli.test.ts"
   },
   "CT-CLI-04": {
@@ -2728,9 +2729,9 @@
    "targetRegression": null,
    "disposition": "keep",
    "consolidateInto": null,
-   "reuses": "test/config.test.ts (single existing test)",
+   "reuses": "Current configuration coverage lives in test/config.characterization.test.ts; temporary helper-setting tests are retired.",
    "newObservation": "Every default + list parsing golden.",
-   "suite": "test/config.test.ts"
+   "suite": "test/config.characterization.test.ts"
   },
   "CT-CONFIG-02": {
    "kind": "characterization",
@@ -2744,12 +2745,12 @@
    "baselineSeam": "in-process env",
    "expectedBaseline": "Pass: 'a b' throws invalid_helper_provider_instance_id; '   ' -> undefined (config.ts:9-14).",
    "targetSeam": "Config layer",
-   "targetRegression": null,
-   "disposition": "keep",
+   "targetRegression": "Temporary helper provider setting removed after upstream #23456; its parsing test is obsolete.",
+   "disposition": "retired",
    "consolidateInto": null,
    "reuses": null,
-   "newObservation": "Whitespace/blank helper id.",
-   "suite": "test/config.test.ts"
+   "newObservation": "Retired with the helper-provider workaround. Original baseline expectation is historical.",
+   "suite": null
   },
   "CT-CONFIG-03": {
    "kind": "characterization",
@@ -2770,7 +2771,7 @@
    "newObservation": "Empty/non-numeric env results.",
    "clarification": "Pin '', 0 and NaN exactly as D-06 keeps them; no new behaviour.",
    "notes": "Description says 'today's results or decided new behaviour (D-06)'; D-06 keeps baseline - pin today's values.",
-   "suite": "test/config.test.ts"
+   "suite": "test/config.characterization.test.ts"
   },
   "CT-CONV-01": {
    "kind": "interruption",
@@ -4656,7 +4657,7 @@
   "CT-MAIN-03": {
    "kind": "characterization",
    "boundary": "real child process",
-   "description": "missing T3 token file -> non-zero exit, stderr contains no token/secret path content; invalid helper instance id -> exit 1 mentioning invalid_helper_provider_instance_id",
+   "description": "missing T3 token file -> non-zero exit, stderr contains no token/secret path content; invalid workflow alias -> exit 1 mentioning invalid_workflow_mcp_alias",
    "ownerFile": "src/main.ts",
    "referencedBy": [],
    "phase": "s1-baseline",
@@ -8406,7 +8407,7 @@
      "id": "CT-CLI-03",
      "kind": "cli",
      "boundary": "real child process + real login.sqlite3",
-     "description": "forge with SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID invalid and T3_TOKEN_FILE missing still succeeds (forge does not load service config)"
+     "description": "forge with WORKFLOW_MCP_SERVER_ALIASES invalid and T3_TOKEN_FILE missing still succeeds (forge does not load service config)"
     },
     {
      "id": "CT-CLI-04",
@@ -8545,18 +8546,12 @@
    ],
    "behaviorsToPreserve": [
     "DATA_DIRECTORY ?? join(XDG_STATE_HOME ?? ~/.local/state, 't3-supervisor') (L6-L7); empty-string env values are used as-is (`??`)",
-    "SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID trimmed; empty -> undefined; >256 chars or any whitespace -> error message `invalid_helper_provider_instance_id` (L9-L14)",
     "defaults: T3_URL http://127.0.0.1:3773, T3_TOKEN_FILE /run/secrets/t3-read-token, HEALTH_PORT 9007, UI_PORT 9008, UI_HOST 127.0.0.1, guidance/write/commit/probe token files under /run/secrets (L20-L34)",
     "EXCLUDED_THREAD_IDS and WORKFLOW_MCP_HOSTS split on ',' trimmed, empty dropped; hosts lowercased (L22, L27)",
     "WORKFLOW_MCP_BIND_HOST, WORKFLOW_MCP_PORT, T3_MANAGED_SCRATCH_ROOT only when truthy (L28-L29, L35)",
     "UI_ASSETS_DIRECTORY default is ../ui-dist relative to the module URL (L30)"
    ],
    "existingTests": [
-    {
-     "file": "test/config.test.ts",
-     "count": 1,
-     "covers": "helper instance id opt-in, trim, >256 rejection"
-    },
     {
      "file": "test/auth-cli.test.ts",
      "count": 4,
@@ -8574,7 +8569,9 @@
      "id": "CT-CONFIG-02",
      "kind": "characterization",
      "boundary": "in-process",
-     "description": "whitespace inside helper id (e.g. 'a b') fails with invalid_helper_provider_instance_id; '   ' -> undefined"
+     "description": "whitespace inside helper id (e.g. 'a b') fails with invalid_helper_provider_instance_id; '   ' -> undefined",
+     "disposition": "retired",
+     "reason": "Temporary helper provider setting removed after upstream #23456."
     },
     {
      "id": "CT-CONFIG-03",
@@ -8603,12 +8600,11 @@
      "effect/Path.Path"
     ],
     "schemas": [
-     "HelperProviderInstanceId (trim, 1..256, no whitespace) with message invalid_helper_provider_instance_id",
      "HostPort list",
      "CommaList"
     ],
     "errors": [
-     "ConfigError (message must contain invalid_helper_provider_instance_id)"
+     "ConfigError (message must contain invalid_workflow_mcp_alias)"
     ],
     "concurrency": [],
     "time": []
@@ -9683,7 +9679,7 @@
    ],
    "behaviorsToPreserve": [
     "startup fails (non-zero exit) if T3_TOKEN_FILE is unreadable; token is trimmed (L20, L23)",
-    "invalid SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID aborts startup before any I/O (L11)",
+    "invalid WORKFLOW_MCP_SERVER_ALIASES aborts startup before any I/O (L11)",
     "supervisor ownership is loaded read-only from guidance.sqlite3 before supervision starts (L12)",
     "thread policy store is opened with EXCLUDED_THREAD_IDS seed and closed on shutdown (L16-L19)",
     "SIGINT/SIGTERM interrupt the main fiber; exit 130 after finalizers (runMain defaultTeardown)",
@@ -9707,7 +9703,7 @@
      "id": "CT-MAIN-03",
      "kind": "characterization",
      "boundary": "real child process",
-     "description": "missing T3 token file -> non-zero exit, stderr contains no token/secret path content; invalid helper instance id -> exit 1 mentioning invalid_helper_provider_instance_id"
+     "description": "missing T3 token file -> non-zero exit, stderr contains no token/secret path content; invalid workflow alias -> exit 1 mentioning invalid_workflow_mcp_alias"
     }
    ],
    "target": {
@@ -15405,9 +15401,9 @@
    "slice": "S0",
    "order": 3,
    "liveProofTrigger": "none",
-   "testMigration": "1 test -> `it.effect` providing ConfigProvider.fromUnknown/fromEnvRecord via ConfigProvider.layer instead of mutating process.env; failure asserted on ConfigError message containing invalid_helper_provider_instance_id. Name parity: 1/1.",
+   "testMigration": "Retired after removal of the temporary helper provider setting; no replacement configuration behavior.",
    "risks": [],
-   "disposition": "port-tests",
+   "disposition": "retired",
    "testNames": [
     "helper provider isolation is opt-in and trims a bounded native instance ID"
    ],
@@ -17343,7 +17339,7 @@
     "a main and two reviewer children share one complete task context and acknowledge every frozen activity",
     "a large stored objective stays pull-readable without inflating or blocking monitoring",
     "an oversized stale-agreement recovery is visible without a definition review and can be explicitly retried",
-    "helper provider isolation is opt-in in root roles and uses the current native selection",
+    "root recruitment inherits normal native selection and keeps exact child registration proof",
     "workflow editing guidance tells authors to start live steps planned and read rejection diagnostics",
     "first descendant observation seeds past quiet history but includes active native or delegated work",
     "first child checkpoint includes relevant completed work before a later active run and all work on a new child",
@@ -19544,7 +19540,7 @@
     "activity references cannot relabel inherited projection records as local activity",
     "a ready helper links and plans a completed unarchived assigned child using its own exact main-run evidence",
     "team registration requires a completed app-owned bootstrap and readiness requires helper-own proof",
-    "opt-in helper provider isolation accepts only a distinct configured instance and owned provider sessions",
+    "helper registration accepts shared providers and sessions but rejects invalid native ownership",
     "helper guidance resolves an omitted activeRunId and retains uncertain identity across a handover",
     "helper guidance defers on target owner input without routing to an eligible ancestor",
     "deferred owner guidance raises one stable attention after grace and routes only after resolution",

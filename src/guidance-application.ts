@@ -115,8 +115,7 @@ export const runGuidanceApplication = (
     // the services of the supervision run, one layer graph built once in this scope over those clients and the run's stores: the
     // supervisor's scope predicates with the admission gate that guards with them, the team services, the Start/Stop control, the
     // workflow controllers and the project supervisor
-    const services = yield* Layer.build(SupervisionLive({operateRpcAvailable: Boolean(operateToken.trim()),
-      helperProviderInstanceId: config.helperProviderInstanceId}).pipe(Layer.provideMerge(clients), Layer.provideMerge(Layer.succeedContext(stores))));
+    const services = yield* Layer.build(SupervisionLive({operateRpcAvailable: Boolean(operateToken.trim())}).pipe(Layer.provideMerge(clients), Layer.provideMerge(Layer.succeedContext(stores))));
     const supervision = Context.get(services, ProjectSupervisor);
     // the dashboard's access client, runtime and workflow MCP endpoint over the run's controllers, provided once in this scope;
     // the listeners are acquired after them and released before them, and the api handlers yield the run's services

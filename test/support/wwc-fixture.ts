@@ -14,7 +14,7 @@ import { makeSupervisionGate, SupervisionGate, SupervisionScope, SupervisionScop
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { HelperTransport } from "../../src/supervisor-helper-transport.js";
 import { NativeOperateRpc, SupervisorRpcError, type NativeRpcShape } from "../../src/supervisor-native.js";
-import { SupervisorTeamController, type SupervisorTeamControllerOptions } from "../../src/supervisor-team-controller.js";
+import { SupervisorTeamController } from "../../src/supervisor-team-controller.js";
 import { readTeamViewData, supervisorTeamView } from "../../src/supervisor-team-view.js";
 import { proposalContextFromDefinitions, validateWorkflowPlan } from "../../src/supervisor-workflow.js";
 import { T3TransportError } from "../../src/t3.js";
@@ -281,8 +281,7 @@ export const openWrite = (fixture: WwcFixture, options: OpenWriteOptions = {}) =
 const rejectingFetch = FetchHttpClient.layer.pipe(Layer.provide(Layer.succeed(FetchHttpClient.Fetch, () => Promise.reject(new Error("no webhook POST")))));
 
 /** The team controller on the same gate and native reads as `write`. */
-export const openTeam = (fixture: WwcFixture, write: WorkflowWriteController["Service"], rpc: NativeRpcShape | null,
-  options: SupervisorTeamControllerOptions = {}) => Effect.gen(function* () {
+export const openTeam = (fixture: WwcFixture, write: WorkflowWriteController["Service"], rpc: NativeRpcShape | null) => Effect.gen(function* () {
   const built = builtWrites.get(write);
   if (!built) return yield* Effect.die(new Error("not a workflow write controller"));
   const t3 = t3Projections((threadId) => {
@@ -298,7 +297,7 @@ export const openTeam = (fixture: WwcFixture, write: WorkflowWriteController["Se
     Effect.provide(built.context),
     Effect.orDie,
   );
-  return yield* SupervisorTeamController.make(options).pipe(
+  return yield* SupervisorTeamController.make().pipe(
     Effect.provide(built.context),
     Effect.provideService(WorkflowWriteController, write),
     Effect.provideService(WorkflowNativeAccess, built.native),

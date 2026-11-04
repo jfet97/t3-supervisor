@@ -101,23 +101,15 @@ completion does not complete a parent step. Work without an effective helper
 assignment remains the root's responsibility. Team membership and operational
 workflow lineage are separate trees.
 
-Helpers inherit the root's model by default. The root may select another model
-from T3's current configured catalog for a helper. T3 remains responsible for
-native model selection; the Supervisor does not maintain a separate model catalog.
+Helpers inherit the root's provider, model and options by default. The root may
+select another compatible configuration from T3's current catalog. T3 remains
+responsible for native model selection; Supervisor has no separate model catalog.
 
-### Temporary provider-session isolation
-
-Until the installed T3 build contains the parent-detach correction in upstream
-PR #20361, an installation can set `SUPERVISOR_HELPER_PROVIDER_INSTANCE_ID` to a
-second configured native provider instance. New helpers must use that instance;
-the root defaults to its current native model and explicit options, with compatible
-deliberate overrides still allowed. Registration requires a different root instance
-and nonempty, disjoint native sessions belonging to the exact root/helper threads.
-Unavailable or unverifiable isolation blocks recruitment and raises root attention.
-Existing helpers are not moved. Unset configuration retains normal recruitment.
-
-This is a temporary installation workaround. Remove the setting once the installed
-T3 build contains the correction.
+Same-provider helpers require T3's attached-child subscription fix from
+[upstream PR #23456](https://github.com/pingdotgg/t3code/pull/23456). It is included
+in stable 0.1.7 and nightly 0.1.7-nightly.20261103.4119 and later builds. Supervisor
+no longer requires a separate helper provider instance or disjoint provider sessions.
+Registration still verifies the native child, its root ownership and completed bootstrap.
 
 The default maximum is five helpers per root. Project settings accept an integer
 from zero to twenty. Zero disables new recruitment, and lowering the limit does

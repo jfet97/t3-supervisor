@@ -253,7 +253,7 @@ build a parser of English prompt or reply text.
 CI owns the complete main, harness and browser suites, the daily published-T3 canary and
 the version PR gate ([CI policy](ci.md)); extended runs and provider trials follow
 [where tests run](#where-tests-run). While editing, run focused files in Docker, for
-example `./dev pnpm test test/config.test.ts` or `./dev e2e test/e2e/chat-stop-enable.test.ts`.
+example `./dev pnpm test test/config.characterization.test.ts` or `./dev e2e test/e2e/chat-stop-enable.test.ts`.
 
 ## Increments
 
