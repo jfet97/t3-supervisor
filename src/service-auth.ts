@@ -4,6 +4,7 @@ import { open, type FileHandle } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Cause, Clock, Context, Data, Effect, FileSystem, Layer, Option, type PlatformError, Predicate, PubSub, Redacted, Schema, Scope, Stream } from "effect";
 import type { SqlClient } from "effect/sql";
+import { isSqlError } from "effect/sql/SqlError";
 import { AccessDb, accessDbLayer, DatabaseFormats, openAccessUpgradeDatabase, readFormat, readOnlyAccessDatabase, readOnlyDatabase, untracedSql, type UpgradeDatabase } from "./db.js";
 import { logEvent } from "./logging.js";
 
@@ -367,15 +368,20 @@ const fileHeader = (path: string): Effect.Effect<Uint8Array, FileFailure> => Eff
 // the journal a database header records: bytes 18 and 19 are 1 for a rollback journal, 2 for a write-ahead log
 const rollbackJournalHeader = (header: Uint8Array): boolean => header.length >= 100 && header[18] === 1 && header[19] === 1;
 
+// what SQLite answers a read-only connection that meets a hot rollback journal: only a connection that can write may roll it back
+const SQLITE_READONLY_ROLLBACK = 776;
+const hotJournal = (error: unknown): boolean =>
+  isSqlError(error) && Predicate.hasProperty(error.reason.cause, "errcode") && error.reason.cause.errcode === SQLITE_READONLY_ROLLBACK;
+
 /*
  * the admission of an existing access database before any connection that can write it (the upgrade's preflight, the service
  * and the forge), each client behind the identity checks. Every release wrote it as a rollback-journal file: one whose header
  * records a write-ahead log has its format read read only, through the log, so a newer one is reported as newer, and is
- * refused otherwise. In a rollback-journal file a write a crash interrupted leaves a hot journal no read-only connection can
- * roll back: only at a format of this Supervisor does the access open complete SQLite's own crash recovery first (the write is
- * rolled back and the journal removed; there is no log to checkpoint). The format and, at a format of this Supervisor, the
- * exact validation are then read on one read-only connection, so a file that is newer or fails validation is never opened for
- * writing.
+ * refused otherwise. A rollback-journal file has its format and, at a format of this Supervisor, the exact validation read on
+ * one locking read-only connection, so a file that is newer or fails validation is never opened for writing, whatever lies
+ * beside it. Only when SQLite itself answers that a hot journal must be rolled back (a write a crash interrupted), and the
+ * file's own header records a format of this Supervisor, does one connection that can write complete that recovery (the write
+ * is rolled back and the journal removed; there is no log to checkpoint) before the read-only admission runs once more.
  */
 const admitAccessDatabase = (fs: FileSystem.FileSystem, path: string): Effect.Effect<number, ServiceAuthUnavailable> =>
   Effect.gen(function* () {
@@ -387,16 +393,21 @@ const admitAccessDatabase = (fs: FileSystem.FileSystem, path: string): Effect.Ef
       const format = yield* formatThrough(readOnlyDatabase(dirname(path), DATABASE_NAME));
       return format > DatabaseFormats.access ? format : yield* unavailable();
     }
-    if ((yield* fs.exists(`${path}-journal`).pipe(Effect.mapError(unavailable))) &&
-      (yield* formatThrough(readOnlyDatabase(dirname(path), DATABASE_NAME))) <= DatabaseFormats.access)
-      yield* Effect.scoped(openPrivateClient(fs, path, openAccessUpgradeDatabase(path),
-        (db) => readFormat(db).pipe(Effect.asVoid, Effect.mapError(unavailable))));
-    return yield* Effect.scoped(Effect.gen(function* () {
+    // the hot journal's error is kept as SQLite reported it, so that only it leads to the recovery
+    const readOnlyAdmission = Effect.scoped(Effect.gen(function* () {
       const { sql } = yield* openPrivateClient(fs, path, Effect.map(readOnlyAccessDatabase(path), (client) => ({ sql: client })), () => Effect.void);
-      const format = yield* readFormat(sql).pipe(Effect.mapError(unavailable));
+      const format = yield* readFormat(sql);
       if (format <= DatabaseFormats.access) yield* validateDatabase(sql);
       return format;
     }));
+    return yield* readOnlyAdmission.pipe(Effect.catchIf(hotJournal, () => Effect.gen(function* () {
+      // the format the file's own header records, read immutable: a newer file is reported as it is, never recovered here
+      const format = yield* formatThrough(readOnlyDatabase(dirname(path), DATABASE_NAME));
+      if (format > DatabaseFormats.access) return format;
+      yield* Effect.scoped(openPrivateClient(fs, path, openAccessUpgradeDatabase(path),
+        (db) => readFormat(db).pipe(Effect.asVoid, Effect.mapError(unavailable))));
+      return yield* readOnlyAdmission;
+    })));
   }).pipe(Effect.mapError(() => new ServiceAuthUnavailable({ part: "database" })));
 
 // the service's and the forge's access client: admitted read only at the current format, then opened and validated again

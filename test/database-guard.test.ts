@@ -9,9 +9,12 @@ import { describe, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import { upgradeDataDirectory } from "../src/database-upgrade.js";
-import { accessDbLayer, catalogDbLayer, DatabaseOpenError, guidanceDbLayer, openUpgradeDatabase, policyDbLayer, readFormat } from "../src/db.js";
+import {
+  accessDbLayer, catalogDbLayer, DatabaseOpenError, DatabaseWorker, type DatabaseWorkerEntry, guidanceDbLayer, openAccessUpgradeDatabase, openUpgradeDatabase,
+  policyDbLayer, readFormat,
+} from "../src/db.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
-import { sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
+import { decodeJson, sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
 
 /*
  * the format guard of every store open (src/db.ts): only a file at its current format opens. A missing file is never created,
@@ -83,6 +86,16 @@ const orphanedLog = (path: string, statements: string) => {
 };
 const inLog = (statements: string) => `PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${statements}`;
 const newerInLog = (tables: string) => inLog(`${tables} PRAGMA user_version=2;`);
+
+// every database worker logs the connections it opens, so a test sees whether one that can write opened `path`
+const loggingWorker = (log: string): DatabaseWorkerEntry => ({
+  url: new URL("./support/db-worker-open-log.ts", import.meta.url), execArgv: ["--import", import.meta.resolve("tsx")], workerData: { log },
+});
+const OpenedConnection = Schema.Struct({ filename: Schema.String, readonly: Schema.Boolean });
+const writableOpens = (log: string, path: string) => existsSync(log)
+  ? readFileSync(log, "utf8").split("\n").filter((line) => line.length > 0).map((line) => decodeJson(OpenedConnection, line))
+    .filter((opened) => !opened.readonly && opened.filename === path)
+  : [];
 
 // the file and its log, byte for byte
 const fileAndLog = (path: string) => ({ main: sha256(path), log: sha256(`${path}-wal`), logBytes: statSync(`${path}-wal`).size });
@@ -211,6 +224,31 @@ describe("database format guard", () => {
     assert.deepEqual(fileAndLog(path), before);
     assert.equal(existsSync(join(directory, "backups")), false);
     checkpointedByWritableClose(path, before, 0);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
+  it.live("an invalid access database beside a journal that is not hot is refused read only: no connection that can write opens it", () => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* temporaryDirectory;
+    const log = join(yield* temporaryDirectory, "opens.jsonl");
+    yield* fs.makeDirectory(join(directory, "access"), { mode: 0o700 });
+    const path = join(directory, "access", "login.sqlite3");
+    // a rollback-journal file at format 0 with a table no release creates, and an empty journal no crash left
+    raw(path, `${legacyAccess} CREATE TABLE extra(id TEXT);`);
+    yield* fs.chmod(path, 0o600);
+    yield* fs.writeFile(`${path}-journal`, new Uint8Array(0));
+    const before = sha256(path);
+    const logged = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, DatabaseWorker, loggingWorker(log));
+    const failure = yield* logged(Effect.flip(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] })));
+    assert.deepEqual([failure.file, failure.reason], ["access/login.sqlite3", "access_invalid"]);
+    const forged = yield* logged(Effect.flip(forgeDashboardToken(directory)));
+    assert.equal(forged.reason, "login_grant_state");
+    assert.deepEqual(writableOpens(log, path), []);
+    assert.equal(sha256(path), before);
+    assert.ok(existsSync(`${path}-journal`), "the journal is left as it was");
+    assert.equal(existsSync(join(directory, "backups")), false);
+    // the negative control: the log records a connection that can write when one opens the file
+    yield* logged(Effect.scoped(openAccessUpgradeDatabase(path)));
+    assert.equal(writableOpens(log, path).length, 1);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
   it.live("an access database that a crash left with an interrupted write is rolled back by SQLite before its read-only validation, then upgraded", () => Effect.gen(function* () {
