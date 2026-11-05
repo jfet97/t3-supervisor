@@ -1,5 +1,38 @@
 # T3 Supervisor
 
+## 0.0.28
+
+### Patch Changes
+
+- 1600ee0: Upgrade Supervisor's databases only when the service starts. Each database now records its format, and the service brings every database to the installed version's format as it starts, before it serves the dashboard or contacts T3. Before it changes an existing database, it copies it into a new private backup set under `backups/` in the state directory and verifies the copy; a start whose databases are already current makes no backup. If a backup or an upgrade step fails, the service does not start and restores nothing by itself: correct the cause and start it again, and it continues with the remaining databases. Stop the running service before starting a new version; downgrades are not supported.
+
+  `t3-supervisor auth forge` never upgrades a database: after installing a new version, start the service once before forging a sign-in token. The one-off conversation cut-over script for older task records is removed.
+
+- 0d7fe49: Installing the npm package with a fresh `npm install` now starts Supervisor. Every Effect
+  package it uses is now an exact dependency, including `@effect/platform-node-shared`, which
+  it reaches only through `@effect/platform-node`, so npm can no longer pick newer Effect
+  releases that do not work together. The published 0.0.27 package stays as it is: a fresh
+  npm install of it is known not to start. It stops with a `SyntaxError` before Supervisor
+  listens or creates any state. The 0.0.27 container image is not affected.
+- 9b820d3: Stop, Enable and Start now save the excluded-chat policy together with their own records, in
+  one transaction, so a failure can no longer leave a chat excluded while its Start still
+  waits, or the reverse. The policy moves from `thread-settings.sqlite3` into
+  `guidance.sqlite3`: the first start after the update copies the old file into its verified
+  backup set, imports the policy unchanged and then removes the file. If the old file comes
+  back with a different policy, for example because an older version ran on the upgraded
+  state, the service refuses to start instead of choosing one.
+- 5c62ef0: Supervisor now checks the stored fields that decide supervision every time it reads them: a
+  Stop's route, caller and time, the Stop notice sent to the chat, a resume, a Start and its
+  operation, the activation baselines, the supervision controls' generations and switches, a
+  project's folder detection, and the No Project mode with its generation. A damaged
+  record now fails with a clear error, which the rollout scan also reports, instead of steering a
+  decision; every other field of a record is kept exactly as stored. The rollout scan reports a
+  database at the current format that lacks part of its schema as a start the service will
+  refuse, not as tables an upgrade would create. New installations no longer create the tables
+  of the retired reminder rules; existing installations keep them and their data. The
+  installation guide no longer describes returning to an earlier version, which is not
+  supported.
+
 ## 0.0.27
 
 ### Patch Changes
