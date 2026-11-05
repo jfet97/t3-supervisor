@@ -232,6 +232,8 @@ describe("declared schema and recognized layouts", () => {
     assert.deepEqual(yield* guidance(guidanceCore.replace("'$.noticeId'", "'$.notice Id'")), { kind: "unknown", object: "activity_notice" });
     // and the space between two words separates two tokens: a column named documentTEXT without a type is another column
     assert.deepEqual(yield* catalog(catalogTables.replace("document TEXT NOT NULL, deleted", "documentTEXT NOT NULL, deleted")), { kind: "unknown", object: "projects" });
+    // a Unicode separator belongs to the identifier in SQLite, even though JavaScript treats it as whitespace
+    assert.deepEqual(yield* catalog(catalogTables.replace("document TEXT NOT NULL, deleted", "document\u2000TEXT NOT NULL, deleted")), { kind: "unknown", object: "projects" });
     const members = (condition: string) => `${guidanceCore}
       CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,
         epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id));

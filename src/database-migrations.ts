@@ -335,14 +335,14 @@ export type SchemaSignature = ReadonlyMap<string, string>;
 const Declaration = Schema.Struct({ type: Schema.String, name: Schema.String, sql: Schema.String });
 const decodeDeclarations = Schema.decodeUnknownEffect(Schema.Array(Declaration));
 
-const wordCharacter = (char: string): boolean => /[\w$]/u.test(char);
+const wordCharacter = (char: string): boolean => char >= "\u0080" || /[A-Za-z0-9_$]/u.test(char);
 
 /*
  * a stored declaration with its layout normalized, so the same statement laid out differently still matches: whitespace between
  * tokens is dropped, except one space between two words, which would otherwise read as one (`document TEXT` is no
  * `documentTEXT`). Quoted text keeps every byte, since whitespace there is data: a 'string literal' of a check, default or
  * partial index, or a "quoted", `quoted` or [quoted] identifier; a doubled quote character stays inside its quoted text, as
- * SQLite reads it
+ * SQLite reads it. Only SQLite's five whitespace characters count as layout
  */
 const declarationText = (sql: string): string => {
   let text = "";
@@ -357,7 +357,7 @@ const declarationText = (sql: string): string => {
       else close = null;
       continue;
     }
-    if (/\s/u.test(char)) {
+    if (/[ \t\n\f\r]/u.test(char)) {
       separated = true;
       continue;
     }
