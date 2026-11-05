@@ -352,3 +352,46 @@ it.effect("CT-PSS-09: a stored Stop, notice, resume, Start, Start operation, bas
   assert.ok(refused instanceof Error);
   assert.match(refused.message, /supervision_row_invalid/);
 })), {timeout: 10_000});
+
+it.effect("CT-PSS-10: a damaged control generation or flag, folder detection or activation version fails typed, enables nothing and is never replaced", () => live(Effect.gen(function* () {
+  const directory = yield* temporaryDataDirectory("pss-service-10-");
+  const {sql, supervisors: store} = yield* reopenGuidanceStores(directory);
+  const put = (key: string, value: unknown) => sql`INSERT INTO meta VALUES(${key},${JSON.stringify(value)}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+  const stored = (key: string) => Effect.map(sql`SELECT value FROM meta WHERE key=${key}`, ([row]) => row?.value);
+  const invalid = <A, E>(effect: Effect.Effect<A, E>) => failsWith(effect, /supervision_row_invalid/);
+
+  // a control written without some fields reads them as their defaults
+  yield* put("supervisor_control:null", {enabled: true, nativeExtra: 1});
+  assert.deepEqual(yield* store.control(null), {projectId: null, generation: 0, enabled: true, manual: true, globallyEnabled: true, effectiveEnabled: true,
+    detectionStatus: "not_checked", detectionError: null});
+  // a damaged generation fails typed, instead of reading as 0 for a pending Start recorded at 0 to pass; so does a damaged flag
+  yield* put("supervisor_control:null", {generation: "damaged", enabled: true, manual: true});
+  yield* invalid(store.control(null));
+  yield* put("supervisor_control:null", {generation: 1, enabled: "true", manual: true});
+  yield* invalid(store.control(null));
+  yield* put("supervisor_global_definitions_control", {generation: 1, enabled: "true", manual: true});
+  yield* invalid(store.useGlobalDefinitions());
+  yield* invalid(store.globalDefinitionsControl());
+
+  // master on and a project left to folder detection without a baseline: damaged detection enables nothing
+  yield* put("supervisor_control:null", {generation: 1, enabled: true, manual: true});
+  yield* put('supervisor_control:"project-a"', {generation: 0, enabled: false, manual: false});
+  for (const detection of [{status: "broken", enabled: true}, {status: "missing", enabled: true}, {status: "present", enabled: "true"}]) {
+    yield* put('supervisor_control_auto:"project-a"', detection);
+    yield* invalid(store.enabled("project-a"));
+    yield* invalid(store.control("project-a"));
+  }
+  yield* put('supervisor_control_auto:"project-a"', {status: "missing", enabled: false, checkedAt: 1});
+  assert.equal(yield* store.enabled("project-a"), false);
+
+  // an activation baseline with a version other than 2 is damage: it fails typed and a new boundary does not replace it
+  const damaged = {version: "2", snapshotSequence: 7, threads: [{id: "main-a", latestRunId: "run-a"}]};
+  yield* put("supervisor_activation_baseline", damaged);
+  yield* invalid(store.baseline());
+  yield* invalid(store.baseline(pssBoundary));
+  assert.equal(yield* stored("supervisor_activation_baseline"), JSON.stringify(damaged));
+  // one without a version is still ignored and replaced, as its reader always did
+  yield* put("supervisor_activation_baseline", {snapshotSequence: 7, threads: []});
+  assert.equal(yield* store.baseline(), null);
+  assert.deepEqual(yield* store.baseline(pssBoundary), {...pssBoundary, version: 2});
+})), {timeout: 10_000});

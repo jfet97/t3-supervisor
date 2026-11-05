@@ -27,8 +27,8 @@ const policyTable = "CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1),do
 
 /*
  * one row of each failing kind, written with the raw driver into a data directory the startup upgrade created; a JSON document
- * whose deciding field breaks (a control's baseline, the No Project mode, a version 2 activation baseline, a Stop's time) fails
- * the same check its reader applies
+ * whose deciding field breaks (a control's baseline, a folder detection, the global definitions flag, the No Project mode, an
+ * activation baseline's version, a Stop's time) fails the same check its reader applies
  */
 const failingRows = `
   UPDATE meta SET value='{"${marker}":1}' WHERE key='settings';
@@ -39,11 +39,11 @@ const failingRows = `
   INSERT INTO meta VALUES('supervisor_start_operation:["main-a","op-bad"]','not json ${marker}');
   INSERT INTO meta VALUES('supervisor_start:main-bad','{"${marker}":1}');
   INSERT INTO meta VALUES('supervisor_control:"project-bad"','{"generation":1,"baseline":{"snapshotSequence":"7","threads":[]}}');
-  INSERT INTO meta VALUES('supervisor_control_auto:"project-bad"','not json');
+  INSERT INTO meta VALUES('supervisor_control_auto:"project-bad"','{"status":"broken","enabled":true}');
   INSERT INTO meta VALUES('supervisor_no_project','{"generation":1,"mode":"sometimes"}');
-  INSERT INTO meta VALUES('supervisor_global_definitions_control','not json');
+  INSERT INTO meta VALUES('supervisor_global_definitions_control','{"generation":1,"enabled":"true","manual":true}');
   INSERT INTO meta VALUES('supervisor_global_definitions_event','not json');
-  INSERT INTO meta VALUES('supervisor_activation_baseline','{"version":2,"snapshotSequence":7,"threads":"all"}');
+  INSERT INTO meta VALUES('supervisor_activation_baseline','{"version":"2","snapshotSequence":7,"threads":[]}');
   INSERT INTO meta VALUES('supervisor_unbound_stop:main-bad','{"route":"ui","callerThreadId":null,"userMessageId":null,"stoppedAt":"later"}');
   INSERT INTO meta VALUES('native_git_probe_sessions','[{"threadId":"${marker}"}]');
   INSERT INTO supervisor_owned_threads VALUES(NULL);

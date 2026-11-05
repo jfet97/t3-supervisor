@@ -198,8 +198,9 @@ export interface ProjectSupervisorStoreShape {
 
 /*
  * the stored fields that decide supervision: a Stop's route, caller and time, its notice's native identities and state, a resume,
- * a Start's intent and its operation, the activation baselines, and the No Project mode with its generation. Every reader of a
- * document that carries them checks them, and one that breaks them fails typed instead of steering a decision
+ * a Start's intent and its operation, the activation baselines, the controls' generations and flags, a project's folder
+ * detection, and the No Project mode with its generation. Every reader of a document that carries them checks them, and one
+ * that breaks them fails typed instead of steering a decision
  */
 const Generation = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const StoredStop = Schema.Struct({route: Schema.Literals(["direct", "relay", "chat", "ui"]), callerThreadId: Schema.NullOr(Schema.String),
@@ -230,10 +231,22 @@ const isStoredStart = Schema.is(Schema.Struct({threadId: Schema.String, projectI
 const isStoredStartOperation = Schema.is(Schema.Struct({threadId: Schema.String, operationId: Schema.String, requestHash: Schema.String,
   status: Schema.Literals(["pending", "active", "rejected", "denied", "unavailable"]), reason: Schema.String, preparing: Schema.optionalKey(Schema.Boolean)}));
 const isStoredStop = Schema.is(StoredStop);
-// a version 2 activation baseline must be whole; an earlier, unversioned one is ignored, as its reader always did
-const isStoredActivationBaseline = (value: unknown): boolean => isStoredObject(value) && (value.version !== 2 || isVersionedBaseline(value));
-// a project's or the global control: its baseline decides activation, while its other fields keep their tolerant reading
-const isStoredControl = Schema.is(Schema.Struct({baseline: Schema.optionalKey(StoredBaseline)}));
+/*
+ * a version 2 activation baseline must be whole; one without a version is ignored, as its reader always did, and any other
+ * version is damage, never an absent baseline that the next cycle would replace
+ */
+const isStoredActivationBaseline = (value: unknown): boolean => isStoredObject(value) && (!("version" in value) || isVersionedBaseline(value));
+/*
+ * a project's or the master control, and the global definitions control: the generation fences Starts and saves, and the flags
+ * decide supervision and its inputs; a field an earlier version did not write reads as its default
+ */
+const controlFields = {generation: Schema.optionalKey(Generation), enabled: Schema.optionalKey(Schema.Boolean), manual: Schema.optionalKey(Schema.Boolean)};
+const isStoredControl = Schema.is(Schema.Struct({...controlFields, baseline: Schema.optionalKey(StoredBaseline)}));
+const isStoredGlobalDefinitionsControl = Schema.is(Schema.Struct(controlFields));
+// a project's folder detection: a present folder enables supervision and a missing one disables it, never the reverse
+const isStoredAutoControl = Schema.is(Schema.Union([
+  Schema.Struct({status: Schema.Literal("present"), enabled: Schema.Literal(true), checkedAt: Schema.optionalKey(Schema.Finite)}),
+  Schema.Struct({status: Schema.Literal("missing"), enabled: Schema.Literal(false), checkedAt: Schema.optionalKey(Schema.Finite)})]));
 const isStoredNoProject = Schema.is(Schema.Struct({generation: Generation, mode: NoProjectMode, baseline: Schema.optionalKey(StoredBaseline)}));
 const isStoredSettings = Schema.is(Schema.Struct({generation: Schema.Finite}));
 
@@ -342,7 +355,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   const controlRecordOf = Effect.fnUntraced(function* (projectId: string | null) {
     const value = yield* metaDocument<{generation?: number; enabled?: boolean; manual?: boolean; baseline?: SupervisorBaseline}>(controlKey(projectId), isStoredControl);
     if (!value) return projectId === null ? {generation: 0, enabled: true, manual: true} : {generation: 0, enabled: false, manual: false};
-    return {generation: Number.isSafeInteger(value.generation) && value.generation! >= 0 ? value.generation! : 0,
+    return {generation: value.generation ?? 0,
       enabled: value.enabled === true, manual: projectId === null || value.manual !== false, ...(value.baseline ? {baseline: value.baseline} : {})} as {generation: number; enabled: boolean; manual: boolean; baseline?: SupervisorBaseline};
   });
   const storedBaseline = Effect.map(metaDocument<SupervisorBaseline>("supervisor_activation_baseline", isStoredActivationBaseline), (baseline) => baseline?.version === 2 ? baseline : null);
@@ -353,7 +366,7 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   });
   const writeBaseline = (value: SupervisorBaseline) => putMeta("supervisor_activation_baseline", JSON.stringify({...value, version: 2}));
   const presenceNeedsBoundary = (projectId: string) => metaExists(presenceUnavailableKey(projectId));
-  const autoRecordOf = (projectId: string) => metaDocument<{status?: unknown; enabled?: unknown}>(autoKey(projectId));
+  const autoRecordOf = (projectId: string) => metaDocument<{status?: unknown; enabled?: unknown}>(autoKey(projectId), isStoredAutoControl);
 
   const autoControlInitializedOf = Effect.fnUntraced(function* (projectId: string) {
     const auto = yield* autoRecordOf(projectId);
@@ -388,10 +401,9 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
   });
 
   const globalDefinitionsRecordOf = Effect.gen(function* () {
-    const value = yield* metaDocument<{generation?: number; enabled?: boolean; manual?: boolean}>("supervisor_global_definitions_control");
+    const value = yield* metaDocument<{generation?: number; enabled?: boolean; manual?: boolean}>("supervisor_global_definitions_control", isStoredGlobalDefinitionsControl);
     if (!value) return {generation: 0, enabled: false, manual: false};
-    return {generation: Number.isSafeInteger(value.generation) && value.generation! >= 0 ? value.generation! : 0,
-      enabled: value.enabled === true, manual: value.manual === true};
+    return {generation: value.generation ?? 0, enabled: value.enabled === true, manual: value.manual === true};
   });
   const globalDefinitionsEventOf = metaDocument<{generation?: number; enabled?: boolean; changedAt?: number; globalFingerprint?: string | null}>("supervisor_global_definitions_event");
   const globalDefinitionsControlOf = Effect.fnUntraced(function* (homePath: string) {
@@ -849,9 +861,9 @@ const metaDocumentKinds: ReadonlyArray<{readonly pattern: string; readonly kind:
   {pattern: "supervisor_start_operation:%", kind: "start operation", guard: isStoredStartOperation, read: "open"},
   {pattern: "supervisor_start:%", kind: "start", guard: isStoredStart, read: "cycle"},
   {pattern: "supervisor_control:%", kind: "control", guard: isStoredControl, read: "cycle"},
-  {pattern: "supervisor_control_auto:%", kind: "auto control", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_control_auto:%", kind: "auto control", guard: isStoredAutoControl, read: "cycle"},
   {pattern: "supervisor_no_project", kind: "no project control", guard: isStoredNoProject, read: "cycle"},
-  {pattern: "supervisor_global_definitions_control", kind: "global definitions control", guard: isStoredObject, read: "cycle"},
+  {pattern: "supervisor_global_definitions_control", kind: "global definitions control", guard: isStoredGlobalDefinitionsControl, read: "cycle"},
   {pattern: "supervisor_global_definitions_event", kind: "global definitions event", guard: isStoredObject, read: "cycle"},
   {pattern: "supervisor_activation_baseline", kind: "activation baseline", guard: isStoredActivationBaseline, read: "cycle"},
   {pattern: "supervisor_unbound_stop:%", kind: "unbound stop", guard: isStoredStop, read: "call"},
