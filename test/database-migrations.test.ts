@@ -5,17 +5,16 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Effect, Exit, FileSystem } from "effect";
 import {
-  catalogContract, catalogLegacy, catalogMigrations, guidanceContract, guidanceLegacy, guidanceMigrations, type MigrationStep, missingSchema,
-  policyMigrations, recognizeLegacy,
+  catalogLegacy, catalogMigrations, guidanceLegacy, guidanceMigrations, type MigrationStep, policyMigrations, recognizeLegacy, schemaDifferences,
+  type SchemaSignature,
 } from "../src/database-migrations.js";
-import { DatabaseUpgradeError, upgradeDataDirectory } from "../src/database-upgrade.js";
+import { DatabaseUpgradeError, referenceSignature, upgradeDataDirectory } from "../src/database-upgrade.js";
 import { type DatabaseKind, openUpgradeDatabase, readOnlyDatabase } from "../src/db.js";
-import { initializeDataDirectory } from "./support/data-directory.js";
 
 /*
- * the format steps and the live schema contracts (src/database-migrations.ts) on real files: what the stores' constructors used to
- * do at every open now happens once, in the step's transaction. The format 0 inputs are written literally (test input), never
- * with today's statements.
+ * the format steps and the declared schema (src/database-migrations.ts) on real files: what the stores' constructors used to do
+ * at every open now happens once, in the step's transaction, and a file is recognized only with the declarations its format's
+ * steps give an empty database. The format 0 inputs are written literally (test input), never with today's statements.
  */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-migrations-" }));
@@ -47,9 +46,23 @@ const applyStep = (directory: string, kind: DatabaseKind, step: MigrationStep | 
   yield* sql.withTransaction(step.apply(sql, { fresh, excludedThreadIds: ["seed"] }));
 }));
 
+const recognition = (directory: string, file: "guidance.sqlite3" | "catalog.sqlite3", reference: SchemaSignature) =>
+  Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, file),
+    (sql) => recognizeLegacy(sql, reference, file === "catalog.sqlite3" ? catalogLegacy : guidanceLegacy)));
+
+const differences = (directory: string, file: string, reference: SchemaSignature) =>
+  Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, file), (sql) => schemaDifferences(sql, reference)));
+
+const refusal = (exit: Exit.Exit<unknown, DatabaseUpgradeError>) => {
+  assert.ok(Exit.isFailure(exit));
+  const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail");
+  assert.ok(failure?._tag === "Fail" && failure.error instanceof DatabaseUpgradeError);
+  return [failure.error.file, failure.error.reason];
+};
+
 /*
- * the guidance store's own tables as the first releases created them, in the file's first transaction (episodes and notices
- * without the columns later releases added)
+ * the guidance store's own tables as every release declared them, in the file's first transaction (episodes and notices with
+ * the columns that transaction added to their first declaration)
  */
 const guidanceCore = `
   CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -57,32 +70,22 @@ const guidanceCore = `
   CREATE TABLE mutes(rule_id TEXT NOT NULL,scope_id TEXT NOT NULL,PRIMARY KEY(rule_id,scope_id));
   CREATE TABLE classifications(project_id TEXT PRIMARY KEY,classification TEXT NOT NULL);
   CREATE TABLE observations(thread_id TEXT PRIMARY KEY,hash TEXT NOT NULL,observed_at INTEGER NOT NULL);
-  CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id));
-  CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,state TEXT NOT NULL,
-    text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,dispatch_started INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,
+    notified INTEGER NOT NULL DEFAULT 0, object_id TEXT,PRIMARY KEY(thread_id,rule_id));
+  CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,
+    epoch INTEGER NOT NULL,state TEXT NOT NULL,text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,
+    dispatch_started INTEGER NOT NULL DEFAULT 0, rule_generation INTEGER NOT NULL DEFAULT -1, settings_generation INTEGER NOT NULL DEFAULT -1);
   CREATE TABLE activity(id TEXT PRIMARY KEY,document TEXT NOT NULL,created_at INTEGER NOT NULL);
   CREATE TABLE budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL);
   CREATE INDEX activity_notice ON activity(json_extract(document,'$.noticeId'),created_at);
 `;
 
-// a guidance file from before the later columns were added (tables as their first releases created them)
-const olderGuidance = (path: string) => exec(path, `
+// a guidance file whose run stopped after the guidance store's own transaction, with stored settings, scope and a notice
+const firstTransactionGuidance = (path: string) => exec(path, `
   PRAGMA journal_mode=WAL;
   ${guidanceCore}
   INSERT INTO meta VALUES('settings','{"generation":2,"evidenceHours":24}'),('supervisor_scope_version','main-v1');
-  INSERT INTO notices VALUES('notice-1','thread','rule','run',0,'uncertain','text',NULL,1,1);
-  CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,
-    PRIMARY KEY(project_id,workspace_root));
-  INSERT INTO supervisor_definition_user_saves VALUES('project','/work','signature',1);
-  CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);
-  INSERT INTO supervisor_monitor_binding_clock VALUES('supervisor',5);
-  CREATE TABLE supervisor_monitor_threads(project_id TEXT NOT NULL,thread_id TEXT NOT NULL,source_ordinal INTEGER NOT NULL,saturated INTEGER NOT NULL DEFAULT 0,
-    saturation_at INTEGER,last_acknowledged_at INTEGER,PRIMARY KEY(project_id, thread_id));
-  INSERT INTO supervisor_monitor_threads(project_id,thread_id,source_ordinal) VALUES('project','thread',7);
-  CREATE TABLE supervisor_monitor_items(project_id TEXT NOT NULL,thread_id TEXT NOT NULL,item_id TEXT NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL,
-    ordinal INTEGER NOT NULL,detected_at INTEGER NOT NULL,version TEXT NOT NULL,priority TEXT,eligible INTEGER NOT NULL,reviewed_version TEXT,
-    updated_at INTEGER NOT NULL,PRIMARY KEY(project_id, thread_id, item_id));
-  INSERT INTO supervisor_monitor_items VALUES('project','thread','item','message','open',1,2,'v1',NULL,1,NULL,3);
+  INSERT INTO notices VALUES('notice-1','thread','rule','run',0,'uncertain','text',NULL,1,1,3,4);
 `);
 
 const catalogTables = `
@@ -99,29 +102,23 @@ const catalogTables = `
 const canonicalShell = '{"id":"thread-kept","title":"Kept","projectId":null,"lineage":{"parentThreadId":null,"relationshipToParent":null}}';
 
 describe("format steps", () => {
-  it.live("guidance format 1 adds every later column once, starting the activation ordinal at the source ordinal, and a second application changes nothing", () => Effect.gen(function* () {
+  it.live("guidance format 1 completes a file its guidance store alone wrote with every later store's declared table, keeping every row; a second application changes nothing", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const path = join(directory, "guidance.sqlite3");
-    olderGuidance(path);
-    const recognized = yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, "guidance.sqlite3"), (sql) => recognizeLegacy(sql, guidanceContract, guidanceLegacy)));
-    assert.deepEqual(recognized, { kind: "recognized" });
+    firstTransactionGuidance(path);
+    const reference = yield* referenceSignature("guidance");
+    assert.deepEqual(yield* recognition(directory, "guidance.sqlite3", reference), { kind: "recognized" });
+    const rows = () => ({ meta: query(path, "SELECT key, value FROM meta ORDER BY key"), notices: query(path, "SELECT * FROM notices") });
+    const before = rows();
+    assert.ok((yield* differences(directory, "guidance.sqlite3", reference)).includes("table:supervisor_team_members"));
     yield* applyStep(directory, "guidance", guidanceMigrations[0]);
-    assert.deepEqual(query(path, "SELECT rule_generation, settings_generation FROM notices"), [{ rule_generation: -1, settings_generation: -1 }]);
-    assert.deepEqual(query(path, "SELECT expected_revision FROM supervisor_definition_user_saves"), [{ expected_revision: "" }]);
-    assert.deepEqual(query(path, "SELECT review_misses FROM supervisor_monitor_binding_clock"), [{ review_misses: 0 }]);
-    assert.deepEqual(query(path, "SELECT source_ordinal, activation_ordinal, untracked_count FROM supervisor_monitor_threads"),
-      [{ source_ordinal: 7, activation_ordinal: 7, untracked_count: 0 }]);
-    assert.deepEqual(query(path, "SELECT read_item_id, active FROM supervisor_monitor_items"), [{ read_item_id: null, active: 1 }]);
-    assert.deepEqual(query(path, "SELECT object_id FROM episodes"), []);
-    // the stored settings and scope are kept; the file now has the whole live schema
-    assert.deepEqual(query(path, "SELECT key, value FROM meta ORDER BY key"), [
-      { key: "settings", value: '{"generation":2,"evidenceHours":24}' }, { key: "supervisor_scope_version", value: "main-v1" },
-    ]);
-    const missing = yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, "guidance.sqlite3"), (sql) => missingSchema(sql, guidanceContract)));
-    assert.deepEqual(missing, []);
-    const once = { schema: schemaText(path), monitor: query(path, "SELECT * FROM supervisor_monitor_threads") };
+    // the stored settings, scope and notice are kept as they were; the file now has the whole declared schema
+    assert.deepEqual(rows(), before);
+    assert.deepEqual(before.notices.map((notice) => [notice.rule_generation, notice.settings_generation]), [[3, 4]]);
+    assert.deepEqual(yield* differences(directory, "guidance.sqlite3", reference), []);
+    const once = schemaText(path);
     yield* applyStep(directory, "guidance", guidanceMigrations[0]);
-    assert.deepEqual({ schema: schemaText(path), monitor: query(path, "SELECT * FROM supervisor_monitor_threads") }, once);
+    assert.deepEqual(schemaText(path), once);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
   it.live("catalog format 1 rewrites stored shells through the whitelist once, leaving a whitelisted shell byte for byte", () => Effect.gen(function* () {
@@ -148,11 +145,7 @@ describe("format steps", () => {
     exec(join(directory, "thread-settings.sqlite3"), `PRAGMA journal_mode=WAL; CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL);
       INSERT INTO settings VALUES(1,'{"generation":4,"excludedThreadIds":[]}');`);
     const before = { schema: schemaText(path), rows: query(path, "SELECT * FROM threads ORDER BY id") };
-    const exit = yield* Effect.exit(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
-    assert.ok(Exit.isFailure(exit));
-    const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail");
-    assert.ok(failure?._tag === "Fail" && failure.error instanceof DatabaseUpgradeError);
-    assert.deepEqual([failure.error.file, failure.error.reason], ["catalog.sqlite3", "migration_failed"]);
+    assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }))), ["catalog.sqlite3", "migration_failed"]);
     assert.deepEqual({ schema: schemaText(path), rows: query(path, "SELECT * FROM threads ORDER BY id") }, before);
     assert.deepEqual(query(path, "PRAGMA user_version"), [{ user_version: 0 }]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
@@ -171,40 +164,47 @@ describe("format steps", () => {
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 });
 
-describe("live schema and recognized layouts", () => {
-  it.live("a current file missing part of its live schema is incomplete, and the upgrade refuses it", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    yield* initializeDataDirectory(directory);
-    exec(join(directory, "catalog.sqlite3"), "DROP INDEX threads_project; ALTER TABLE cursors DROP COLUMN sequence;");
-    const missing = yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, "catalog.sqlite3"), (sql) => missingSchema(sql, catalogContract)));
-    assert.deepEqual(missing, ["cursors.sequence", "index:threads_project"]);
-    const exit = yield* Effect.exit(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
-    assert.ok(Exit.isFailure(exit));
-    const failure = exit.cause.reasons.find((reason) => reason._tag === "Fail");
-    assert.ok(failure?._tag === "Fail" && failure.error instanceof DatabaseUpgradeError);
-    assert.deepEqual([failure.error.file, failure.error.reason], ["catalog.sqlite3", "incomplete_schema"]);
+describe("declared schema and recognized layouts", () => {
+  it.live("a current file without part of its declared schema, or declaring a table differently under the same names, is incomplete and refused", () => Effect.gen(function* () {
+    const reference = yield* referenceSignature("catalog");
+    const missing = yield* temporaryDirectory;
+    yield* upgradeDataDirectory({ dataDirectory: missing, excludedThreadIds: [] });
+    exec(join(missing, "catalog.sqlite3"), "DROP INDEX threads_project; ALTER TABLE cursors DROP COLUMN sequence;");
+    assert.deepEqual(yield* differences(missing, "catalog.sqlite3", reference), ["index:threads_project", "table:cursors"]);
+    assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: missing, excludedThreadIds: [] }))), ["catalog.sqlite3", "incomplete_schema"]);
+
+    // the same table and column names without the primary key
+    const redeclared = yield* temporaryDirectory;
+    yield* upgradeDataDirectory({ dataDirectory: redeclared, excludedThreadIds: [] });
+    exec(join(redeclared, "catalog.sqlite3"), "DROP TABLE thread_revisions; CREATE TABLE thread_revisions (thread_id TEXT, revision INTEGER NOT NULL);");
+    assert.deepEqual(yield* differences(redeclared, "catalog.sqlite3", reference), ["table:thread_revisions"]);
+    assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: redeclared, excludedThreadIds: [] }))), ["catalog.sqlite3", "incomplete_schema"]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
-  it.live("format 0 layouts: table-less is empty, a release's first transaction with later and historical tables is recognized, anything else is unknown", () => Effect.gen(function* () {
-    const recognition = (file: "guidance.sqlite3" | "catalog.sqlite3", statements: string) => Effect.gen(function* () {
+  it.live("format 0 layouts: table-less is empty, a release's declarations with its first transaction are recognized, anything else is unknown", () => Effect.gen(function* () {
+    const references = { guidance: yield* referenceSignature("guidance"), catalog: yield* referenceSignature("catalog") };
+    const recognized = (file: "guidance.sqlite3" | "catalog.sqlite3", statements: string) => Effect.gen(function* () {
       const directory = yield* temporaryDirectory;
       exec(join(directory, file), statements);
-      const contract = file === "catalog.sqlite3" ? catalogContract : guidanceContract;
-      const legacy = file === "catalog.sqlite3" ? catalogLegacy : guidanceLegacy;
-      return yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, file), (sql) => recognizeLegacy(sql, contract, legacy)));
+      return yield* recognition(directory, file, file === "catalog.sqlite3" ? references.catalog : references.guidance);
     });
-    const guidance = (statements: string) => recognition("guidance.sqlite3", statements);
-    const catalog = (statements: string) => recognition("catalog.sqlite3", statements);
+    const guidance = (statements: string) => recognized("guidance.sqlite3", statements);
+    const catalog = (statements: string) => recognized("catalog.sqlite3", statements);
     assert.deepEqual(yield* guidance(""), { kind: "empty" });
-    // a run that stopped after the guidance store's own transaction, then the same with a later and a historical table
+    // a run that stopped after the guidance store's own transaction, then the same with a later store's table
     assert.deepEqual(yield* guidance(guidanceCore), { kind: "recognized" });
-    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY);
-      CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);`), { kind: "recognized" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY);`), { kind: "recognized" });
     // part of that first transaction is missing: no release wrote such a file, so it is not repaired into one
     assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY);"),
       { kind: "unknown", object: "rules" });
     assert.deepEqual(yield* guidance(guidanceCore.replace(/CREATE INDEX activity_notice[^;]*;/u, "")), { kind: "unknown", object: "activity_notice" });
+    // an object or a declaration no release wrote: an unknown index or table, a prototype table, a missing or extra column
     assert.deepEqual(yield* guidance(`${guidanceCore} CREATE INDEX someone_elses ON meta(value);`), { kind: "unknown", object: "someone_elses" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);`),
+      { kind: "unknown", object: "supervisor_project_bindings" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);`),
+      { kind: "unknown", object: "supervisor_monitor_binding_clock" });
+    assert.deepEqual(yield* guidance(guidanceCore.replace(", object_id TEXT", "")), { kind: "unknown", object: "episodes" });
     assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL,extra TEXT);"), { kind: "unknown", object: "meta" });
     assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY);"), { kind: "unknown", object: "meta" });
     assert.deepEqual(yield* guidance("CREATE TABLE constructor(id TEXT);"), { kind: "unknown", object: "constructor" });
@@ -213,5 +213,9 @@ describe("live schema and recognized layouts", () => {
     assert.deepEqual(yield* catalog(catalogTables), { kind: "recognized" });
     assert.deepEqual(yield* catalog(catalogTables.replace(/CREATE TABLE shell_coverage[^;]*;/u, "")), { kind: "recognized" });
     assert.deepEqual(yield* catalog(catalogTables.replace(/CREATE TABLE thread_revisions[^;]*;/u, "")), { kind: "unknown", object: "thread_revisions" });
+    // the same names with another declaration: no primary key, no check constraint, an index on another column
+    assert.deepEqual(yield* catalog(catalogTables.replace("threads (id TEXT PRIMARY KEY,", "threads (id TEXT,")), { kind: "unknown", object: "threads" });
+    assert.deepEqual(yield* catalog(catalogTables.replace(" CHECK(stream IN ('active', 'archive'))", "")), { kind: "unknown", object: "cursors" });
+    assert.deepEqual(yield* catalog(catalogTables.replace("ON threads(project_id)", "ON threads(document)")), { kind: "unknown", object: "threads_project" });
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 });

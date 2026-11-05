@@ -24,6 +24,11 @@ export const StatementOperation = Schema.Literals(["execute", "executeRaw", "exe
 export type StatementOperation = typeof StatementOperation.Type;
 
 export const WorkerRequest = Schema.Union([
+  /*
+   * the stored format of `filename`, before the worker opens its own connection: PRAGMA user_version through a read-only
+   * connection that is closed again at once, so a file the main thread refuses is never opened by a connection that can write
+   */
+  Schema.Struct({id: Schema.Number, op: Schema.Literal("format"), filename: Schema.String, busyTimeoutMs: Schema.Number}),
   Schema.Struct({id: Schema.Number, op: Schema.Literal("open"), config: WorkerDatabaseConfig}),
   Schema.Struct({id: Schema.Number, op: StatementOperation, sql: Schema.String, params: Schema.Array(Schema.Unknown), safeIntegers: Schema.Boolean}),
   // an online backup of the open database into `destination`, through the connection's own SQLite backup API

@@ -6,13 +6,12 @@ import { DatabaseSync } from "node:sqlite";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Effect, Exit, FileSystem, Layer, Schema } from "effect";
-import { catalogContract, guidanceContract, policyContract, type SchemaContract } from "../src/database-migrations.js";
 import { DatabaseUpgradeError, type UpgradeReport, upgradeDataDirectory } from "../src/database-upgrade.js";
 import { guidanceDbLayer } from "../src/db.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { SupervisorIds } from "../src/ids.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
-import { fixtureShapes, materializeFixture, verifyFixtureIntegrity } from "./support/persistence-fixtures.js";
+import { expectedDumpSync, type FixtureDatabaseName, fixtureShapes, materializeFixture, verifyFixtureIntegrity } from "./support/persistence-fixtures.js";
 import { decodeJson, sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
 
 /*
@@ -85,18 +84,16 @@ const assertPreserved = (before: Rows, after: Rows, allowed: (table: string) => 
   }
 };
 
-// the live schema of a file against a contract: exactly its tables and columns for a fresh file
-const liveSchema = (path: string) => read(path, (db) => {
-  const objects = sqliteRows(db, Schema.Struct({ type: Schema.String, name: Schema.String }), "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'");
-  const tables: Record<string, Array<string>> = {};
-  for (const { name } of objects.filter((object) => object.type === "table"))
-    tables[name] = sqliteRows(db, Named, `PRAGMA table_info("${name}")`).map((column) => column.name).sort();
-  return { tables, indexes: objects.filter((object) => object.type === "index").map((object) => object.name).sort() };
-});
-const sortedContract = (contract: SchemaContract) => ({
-  tables: Object.fromEntries(Object.entries(contract.tables).map(([table, columns]) => [table, [...columns].sort()])),
-  indexes: [...contract.indexes].sort(),
-});
+// a file's user objects with their stored declarations, whitespace removed, keyed as type:name
+const Declared = Schema.Struct({ type: Schema.String, name: Schema.String, sql: Schema.String });
+const declarations = (path: string) => read(path, (db) => Object.fromEntries(
+  sqliteRows(db, Declared, "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name")
+    .map((row) => [`${row.type}:${row.name}`, row.sql.replace(/\s+/gu, "")])));
+
+// the same for the frozen Supervisor 0.0.27 layout (test/fixtures/persistence), an independent record of the declarations
+const frozenDeclarations = (name: FixtureDatabaseName) => Object.fromEntries(expectedDumpSync("format0-current-unversioned", name).sqliteMaster
+  .filter((row) => !row.name.startsWith("sqlite_"))
+  .map((row) => [`${row.type}:${row.name}`, (row.sql ?? "").replace(/\s+/gu, "")]));
 
 // format 0 files as Supervisor 0.0.27 left them, written literally (test input, not today's statements)
 const legacyCatalog = (directory: string, threadDocument = '{"id":"thread-1","title":"A chat","projectId":"project-1","lineage":{"parentThreadId":null,"relationshipToParent":null}}') =>
@@ -137,9 +134,11 @@ const legacyGuidance = (directory: string) =>
     CREATE TABLE mutes(rule_id TEXT NOT NULL,scope_id TEXT NOT NULL,PRIMARY KEY(rule_id,scope_id));
     CREATE TABLE classifications(project_id TEXT PRIMARY KEY,classification TEXT NOT NULL);
     CREATE TABLE observations(thread_id TEXT PRIMARY KEY,hash TEXT NOT NULL,observed_at INTEGER NOT NULL);
-    CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id));
+    CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,
+      notified INTEGER NOT NULL DEFAULT 0, object_id TEXT,PRIMARY KEY(thread_id,rule_id));
     CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,state TEXT NOT NULL,
-      text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,dispatch_started INTEGER NOT NULL DEFAULT 0);
+      text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,dispatch_started INTEGER NOT NULL DEFAULT 0,
+      rule_generation INTEGER NOT NULL DEFAULT -1, settings_generation INTEGER NOT NULL DEFAULT -1);
     CREATE TABLE activity(id TEXT PRIMARY KEY,document TEXT NOT NULL,created_at INTEGER NOT NULL);
     CREATE TABLE budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL);
     CREATE INDEX activity_notice ON activity(json_extract(document,'$.noticeId'),created_at);
@@ -279,10 +278,10 @@ describe("startup upgrade", () => {
     ] });
     for (const file of storeFiles) assert.deepEqual([formatOf(join(directory, file)), journalOf(join(directory, file))], [1, "wal"], file);
     assert.deepEqual(tableRows(join(directory, "thread-settings.sqlite3")).settings, [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
-    // a fresh file has exactly the live schema of its format
-    assert.deepEqual(liveSchema(join(directory, "catalog.sqlite3")), sortedContract(catalogContract));
-    assert.deepEqual(liveSchema(join(directory, "guidance.sqlite3")), sortedContract(guidanceContract));
-    assert.deepEqual(liveSchema(join(directory, "thread-settings.sqlite3")), sortedContract(policyContract));
+    // a fresh file declares exactly what Supervisor 0.0.27 declared: format 1 is that schema
+    assert.deepEqual(declarations(join(directory, "catalog.sqlite3")), frozenDeclarations("catalog"));
+    assert.deepEqual(declarations(join(directory, "guidance.sqlite3")), frozenDeclarations("guidance"));
+    assert.deepEqual(declarations(join(directory, "thread-settings.sqlite3")), frozenDeclarations("thread-settings"));
     assert.deepEqual(tableRows(join(directory, "guidance.sqlite3")).meta, [
       { key: "settings", value: '{"generation":1,"evidenceHours":24}' }, { key: "supervisor_scope_version", value: "main-v1" },
     ]);
@@ -342,6 +341,21 @@ describe("startup upgrade", () => {
     assert.deepEqual(snapshotDirectory(unknown), unknownBefore);
     assert.deepEqual(backupSets(unknown), []);
     for (const file of allFiles) assert.equal(formatOf(join(unknown, file)), 0, file);
+
+    // every name as a release wrote it, but the threads table declared without its primary key: never stamped format 1
+    const redeclared = yield* temporaryDirectory;
+    yield* legacyDirectory(redeclared);
+    const catalog = join(redeclared, "catalog.sqlite3");
+    exec(catalog, "DROP INDEX threads_project; ALTER TABLE threads RENAME TO threads_kept;" +
+      " CREATE TABLE threads (id TEXT, project_id TEXT, document TEXT NOT NULL, location TEXT NOT NULL CHECK(location IN ('active', 'archive', 'removed')), revision INTEGER NOT NULL);" +
+      " INSERT INTO threads SELECT * FROM threads_kept; DROP TABLE threads_kept; CREATE INDEX threads_project ON threads(project_id);");
+    assert.deepEqual(read(catalog, (db) => sqliteRows(db, Named, "SELECT name FROM pragma_table_info('threads') ORDER BY cid").map((column) => column.name)),
+      ["id", "project_id", "document", "location", "revision"]);
+    const redeclaredBefore = snapshotDirectory(redeclared);
+    refusedWith(yield* Effect.exit(upgrade(redeclared)), "catalog.sqlite3", "unknown_layout");
+    assert.deepEqual(snapshotDirectory(redeclared), redeclaredBefore);
+    assert.deepEqual(backupSets(redeclared), []);
+    for (const file of allFiles) assert.equal(formatOf(join(redeclared, file)), 0, file);
 
     const invalid = yield* temporaryDirectory;
     legacyCatalog(invalid);

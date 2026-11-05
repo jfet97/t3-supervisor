@@ -517,7 +517,7 @@ export const checkConversationRows: Effect.Effect<StoredRowScan, SqlError.SqlErr
   const changes = [
     ...(yield* Effect.forEach(["supervisor_conversation_requests", "supervisor_workflow_introductions", "supervisor_workflow_agreement_candidates", "supervisor_planning_attempts"],
       (table) => schemaChanges(db, table))).flat(),
-    ...yield* schemaChanges(db, "supervisor_monitor_binding_clock", ["review_misses"]),
+    ...yield* schemaChanges(db, "supervisor_monitor_binding_clock"),
   ];
   const cycle = { problem: "undecodable", read: "cycle" } as const;
   const findings = [

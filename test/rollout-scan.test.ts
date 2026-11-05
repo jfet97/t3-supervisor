@@ -166,7 +166,7 @@ it.live("the rollout scan reports each file's format and one stored row of each 
   ]) assert.ok(report.includes(line), report);
 }), {timeout: 30_000});
 
-it.live("the rollout scan reports format 0 for unversioned files and lists what the service's start changes: added columns, created tables, recovered notices and the one-time reset", () => Effect.gen(function* () {
+it.live("the rollout scan reports format 0 for unversioned files and lists what the service's start changes: created tables, recovered notices and the one-time reset", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("rollout-scan-");
   const legacy = new DatabaseSync(join(directory, "guidance.sqlite3"));
   legacy.exec(`CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -195,8 +195,6 @@ it.live("the rollout scan reports format 0 for unversioned files and lists what 
   const guidance = scan.files.find((file) => file.file === "guidance.sqlite3");
   const changes = (guidance?.rows?.changes ?? []).map((change) => `${change.table}: ${change.change} (${change.rows})`);
   for (const expectedChange of [
-    "notices: column rule_generation added with its default (0)",
-    "notices: column settings_generation added with its default (0)",
     "notices: committed notices recovered as not delivered or uncertain (as the baseline open did) (1)",
     "rules: table created (0)",
     "supervisor_main_bindings: cleared by the upgrade's one-time reset (no stored scope version) (1)",

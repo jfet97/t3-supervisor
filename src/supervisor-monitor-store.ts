@@ -549,8 +549,8 @@ export class ProjectSupervisorMonitorStore extends Context.Service<ProjectSuperv
 export const checkMonitorRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
   const db = yield* GuidanceDb;
   const changes = [
-    ...yield* schemaChanges(db, "supervisor_monitor_threads", ["activation_ordinal", "untracked_count"]),
-    ...yield* schemaChanges(db, "supervisor_monitor_items", ["read_item_id", "active"]),
+    ...yield* schemaChanges(db, "supervisor_monitor_threads"),
+    ...yield* schemaChanges(db, "supervisor_monitor_items"),
   ];
   const cycle = { problem: "undecodable", read: "cycle" } as const;
   const findings = [

@@ -42,6 +42,18 @@ export const serveDatabase: Effect.Effect<void, unknown, WorkerRunnerPlatform> =
   const inTransaction = () => connection?.isTransaction() ?? false;
 
   const run = (request: WorkerRequest): Effect.Effect<unknown, SqlError> => {
+    /*
+     * the admission read: a read-only client of its own, closed before the reply, so it never writes the file or its log,
+     * never checkpoints and removes nothing; only then may the main thread send the open
+     */
+    if (request.op === "format") {
+      if (connection) return Effect.fail(unexpected("The database worker reads a format only before it opens"));
+      return Effect.scoped(Effect.gen(function* () {
+        const client = yield* SqliteClient.make({filename: request.filename, readonly: true, disableWAL: true,
+          busyTimeout: Duration.millis(request.busyTimeoutMs)});
+        return yield* client.unsafe("PRAGMA user_version");
+      })).pipe(Effect.provide(Reactivity.layer));
+    }
     if (request.op === "open") {
       if (connection) return Effect.fail(unexpected("The database worker is already open"));
       return Effect.gen(function* () {

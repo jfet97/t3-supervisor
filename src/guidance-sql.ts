@@ -85,15 +85,6 @@ const ChangesRow = Schema.Struct({ changes: Schema.Number });
 export const changedRows = (statement: Effect.Effect<unknown, SqlError.SqlError>): Effect.Effect<number, SqlError.SqlError | GuidanceStoreError> =>
   statement.pipe(Effect.flatMap(decodeGuidanceRow(ChangesRow, "statement_result")), Effect.map((result) => result.changes));
 
-const ColumnName = Schema.Struct({ name: Schema.String });
-/** The column names of a table, for the idempotent column additions at open. */
-export const tableColumns = Effect.fnUntraced(function* (db: SqlClient.SqlClient, table: string) {
-  const rows = yield* db.unsafe(`PRAGMA table_info(${table})`);
-  const columns: string[] = [];
-  for (const row of rows) columns.push((yield* decodeGuidanceRow(ColumnName, "table_info")(row)).name);
-  return columns;
-});
-
 // ---- the read-only rollout scan: each store checks its existing rows with its own decoders (scripts/rollout-scan.ts)
 
 /**
@@ -148,9 +139,7 @@ export const rowFindings = <R>(rows: ReadonlyArray<R>, finding: Omit<StoredRowFi
     : Effect.map(Effect.forEach(rows, (row) => Effect.map(Effect.exit(Effect.suspend(() => decode(row))), (exit) => exit._tag === "Failure" ? [{...finding, key: key(row)}] : [])),
       (found) => found.flat());
 
-/** The open's table creation and column additions for a table, as changes. */
-export const schemaChanges = Effect.fnUntraced(function* (db: SqlClient.SqlClient, table: string, columns: ReadonlyArray<string> = []) {
-  if (!(yield* tableExists(db, table))) return [{table, change: "table created", rows: 0}] satisfies Array<OpenChange>;
-  const present = yield* tableColumns(db, table);
-  return columns.filter((column) => !present.includes(column)).map((column): OpenChange => ({table, change: `column ${column} added with its default`, rows: 0}));
+/** The startup upgrade's creation of a table the file does not have yet, as a change. */
+export const schemaChanges = Effect.fnUntraced(function* (db: SqlClient.SqlClient, table: string) {
+  return (yield* tableExists(db, table)) ? [] : [{table, change: "table created", rows: 0}] satisfies Array<OpenChange>;
 });

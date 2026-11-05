@@ -3,12 +3,12 @@ import { Context, Data, Effect, FileSystem, Layer, Schema, type Scope } from "ef
 import type { SqlClient } from "effect/sql";
 import { type BackupSource, writeBackupSet } from "./database-backup.js";
 import {
-  catalogContract, catalogLegacy, catalogMigrations, guidanceContract, guidanceLegacy, guidanceMigrations, type LegacyLayout, type MigrationContext,
-  type MigrationStep, missingSchema, policyContract, policyLegacy, policyMigrations, recognizeLegacy, requirePolicyRow, schemaObjects, type SchemaContract,
+  catalogLegacy, catalogMigrations, guidanceLegacy, guidanceMigrations, type LegacyLayout, type MigrationContext, type MigrationStep, policyLegacy,
+  policyMigrations, recognizeLegacy, requirePolicyRow, schemaDifferences, schemaObjects, schemaSignature, type SchemaSignature,
 } from "./database-migrations.js";
 import {
-  CatalogDb, catalogDbLayer, DatabaseFiles, DatabaseFormats, type DatabaseKind, GuidanceDb, guidanceDbLayer, openUpgradeDatabase, PolicyDb, policyDbLayer,
-  readFormat, readOnlyDatabase, type UpgradeDatabase,
+  CatalogDb, catalogDbLayer, DatabaseFiles, DatabaseFormats, type DatabaseKind, GuidanceDb, guidanceDbLayer, memoryDatabase, openUpgradeDatabase, PolicyDb,
+  policyDbLayer, readFormat, readOnlyDatabase, type UpgradeDatabase,
 } from "./db.js";
 import { logEvent } from "./logging.js";
 import { openExistingAccessDatabase, verifyAccessDatabase } from "./service-auth.js";
@@ -65,17 +65,22 @@ const accessFile = "access/login.sqlite3";
 // a store file of the directory with what its upgrade needs
 interface StoreSpec {
   readonly kind: DatabaseKind;
-  readonly contract: SchemaContract;
   readonly legacy: LegacyLayout;
   readonly steps: ReadonlyArray<MigrationStep>;
   readonly policy: boolean;
 }
 
 const stores: Readonly<Record<DatabaseKind, StoreSpec>> = {
-  catalog: { kind: "catalog", contract: catalogContract, legacy: catalogLegacy, steps: catalogMigrations, policy: false },
-  guidance: { kind: "guidance", contract: guidanceContract, legacy: guidanceLegacy, steps: guidanceMigrations, policy: false },
-  policy: { kind: "policy", contract: policyContract, legacy: policyLegacy, steps: policyMigrations, policy: true },
+  catalog: { kind: "catalog", legacy: catalogLegacy, steps: catalogMigrations, policy: false },
+  guidance: { kind: "guidance", legacy: guidanceLegacy, steps: guidanceMigrations, policy: false },
+  policy: { kind: "policy", legacy: policyLegacy, steps: policyMigrations, policy: true },
 };
+
+/*
+ * the declared schema of each store file at its current format, computed at most once per run and only when an existing file
+ * needs it: a fresh directory's files come from the same steps on an empty file and are never compared with it
+ */
+type References = Readonly<Record<DatabaseKind, Effect.Effect<SchemaSignature, DatabaseUpgradeError>>>;
 
 // format 1 of the access database is the schema the auth service has always validated exactly; the step only records it
 const accessSteps: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1, apply: () => Effect.void }];
@@ -106,8 +111,24 @@ const refusal = (file: string | null, reason: UpgradeFailure) => new DatabaseUpg
 const asUpgradeError = (file: string | null, reason: UpgradeFailure) => <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, DatabaseUpgradeError, R> =>
   Effect.mapError(effect, (error) => error instanceof DatabaseUpgradeError ? error : refusal(file, reason));
 
+/**
+ * The declared schema of a store file at its current format: its steps applied to an empty private in-memory database, the
+ * program a fresh file goes through. Existing files are compared with it, never with a second copy of the statements.
+ */
+export const referenceSignature = (kind: DatabaseKind): Effect.Effect<SchemaSignature, DatabaseUpgradeError> => {
+  const { file, format } = DatabaseFiles[kind];
+  return Effect.scoped(Effect.gen(function* () {
+    const steps = stepsBetween(stores[kind].steps, 0, format);
+    if (steps === null) return yield* refusal(file, "migration_failed");
+    const sql = yield* memoryDatabase;
+    yield* sql.withTransaction(Effect.forEach(steps, (step) => step.apply(sql, { fresh: true, excludedThreadIds: [] }), { discard: true }));
+    return yield* schemaSignature(sql);
+  })).pipe(asUpgradeError(file, "migration_failed"));
+};
+
 // the preflight of one store file, read only: a read-only client never writes, creates no file and leaves a live WAL as it is
-const inspect = (dataDirectory: string, spec: StoreSpec): Effect.Effect<FileState, DatabaseUpgradeError, FileSystem.FileSystem> => {
+const inspect = (dataDirectory: string, spec: StoreSpec, reference: Effect.Effect<SchemaSignature, DatabaseUpgradeError>):
+  Effect.Effect<FileState, DatabaseUpgradeError, FileSystem.FileSystem> => {
   const { file, format: target } = DatabaseFiles[spec.kind];
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -117,12 +138,13 @@ const inspect = (dataDirectory: string, spec: StoreSpec): Effect.Effect<FileStat
       const format = yield* readFormat(sql);
       if (format > target) return yield* refusal(file, "future_format");
       if (format === target) {
-        if ((yield* missingSchema(sql, spec.contract)).length > 0) return yield* refusal(file, "incomplete_schema");
+        if ((yield* schemaDifferences(sql, yield* reference)).length > 0) return yield* refusal(file, "incomplete_schema");
         if (spec.policy) yield* requirePolicyRow(sql).pipe(asUpgradeError(file, "invalid_policy"));
         return { state: "current" } as const;
       }
       if (format === 0) {
-        const recognition = yield* recognizeLegacy(sql, spec.contract, spec.legacy);
+        if ((yield* schemaObjects(sql)).length === 0) return { state: "empty" } as const;
+        const recognition = yield* recognizeLegacy(sql, yield* reference, spec.legacy);
         if (recognition.kind === "empty") return { state: "empty" } as const;
         if (recognition.kind === "unknown") return yield* refusal(file, "unknown_layout");
       } else if ((yield* schemaObjects(sql)).length === 0) return yield* refusal(file, "unknown_layout");
@@ -153,7 +175,11 @@ interface Migration {
   readonly from: number;
   readonly target: number;
   readonly steps: ReadonlyArray<MigrationStep>;
-  readonly contract: SchemaContract | null;
+  /*
+   * the declared schema an upgraded file must have before the commit; none for a file this run creates (the same steps on an
+   * empty file) or for the access database, which the auth service validates exactly
+   */
+  readonly reference: SchemaSignature | null;
   /** the file must still be table-less when the transaction holds the lock (it is being created) */
   readonly creating: boolean;
   readonly journal: "wal" | "delete";
@@ -177,7 +203,7 @@ const migrate = (database: UpgradeDatabase, migration: Migration): Effect.Effect
       if (steps === null) return yield* refusal(migration.file, "migration_failed");
       for (const step of steps) yield* step.apply(sql, migration.context);
       yield* sql.unsafe(`PRAGMA user_version = ${migration.target}`);
-      if (migration.contract !== null && (yield* missingSchema(sql, migration.contract)).length > 0) return yield* refusal(migration.file, "incomplete_schema");
+      if (migration.reference !== null && (yield* schemaDifferences(sql, migration.reference)).length > 0) return yield* refusal(migration.file, "incomplete_schema");
       return true;
     }));
     // a new file gets the store's journal mode once it has its format; an existing one already has it
@@ -189,25 +215,25 @@ const migrate = (database: UpgradeDatabase, migration: Migration): Effect.Effect
   }).pipe(asUpgradeError(migration.file, "migration_failed"));
 };
 
-const storeMigration = (spec: StoreSpec, state: FileState, context: MigrationContext): Migration => {
+const storeMigration = (spec: StoreSpec, state: FileState, context: MigrationContext, reference: SchemaSignature | null): Migration => {
   const { file, format, journal } = DatabaseFiles[spec.kind];
   return {
-    file, target: format, steps: spec.steps, contract: spec.contract, journal, context,
+    file, target: format, steps: spec.steps, reference, journal, context,
     from: state.state === "upgradable" ? state.format : 0,
     creating: state.state !== "upgradable",
   };
 };
 
-const upgradeStore = (dataDirectory: string, spec: StoreSpec, state: FileState, context: MigrationContext) =>
+const upgradeStore = (dataDirectory: string, spec: StoreSpec, state: FileState, context: MigrationContext, reference: SchemaSignature | null) =>
   Effect.scoped(Effect.flatMap(
     openUpgradeDatabase(dataDirectory, spec.kind, { create: state.state === "absent" }).pipe(asUpgradeError(DatabaseFiles[spec.kind].file, "unreadable")),
-    (database) => migrate(database, storeMigration(spec, state, context))));
+    (database) => migrate(database, storeMigration(spec, state, context, reference))));
 
 const upgradeAccess = (dataDirectory: string, from: number) => Effect.scoped(Effect.gen(function* () {
   const opened = yield* openExistingAccessDatabase(dataDirectory).pipe(asUpgradeError(accessFile, "access_invalid"));
-  if (opened === null) return yield* refusal(accessFile, "concurrent_change");
+  if (opened === null || opened.database === null) return yield* refusal(accessFile, "concurrent_change");
   return yield* migrate(opened.database, {
-    file: accessFile, from, target: DatabaseFormats.access, steps: accessSteps, contract: null, creating: false, journal: "delete",
+    file: accessFile, from, target: DatabaseFormats.access, steps: accessSteps, reference: null, creating: false, journal: "delete",
     context: { fresh: false, excludedThreadIds: [] },
   });
 }));
@@ -218,7 +244,7 @@ const backupChanging = (dataDirectory: string, access: FileState, files: Readonl
     const sources: Array<BackupSource> = [];
     if (access.state === "upgradable") {
       const opened = yield* openExistingAccessDatabase(dataDirectory).pipe(asUpgradeError(accessFile, "access_invalid"));
-      if (opened === null) return yield* refusal(accessFile, "concurrent_change");
+      if (opened === null || opened.database === null) return yield* refusal(accessFile, "concurrent_change");
       sources.push({ file: accessFile, name: "access-login.sqlite3", targetFormat: DatabaseFormats.access, database: opened.database });
     }
     for (const kind of ["catalog", "guidance", "policy"] as const) {
@@ -233,11 +259,14 @@ const backupChanging = (dataDirectory: string, access: FileState, files: Readonl
       Effect.map((set) => set.id));
   }));
 
-// the result as the stores and the auth service will open it: each file through its guarded open, with its live schema
+/*
+ * the result as the stores and the auth service will open it: each file through its guarded open, the policy with its row. The
+ * declared schema needs no second comparison: the preflight compared every current file, each upgrade compared its file
+ * before the commit, and a created file is the steps' own result
+ */
 const verifyStore = (spec: StoreSpec, open: Effect.Effect<SqlClient.SqlClient, unknown, Scope.Scope | FileSystem.FileSystem>) =>
   Effect.scoped(Effect.gen(function* () {
     const sql = yield* open;
-    if ((yield* missingSchema(sql, spec.contract)).length > 0) return yield* refusal(DatabaseFiles[spec.kind].file, "validation_failed");
     if (spec.policy) yield* requirePolicyRow(sql);
   })).pipe(asUpgradeError(DatabaseFiles[spec.kind].file, "validation_failed"));
 
@@ -259,12 +288,18 @@ const verify = (dataDirectory: string, accessPresent: boolean) => Effect.gen(fun
 export const upgradeDataDirectory = (options: UpgradeOptions): Effect.Effect<UpgradeReport, DatabaseUpgradeError, FileSystem.FileSystem> => {
   const { dataDirectory } = options;
   return Effect.gen(function* () {
+    // 0. the declared schema of every store file at its current format, from its own steps, once and only if a file needs it
+    const references: References = {
+      catalog: yield* Effect.cached(referenceSignature("catalog")),
+      guidance: yield* Effect.cached(referenceSignature("guidance")),
+      policy: yield* Effect.cached(referenceSignature("policy")),
+    };
     // 1. the read-only preflight of every file; nothing is written before every file passed it
     const access = yield* inspectAccess(dataDirectory);
     const files = {
-      catalog: yield* inspect(dataDirectory, stores.catalog),
-      guidance: yield* inspect(dataDirectory, stores.guidance),
-      policy: yield* inspect(dataDirectory, stores.policy),
+      catalog: yield* inspect(dataDirectory, stores.catalog, references.catalog),
+      guidance: yield* inspect(dataDirectory, stores.guidance, references.guidance),
+      policy: yield* inspect(dataDirectory, stores.policy, references.policy),
     };
     const fresh = !hasTables(files.catalog) && !hasTables(files.guidance) && !hasTables(files.policy);
     if (!fresh && !hasTables(files.policy)) return yield* refusal(DatabaseFiles.policy.file, "missing_policy");
@@ -284,7 +319,8 @@ export const upgradeDataDirectory = (options: UpgradeOptions): Effect.Effect<Upg
     for (const kind of order) {
       const state = files[kind];
       if (state.state === "current") continue;
-      yield* upgradeStore(dataDirectory, stores[kind], state, context).pipe(Effect.map(record(DatabaseFiles[kind].file, state, DatabaseFiles[kind].format)));
+      const reference = state.state === "upgradable" ? yield* references[kind] : null;
+      yield* upgradeStore(dataDirectory, stores[kind], state, context, reference).pipe(Effect.map(record(DatabaseFiles[kind].file, state, DatabaseFiles[kind].format)));
     }
 
     // 4. the result as the stores will open it

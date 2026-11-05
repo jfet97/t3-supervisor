@@ -142,6 +142,17 @@ interface WorkerClient {
   readonly backup: (destination: string) => Effect.Effect<BackupMetadata, SqlError>;
 }
 
+/*
+ * an open's admission: the worker reads the stored format of `filename` through a read-only connection of its own, closed
+ * again before the reply, and the open only proceeds at `expected`; a refused file is never opened by a connection that can
+ * write, which would recover and checkpoint a log on close
+ */
+interface Admission {
+  readonly filename: string;
+  readonly file: string;
+  readonly expected: number;
+}
+
 /**
  * One SQLite client whose single connection lives in a dedicated worker thread. The client itself is the stock one that
  * `@effect/sql-sqlite-node` builds in-process (one leased connection behind a semaphore, BEGIN IMMEDIATE, savepoints and
@@ -157,7 +168,7 @@ interface WorkerClient {
  * stock rollback after the failure sends nothing and the caller sees the unknown outcome as a typed `SqlError`. A new
  * client (a rebuilt layer) opens a new worker. A backup request travels the same way and has the same outcomes.
  */
-const workerClient = (config: WorkerDatabaseConfig): Effect.Effect<WorkerClient, SqlError, Scope.Scope> => Effect.gen(function* () {
+const workerClient = (config: WorkerDatabaseConfig, admission?: Admission): Effect.Effect<WorkerClient, SqlError | DatabaseOpenError, Scope.Scope> => Effect.gen(function* () {
   const entry = yield* DatabaseWorker;
   let thread: WorkerThread | undefined;
   const spawn = () => thread = new WorkerThread(entry.url, {...(entry.execArgv ? {execArgv: entry.execArgv} : {}), ...(entry.workerData === undefined ? {} : {workerData: entry.workerData})});
@@ -214,6 +225,10 @@ const workerClient = (config: WorkerDatabaseConfig): Effect.Effect<WorkerClient,
     executeUnprepared: (sql, params, transformRows) => Effect.map(rows("executeUnprepared", sql, params), (all) => transformRows ? transformRows(all) : all),
     executeStream: () => Stream.die("executeStream not implemented"),
   };
+  if (admission !== undefined) yield* call({id: ++sequence, op: "format", filename: admission.filename, busyTimeoutMs: config.busyTimeoutMs}).pipe(
+    Effect.flatMap(decodeUserVersion),
+    Effect.mapError((cause) => new DatabaseOpenError({file: admission.file, reason: "open_failed", cause})),
+    Effect.flatMap(([row]) => formatCheck(admission.file, admission.expected, row.user_version)));
   yield* call({id: ++sequence, op: "open", config});
 
   const { acquirer, borrower, isTransaction, onCommitFailure, transactionAcquirer } = SqlClient.makeSqliteAcquirers({
@@ -267,12 +282,26 @@ export const readFormat = (sql: SqlClient.SqlClient): Effect.Effect<number, SqlE
     Effect.flatMap(decodeUserVersion),
     Effect.map(([row]) => row.user_version));
 
-// the format check of every store open: on the opened connection, before any journal-mode change, pragma or store code
+// a file at `expected` passes; an older one asks for the service to start once, a newer one is refused
+const formatCheck = (file: string, expected: number, found: number): Effect.Effect<void, DatabaseOpenError> => found === expected ? Effect.void
+  : Effect.fail(new DatabaseOpenError({file, reason: found < expected ? "upgrade_required" : "unsupported_format", found, expected}));
+
+// the format check of every store open on a connection, before any journal-mode change, pragma or store code
 const requireFormat = (sql: SqlClient.SqlClient, file: string, expected: number): Effect.Effect<void, DatabaseOpenError> =>
   readFormat(sql).pipe(
     Effect.mapError((cause) => new DatabaseOpenError({file, reason: "open_failed", cause})),
-    Effect.flatMap((found) => found === expected ? Effect.void : Effect.fail(new DatabaseOpenError({
-      file, reason: found < expected ? "upgrade_required" : "unsupported_format", found, expected}))));
+    Effect.flatMap((found) => formatCheck(file, expected, found)));
+
+/*
+ * how a read-only connection reads a file: with a write-ahead log beside it, through the log (a live server keeps one, a killed
+ * one leaves one), which a read-only connection never checkpoints or removes; without one every committed row is in the file
+ * itself, which is then opened immutable, so no log or shared-memory file is created
+ */
+const readOnlyFilename = (path: string): string => existsSync(`${path}-wal`) ? path : `${pathToFileURL(path).href}?immutable=1`;
+
+// a refusal keeps its reason; any other failure of an open is open_failed
+const openFailure = (file: string) => (cause: unknown): DatabaseOpenError =>
+  cause instanceof DatabaseOpenError ? cause : new DatabaseOpenError({ file, reason: "open_failed", cause });
 
 // the directory and an existing file made private before the client opens them, so the sidecars it creates are private too
 const secureExisting = (directory: string, path: string): Effect.Effect<void, PlatformError, FileSystem.FileSystem> =>
@@ -298,8 +327,12 @@ const openDatabase = (directory: string, options: DatabaseFile): Effect.Effect<S
     // sidecar modes are restored when the client closes, as the baseline close does; registered before the client,
     // so it runs after the client's own finalizer has closed the connection
     yield* Effect.addFinalizer(() => securePrivateFiles(path).pipe(Effect.provideService(FileSystem.FileSystem, fs), Effect.orDie));
-    // the client never switches the journal mode on its own: the format is checked first
-    const { client } = yield* workerClient({filename: path, readonly: false, disableWAL: true, busyTimeoutMs: 5_000}).pipe(Effect.mapError(failed));
+    /*
+     * only an admitted file is opened for writing; the client never switches the journal mode on its own, and the format is
+     * checked again on its connection first, since the file could have changed in between
+     */
+    const { client } = yield* workerClient({filename: path, readonly: false, disableWAL: true, busyTimeoutMs: 5_000},
+      {filename: readOnlyFilename(path), file: options.file, expected: options.format}).pipe(Effect.mapError(openFailure(options.file)));
     yield* requireFormat(client, options.file, options.format);
     if (options.journal === "wal") yield* client.unsafe("PRAGMA journal_mode=WAL").pipe(Effect.mapError(failed));
     for (const pragma of options.pragmas) yield* client.unsafe(`PRAGMA ${pragma}`).pipe(Effect.mapError(failed));
@@ -332,7 +365,9 @@ export const policyDbLayer = (dataDirectory: string): Layer.Layer<PolicyDb, Data
 export const accessDbLayer = (path: string): Layer.Layer<AccessDb, DatabaseOpenError> =>
   Layer.effect(AccessDb, Effect.gen(function* () {
     const failed = (cause: unknown) => new DatabaseOpenError({ file: "login.sqlite3", reason: "open_failed", cause });
-    const { client } = yield* workerClient({filename: path, readonly: false, disableWAL: true, busyTimeoutMs: 5_000}).pipe(Effect.mapError(failed));
+    // admitted read only first, then checked again on the connection that can write
+    const { client } = yield* workerClient({filename: path, readonly: false, disableWAL: true, busyTimeoutMs: 5_000},
+      {filename: readOnlyFilename(path), file: "login.sqlite3", expected: DatabaseFormats.access}).pipe(Effect.mapError(openFailure("login.sqlite3")));
     yield* requireFormat(client, "login.sqlite3", DatabaseFormats.access);
     for (const pragma of accessPragmas) yield* client.unsafe(`PRAGMA ${pragma}`).pipe(Effect.mapError(failed));
     return client;
@@ -380,15 +415,18 @@ export const openAccessUpgradeDatabase = (path: string): Effect.Effect<UpgradeDa
     return {sql: client, backup};
   }).pipe(untracedSql);
 
+/** A private in-memory database, for the startup upgrade's reference schema only: no file is created or opened. */
+export const memoryDatabase: Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> =
+  workerClient({filename: ":memory:", readonly: false, disableWAL: true, busyTimeoutMs: 5_000}).pipe(
+    Effect.map(({ client }) => client),
+    Effect.mapError((cause) => new DatabaseOpenError({ file: ":memory:", reason: "open_failed", cause })), untracedSql);
+
 /**
- * A read-only client on an existing store file, for the rollout scan and backup verification: no statement, pragma or file
- * creation writes. With a write-ahead log beside the file the client reads through it (a live server keeps it); without one
- * every committed row is in the file itself, which is then opened immutable, so the client creates no log or shared-memory
- * file of its own.
+ * A read-only client on an existing store file, for the startup upgrade's preflight, the rollout scan and backup verification:
+ * no statement, pragma or file creation writes, and nothing is checkpointed or removed (see `readOnlyFilename`).
  */
 export const readOnlyDatabase = (directory: string, file: string): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> => {
-  const path = join(resolve(directory), file);
-  const filename = existsSync(`${path}-wal`) ? path : `${pathToFileURL(path).href}?immutable=1`;
+  const filename = readOnlyFilename(join(resolve(directory), file));
   return workerClient({filename, readonly: true, disableWAL: false, busyTimeoutMs: 5_000}).pipe(
     Effect.map(({ client }) => client),
     Effect.mapError((cause) => new DatabaseOpenError({ file, reason: "open_failed", cause })), untracedSql);

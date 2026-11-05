@@ -5,14 +5,16 @@ import { rewhitelistStoredShell } from "./store.js";
 import { ThreadPolicy } from "./thread-policy-contract.js";
 
 /*
- * the format steps of the store files (PRAGMA user_version) and the live schema each current format must have. A step is a
+ * the format steps of the store files (PRAGMA user_version) and the declared schema each current format must have. A step is a
  * plain Effect program on the startup upgrade's client (src/database-upgrade.ts), which runs every pending step of one file
  * and its new format in one BEGIN IMMEDIATE transaction; this is not a migration framework.
  *
  * Format 1 is the schema Supervisor 0.0.27 left in place at open: its stores created every table, added the later columns and
  * wrote the default rows in their constructors, every time they opened. Those statements moved here verbatim, in the order a
  * run's stores executed them (the stored DDL text is golden: fresh and upgraded files get the same text), so a fresh file and
- * an upgraded one go through the same program. The constructors keep only their restart recovery.
+ * an upgraded one go through the same program. Every published release declared each object exactly as format 1 does, so the
+ * column additions only unpublished prototypes needed are gone: no file the upgrade recognizes lacks those columns. The
+ * constructors keep only their restart recovery.
  */
 
 /** A step that cannot carry a file forward: an unexpected layout or a stored row it cannot read; it names a table, never a row. */
@@ -36,8 +38,8 @@ export interface MigrationStep {
 const ColumnName = Schema.Struct({ name: Schema.String });
 const decodeColumn = Schema.decodeUnknownEffect(ColumnName);
 
-/** The column names of a table (none when the table does not exist). */
-export const columnsOf = (sql: SqlClient.SqlClient, table: string): Effect.Effect<ReadonlyArray<string>, SqlError | MigrationRefused> =>
+// the column names of a table (none when the table does not exist)
+const columnsOf = (sql: SqlClient.SqlClient, table: string): Effect.Effect<ReadonlyArray<string>, SqlError | MigrationRefused> =>
   sql.unsafe(`PRAGMA table_info(${table})`).pipe(Effect.flatMap(Effect.forEach((row) => decodeColumn(row).pipe(
     Effect.map((column) => column.name), Effect.mapError(() => new MigrationRefused({ table, reason: "layout" }))))));
 
@@ -245,13 +247,12 @@ export const catalogMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1
 // ---- guidance.sqlite3
 
 /*
- * the prototype tables the approved one-time reset clears when a file has no supervision scope version yet (format 0 only;
- * supervisor-state-reset.ts keeps its own list for the test reset)
+ * the disposable supervision tables the approved one-time reset clears when a file has no supervision scope version yet (format
+ * 0 only; supervisor-state-reset.ts keeps its own list for the test reset)
  */
 const disposableSupervisionTables = [
-  "supervisor_project_bindings", "supervisor_main_bindings", "supervisor_task_interpretations",
-  "supervisor_conversation_requests", "supervisor_workflow_introductions", "supervisor_workflow_agreement_candidates",
-  "supervisor_monitor_project_clock", "supervisor_monitor_binding_clock", "supervisor_monitor_items", "supervisor_monitor_threads",
+  "supervisor_main_bindings", "supervisor_task_interpretations", "supervisor_conversation_requests", "supervisor_workflow_introductions",
+  "supervisor_workflow_agreement_candidates", "supervisor_monitor_binding_clock", "supervisor_monitor_items", "supervisor_monitor_threads",
 ] as const;
 
 const decodeScopeVersion = Schema.decodeUnknownEffect(Schema.Struct({ value: Schema.String }));
@@ -280,25 +281,10 @@ const guidanceFormat1 = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
   yield* addColumn(sql, "episodes", "object_id", "ALTER TABLE episodes ADD COLUMN object_id TEXT");
   for (const column of ["rule_generation", "settings_generation"])
     yield* addColumn(sql, "notices", column, `ALTER TABLE notices ADD COLUMN ${column} INTEGER NOT NULL DEFAULT -1`);
-  // the project supervision store
+  // the project supervision store, the conversation store and the monitor store
   yield* run(sql, supervisionStatements);
-  yield* addColumn(sql, "supervisor_definition_user_saves", "expected_revision",
-    "ALTER TABLE supervisor_definition_user_saves ADD COLUMN expected_revision TEXT NOT NULL DEFAULT ''");
-  // the conversation store
   yield* run(sql, conversationStatements);
-  yield* addColumn(sql, "supervisor_monitor_binding_clock", "review_misses",
-    "ALTER TABLE supervisor_monitor_binding_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0");
-  // the monitor store, whose added activation ordinal starts as the source ordinal
   yield* run(sql, monitorStatements);
-  if (!(yield* columnsOf(sql, "supervisor_monitor_threads")).includes("activation_ordinal")) {
-    yield* sql.unsafe("ALTER TABLE supervisor_monitor_threads ADD COLUMN activation_ordinal INTEGER");
-    yield* sql.unsafe(`UPDATE supervisor_monitor_threads SET activation_ordinal=source_ordinal
-        WHERE activation_ordinal IS NULL`);
-  }
-  yield* addColumn(sql, "supervisor_monitor_threads", "untracked_count",
-    "ALTER TABLE supervisor_monitor_threads ADD COLUMN untracked_count INTEGER NOT NULL DEFAULT 0");
-  yield* addColumn(sql, "supervisor_monitor_items", "read_item_id", "ALTER TABLE supervisor_monitor_items ADD COLUMN read_item_id TEXT");
-  yield* addColumn(sql, "supervisor_monitor_items", "active", "ALTER TABLE supervisor_monitor_items ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
   /*
    * the team store, the workflow state store, the workflow write receipts and evidence, the helper transport and the team
    * controller's tool receipts
@@ -337,115 +323,56 @@ const policyFormat1 = (sql: SqlClient.SqlClient, context: MigrationContext) => E
 
 export const policyMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1, apply: policyFormat1 }];
 
-// ---- the live schema of each current format, and the format 0 layouts an upgrade recognizes
+// ---- the declared schema of each current format, and the format 0 layouts an upgrade recognizes
 
 /**
- * The tables (with their columns) and indexes a file at the current format must have. A fresh file has exactly these; an
- * upgraded one may keep a historical table or a column's older declaration (an added column is nullable where an ALTER added
- * it), but never lacks one of them.
+ * A file's schema as SQLite stores it: every user object (table, index, view or trigger, without SQLite's internal ones) keyed
+ * as `type:name`, with its stored declaration without whitespace. Equal signatures mean the same tables with the same columns,
+ * types, defaults, keys and constraints, and the same index definitions.
  */
-export interface SchemaContract {
-  readonly tables: Readonly<Record<string, ReadonlyArray<string>>>;
-  readonly indexes: ReadonlyArray<string>;
-}
+export type SchemaSignature = ReadonlyMap<string, string>;
 
-export const catalogContract: SchemaContract = {
-  tables: {
-    activations: ["environment_id", "activated_at"],
-    environment_binding: ["id", "environment_id"],
-    cursors: ["stream", "sequence"],
-    projects: ["id", "document", "deleted"],
-    shell_coverage: ["id", "sequence"],
-    threads: ["id", "project_id", "document", "location", "revision"],
-    thread_revisions: ["thread_id", "revision"],
-  },
-  indexes: ["threads_project"],
-};
+const Declaration = Schema.Struct({ type: Schema.String, name: Schema.String, sql: Schema.String });
+const decodeDeclarations = Schema.decodeUnknownEffect(Schema.Array(Declaration));
 
-export const guidanceContract: SchemaContract = {
-  tables: {
-    meta: ["key", "value"],
-    rules: ["id", "document"],
-    mutes: ["rule_id", "scope_id"],
-    classifications: ["project_id", "classification"],
-    observations: ["thread_id", "hash", "observed_at"],
-    episodes: ["thread_id", "rule_id", "epoch", "notified", "object_id"],
-    notices: ["id", "thread_id", "rule_id", "run_id", "epoch", "state", "text", "message_id", "created_at", "dispatch_started", "rule_generation", "settings_generation"],
-    activity: ["id", "document", "created_at"],
-    budget: ["day", "tokens"],
-    supervisor_owned_threads: ["id"],
-    supervisor_project_settings: ["project_id", "document"],
-    supervisor_main_bindings: ["project_id", "main_thread_id", "document"],
-    supervisor_task_interpretations: ["thread_id", "project_id", "document", "updated_at"],
-    supervisor_definition_user_saves: ["project_id", "workspace_root", "signature", "saved_at", "expected_revision"],
-    supervisor_chat_enables: ["thread_id", "enabled_at"],
-    supervisor_planning_attempts: ["id", "project_id", "document", "created_at"],
-    supervisor_conversation_requests: ["id", "project_id", "document", "created_at"],
-    supervisor_workflow_introductions: ["task_id", "project_id", "document"],
-    supervisor_workflow_agreement_candidates: ["task_id", "proposal_id", "project_id", "document", "created_at"],
-    supervisor_monitor_binding_clock: ["supervisor_thread_id", "last_notice_at", "review_misses"],
-    supervisor_monitor_threads: ["project_id", "thread_id", "source_ordinal", "activation_ordinal", "saturated", "saturation_at", "last_acknowledged_at", "untracked_count"],
-    supervisor_monitor_items: ["project_id", "thread_id", "item_id", "read_item_id", "type", "status", "ordinal", "detected_at", "version", "priority", "eligible", "active", "reviewed_version", "updated_at"],
-    supervisor_team_members: ["owner_thread_id", "owner_generation", "member_thread_id", "state", "epoch", "document"],
-    supervisor_team_assignments: ["owner_thread_id", "owner_generation", "subtree_root_thread_id", "document"],
-    supervisor_team_notifications: ["owner_thread_id", "owner_generation", "id", "recipient_thread_id", "state", "created_at", "document"],
-    supervisor_team_events: ["owner_thread_id", "owner_generation", "id", "created_at", "acknowledged_at", "document"],
-    supervisor_team_requests: ["owner_thread_id", "owner_generation", "request_id", "state", "created_at", "updated_at", "document"],
-    supervisor_workflow_state: ["workflow_id", "project_id", "main_thread_id", "thread_id", "parent_workflow_id", "parent_thread_id", "revision", "document", "created_at", "updated_at"],
-    supervisor_workflow_operations: ["project_id", "main_thread_id", "actor_thread_id", "binding_generation", "operation_namespace", "operation_id", "request_hash", "result", "workflow_id", "created_at"],
-    supervisor_workflow_write_receipts: ["operation_id", "operation_namespace", "request_hash", "project_id", "main_thread_id", "supervisor_thread_id", "binding_generation", "result", "created_at"],
-    supervisor_workflow_write_evidence: ["supervisor_thread_id", "item_id", "operation_id", "operation_namespace", "request_hash", "project_id", "main_thread_id", "binding_generation", "native_evidence", "result", "successful", "created_at"],
-    supervisor_helper_channels: ["owner_thread_id", "owner_generation", "helper_thread_id", "document"],
-    supervisor_helper_deliveries: ["owner_thread_id", "owner_generation", "message_id", "document"],
-    supervisor_team_tool_receipts: ["owner_thread_id", "actor_thread_id", "binding_generation", "actor_epoch", "operation_id", "request_hash", "evidence_item_id", "document"],
-  },
-  indexes: [
-    "activity_notice", "supervisor_tasks_project", "supervisor_planning_project", "supervisor_conversation_project", "supervisor_workflow_agreement_project",
-    "supervisor_monitor_pending", "supervisor_main_binding_thread", "supervisor_team_member_identity", "supervisor_team_notifications_recipient",
-    "supervisor_team_events_pending", "supervisor_team_requests_pending", "supervisor_workflow_scope", "supervisor_workflow_write_evidence_operation",
-  ],
-};
-
-export const policyContract: SchemaContract = { tables: { settings: ["id", "document"] }, indexes: [] };
+/** The signature of the schema a file stores. */
+export const schemaSignature = (sql: SqlClient.SqlClient): Effect.Effect<SchemaSignature, SqlError | MigrationRefused> =>
+  sql.unsafe("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name").pipe(
+    Effect.flatMap((rows) => decodeDeclarations(rows).pipe(Effect.mapError(() => new MigrationRefused({ table: "sqlite_master", reason: "layout" })))),
+    Effect.map((rows) => new Map(rows.map((row): readonly [string, string] => [`${row.type}:${row.name}`, row.sql.replace(/\s+/gu, "")]))));
 
 /**
- * The format 0 layouts an upgrade carries forward: the file has every table and index its first schema transaction created in
- * every release, every table is a current one or a known historical one, every named index is a current one, and a current
- * table has at least its original columns (all but the ones a later release added) and no column the current format does not
- * know. Tables a later constructor would have created may be missing (a release stopped before it, or predates it); the step
- * creates them. A file without part of its first transaction was never written that way by a release and is not upgraded.
+ * The objects of `reference` (the signature the current format's steps give an empty database) that a file does not have or
+ * declares differently, as `type:name`; none when the file has the whole declared schema of its format.
+ */
+export const schemaDifferences = (sql: SqlClient.SqlClient, reference: SchemaSignature): Effect.Effect<ReadonlyArray<string>, SqlError | MigrationRefused> =>
+  Effect.map(schemaSignature(sql), (file) => [...reference].filter(([key, declaration]) => file.get(key) !== declaration).map(([key]) => key));
+
+/**
+ * The format 0 layouts an upgrade carries forward. Every published release declared each of its objects exactly as format 1
+ * does (only whole tables were added over time; test/fixtures/persistence holds the frozen layouts), so every object of a
+ * recognized file has the declaration of the current format's reference, and the file has every table and index its first
+ * schema transaction created in every release. Tables a later constructor would have created may be missing (a run stopped
+ * before it, or the release predates it); the step creates them. Any other object or declaration (another column, type,
+ * default, key, constraint or index definition) or a missing part of the first transaction was never written by a release,
+ * so the file is not upgraded.
  */
 export interface LegacyLayout {
-  /** the tables and indexes that every release created together, in the file's first transaction */
+  /** the tables and indexes every release created together, in the file's first transaction */
   readonly required: { readonly tables: ReadonlyArray<string>; readonly indexes: ReadonlyArray<string> };
-  /** per current table, the columns later releases added with ALTER TABLE */
-  readonly added: Readonly<Record<string, ReadonlyArray<string>>>;
-  /** tables earlier releases created that the current format no longer uses; they are kept as they are */
-  readonly historical: ReadonlyArray<string>;
 }
 
 // the whole catalog schema is one transaction; shell_coverage came with a later release
 export const catalogLegacy: LegacyLayout = {
   required: { tables: ["activations", "environment_binding", "cursors", "projects", "threads", "thread_revisions"], indexes: ["threads_project"] },
-  added: {},
-  historical: [],
 };
 
 // the guidance store's own tables come first, in one transaction; the supervision stores add theirs later, one by one
 export const guidanceLegacy: LegacyLayout = {
   required: { tables: ["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"], indexes: ["activity_notice"] },
-  added: {
-    episodes: ["object_id"],
-    notices: ["rule_generation", "settings_generation"],
-    supervisor_definition_user_saves: ["expected_revision"],
-    supervisor_monitor_binding_clock: ["review_misses"],
-    supervisor_monitor_threads: ["activation_ordinal", "untracked_count"],
-    supervisor_monitor_items: ["read_item_id", "active"],
-  },
-  historical: ["supervisor_project_bindings", "supervisor_monitor_project_clock"],
 };
 
-export const policyLegacy: LegacyLayout = { required: { tables: ["settings"], indexes: [] }, added: {}, historical: [] };
+export const policyLegacy: LegacyLayout = { required: { tables: ["settings"], indexes: [] } };
 
 const SchemaObject = Schema.Struct({ type: Schema.String, name: Schema.String });
 const decodeObjects = Schema.decodeUnknownEffect(Schema.Array(SchemaObject));
@@ -455,50 +382,18 @@ export const schemaObjects = (sql: SqlClient.SqlClient): Effect.Effect<ReadonlyA
   sql.unsafe("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name").pipe(
     Effect.flatMap((rows) => decodeObjects(rows).pipe(Effect.mapError(() => new MigrationRefused({ table: "sqlite_master", reason: "layout" })))));
 
-/** What a contract finds missing in a file: `table`, `table.column` or `index:name` entries, none when it is complete. */
-export const missingSchema = (sql: SqlClient.SqlClient, contract: SchemaContract): Effect.Effect<ReadonlyArray<string>, SqlError | MigrationRefused> =>
-  Effect.gen(function* () {
-    const objects = yield* schemaObjects(sql);
-    const tables = new Set(objects.filter((object) => object.type === "table").map((object) => object.name));
-    const indexes = new Set(objects.filter((object) => object.type === "index").map((object) => object.name));
-    const missing: Array<string> = [];
-    for (const [table, columns] of Object.entries(contract.tables)) {
-      if (!tables.has(table)) {
-        missing.push(table);
-        continue;
-      }
-      const present = yield* columnsOf(sql, table);
-      for (const column of columns) if (!present.includes(column)) missing.push(`${table}.${column}`);
-    }
-    for (const index of contract.indexes) if (!indexes.has(index)) missing.push(`index:${index}`);
-    return missing;
-  });
-
 /** How a format 0 file looks to the upgrade: table-less, a recognized earlier layout, or unknown (naming the first unknown or missing object). */
 export type LegacyRecognition = { readonly kind: "empty" } | { readonly kind: "recognized" } | { readonly kind: "unknown"; readonly object: string };
 
-export const recognizeLegacy = (sql: SqlClient.SqlClient, contract: SchemaContract, legacy: LegacyLayout): Effect.Effect<LegacyRecognition, SqlError | MigrationRefused> =>
+const objectName = (key: string): string => key.slice(key.indexOf(":") + 1);
+
+export const recognizeLegacy = (sql: SqlClient.SqlClient, reference: SchemaSignature, legacy: LegacyLayout): Effect.Effect<LegacyRecognition, SqlError | MigrationRefused> =>
   Effect.gen(function* () {
-    const objects = yield* schemaObjects(sql);
-    if (objects.length === 0) return { kind: "empty" } as const;
-    for (const object of objects) {
-      if (object.type === "index") {
-        if (!contract.indexes.includes(object.name)) return { kind: "unknown", object: object.name } as const;
-        continue;
-      }
-      if (object.type !== "table") return { kind: "unknown", object: object.name } as const;
-      // own entries only: a table named like an object property is simply unknown
-      const current = Object.hasOwn(contract.tables, object.name) ? contract.tables[object.name] : undefined;
-      if (current === undefined) {
-        if (legacy.historical.includes(object.name)) continue;
-        return { kind: "unknown", object: object.name } as const;
-      }
-      const added = Object.hasOwn(legacy.added, object.name) ? legacy.added[object.name] ?? [] : [];
-      const present = yield* columnsOf(sql, object.name);
-      if (present.some((column) => !current.includes(column)) || current.some((column) => !added.includes(column) && !present.includes(column)))
-        return { kind: "unknown", object: object.name } as const;
-    }
-    const has = (type: string, name: string) => objects.some((object) => object.type === type && object.name === name);
-    const missing = legacy.required.tables.find((name) => !has("table", name)) ?? legacy.required.indexes.find((name) => !has("index", name));
-    return missing === undefined ? { kind: "recognized" } as const : { kind: "unknown", object: missing } as const;
+    const file = yield* schemaSignature(sql);
+    if (file.size === 0) return { kind: "empty" } as const;
+    for (const [key, declaration] of file)
+      if (reference.get(key) !== declaration) return { kind: "unknown", object: objectName(key) } as const;
+    const required = [...legacy.required.tables.map((name) => `table:${name}`), ...legacy.required.indexes.map((name) => `index:${name}`)];
+    const missing = required.find((key) => !file.has(key));
+    return missing === undefined ? { kind: "recognized" } as const : { kind: "unknown", object: objectName(missing) } as const;
   });

@@ -167,9 +167,8 @@ export class GuidanceStore extends Context.Service<GuidanceStore, GuidanceStoreS
 export const checkGuidanceRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
   const db = yield* GuidanceDb;
   const changes = [
-    ...(yield* Effect.forEach(["meta", "rules", "mutes", "classifications", "observations", "activity", "budget"], (table) => schemaChanges(db, table))).flat(),
-    ...yield* schemaChanges(db, "episodes", ["object_id"]),
-    ...yield* schemaChanges(db, "notices", ["rule_generation", "settings_generation"]),
+    ...(yield* Effect.forEach(["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"],
+      (table) => schemaChanges(db, table))).flat(),
   ];
   const call = {problem: "undecodable", read: "call"} as const;
   const notices = yield* rowsOf(db, "notices", "SELECT * FROM notices");

@@ -835,7 +835,7 @@ export const checkProjectSupervisorRows: Effect.Effect<StoredRowScan, SqlError.S
   const changes = [
     ...(yield* Effect.forEach(["supervisor_owned_threads", "supervisor_project_settings", "supervisor_main_bindings", "supervisor_task_interpretations",
       "supervisor_chat_enables"], (table) => schemaChanges(sql, table))).flat(),
-    ...yield* schemaChanges(sql, "supervisor_definition_user_saves", ["expected_revision"]),
+    ...yield* schemaChanges(sql, "supervisor_definition_user_saves"),
   ];
   const findings: Array<StoredRowFinding> = [];
   const metaValue = (guard: (value: unknown) => boolean) => (row: Record<string, unknown>) =>

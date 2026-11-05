@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -10,7 +11,6 @@ import { SqlClient } from "effect/sql";
 import { upgradeDataDirectory } from "../src/database-upgrade.js";
 import { accessDbLayer, catalogDbLayer, DatabaseOpenError, guidanceDbLayer, openUpgradeDatabase, policyDbLayer, readFormat } from "../src/db.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
-import { initializeDataDirectory } from "./support/data-directory.js";
 import { sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
 
 /*
@@ -21,6 +21,9 @@ import { sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
  */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-guard-" }));
+
+// a fresh directory through the production startup upgrade itself
+const initialized = (directory: string) => upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] });
 
 const opened = <A, R>(layer: Layer.Layer<A, DatabaseOpenError, R>) => Effect.scoped(Layer.build(layer)).pipe(Effect.asVoid);
 
@@ -46,9 +49,8 @@ const raw = (path: string, statements: string) => {
   }
 };
 
-// the access tables of Supervisor 0.0.27, written literally: a format 0 access database the forge must not migrate
-const legacyAccess = `
-  PRAGMA journal_mode=DELETE;
+// the access tables of Supervisor 0.0.27, written literally
+const accessTables = `
   CREATE TABLE dashboard_login_grants (
         token_hash TEXT PRIMARY KEY NOT NULL CHECK(length(token_hash)=64),
         issued_at INTEGER NOT NULL,
@@ -60,6 +62,41 @@ const legacyAccess = `
         expires_at INTEGER NOT NULL CHECK(expires_at > issued_at AND expires_at - issued_at <= 2592000000)
       ) STRICT;
 `;
+
+// a format 0 access database the forge must not migrate
+const legacyAccess = `PRAGMA journal_mode=DELETE; ${accessTables}`;
+
+/*
+ * a separate process commits `statements` to the write-ahead log of a new file and is killed before any checkpoint or close:
+ * no connection of any process is left on the file, so the next connection that can write would recover the log and
+ * checkpoint it into the file when it closes
+ */
+const killedWriter = 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); db.exec(process.argv[2]); process.kill(process.pid, "SIGKILL");';
+const orphanedLog = (path: string, statements: string) => {
+  const result = spawnSync(process.execPath, ["-e", killedWriter, path, statements], { encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.signal, "SIGKILL", result.stderr);
+  assert.ok(existsSync(`${path}-wal`), "the killed writer left its log");
+};
+const newerInLog = (tables: string) => `PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${tables} PRAGMA user_version=2;`;
+
+// the file and its log, byte for byte
+const fileAndLog = (path: string) => ({ main: sha256(path), log: sha256(`${path}-wal`), logBytes: statSync(`${path}-wal`).size });
+
+/*
+ * the negative control of an orphaned log: a connection that can write, closing as the last one, checkpoints the log into the
+ * file and removes it, so the byte checks before it would have seen any such open
+ */
+const checkpointedByWritableClose = (path: string, before: { readonly main: string }) => {
+  const writable = new DatabaseSync(path);
+  try {
+    assert.equal(sqliteRow(writable, UserVersionRow, "PRAGMA user_version").user_version, 2);
+  } finally {
+    writable.close();
+  }
+  assert.equal(existsSync(`${path}-wal`), false, "the log was checkpointed and removed");
+  assert.equal(headerFormat(path), 2);
+  assert.notEqual(sha256(path), before.main);
+};
 
 describe("database format guard", () => {
   it.live("a missing store file is not created: the open asks for the service to start once", () => Effect.gen(function* () {
@@ -111,9 +148,50 @@ describe("database format guard", () => {
     assert.deepEqual(sqliteRows(holder, Schema.Struct({ v: Schema.String }), "SELECT v FROM kept"), [{ v: "row" }]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
+  it.live("a newer format that a killed process left only in its write-ahead log is refused by the open and the preflight, which neither recover nor checkpoint it", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    const path = join(directory, "guidance.sqlite3");
+    orphanedLog(path, newerInLog("CREATE TABLE kept(v TEXT); INSERT INTO kept VALUES('row');"));
+    assert.equal(headerFormat(path), 0, "the newer format is only in the log");
+    const before = fileAndLog(path);
+    const error = yield* refusal(guidanceDbLayer(directory));
+    assert.deepEqual([error.reason, error.found, error.expected], ["unsupported_format", 2, 1]);
+    assert.deepEqual(fileAndLog(path), before);
+    const failure = yield* Effect.flip(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
+    assert.deepEqual([failure.file, failure.reason], ["guidance.sqlite3", "future_format"]);
+    assert.deepEqual(fileAndLog(path), before);
+    assert.equal(existsSync(join(directory, "backups")), false);
+    checkpointedByWritableClose(path, before);
+    const kept = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.deepEqual(sqliteRows(kept, Schema.Struct({ v: Schema.String }), "SELECT v FROM kept"), [{ v: "row" }]);
+    } finally {
+      kept.close();
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
+  it.live("a newer access database that a killed process left only in its write-ahead log is refused by the preflight and the forge without being opened for writing", () => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* temporaryDirectory;
+    yield* fs.makeDirectory(join(directory, "access"), { mode: 0o700 });
+    const path = join(directory, "access", "login.sqlite3");
+    orphanedLog(path, newerInLog(accessTables));
+    yield* fs.chmod(path, 0o600);
+    assert.equal(headerFormat(path), 0, "the newer format is only in the log");
+    const before = fileAndLog(path);
+    const failure = yield* Effect.flip(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
+    assert.deepEqual([failure.file, failure.reason], ["access/login.sqlite3", "future_format"]);
+    assert.deepEqual(fileAndLog(path), before);
+    const forged = yield* Effect.flip(forgeDashboardToken(directory));
+    assert.equal(forged.reason, "login_grant_state");
+    assert.deepEqual(fileAndLog(path), before);
+    assert.equal(existsSync(join(directory, "backups")), false);
+    checkpointedByWritableClose(path, before);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
   it.live("a file at the current format opens", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
-    yield* initializeDataDirectory(directory);
+    yield* initialized(directory);
     yield* opened(catalogDbLayer(directory));
     yield* opened(guidanceDbLayer(directory));
     yield* opened(policyDbLayer(directory));
@@ -121,7 +199,7 @@ describe("database format guard", () => {
 
   it.live("the stored format reads as the same number whatever integer mode the caller runs in", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
-    yield* initializeDataDirectory(directory);
+    yield* initialized(directory);
     const { sql } = yield* openUpgradeDatabase(directory, "guidance", { create: false });
     // the mode a backup snapshot reads its rows in: other statements see exact bigints
     const exact = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, SqlClient.SafeIntegers, true);
@@ -133,7 +211,7 @@ describe("database format guard", () => {
 
   it.live("a negative user_version is no format: the open and the startup upgrade refuse the file and leave it as it is", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
-    yield* initializeDataDirectory(directory);
+    yield* initialized(directory);
     const path = join(directory, "guidance.sqlite3");
     raw(path, "PRAGMA user_version=-1;");
     const error = yield* refusal(guidanceDbLayer(directory));

@@ -37,8 +37,9 @@ const tableDigest = (db: GuidanceDb["Service"]) => Effect.gen(function* () {
 const count = (db: GuidanceDb["Service"], table: string) => Effect.map(rows(db, `SELECT count(*) AS n FROM ${table}`), ([row]) => Number(row?.n));
 
 /*
- * a format 0 guidance file as an earlier release left it: disposable prototype state in tables the reset clears, beside
- * permanent ownership, the default settings and unrelated state (literal statements, not today's schema)
+ * a format 0 guidance file with disposable supervision state in tables the reset clears, beside permanent ownership, the
+ * default settings and a table outside the reset's list (literal statements, not today's schema); the step is applied to it
+ * directly, since which files the upgrade accepts is database-migrations.test.ts's subject
  */
 const legacyGuidance = (path: string, scopeVersion: string | null) => Effect.sync(() => {
   const db = new DatabaseSync(path);
@@ -51,14 +52,14 @@ const legacyGuidance = (path: string, scopeVersion: string | null) => Effect.syn
       INSERT INTO supervisor_owned_threads VALUES('owned-supervisor');
       CREATE TABLE unrelated_delivery(id TEXT);
       INSERT INTO unrelated_delivery VALUES('retained');
-      CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
-      INSERT INTO supervisor_project_bindings VALUES('p','{}');
+      CREATE TABLE supervisor_task_interpretations(thread_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,updated_at INTEGER NOT NULL);
+      INSERT INTO supervisor_task_interpretations VALUES('task','p','{}',1);
       CREATE TABLE supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id));
       INSERT INTO supervisor_main_bindings VALUES('p','main','{"threadId":"supervisor"}');
       CREATE TABLE supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL);
       INSERT INTO supervisor_conversation_requests VALUES('request','p','{}',1);
-      CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);
-      INSERT INTO supervisor_monitor_binding_clock VALUES('owned-supervisor',1);
+      CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0);
+      INSERT INTO supervisor_monitor_binding_clock VALUES('owned-supervisor',1,0);
     `);
     if (scopeVersion !== null) db.prepare("INSERT INTO meta VALUES('supervisor_scope_version',?)").run(scopeVersion);
   } finally {
@@ -74,7 +75,7 @@ const applyFormat1 = (directory: string) => Effect.scoped(Effect.gen(function* (
   yield* sql.withTransaction(step.apply(sql, { fresh: false, excludedThreadIds: [] }));
   const read = (query: string) => sql.unsafe<Record<string, unknown>>(query).pipe(Effect.map((result) => result.map((row) => ({ ...row }))));
   return {
-    cleared: yield* Effect.forEach(["supervisor_project_bindings", "supervisor_main_bindings", "supervisor_conversation_requests", "supervisor_monitor_binding_clock"],
+    cleared: yield* Effect.forEach(["supervisor_task_interpretations", "supervisor_main_bindings", "supervisor_conversation_requests", "supervisor_monitor_binding_clock"],
       (table) => Effect.map(read(`SELECT count(*) AS n FROM ${table}`), ([row]) => Number(row?.n))),
     owned: yield* read("SELECT id FROM supervisor_owned_threads"),
     unrelated: yield* read("SELECT id FROM unrelated_delivery"),
@@ -89,7 +90,7 @@ const rawDirectory = Effect.gen(function* () {
 }).pipe(Effect.provide(NodeFileSystem.layer));
 
 describe("SupervisorStateReset", () => {
-  it.live("the format 1 step clears the disposable prototype state once and records main-v1, preserving unrelated state", () => Effect.gen(function* () {
+  it.live("the format 1 step clears the disposable supervision state once and records main-v1, preserving unrelated state", () => Effect.gen(function* () {
     const directory = yield* rawDirectory;
     yield* legacyGuidance(join(directory, "guidance.sqlite3"), null);
     const first = yield* applyFormat1(directory);
@@ -108,7 +109,7 @@ describe("SupervisorStateReset", () => {
     const counts = () => {
       const db = new DatabaseSync(path, { readOnly: true });
       try {
-        return ["supervisor_project_bindings", "supervisor_main_bindings", "supervisor_conversation_requests", "meta"].map((table) =>
+        return ["supervisor_task_interpretations", "supervisor_main_bindings", "supervisor_conversation_requests", "meta"].map((table) =>
           sqliteRow(db, Schema.Struct({ n: Schema.Number }), `SELECT count(*) AS n FROM ${table}`).n);
       } finally {
         db.close();

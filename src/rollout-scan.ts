@@ -22,7 +22,7 @@ import { checkWorkflowWriteRows } from "./workflow-write-controller.js";
  * (no file is created, no pragma or statement writes) and reported with its format, its SQLite user_version, beside the format
  * this version runs; only the service's start creates or upgrades a file (src/database-upgrade.ts). The rows of guidance.sqlite3
  * and thread-settings.sqlite3 go through the decoders their readers use, and what the service's start changes in them is listed:
- * its upgrade creates tables and columns and clears the one-time reset's rows, the stores' open recovers committed notices.
+ * its upgrade creates tables and clears the one-time reset's rows, the stores' open recovers committed notices.
  * Nothing contacts T3
  */
 
