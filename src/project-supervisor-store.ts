@@ -29,10 +29,14 @@ export const SUPERVISOR_ROOT_THREAD_PREFIX = "supervisor-root:";
 // superviseAgentCreatedThreads: whether ordinary agent-created mains are supervised, off unless
 // saved; agentCreatedThreadsEnabledAt: when it was last turned on, so only agent requests written afterwards count
 export type ProjectModelSettings = {projectId: string; generation: number; modelMutationGeneration: number; modelSelection: SupervisorModelSelection; pending: boolean; monitoring: SupervisorMonitoringSettings; planningTimeoutMs?: number; teamSettings?: {maxHelpersPerRoot: number}; superviseAgentCreatedThreads: boolean; agentCreatedThreadsEnabledAt: number | null; applyAttempts?: number; applicationMessage?: string | null};
-export type SupervisorStopNotice = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null;
-  state: "ready" | "uncertain" | "accepted" | "sent" | "blocked" | "unconfirmed" | "superseded";
-  text: string; visibilityMisses?: number; nextObserveAt?: number;
+type StopNoticeFields = {messageId: string; commandId: string; stoppedAt: number; enabledAt: number | null; visibilityMisses?: number; nextObserveAt?: number;
   dispatchMode?: {type: "steer_active"; targetRunId: string} | {type: "queue_after_active"}; rejectedAttempts?: Array<{messageId: string; commandId: string}>; error?: string | null};
+/**
+ * A Stop notice and its native identities. One that may still be sent or observed, directly or after Retry, carries its immutable
+ * body; a sent or superseded notice is complete, and one completed before notice bodies were stored has none.
+ */
+export type SupervisorStopNotice = StopNoticeFields &
+  ({state: "ready" | "uncertain" | "accepted" | "blocked" | "unconfirmed"; text: string} | {state: "sent" | "superseded"; text?: string});
 export type BindingRecord = SupervisorBinding & {mainQuietSince?: number | null; mainQuietFingerprint?: string; mainSettlementBlockedBy?: string | null; mainSettlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; stopNotice?: SupervisorStopNotice;mainThreadId: string; modelState?: ProjectModelSettings; quietFingerprint?: string; manualKeepActive?: boolean; quietSince?: number | null; settlement?: {commandId: string; state: "pending" | "uncertain" | "settled" | "superseded"; observedAt: number; activityVersion?: string; attempts?: number}; enableAfterSequence: number; title: string; initialModel: SupervisorModelSelection; creationAttempts?: number; creationMessage?: string; deliveredRoleVersion?: string; stopObservedAt?: number; supervisionStop?: {route: "direct" | "relay" | "chat" | "ui"; callerThreadId: string | null; userMessageId: string | null; stoppedAt: number};
   /** The direct human resume that lifted the latest Stop from this Supervisor's own conversation; any later Stop or Enable replaces it. */
   supervisionResume?: SupervisionResume;
@@ -206,13 +210,16 @@ const Generation = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const StoredStop = Schema.Struct({route: Schema.Literals(["direct", "relay", "chat", "ui"]), callerThreadId: Schema.NullOr(Schema.String),
   userMessageId: Schema.NullOr(Schema.String), stoppedAt: Schema.Finite});
 const StoredResume = Schema.Struct({callerThreadId: Schema.String, userMessageId: Schema.String, operationId: Schema.String, resumedAt: Schema.Finite});
-const StoredStopNotice = Schema.Struct({messageId: Schema.String, commandId: Schema.String, stoppedAt: Schema.Finite, enabledAt: Schema.NullOr(Schema.Finite),
-  state: Schema.Literals(["ready", "uncertain", "accepted", "sent", "blocked", "unconfirmed", "superseded"]), text: Schema.String,
+const stopNoticeFields = {messageId: Schema.String, commandId: Schema.String, stoppedAt: Schema.Finite, enabledAt: Schema.NullOr(Schema.Finite),
   visibilityMisses: Schema.optionalKey(Schema.Finite), nextObserveAt: Schema.optionalKey(Schema.Finite),
   dispatchMode: Schema.optionalKey(Schema.Union([Schema.Struct({type: Schema.Literal("steer_active"), targetRunId: Schema.String}),
     Schema.Struct({type: Schema.Literal("queue_after_active")})])),
   rejectedAttempts: Schema.optionalKey(Schema.Array(Schema.Struct({messageId: Schema.String, commandId: Schema.String}))),
-  error: Schema.optionalKey(Schema.NullOr(Schema.String))});
+  error: Schema.optionalKey(Schema.NullOr(Schema.String))};
+// a notice that may still be sent or observed needs its body; a sent or superseded one completed before bodies were stored has none
+const StoredStopNotice = Schema.Union([
+  Schema.Struct({...stopNoticeFields, state: Schema.Literals(["ready", "uncertain", "accepted", "blocked", "unconfirmed"]), text: Schema.String}),
+  Schema.Struct({...stopNoticeFields, state: Schema.Literals(["sent", "superseded"]), text: Schema.optionalKey(Schema.String)})]);
 const baselineFields = {snapshotSequence: Schema.Finite, threads: Schema.Array(Schema.Struct({id: Schema.String, latestRunId: Schema.NullOr(Schema.String)}))};
 const StoredBaseline = Schema.Struct(baselineFields);
 const isVersionedBaseline = Schema.is(Schema.Struct({...baselineFields, version: Schema.Literal(2)}));

@@ -6571,6 +6571,7 @@ it.effect("an uncertain Stop notice keeps its exact body through root replacemen
   yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: (yield* fixture.threadPolicy.get()).generation});
   fixture.failNextIntroduction();yield* fixture.conversation.reconcileStopNotice(fixture.binding);
   const prior = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!;const notice = prior.stopNotice!;
+  assert.ok(notice.text !== undefined, "an uncertain notice keeps its body");
   yield* fixture.projectStore.setBinding({...prior, state: "missing"});
   const replacement = yield* fixture.projectStore.replaceMissingBinding((yield* fixture.projectStore.binding(projectId, operativeThreadId))!, defaultSupervisorModel);
   assert.notEqual(replacement.threadId, fixture.binding.threadId);
@@ -6580,6 +6581,27 @@ it.effect("an uncertain Stop notice keeps its exact body through root replacemen
   assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice?.state, "sent");
   assert.equal((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice?.text, notice.text);
   assert.equal(fixture.calls.length, 1, "root replacement does not create a second unknown notice");
+}));
+
+it.effect("a Stop notice sent before notice bodies were stored is complete: reconcile and Retry never send, observe or rewrite it", () => Effect.gen(function* () {
+  const clock = yield* pinnedClock(baseTime);
+  const fixture = yield* makeFixture(clock);
+  const service = fixture.makeProjectSupervisor();
+  yield* service.setChatSupervision({projectId, mainThreadId: operativeThreadId, enabled: false, policyGeneration: (yield* fixture.threadPolicy.get()).generation});
+  const prepared = (yield* fixture.projectStore.binding(projectId, operativeThreadId))!.stopNotice!;
+  // the stopped chat's notice as a build that sent it before bodies were stored left it: no text
+  const legacy = {messageId: "legacy-notice", commandId: "legacy-command", stoppedAt: prepared.stoppedAt, enabledAt: prepared.enabledAt, state: "sent",
+    dispatchMode: {type: "queue_after_active"}, error: null};
+  yield* fixture.sql.unsafe("UPDATE supervisor_main_bindings SET document=json_set(document,'$.stopNotice',json(?)) WHERE main_thread_id=?", [JSON.stringify(legacy), operativeThreadId]);
+  const stored = fixture.sql.unsafe<{document: string}>("SELECT document FROM supervisor_main_bindings WHERE main_thread_id=?", [operativeThreadId]);
+  const before = yield* stored;
+  yield* fixture.conversation.reconcileStopNotice(fixture.binding);
+  yield* fixture.conversation.retry(projectId, fixture.binding.threadId);
+  yield* clock.advance(61_000);
+  yield* fixture.conversation.reconcileStopNotice(fixture.binding);
+  assert.equal(fixture.calls.length, 0, "no notice is sent");
+  assert.deepEqual(yield* stored, before, "the completed notice stays exactly as stored");
+  assert.deepEqual((yield* fixture.projectStore.binding(projectId, operativeThreadId))?.stopNotice, legacy);
 }));
 
 const branchFence = (value: unknown) => "```branch-selection\n" + JSON.stringify(value) + "\n```";
