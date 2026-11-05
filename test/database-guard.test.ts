@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer } from "effect";
-import { accessDbLayer, catalogDbLayer, DatabaseOpenError, guidanceDbLayer, policyDbLayer } from "../src/db.js";
+import { Effect, FileSystem, Layer, Schema } from "effect";
+import { SqlClient } from "effect/sql";
+import { upgradeDataDirectory } from "../src/database-upgrade.js";
+import { accessDbLayer, catalogDbLayer, DatabaseOpenError, guidanceDbLayer, openUpgradeDatabase, policyDbLayer, readFormat } from "../src/db.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
 import { initializeDataDirectory } from "./support/data-directory.js";
+import { sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
 
 /*
  * the format guard of every store open (src/db.ts): only a file at its current format opens. A missing file is never created,
@@ -24,6 +27,9 @@ const opened = <A, R>(layer: Layer.Layer<A, DatabaseOpenError, R>) => Effect.sco
 const refusal = <A, R>(layer: Layer.Layer<A, DatabaseOpenError, R>) => Effect.flip(opened(layer));
 
 const sha256 = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
+
+const UserVersionRow = Schema.Struct({ user_version: Schema.Number });
+const CountRow = Schema.Struct({ n: Schema.Number });
 
 // the format a database file's own header records (bytes 60-63), or null while the main file has no complete header
 const headerFormat = (path: string): number | null => {
@@ -101,8 +107,8 @@ describe("database format guard", () => {
     assert.deepEqual([error.reason, error.found, error.expected], ["unsupported_format", 2, 1]);
     assert.match(error.message, /newer than format 1/u);
     assert.deepEqual({ main: sha256(path), log: sha256(`${path}-wal`), logBytes: statSync(`${path}-wal`).size }, before);
-    assert.deepEqual(holder.prepare("PRAGMA user_version").get(), { user_version: 2 });
-    assert.deepEqual(holder.prepare("SELECT v FROM kept").all(), [{ v: "row" }]);
+    assert.equal(sqliteRow(holder, UserVersionRow, "PRAGMA user_version").user_version, 2);
+    assert.deepEqual(sqliteRows(holder, Schema.Struct({ v: Schema.String }), "SELECT v FROM kept"), [{ v: "row" }]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
   it.live("a file at the current format opens", () => Effect.gen(function* () {
@@ -111,6 +117,36 @@ describe("database format guard", () => {
     yield* opened(catalogDbLayer(directory));
     yield* opened(guidanceDbLayer(directory));
     yield* opened(policyDbLayer(directory));
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
+
+  it.live("the stored format reads as the same number whatever integer mode the caller runs in", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* initializeDataDirectory(directory);
+    const { sql } = yield* openUpgradeDatabase(directory, "guidance", { create: false });
+    // the mode a backup snapshot reads its rows in: other statements see exact bigints
+    const exact = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, SqlClient.SafeIntegers, true);
+    const [row] = yield* exact(sql.unsafe("SELECT 1 AS one"));
+    assert.equal(typeof row?.one, "bigint");
+    assert.equal(yield* exact(readFormat(sql)), 1);
+    assert.equal(yield* readFormat(sql), 1);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
+
+  it.live("a negative user_version is no format: the open and the startup upgrade refuse the file and leave it as it is", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* initializeDataDirectory(directory);
+    const path = join(directory, "guidance.sqlite3");
+    raw(path, "PRAGMA user_version=-1;");
+    const error = yield* refusal(guidanceDbLayer(directory));
+    assert.deepEqual([error.reason, error.found], ["open_failed", undefined]);
+    const failure = yield* Effect.flip(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
+    assert.deepEqual([failure.file, failure.reason], ["guidance.sqlite3", "unreadable"]);
+    assert.equal(existsSync(join(directory, "backups")), false);
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.equal(sqliteRow(db, UserVersionRow, "PRAGMA user_version").user_version, -1);
+    } finally {
+      db.close();
+    }
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
   it.live("the access client refuses an older or newer access database before its pragmas", () => Effect.gen(function* () {
@@ -139,8 +175,8 @@ describe("database format guard", () => {
     assert.equal(sha256(path), before);
     const db = new DatabaseSync(path, { readOnly: true });
     try {
-      assert.deepEqual(db.prepare("PRAGMA user_version").get(), { user_version: 0 });
-      assert.deepEqual(db.prepare("SELECT count(*) AS n FROM dashboard_login_grants").get(), { n: 0 });
+      assert.equal(sqliteRow(db, UserVersionRow, "PRAGMA user_version").user_version, 0);
+      assert.equal(sqliteRow(db, CountRow, "SELECT count(*) AS n FROM dashboard_login_grants").n, 0);
     } finally {
       db.close();
     }

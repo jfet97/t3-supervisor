@@ -121,7 +121,7 @@ describe("SupervisorStateReset", () => {
     yield* Effect.flip(applyFormat1(directory));
     assert.deepEqual(counts(), before);
     const tables = new DatabaseSync(path, { readOnly: true });
-    assert.deepEqual(tables.prepare("SELECT count(*) AS n FROM sqlite_master WHERE name='rules'").get(), { n: 0 }, "the step's tables rolled back too");
+    assert.equal(sqliteRow(tables, Schema.Struct({ n: Schema.Number }), "SELECT count(*) AS n FROM sqlite_master WHERE name='rules'").n, 0, "the step's tables rolled back too");
     tables.close();
     const writable = new DatabaseSync(path);
     writable.exec("DROP TRIGGER refuse_scope;");

@@ -248,12 +248,24 @@ const workerClient = (config: WorkerDatabaseConfig): Effect.Effect<WorkerClient,
 const insideTransaction = new SqlError({reason: new UnknownError({cause: "backup_in_transaction", message: "A backup cannot run inside a transaction", operation: "backup"})});
 const malformedBackup = new SqlError({reason: new UnknownError({cause: "backup_report", message: "The database worker reported a malformed backup", operation: "backup"})});
 
-const UserVersion = Schema.Tuple([Schema.Struct({user_version: Schema.Int})]);
+/*
+ * a format counts up from 0 and is stored in SQLite's signed 32-bit user_version, so a stored format is an integer from 0 to
+ * 2^31 - 1; a negative value is no format of any Supervisor
+ */
+const StoredFormat = Schema.Int.check(Schema.isBetween({minimum: 0, maximum: 2_147_483_647}));
+const UserVersion = Schema.Tuple([Schema.Struct({user_version: StoredFormat})]);
 const decodeUserVersion = Schema.decodeUnknownEffect(UserVersion);
 
-/** The file's stored format (its SQLite user_version), read through the client's connection, a committed WAL included. */
+/**
+ * The file's stored format (its SQLite user_version), read through the client's connection, a committed WAL included. The
+ * pragma is read as a plain number whatever integer mode the caller runs in (a backup snapshot reads its rows as exact
+ * bigints), so every caller decodes, compares and records the same number.
+ */
 export const readFormat = (sql: SqlClient.SqlClient): Effect.Effect<number, SqlError | Schema.SchemaError> =>
-  sql.unsafe("PRAGMA user_version").pipe(Effect.flatMap(decodeUserVersion), Effect.map(([row]) => row.user_version));
+  sql.unsafe("PRAGMA user_version").pipe(
+    Effect.provideService(SqlClient.SafeIntegers, false),
+    Effect.flatMap(decodeUserVersion),
+    Effect.map(([row]) => row.user_version));
 
 // the format check of every store open: on the opened connection, before any journal-mode change, pragma or store code
 const requireFormat = (sql: SqlClient.SqlClient, file: string, expected: number): Effect.Effect<void, DatabaseOpenError> =>
