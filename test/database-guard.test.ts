@@ -125,7 +125,7 @@ describe("database format guard", () => {
     const { sql } = yield* openUpgradeDatabase(directory, "guidance", { create: false });
     // the mode a backup snapshot reads its rows in: other statements see exact bigints
     const exact = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, SqlClient.SafeIntegers, true);
-    const [row] = yield* exact(sql.unsafe("SELECT 1 AS one"));
+    const [row] = yield* exact(sql.unsafe<{one: unknown}>("SELECT 1 AS one"));
     assert.equal(typeof row?.one, "bigint");
     assert.equal(yield* exact(readFormat(sql)), 1);
     assert.equal(yield* readFormat(sql), 1);

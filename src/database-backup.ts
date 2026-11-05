@@ -124,12 +124,12 @@ const snapshotOf = (sql: SqlClient.SqlClient) => snapshotRead(sql)(Effect.gen(fu
       // pages in rowid order, so a large table never crosses the worker boundary at once
       let after: bigint | null = null;
       for (;;) {
-        const rows = yield* (after === null
+        const rows: ReadonlyArray<ReadonlyArray<unknown>> = yield* (after === null
           ? sql.unsafe(`SELECT rowid, * FROM ${quoted(table.name)} ORDER BY rowid LIMIT ${pageRows}`).values
           : sql.unsafe(`SELECT rowid, * FROM ${quoted(table.name)} WHERE rowid > ? ORDER BY rowid LIMIT ${pageRows}`, [after]).values);
         for (const row of rows) content.update(JSON.stringify(row.map(typed)));
         count += rows.length;
-        const last = rows.at(-1);
+        const last: ReadonlyArray<unknown> | undefined = rows.at(-1);
         if (rows.length < pageRows || last === undefined) break;
         after = yield* decodeRowId(last[0]);
       }
