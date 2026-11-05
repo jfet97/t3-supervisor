@@ -395,3 +395,28 @@ it.effect("CT-PSS-10: a damaged control generation or flag, folder detection or 
   assert.equal(yield* store.baseline(), null);
   assert.deepEqual(yield* store.baseline(pssBoundary), {...pssBoundary, version: 2});
 })), {timeout: 10_000});
+
+it.effect("CT-PSS-11: a Stop notice completed before notice bodies were stored reads whole; one that may still be sent or observed needs its body", () => live(Effect.gen(function* () {
+  const directory = yield* temporaryDataDirectory("pss-service-11-");
+  const {sql, supervisors: store} = yield* reopenGuidanceStores(directory);
+  const binding = {projectId: "project-a", mainThreadId: "main-a", threadId: "supervisor-root:a", generation: 1, state: "active"};
+  const insert = (mainThreadId: string, stopNotice: unknown) =>
+    sql`INSERT INTO supervisor_main_bindings VALUES('project-a',${mainThreadId},${JSON.stringify({...binding, mainThreadId, stopNotice})})`;
+  const documentOf = (mainThreadId: string) => Effect.map(sql`SELECT document FROM supervisor_main_bindings WHERE main_thread_id=${mainThreadId}`, ([row]) => row?.document);
+  // a notice a build before stored bodies left once it was sent or superseded: no text, its identities and unknown keys kept
+  const legacy = {messageId: "legacy-notice", commandId: "legacy-command", stoppedAt: 123456789, enabledAt: null, state: "sent",
+    dispatchMode: {type: "queue_after_active"}, error: null, nativeExtra: {opaque: [1, 2]}};
+  for (const [mainThreadId, notice] of [["main-sent", legacy], ["main-superseded", {...legacy, state: "superseded"}]] as const) {
+    yield* insert(mainThreadId, notice);
+    const before = yield* documentOf(mainThreadId);
+    assert.deepEqual((yield* store.binding("project-a", mainThreadId))?.stopNotice, notice);
+    assert.equal(yield* documentOf(mainThreadId), before, "reading it writes nothing");
+  }
+  // a notice that may still be sent, observed or made sendable again by Retry is refused without its body
+  for (const state of ["ready", "uncertain", "accepted", "blocked", "unconfirmed"]) {
+    yield* insert(`main-${state}`, {...legacy, state});
+    yield* failsWith(store.binding("project-a", `main-${state}`), /supervision_row_invalid/);
+    yield* sql`DELETE FROM supervisor_main_bindings WHERE main_thread_id=${`main-${state}`}`;
+  }
+})), {timeout: 10_000});
+

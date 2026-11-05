@@ -1765,6 +1765,7 @@ it.effect("Retry reaches a started No Project chat and still reconciles Stop not
     yield* f.supervisor.setChatSupervision({projectId: "project-a", mainThreadId: "manual", policyGeneration: (yield* f.policy.get()).generation, enabled: false});
     const stopped = (yield* f.fixture.store.binding("project-a", "manual"))!;
     assert.ok(stopped.stopNotice);
+    assert.ok(stopped.stopNotice.state === "ready", "this Stop prepared a notice with its immutable body");
     yield* f.fixture.store.setStopNotice(stopped, stopped.stopNotice.messageId, {...stopped.stopNotice, state: "unconfirmed"});
     yield* f.fixture.store.setBinding({...stopped, settlement: {commandId: "uncertain-settle", state: "uncertain", attempts: 3, observedAt: 1}});
     const before = f.fixture.operations.length;

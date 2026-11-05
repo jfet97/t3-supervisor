@@ -2686,8 +2686,11 @@ Turns without a service request: do pending context/planning work, then keep the
     const current = Effect.map(store.binding(owner.projectId, owner.mainThreadId), (binding) =>
       binding?.threadId === owner.threadId && binding.generation === owner.generation ? binding : null);
     const first = yield* current;
-    const notice = first?.stopNotice;
-    if (!first || !notice || ["sent", "blocked", "unconfirmed", "superseded"].includes(notice.state)) return;
+    const stored = first?.stopNotice;
+    // a sent or superseded notice is complete, a blocked or unconfirmed one waits for Retry: none is sent or observed here
+    if (!first || !stored || (stored.state !== "ready" && stored.state !== "uncertain" && stored.state !== "accepted")) return;
+    // the notice still to be sent or observed, with the body it is sent and recognized by
+    const notice = stored;
     if ((notice.nextObserveAt ?? 0) > (yield* Clock.currentTimeMillis)) return;
     const text = notice.text;
     // the notice read and its compare-and-set write are one transaction
@@ -3248,7 +3251,8 @@ Turns without a service request: do pending context/planning work, then keep the
     if (!(yield* enabled(projectId, (yield* store.bindingForSupervisor(supervisorThreadId))?.mainThreadId, "reconcile"))) return;
     const binding = yield* store.bindingForSupervisor(supervisorThreadId);
     const notice = binding?.stopNotice;
-    if (binding && notice && ["unconfirmed", "blocked"].includes(notice.state)) yield* store.setStopNotice(binding, notice.messageId,
+    // only a blocked or unconfirmed notice, which carries its body, is made sendable or observable again; a completed one never is
+    if (binding && notice && (notice.state === "unconfirmed" || notice.state === "blocked")) yield* store.setStopNotice(binding, notice.messageId,
       {...notice, state: notice.state === "unconfirmed" ? "uncertain" : "ready", visibilityMisses: 0, nextObserveAt: yield* clock.currentTimeMillis, error: null});
     yield* requests.reviewMisses(supervisorThreadId, true);
     // an unknown delivery is never made sendable again: Retry only re-observes it, so no Stop, Enable or activation boundary is

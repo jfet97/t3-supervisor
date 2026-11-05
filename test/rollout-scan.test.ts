@@ -48,6 +48,8 @@ const failingRows = `
   INSERT INTO meta VALUES('native_git_probe_sessions','[{"threadId":"${marker}"}]');
   INSERT INTO supervisor_owned_threads VALUES(NULL);
   INSERT INTO supervisor_main_bindings VALUES('project-bad','main-bad','{"${marker}":1}');
+  INSERT INTO supervisor_main_bindings VALUES('project-ok','main-sent','{"projectId":"project-ok","mainThreadId":"main-sent","threadId":"supervisor-root:ok","generation":1,"state":"active","stopNotice":{"messageId":"legacy-notice","commandId":"legacy-command","stoppedAt":123456789,"enabledAt":null,"state":"sent","dispatchMode":{"type":"queue_after_active"},"error":null}}');
+  INSERT INTO supervisor_main_bindings VALUES('project-bad','main-unsent','{"projectId":"project-bad","mainThreadId":"main-unsent","threadId":"supervisor-root:bad","generation":1,"state":"active","stopNotice":{"messageId":"legacy-notice","commandId":"legacy-command","stoppedAt":123456789,"enabledAt":null,"state":"ready","dispatchMode":{"type":"queue_after_active"},"error":null}}');
   INSERT INTO supervisor_task_interpretations VALUES('thread-bad','project-bad','not json',1);
   INSERT INTO supervisor_project_settings VALUES('project-bad','{"${marker}":1}');
   INSERT INTO supervisor_chat_enables VALUES('thread-bad','${marker}');
@@ -96,6 +98,7 @@ const expected = [
   "guidance.sqlite3 | supervisor_helper_channels | channel | incompatible | cycle | owner-bad 1 helper-bad",
   "guidance.sqlite3 | supervisor_helper_deliveries | delivery receipt | incompatible | cycle | owner-bad 1 message-bad",
   "guidance.sqlite3 | supervisor_main_bindings | binding | undecodable | cycle | project-bad main-bad",
+  "guidance.sqlite3 | supervisor_main_bindings | binding | undecodable | cycle | project-bad main-unsent",
   "guidance.sqlite3 | supervisor_monitor_binding_clock | notice clock | undecodable | cycle | supervisor-bad",
   "guidance.sqlite3 | supervisor_monitor_items | monitor item | undecodable | cycle | project-bad thread-bad item-bad",
   "guidance.sqlite3 | supervisor_monitor_threads | monitor thread | undecodable | cycle | project-bad thread-bad",

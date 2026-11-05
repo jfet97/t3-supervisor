@@ -7,6 +7,7 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Effect, Exit, FileSystem, Layer, Schema } from "effect";
 import { DatabaseUpgradeError, type UpgradeReport, upgradeDataDirectory } from "../src/database-upgrade.js";
+import { rolloutScan } from "../src/rollout-scan.js";
 import { guidanceDbLayer } from "../src/db.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { SupervisorIds } from "../src/ids.js";
@@ -548,6 +549,66 @@ describe("startup upgrade", () => {
       refusedWith(yield* Effect.exit(upgrade(directory)), "guidance.sqlite3", "incomplete_schema");
       assert.deepEqual(snapshotDirectory(directory), before, damage);
       assert.deepEqual(backupSets(directory), [], damage);
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  /*
+   * an installation that ran builds from before the first release: guidance keeps the project-scoped supervision's bindings and
+   * notice clock (the clock created without review_misses and given it by ALTER TABLE), with rows, and a Stop notice sent before
+   * notice bodies were stored
+   */
+  it.live("the tables early builds left in guidance and a Stop notice sent before bodies were stored are carried forward as they are", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* materializeFixture("format0-current-unversioned", directory);
+    const legacyBinding = { projectId: "fixture-project-legacy", mainThreadId: "fixture-thread-main-legacy", threadId: "supervisor-root:legacy", generation: 1,
+      state: "active", stopNotice: { messageId: "legacy-notice", commandId: "legacy-command", stoppedAt: 1760000000000, enabledAt: null, state: "sent",
+        dispatchMode: { type: "queue_after_active" }, error: null } };
+    exec(join(directory, "guidance.sqlite3"), `
+      CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
+      INSERT INTO supervisor_project_bindings VALUES('fixture-project-legacy','{"projectId":"fixture-project-legacy","threadId":"supervisor-root:legacy","nativeExtra":{"opaque":[1,2]}}');
+      CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);
+      INSERT INTO supervisor_monitor_project_clock VALUES('fixture-project-legacy',1760000000000);
+      ALTER TABLE supervisor_monitor_project_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0;
+      UPDATE supervisor_monitor_project_clock SET review_misses=2;
+      INSERT INTO supervisor_main_bindings VALUES('fixture-project-legacy','fixture-thread-main-legacy','${JSON.stringify(legacyBinding)}');
+    `);
+    const retained = ["table:supervisor_monitor_project_clock", "table:supervisor_project_bindings"];
+    const retainedDeclarations = () => Object.fromEntries(Object.entries(declarations(join(directory, "guidance.sqlite3"))).filter(([key]) => retained.includes(key)));
+    const declared = retainedDeclarations();
+    const before = snapshotDirectory(directory);
+    const report = yield* upgrade(directory);
+    assert.ok(report.backupSet !== null);
+    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), currentFormat[file], file);
+    // every row is kept byte for byte, the retained tables' rows and declarations among them
+    const after = snapshotDirectory(directory);
+    assertPreserved(before["guidance.sqlite3"] ?? {}, withoutMarker(after["guidance.sqlite3"] ?? {}));
+    for (const table of ["supervisor_project_bindings", "supervisor_monitor_project_clock", "supervisor_main_bindings"])
+      assert.deepEqual(after["guidance.sqlite3"]?.[table], before["guidance.sqlite3"]?.[table], table);
+    assert.deepEqual(retainedDeclarations(), declared);
+    // the readers' own checks find nothing in them, the binding with its bodiless sent notice included
+    const guidanceScan = (yield* rolloutScan(directory)).files.find((file) => file.file === "guidance.sqlite3");
+    assert.deepEqual((guidanceScan?.rows?.findings ?? []).filter((group) => ["supervisor_main_bindings", ...retained.map((key) => key.slice(6))].includes(group.table)), []);
+    // a later start changes nothing
+    assert.deepEqual(yield* upgrade(directory), { fresh: false, backupSet: null, files: [], policyFileRemoved: false });
+    assert.deepEqual(snapshotDirectory(directory)["guidance.sqlite3"], after["guidance.sqlite3"]);
+    assert.deepEqual(retainedDeclarations(), declared);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  it.live("another declaration of a retained table, or an object on one, is refused before backup or migration writes", () => Effect.gen(function* () {
+    for (const statement of [
+      "CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT);",
+      "CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);",
+      `CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);
+        CREATE INDEX supervisor_project_bindings_document ON supervisor_project_bindings(document);`,
+    ]) {
+      const directory = yield* temporaryDirectory;
+      yield* materializeFixture("format0-current-unversioned", directory);
+      exec(join(directory, "guidance.sqlite3"), statement);
+      const before = snapshotDirectory(directory);
+      refusedWith(yield* Effect.exit(upgrade(directory)), "guidance.sqlite3", "unknown_layout");
+      assert.deepEqual(snapshotDirectory(directory), before, statement);
+      assert.deepEqual(backupSets(directory), [], statement);
+      for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 0, `${file} ${statement}`);
     }
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
