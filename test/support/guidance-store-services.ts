@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, FileSystem, Layer, Ref, Scope } from "effect";
 import type { SqlClient } from "effect/sql";
-import { GuidanceDb, guidanceDbLayer, PolicyDb, policyDbLayer } from "../../src/db.js";
+import { CatalogDb, catalogDbLayer, GuidanceDb, guidanceDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
@@ -120,9 +120,9 @@ export const sequentialIds = (prefix = "00000000-0000-4000-8000"): Layer.Layer<S
 export const guidanceDb = (directory: string): Layer.Layer<GuidanceDb, never> =>
   Layer.fresh(guidanceDbLayer(directory)).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
 
-/** A fresh thread-settings.sqlite3 client for `directory`, closed when the effect using it ends. */
-export const policyDb = (directory: string): Layer.Layer<PolicyDb, never> =>
-  Layer.fresh(policyDbLayer(directory)).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
+/** A fresh catalog.sqlite3 client for `directory`, closed when the effect using it ends. */
+export const catalogDb = (directory: string): Layer.Layer<CatalogDb, never> =>
+  Layer.fresh(catalogDbLayer(directory)).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
 
 /** Rows of a query as plain objects, for comparing table contents. */
 export const rows = (db: SqlClient.SqlClient, query: string, ...params: ReadonlyArray<unknown>) =>

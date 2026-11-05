@@ -130,6 +130,14 @@ keeps each database as it was before the upgrade. It is private (directory mode
 yourself once you no longer need them. A new installation makes no backup, and
 neither does a start whose databases already have the current format.
 
+The excluded-chat policy is kept in `guidance.sqlite3`, so a Stop, Enable or Start
+saves the policy and its own records together. Earlier versions kept it in
+`thread-settings.sqlite3`: the first start of this version copies that file into the
+backup set with the others, imports its policy unchanged and then deletes it, so the
+copy in the backup set is the one that remains. If `thread-settings.sqlite3` comes
+back with a different policy, for example because an older version ran on the
+upgraded state, the service refuses to start rather than choose one.
+
 The service refuses to start, without changing anything, on a database whose layout
 it does not recognize or whose format is newer than the installed version's. If a
 backup cannot be made or verified, or an upgrade step fails, it also exits with an

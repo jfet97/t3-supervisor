@@ -46,6 +46,28 @@
         }
       },
       "statements": "supervision-history"
+    },
+    {
+      "id": "format2-supervision-history",
+      "file": "guidance.sqlite3",
+      "format": 2,
+      "requires": {
+        "declarations": {
+          "index:supervisor_main_binding_thread": "CREATE INDEX supervisor_main_binding_thread ON supervisor_main_bindings(json_extract(document,'$.threadId'))",
+          "index:supervisor_team_member_identity": "CREATE UNIQUE INDEX supervisor_team_member_identity ON supervisor_team_members(member_thread_id) WHERE state<>'retired'",
+          "index:supervisor_workflow_write_evidence_operation": "CREATE INDEX supervisor_workflow_write_evidence_operation\n        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at)",
+          "table:supervisor_helper_channels": "CREATE TABLE supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))",
+          "table:supervisor_main_bindings": "CREATE TABLE supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id))",
+          "table:supervisor_owned_threads": "CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY)",
+          "table:supervisor_team_members": "CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id))",
+          "table:supervisor_workflow_write_evidence": "CREATE TABLE supervisor_workflow_write_evidence (\n        supervisor_thread_id TEXT NOT NULL,\n        item_id TEXT NOT NULL,\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        native_evidence TEXT NOT NULL,\n        result TEXT NOT NULL,\n        successful INTEGER NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(supervisor_thread_id,item_id)\n      )",
+          "table:supervisor_workflow_write_receipts": "CREATE TABLE supervisor_workflow_write_receipts (\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        supervisor_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        result TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)\n      )"
+        },
+        "meta": {
+          "supervisor_scope_version": "main-v1"
+        }
+      },
+      "statements": "supervision-history"
     }
   ],
   "statements": {

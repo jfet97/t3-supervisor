@@ -5,7 +5,6 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { ConfigProvider, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Stream, SubscriptionRef } from "effect";
 import { Store } from "../src/store.js";
 import { supervise, SupervisorLive, SupervisorStatusRef, type SupervisorStatus } from "../src/supervisor.js";
-import { ThreadPolicyStore } from "../src/thread-policy.js";
 import { supervisorHarness, type SupervisorHarness } from "./support/g8-cli.js";
 import { portState } from "./support/g11-http.js";
 
@@ -15,7 +14,6 @@ import { portState } from "./support/g11-http.js";
 interface Release {
   readonly listeners: Readonly<Record<"health" | "ui" | "mcp", "open" | "refused">>;
   readonly catalog: "open" | "closed";
-  readonly threadPolicy: "open" | "closed";
 }
 
 // relative paths under the data directory, sorted; none before the directory exists
@@ -27,7 +25,7 @@ const dataFiles = (harness: SupervisorHarness) => Effect.gen(function* () {
 const ready = (status: SupervisorStatus) =>
   status.supervisionState === "ready" && status.t3Connected && status.activation !== null && status.storeState === "ready";
 
-it.live("CT-MAIN-02: the supervision run and its health, UI and MCP listeners release before the catalog and thread-policy stores", () =>
+it.live("CT-MAIN-02: the supervision run and its health, UI and MCP listeners release before the catalog store", () =>
   Effect.gen(function* () {
     const harness = yield* supervisorHarness({ activeThreads: 1, archiveThreads: 1 }).pipe(Effect.provide(NodeFileSystem.layer));
     const events: unknown[] = [];
@@ -40,18 +38,16 @@ it.live("CT-MAIN-02: the supervision run and its health, UI and MCP listeners re
     const observed = yield* Deferred.make<SubscriptionRef.SubscriptionRef<SupervisorStatus>>();
     const released = yield* Deferred.make<Release>();
     // built after the root services and released first among them: it hands over the status and, once the services begin
-    // to release, records the listeners and whether the catalog and thread-policy stores still answer
+    // to release, records the listeners and whether the catalog store still answers
     const observer = Layer.effectDiscard(Effect.gen(function* () {
       const status = yield* SupervisorStatusRef;
       const store = yield* Store;
-      const policy = yield* ThreadPolicyStore;
       yield* Deferred.succeed(observed, status);
       yield* Effect.addFinalizer(() => Effect.gen(function* () {
         const states = yield* listeners;
         const answers = (exit: Exit.Exit<unknown, unknown>) => Exit.isSuccess(exit) ? "open" as const : "closed" as const;
         const catalog = answers(yield* Effect.exit(store.cursor("active")));
-        const threadPolicy = answers(yield* Effect.exit(policy.get()));
-        yield* Deferred.succeed(released, { listeners: states, catalog, threadPolicy });
+        yield* Deferred.succeed(released, { listeners: states, catalog });
       }));
     }));
     const provider = ConfigProvider.layer(ConfigProvider.fromEnvRecord(harness.env, { preserveEmptyStrings: true }));
@@ -63,7 +59,7 @@ it.live("CT-MAIN-02: the supervision run and its health, UI and MCP listeners re
 
     yield* Fiber.interrupt(fiber).pipe(Effect.timeout("5 seconds"));
     assert.deepEqual(yield* Deferred.await(released).pipe(Effect.timeout("1 second")),
-      { listeners: { health: "refused", ui: "refused", mcp: "refused" }, catalog: "open", threadPolicy: "open" });
+      { listeners: { health: "refused", ui: "refused", mcp: "refused" }, catalog: "open" });
     // after the services released, every database is closed: no wal, shm or journal sidecar remains
     assert.deepEqual((yield* dataFiles(harness)).filter((file) => /-(wal|shm|journal)$/u.test(file)), []);
     // shutdown logs nothing after the start: no operation_deferred or supervision_unavailable line

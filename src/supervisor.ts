@@ -13,9 +13,7 @@ import { NativeEnvelope } from "./native-envelope.js";
 import { NativeRpc, NativeShell } from "./supervisor-native.js";
 import { T3Client } from "./t3.js";
 import { T3Native } from "./t3-native/index.js";
-import { policyDbLayer } from "./db.js";
 import { persistenceStartup } from "./database-upgrade.js";
-import { ThreadPolicyStore } from "./thread-policy.js";
 import type { SupervisorSettings } from "./types.js";
 import { buildInfo } from "./version.js";
 
@@ -185,24 +183,17 @@ export type NativeTransport = NativeEnvelope | Crypto.Crypto | HttpClient.HttpCl
 
 const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(config.dataDirectory)));
 
-export type SupervisorServices = DashboardUpdates | SupervisorConfig | SupervisorStatusRef | Store | T3Client | T3Native | ThreadPolicyStore | SupervisorOwnership |
+export type SupervisorServices = DashboardUpdates | SupervisorConfig | SupervisorStatusRef | Store | T3Client | T3Native | SupervisorOwnership |
   NativeTransport | FileSystem.FileSystem;
 
-/*
- * the process's thread-policy store on its own PolicyDb client (thread-settings.sqlite3); the startup upgrade seeded it once, when
- * the directory was fresh
- */
-const threadPolicy = Layer.unwrap(SupervisorConfig.useSync((config) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)))));
-
 /**
- * The root services over the configuration, acquired in today's order: ownership, thread policy, the native transport and the T3
- * access over the read token, then the catalog and the status; they release in reverse. Each supervision run reloads the permanent
- * ownership into the process's set when its guidance stores are acquired.
+ * The root services over the configuration, acquired in today's order: ownership, the native transport and the T3 access over
+ * the read token, then the catalog and the status; they release in reverse. Each supervision run reloads the permanent ownership
+ * into the process's set when its guidance stores are acquired, and builds the thread-policy store on its own guidance client.
  */
 export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRef.layer).pipe(
   Layer.provideMerge(rootAccess),
   Layer.provideMerge(NativeTransportLive),
-  Layer.provideMerge(threadPolicy),
   Layer.provideMerge(SupervisorOwnership.layer),
   Layer.provideMerge(DashboardUpdates.layer),
 );

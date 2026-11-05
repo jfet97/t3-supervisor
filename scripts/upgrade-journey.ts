@@ -13,7 +13,8 @@ import { decodeDescriptor, installRuntime, issueSession, orchestrationProtocol, 
 import { channelRelease, decodeReleaseLock, imagePlatforms, imageReference, ReleaseChannel, sourceRepository, type ImagePlatform } from "./supervisor-releases.js";
 import {
   backupProblems, catalogIdentities, changingFiles, databaseFiles, type DatabaseFile, eventLines, type FileRows, type Formats, type JourneyCheck,
-  journeyOutcome, type JourneyOutcome, requiredMeta, rowDifferences, SeedFile, selectSeedSet, startupFailure, upgradeEventProblems,
+  journeyOutcome, type JourneyOutcome, movedPolicyProblems, requiredMeta, rowDifferences, SeedFile, selectSeedSet, startupFailure, upgradeEventProblems,
+  withoutImportMarker,
 } from "./upgrade-journey-evidence.js";
 import { backupObservation, type DirectorySnapshot, fileShape, seedFile, snapshotDirectory } from "./upgrade-journey-files.js";
 
@@ -44,16 +45,17 @@ const readCredential = {name: "read", variable: "T3_TOKEN_FILE", scopes: ["orche
 const readyTimeoutMs = 180_000;
 const seedFilePath = join(repositoryRoot, "test", "fixtures", "upgrade-journeys", "seed-sets.json");
 
-/* The candidate's current format of each database file, src/db.ts. How each file's rows must come through its start: byte for byte,
- * or by identity for the catalog, which a start may rebuild from T3. A format that moves rows between files, such as the thread policy
- * into guidance, changes its file's entry here and checks the moved rows in their new file.
+/* The candidate's current format of each database file, src/db.ts, and null for thread-settings.sqlite3, which guidance format 2
+ * retired: the start imports its policy into guidance and removes it. How each file's rows must come through its start: byte for
+ * byte (guidance's import marker aside), by identity for the catalog, which a start may rebuild from T3, or moved into guidance for
+ * the retired policy file.
  */
 const currentFormats: Formats = {
   "access/login.sqlite3": DatabaseFormats.access, "catalog.sqlite3": DatabaseFormats.catalog,
-  "guidance.sqlite3": DatabaseFormats.guidance, "thread-settings.sqlite3": DatabaseFormats.policy,
+  "guidance.sqlite3": DatabaseFormats.guidance, "thread-settings.sqlite3": null,
 };
-const preservation: Readonly<Record<DatabaseFile, "rows" | "identities">> = {
-  "access/login.sqlite3": "rows", "catalog.sqlite3": "identities", "guidance.sqlite3": "rows", "thread-settings.sqlite3": "rows",
+const preservation: Readonly<Record<DatabaseFile, "rows" | "identities" | "moved">> = {
+  "access/login.sqlite3": "rows", "catalog.sqlite3": "identities", "guidance.sqlite3": "rows", "thread-settings.sqlite3": "moved",
 };
 
 export class JourneyError extends Data.TaggedError("JourneyError")<{readonly message: string}> {}
@@ -498,11 +500,20 @@ const storedSettings = (rows: FileRows | undefined, projectId: string) => {
 const formatsText = (formats: Readonly<Partial<Record<DatabaseFile, number | null>>>) =>
   databaseFiles.map((file) => `${file} ${formats[file] === null || formats[file] === undefined ? "absent" : `format ${formats[file]}`}`).join(", ");
 
-// the stored rows a start must keep, by each file's preservation rule: every row byte for byte, or the catalog's identities, and the bearer
+/*
+ * the stored rows a start must keep, by each file's preservation rule: every row byte for byte (guidance's import marker aside), the
+ * catalog's identities, or the retired policy file's row moved into guidance; and the bearer
+ */
 const preservedProblems = (before: DirectorySnapshot, after: DirectorySnapshot): ReadonlyArray<string> => [
-  ...databaseFiles.flatMap((file) => preservation[file] === "rows"
-    ? rowDifferences(before.rows[file] ?? {}, after.rows[file] ?? {}).map((problem) => `${file}: ${problem}`)
-    : isDeepStrictEqual(catalogIdentities(before.rows[file] ?? {}), catalogIdentities(after.rows[file] ?? {})) ? [] : [`${file}: its identities changed`]),
+  ...databaseFiles.flatMap((file) => {
+    const was = before.rows[file] ?? {};
+    const rule = preservation[file];
+    if (rule === "rows") return rowDifferences(was, file === "guidance.sqlite3" ? withoutImportMarker(was, after.rows[file] ?? {}) : after.rows[file] ?? {})
+      .map((problem) => `${file}: ${problem}`);
+    if (rule === "identities") return isDeepStrictEqual(catalogIdentities(was), catalogIdentities(after.rows[file] ?? {})) ? [] : [`${file}: its identities changed`];
+    return movedPolicyProblems(before.rows[file], after.rows["guidance.sqlite3"], after.formats[file] !== null && after.formats[file] !== undefined, after.sets)
+      .map((problem) => `${file}: ${problem}`);
+  }),
   ...(before.bearer === null || after.bearer === before.bearer ? [] : ["access/workflow-mcp-token changed or disappeared"]),
 ];
 
@@ -676,7 +687,7 @@ const finish = (folder: RunFolder) => Effect.gen(function* () {
       `policy generation ${written.policy.generation}, project settings generation ${written.projectSettings.generation}, No Project ${written.noProject.mode}`);
     const kept = preservedProblems(before, after);
     add("stored rows, identities, native evidence and the workflow MCP bearer preserved", kept.length === 0, kept.slice(0, 6).join("; ") ||
-      "access, guidance and thread-settings byte for byte, the catalog's identities and the bearer unchanged");
+      "access and guidance byte for byte, the policy moved byte for byte into guidance with its import marker and thread-settings removed, the catalog's identities and the bearer unchanged");
     add("candidate stopped cleanly", first.code === 130, `exit ${String(first.code ?? "killed")}`);
 
     // 5. a restart over the upgraded directory: no redundant upgrade, no backup, everything still there

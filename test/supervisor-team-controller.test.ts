@@ -1,19 +1,18 @@
 import assert from "node:assert/strict";
 import {createHash} from "node:crypto";
 import {it} from "@effect/vitest";
-import {Context, Deferred, Effect, Fiber, Layer} from "effect";
+import {Deferred, Effect, Fiber} from "effect";
 import type {SqlClient} from "effect/sql";
 import {defaultSupervisorModel} from "../src/project-supervisor-store.js";
 import {SupervisorRpcError, type NativeRpcShape} from "../src/supervisor-native.js";
 import {supervisionTeamToolDefinition, type SupervisorTeamController} from "../src/supervisor-team-controller.js";
 import {teamNotificationEvidence, teamNotificationText} from "../src/supervisor-team-runtime.js";
 import {attributesHelperDelivery} from "../src/supervisor-helper-transport.js";
-import {ThreadPolicyStore} from "../src/thread-policy.js";
 import type {WorkflowCallCancel} from "../src/workflow-write-controller.js";
 import {workflowToolInputMaxBytes, workflowToolInputSize, workflowToolNames} from "../src/workflow-write-evidence.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
 import {cancelAfter, within} from "./support/g11-http.js";
-import {execute, openSupervisionStores, policyLayer, row, rows, supervisionStores, temporaryDirectory} from "./support/g11-stores.js";
+import {execute, openSupervisionStores, row, rows, supervisionStores, temporaryDirectory} from "./support/g11-stores.js";
 import {stopMain, teamControllers, type TeamNative} from "./support/g11-team.js";
 import {exchangeTable, measureExchange, recordExchangeSamples, type ExchangeSample} from "./support/exchange-audit.js";
 
@@ -33,7 +32,7 @@ const deadline = <A, E>(call: (cancel: WorkflowCallCancel) => Effect.Effect<A, E
 const fixture = Effect.gen(function* () {
   const directory = yield* temporaryDirectory("team-review-controller-");
   const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer(directory)), ThreadPolicyStore);
+  const policy = stores.policy;
   const {supervisors, team, sql} = stores;
   const reserved = yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1);
   const binding = {...reserved, state: "ready" as const};
@@ -346,7 +345,6 @@ const operateFixture = Effect.gen(function* () {
   const directory = yield* temporaryDirectory("team-controller-operate-");
   // the first client of the file is closed by a simulated crash, or with the test scope
   const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer(directory)), ThreadPolicyStore);
   const {supervisors, team, sql} = stores;
   const binding = {...(yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1)), state: "ready" as const};
   yield* supervisors.setBinding(binding);
@@ -399,7 +397,8 @@ const operateFixture = Effect.gen(function* () {
     call: (tag, payload, cancel) => Effect.suspend(() => invoke(tag, payload, cancel)),
     initiate: (tag, payload, cancel) => Effect.sync(() => ({sent: Effect.succeed(true), result: invoke(tag, payload, cancel), release: Effect.void})),
   };
-  const makeController = (opened: typeof stores) => Effect.map(teamControllers(opened, policy, native, {rpc}), (built) => built.controller);
+  // a controller reopened after a crash reads the policy through its own reopened client
+  const makeController = (opened: typeof stores) => Effect.map(teamControllers(opened, opened.policy, native, {rpc}), (built) => built.controller);
   const controller = yield* makeController(stores);
   // a dispatch still pending when the test ends is abandoned: it fails as the baseline call failed when its test finished
   yield* Effect.addFinalizer(() => Effect.forEach(pending, (held) => Deferred.fail(held, new SupervisorRpcError("uncertain")), {discard: true}));

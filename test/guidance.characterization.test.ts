@@ -361,10 +361,11 @@ it.live("CT-UI-02: sign-in rejects foreign origins, non-JSON, oversized, malform
   assert.deepEqual(yield* exchangeJson(origin + "/api/csrf", {headers: {"x-supervisor-session": first.session}}), [401, {message: "Sign in to Supervisor."}]);
 }), {timeout: 10_000});
 
-// target change (S6d contract, the switch: the root provides the thread-policy store on its PolicyDb client for the process,
-// and the dashboard's thread-policy handler saves through it): the baseline dashboard had no thread policy unless one was
-// configured, so the 64000-byte save that reached the handler answered 400 "Chat settings unavailable."; the handler now
-// always has the process's store, and the same save of generation 1 commits generation 2
+/* target change (S6d contract, the switch: the run provides the thread-policy store on its guidance client, and the
+ * dashboard's thread-policy handler saves through it): the baseline dashboard had no thread policy unless one was configured,
+ * so the 64000-byte save that reached the handler answered 400 "Chat settings unavailable."; the handler now always has the
+ * run's store, and the same save of generation 1 commits generation 2
+ */
 it.live("CT-UI-03: /api answers 401 before CSRF, then 403 without a valid token and origin, 415 for non-JSON and 413 above 64000 bytes", () => Effect.gen(function* () {
   const {origin, directory} = yield* startUi();
   const call = (path: string, init: ExchangeInit = {}) => within(exchangeJson(origin + path, init), "5 seconds", path);
@@ -391,7 +392,7 @@ it.live("CT-UI-03: /api answers 401 before CSRF, then 403 without a valid token 
     return body.slice(0, -1) + " ".repeat(size - body.length) + "}";
   };
   assert.deepEqual(yield* post(valid, padded(64_001)), [413, {message: "The request payload is too large. Reduce its size before retrying."}]);
-  // 64000 bytes reach the handler, which saves through the process's thread-policy store
+  // 64000 bytes reach the handler, which saves through the run's thread-policy store
   assert.deepEqual(yield* post(valid, padded(64_000)), [200, {generation: 2, excludedThreadIds: []}]);
 }), {timeout: 10_000});
 
@@ -497,7 +498,7 @@ it.live("CT-UI-06: a listen failure on the MCP bind host closes the UI listener 
 it.live("CT-UI-07: session and CSRF values never reach console or process output during a full request cycle", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c3b-log-");
   const started = yield* startUi({directory});
-  // the process's thread-policy store the dashboard saves through
+  // the run's thread-policy store, on its guidance client, that the dashboard saves through
   const policy = started.policy;
   const {origin} = started;
   const captured: string[] = [];

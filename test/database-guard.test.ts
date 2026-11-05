@@ -10,8 +10,8 @@ import { Effect, FileSystem, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import { upgradeDataDirectory } from "../src/database-upgrade.js";
 import {
-  accessDbLayer, catalogDbLayer, DatabaseOpenError, DatabaseWorker, type DatabaseWorkerEntry, guidanceDbLayer, openAccessUpgradeDatabase, openUpgradeDatabase,
-  policyDbLayer, readFormat,
+  accessDbLayer, catalogDbLayer, DatabaseFormats, DatabaseOpenError, DatabaseWorker, type DatabaseWorkerEntry, guidanceDbLayer, openAccessUpgradeDatabase, openUpgradeDatabase,
+  readFormat,
 } from "../src/db.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
 import { decodeJson, sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
@@ -85,7 +85,8 @@ const orphanedLog = (path: string, statements: string) => {
   assert.ok(existsSync(`${path}-wal`), "the killed writer left its log");
 };
 const inLog = (statements: string) => `PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${statements}`;
-const newerInLog = (tables: string) => inLog(`${tables} PRAGMA user_version=2;`);
+// a format newer than the file's current one: 3 for guidance (current 2), 2 for the access database (current 1)
+const newerInLog = (tables: string, format = 2) => inLog(`${tables} PRAGMA user_version=${format};`);
 
 // every database worker logs the connections it opens, so a test sees whether one that can write opened `path`
 const loggingWorker = (log: string): DatabaseWorkerEntry => ({
@@ -124,7 +125,6 @@ describe("database format guard", () => {
     const refusals = [
       { file: "catalog.sqlite3", refused: refusal(catalogDbLayer(directory)) },
       { file: "guidance.sqlite3", refused: refusal(guidanceDbLayer(directory)) },
-      { file: "thread-settings.sqlite3", refused: refusal(policyDbLayer(directory)) },
     ];
     for (const { file, refused } of refusals) {
       const error = yield* refused;
@@ -145,7 +145,7 @@ describe("database format guard", () => {
     const catalogError = yield* refusal(catalogDbLayer(directory));
     const guidanceError = yield* refusal(guidanceDbLayer(directory));
     assert.deepEqual([catalogError.reason, catalogError.found, catalogError.expected], ["upgrade_required", 0, 1]);
-    assert.deepEqual([guidanceError.reason, guidanceError.found, guidanceError.expected], ["upgrade_required", 0, 1]);
+    assert.deepEqual([guidanceError.reason, guidanceError.found, guidanceError.expected], ["upgrade_required", 0, 2]);
     assert.deepEqual([sha256(catalog), sha256(guidance)], before);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
@@ -155,31 +155,31 @@ describe("database format guard", () => {
     // another connection keeps the file open, so its committed log is not checkpointed into the main file
     const holder = new DatabaseSync(path);
     yield* Effect.addFinalizer(() => Effect.sync(() => holder.close()));
-    holder.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE kept(v TEXT); INSERT INTO kept VALUES('row'); PRAGMA user_version=2;");
-    assert.notEqual(headerFormat(path), 2, "the newer format is still only in the log");
+    holder.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE kept(v TEXT); INSERT INTO kept VALUES('row'); PRAGMA user_version=3;");
+    assert.notEqual(headerFormat(path), 3, "the newer format is still only in the log");
     const before = { main: sha256(path), log: sha256(`${path}-wal`), logBytes: statSync(`${path}-wal`).size };
     const error = yield* refusal(guidanceDbLayer(directory));
-    assert.deepEqual([error.reason, error.found, error.expected], ["unsupported_format", 2, 1]);
-    assert.match(error.message, /newer than format 1/u);
+    assert.deepEqual([error.reason, error.found, error.expected], ["unsupported_format", 3, 2]);
+    assert.match(error.message, /newer than format 2/u);
     assert.deepEqual({ main: sha256(path), log: sha256(`${path}-wal`), logBytes: statSync(`${path}-wal`).size }, before);
-    assert.equal(sqliteRow(holder, UserVersionRow, "PRAGMA user_version").user_version, 2);
+    assert.equal(sqliteRow(holder, UserVersionRow, "PRAGMA user_version").user_version, 3);
     assert.deepEqual(sqliteRows(holder, Schema.Struct({ v: Schema.String }), "SELECT v FROM kept"), [{ v: "row" }]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
   it.live("a newer format that a killed process left only in its write-ahead log is refused by the open and the preflight, which neither recover nor checkpoint it", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const path = join(directory, "guidance.sqlite3");
-    orphanedLog(path, newerInLog("CREATE TABLE kept(v TEXT); INSERT INTO kept VALUES('row');"));
+    orphanedLog(path, newerInLog("CREATE TABLE kept(v TEXT); INSERT INTO kept VALUES('row');", 3));
     assert.equal(headerFormat(path), 0, "the newer format is only in the log");
     const before = fileAndLog(path);
     const error = yield* refusal(guidanceDbLayer(directory));
-    assert.deepEqual([error.reason, error.found, error.expected], ["unsupported_format", 2, 1]);
+    assert.deepEqual([error.reason, error.found, error.expected], ["unsupported_format", 3, 2]);
     assert.deepEqual(fileAndLog(path), before);
     const failure = yield* Effect.flip(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
     assert.deepEqual([failure.file, failure.reason], ["guidance.sqlite3", "future_format"]);
     assert.deepEqual(fileAndLog(path), before);
     assert.equal(existsSync(join(directory, "backups")), false);
-    checkpointedByWritableClose(path, before);
+    checkpointedByWritableClose(path, before, 3);
     const kept = new DatabaseSync(path, { readOnly: true });
     try {
       assert.deepEqual(sqliteRows(kept, Schema.Struct({ v: Schema.String }), "SELECT v FROM kept"), [{ v: "row" }]);
@@ -281,7 +281,6 @@ describe("database format guard", () => {
     yield* initialized(directory);
     yield* opened(catalogDbLayer(directory));
     yield* opened(guidanceDbLayer(directory));
-    yield* opened(policyDbLayer(directory));
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
   it.live("the stored format reads as the same number whatever integer mode the caller runs in", () => Effect.gen(function* () {
@@ -292,8 +291,8 @@ describe("database format guard", () => {
     const exact = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, SqlClient.SafeIntegers, true);
     const [row] = yield* exact(sql.unsafe<{one: unknown}>("SELECT 1 AS one"));
     assert.equal(typeof row?.one, "bigint");
-    assert.equal(yield* exact(readFormat(sql)), 1);
-    assert.equal(yield* readFormat(sql), 1);
+    assert.equal(yield* exact(readFormat(sql)), DatabaseFormats.guidance);
+    assert.equal(yield* readFormat(sql), DatabaseFormats.guidance);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
   it.live("a negative user_version is no format: the open and the startup upgrade refuse the file and leave it as it is", () => Effect.gen(function* () {

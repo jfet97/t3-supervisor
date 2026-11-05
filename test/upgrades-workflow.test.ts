@@ -264,6 +264,7 @@ it.live("passes a journey only on a passing report of exactly its frozen inputs,
     [{report: {...report("stable"), inputs: {...report("stable").inputs, t3: {...pinned, archive: null}}}, status: "0 300"}, "harness", /rather than the repository pin/u],
     [{report: {...report("stable"), inputs: {...report("stable").inputs, t3: {...pinned, platform: "linux-arm64"}}}, status: "0 300"}, "harness", /rather than the repository pin/u],
     [{report: report("stable"), status: "1 300"}, "harness", /exited 1 despite a passing report/u],
+    [{report: report("stable", {passed: false}), status: "1 300"}, "harness", /reported passed without a passing flag/u],
     [{report: report("stable", {outcome: "failed", passed: false}), status: "0 300"}, "harness", /exited 0 despite a report that did not pass/u],
     [{status: "1 30"}, "harness", /exited 1 without a report/u],
   ] as const) {

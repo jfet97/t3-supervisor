@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Effect, Exit, FileSystem } from "effect";
 import {
-  catalogLegacy, catalogMigrations, guidanceLegacy, guidanceMigrations, type MigrationStep, policyMigrations, recognizeLegacy, schemaDifferences,
+  catalogLegacy, catalogMigrations, guidanceLegacy, guidanceMigrations, type MigrationStep, type PolicySource, recognizeLegacy, schemaDifferences,
   type SchemaSignature,
 } from "../src/database-migrations.js";
 import { DatabaseUpgradeError, referenceSignature, upgradeDataDirectory } from "../src/database-upgrade.js";
@@ -40,10 +41,10 @@ const query = (path: string, sql: string): ReadonlyArray<Record<string, unknown>
 const schemaText = (path: string) => query(path, "SELECT type, name, sql FROM sqlite_master ORDER BY type, name");
 
 // one step on the file through the startup upgrade's client, in one transaction, as the coordinator runs it
-const applyStep = (directory: string, kind: DatabaseKind, step: MigrationStep | undefined, fresh = false) => Effect.scoped(Effect.gen(function* () {
-  assert.ok(step !== undefined && step.from === 0 && step.to === 1);
+const applyStep = (directory: string, kind: DatabaseKind, step: MigrationStep | undefined, policy: PolicySource = { kind: "none" }) => Effect.scoped(Effect.gen(function* () {
+  assert.ok(step !== undefined);
   const { sql } = yield* openUpgradeDatabase(directory, kind, { create: false });
-  yield* sql.withTransaction(step.apply(sql, { fresh, excludedThreadIds: ["seed"] }));
+  yield* sql.withTransaction(step.apply(sql, { policy }));
 }));
 
 const recognition = (directory: string, file: "guidance.sqlite3" | "catalog.sqlite3", reference: SchemaSignature) =>
@@ -106,7 +107,7 @@ describe("format steps", () => {
     const directory = yield* temporaryDirectory;
     const path = join(directory, "guidance.sqlite3");
     firstTransactionGuidance(path);
-    const reference = yield* referenceSignature("guidance");
+    const reference = yield* referenceSignature("guidance", 1);
     assert.deepEqual(yield* recognition(directory, "guidance.sqlite3", reference), { kind: "recognized" });
     const rows = () => ({ meta: query(path, "SELECT key, value FROM meta ORDER BY key"), notices: query(path, "SELECT * FROM notices") });
     const before = rows();
@@ -150,17 +151,38 @@ describe("format steps", () => {
     assert.deepEqual(query(path, "PRAGMA user_version"), [{ user_version: 0 }]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
-  it.live("the policy step seeds only a fresh file and never an existing one without its row", () => Effect.gen(function* () {
+  it.live("guidance format 2 writes a fresh directory's configured chats or the imported document's bytes, and refuses without either", () => Effect.gen(function* () {
+    // a guidance file at format 1, through its own step on an empty file
+    const format1 = (directory: string) => Effect.gen(function* () {
+      exec(join(directory, "guidance.sqlite3"), "");
+      yield* applyStep(directory, "guidance", guidanceMigrations[0]);
+    });
     const fresh = yield* temporaryDirectory;
-    exec(join(fresh, "thread-settings.sqlite3"), "");
-    yield* applyStep(fresh, "policy", policyMigrations[0], true);
-    assert.deepEqual(query(join(fresh, "thread-settings.sqlite3"), "SELECT document FROM settings"), [{ document: '{"generation":1,"excludedThreadIds":["seed"]}' }]);
+    yield* format1(fresh);
+    yield* applyStep(fresh, "guidance", guidanceMigrations[1], { kind: "fresh", excludedThreadIds: ["seed"] });
+    const freshPath = join(fresh, "guidance.sqlite3");
+    assert.deepEqual(query(freshPath, "SELECT id, document FROM thread_policy"), [{ id: 1, document: '{"generation":1,"excludedThreadIds":["seed"]}' }]);
+    assert.deepEqual(query(freshPath, "SELECT key, value FROM meta WHERE key IN ('bootstrap_pending','thread_policy_import')"), [{ key: "bootstrap_pending", value: "{}" }]);
 
-    const existing = yield* temporaryDirectory;
-    exec(join(existing, "thread-settings.sqlite3"), "CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL);");
-    const refused = yield* Effect.flip(applyStep(existing, "policy", policyMigrations[0]));
-    assert.deepEqual([refused._tag, "table" in refused ? refused.table : null], ["MigrationRefused", "settings"]);
-    assert.deepEqual(query(join(existing, "thread-settings.sqlite3"), "SELECT count(*) AS n FROM settings"), [{ n: 0 }]);
+    const imported = yield* temporaryDirectory;
+    yield* format1(imported);
+    const bytes = Buffer.from('{ "generation": 4, "excludedThreadIds": ["a"] }', "utf8");
+    const marker = { documentSha256: createHash("sha256").update(bytes).digest("hex"), generation: 4, backupSet: "20261105T120000Z-0a1b2c3d" };
+    yield* applyStep(imported, "guidance", guidanceMigrations[1], { kind: "import", bytes, marker });
+    const importedPath = join(imported, "guidance.sqlite3");
+    assert.deepEqual(query(importedPath, "SELECT hex(CAST(document AS BLOB)) AS hex FROM thread_policy"), [{ hex: bytes.toString("hex").toUpperCase() }]);
+    assert.deepEqual(query(importedPath, "SELECT key, value FROM meta WHERE key IN ('bootstrap_pending','thread_policy_import')"),
+      [{ key: "thread_policy_import", value: JSON.stringify(marker) }]);
+
+    // without a policy, or with bytes the marker does not name, the step refuses and its transaction leaves nothing behind
+    const unnamed: PolicySource = { kind: "import", bytes, marker: { ...marker, documentSha256: "0".repeat(64) } };
+    for (const policy of [{ kind: "none" } satisfies PolicySource, unnamed]) {
+      const refused = yield* temporaryDirectory;
+      yield* format1(refused);
+      const failure = yield* Effect.flip(applyStep(refused, "guidance", guidanceMigrations[1], policy));
+      assert.deepEqual([failure._tag, "table" in failure ? failure.table : null], ["MigrationRefused", "thread_policy"]);
+      assert.deepEqual(query(join(refused, "guidance.sqlite3"), "SELECT count(*) AS n FROM sqlite_master WHERE name='thread_policy'"), [{ n: 0 }]);
+    }
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 });
 
@@ -189,7 +211,8 @@ describe("declared schema and recognized layouts", () => {
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
   it.live("format 0 layouts: table-less is empty, a release's declarations with its first transaction are recognized, anything else is unknown", () => Effect.gen(function* () {
-    const references = { guidance: yield* referenceSignature("guidance"), catalog: yield* referenceSignature("catalog") };
+    // format 0 files are recognized against format 1, the layout every release declared
+    const references = { guidance: yield* referenceSignature("guidance", 1), catalog: yield* referenceSignature("catalog") };
     const recognized = (file: "guidance.sqlite3" | "catalog.sqlite3", statements: string) => Effect.gen(function* () {
       const directory = yield* temporaryDirectory;
       exec(join(directory, file), statements);
@@ -216,6 +239,9 @@ describe("declared schema and recognized layouts", () => {
     assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY);"), { kind: "unknown", object: "meta" });
     assert.deepEqual(yield* guidance("CREATE TABLE constructor(id TEXT);"), { kind: "unknown", object: "constructor" });
     assert.deepEqual(yield* guidance(`${guidanceCore} CREATE VIEW recent AS SELECT key FROM meta;`), { kind: "unknown", object: "recent" });
+    // guidance's policy table comes with format 2: no release wrote it beside a format 0 layout
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE thread_policy(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL);`),
+      { kind: "unknown", object: "thread_policy" });
     // the catalog schema is one transaction; only shell_coverage came with a later release
     assert.deepEqual(yield* catalog(catalogTables), { kind: "recognized" });
     assert.deepEqual(yield* catalog(catalogTables.replace(/CREATE TABLE shell_coverage[^;]*;/u, "")), { kind: "recognized" });

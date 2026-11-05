@@ -74,7 +74,7 @@ export interface SupervisionControlShape {
   readonly saveThreadPolicy: (input: ThreadPolicySettings) => Effect.Effect<ThreadPolicySettings, ThreadPolicySaveFailed>;
   // the dashboard's chat-policy write with its Enable or Stop bookkeeping, as one admission section
   readonly setChatPolicy: (threadId: string, enabled: boolean, policyGeneration: number) => Effect.Effect<ChatPolicyWrite, SupervisionStoreError>;
-  // section-only: called inside SupervisionGate.admit, within the section's guidance transaction (the policy write commits first)
+  // section-only: called inside SupervisionGate.admit, within the section's guidance transaction, which commits the policy write with it
   readonly activateStart: (start: SupervisionStartRecord) => Effect.Effect<boolean, SupervisionStoreError>;
   readonly rejectStart: (start: SupervisionStartRecord, reason: string) => Effect.Effect<void, SupervisionStoreError>;
   // a read of the recorded operation
@@ -106,19 +106,18 @@ const makeSupervisionControl = Effect.gen(function* () {
   const rejectStart = (start: SupervisionStartRecord, reason: string) => transaction(Effect.gen(function* () {
     if ((yield* store.start(start.threadId))?.operationId === start.operationId) yield* store.saveStart({...start, status: "rejected", reason});
   }));
-  // each attempt reads the stored policy and saves it by compare-and-set; any failed save is retried, or a conflict when the caller
-  // named the generation
+  /*
+   * reads the stored policy and saves it by compare-and-set inside the caller's guidance transaction, so the save commits or rolls
+   * back with that transaction's bookkeeping. A save that fails is a conflict; there is one attempt, since a reread in the same
+   * transaction sees the same policy
+   */
   const writeChatPolicy = (threadId: string, stopped: boolean, expectedGeneration?: number) => Effect.gen(function* (): Effect.fn.Return<ChatPolicyWrite, ThreadPolicyStoreError> {
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const current = yield* policy.get();
-      if (expectedGeneration !== undefined && current.generation !== expectedGeneration) return {status: "conflict"};
-      if (current.excludedThreadIds.includes(threadId) === stopped) return {status: "saved", changed: false};
-      if (stopped && current.excludedThreadIds.length >= 500) return {status: "full"};
-      const saved = yield* attemptSave(policy.save({...current, excludedThreadIds: stopped ? [...current.excludedThreadIds, threadId] : current.excludedThreadIds.filter(id => id !== threadId)}));
-      if (saved.ok) return {status: "saved", changed: true};
-      if (expectedGeneration !== undefined) return {status: "conflict"};
-    }
-    return {status: "conflict"};
+    const current = yield* policy.get();
+    if (expectedGeneration !== undefined && current.generation !== expectedGeneration) return {status: "conflict"};
+    if (current.excludedThreadIds.includes(threadId) === stopped) return {status: "saved", changed: false};
+    if (stopped && current.excludedThreadIds.length >= 500) return {status: "full"};
+    const saved = yield* attemptSave(policy.save({...current, excludedThreadIds: stopped ? [...current.excludedThreadIds, threadId] : current.excludedThreadIds.filter(id => id !== threadId)}));
+    return saved.ok ? {status: "saved", changed: true} : {status: "conflict"};
   });
   // records the stop and a single operative notice, and fences unsent check-ins without cancelling operative work.
   // a stop supersedes any earlier keep-active choice for the owned Supervisor, so its settlement is not vetoed by an older intent.
@@ -142,7 +141,10 @@ const makeSupervisionControl = Effect.gen(function* () {
   }));
   const activateStart = (start: SupervisionStartRecord) => Effect.gen(function* () {
     if (!(yield* scope.validPendingStart(start))) return false;
-    // pending is durable before the separate policy write; a crash cannot grant on-request effects without the committed permission
+    /*
+     * Pending is durable from the decision's transaction. The policy write and Enable and Start bookkeeping below commit
+     * together, so no crash leaves the chat enabled without its active Start, or the reverse.
+     */
     const written = yield* writeChatPolicy(start.threadId, false);
     if (written.status !== "saved") return false;
     yield* store.recordChatEnable(start.threadId, start.intentAt);
@@ -184,8 +186,10 @@ const makeSupervisionControl = Effect.gen(function* () {
     const projectId = thread.projectId;
     // the task identity of a source-bound Start, allocated before the section
     const taskId = yield* ids.uuid;
-    // from the last await, the rechecks, the start record and a dashboard activation run as one admission section: the rechecks and
-    // the pending record commit first, then the activation's policy write and its guidance transaction
+    /*
+     * From the last await, the rechecks, Start record and dashboard activation run as one admission section. The pending
+     * record commits first, then activation commits its policy and bookkeeping in one transaction.
+     */
     return yield* gate.admit(() => Effect.gen(function* () {
       const decision = yield* transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult | {activate: SupervisionStartRecord}, SupervisionStoreError> {
         if (main.thread.projectId !== thread.projectId || !scope.mainShape(main.thread)) return {status: "denied", reason: "scope_changed"};
@@ -339,8 +343,10 @@ const makeSupervisionControl = Effect.gen(function* () {
         if (!read.ok) return {status: "unavailable", reason: "evidence_projection_unavailable", retryable: true};
         evidenceProjection = read.value;
       }
-      // from the last await, the source checks, the policy write and its bookkeeping run as one admission section; its guidance
-      // reads and bookkeeping are one transaction, which commits after the policy write
+      /*
+       * From the last await, source checks, the policy write and bookkeeping run as one admission section and one guidance
+       * transaction. The exclusion and recorded Stop commit together or not at all.
+       */
       const outcome = yield* gate.admit(() => transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStopResult | null, SupervisionStoreError> {
         const message = genuineUserMessage(evidenceProjection, input.userMessageId);
         if (!message) return null;
@@ -389,8 +395,10 @@ const makeSupervisionControl = Effect.gen(function* () {
     }
     return {status: "denied", reason: "user_message_not_genuine"};
   });
-  // the save and its Stop/Enable bookkeeping as one admission section, the bookkeeping one transaction that commits after the
-  // policy save; a failure anywhere in it is the save's failure, with its message
+  /*
+   * The save and Stop/Enable bookkeeping share one admission section and one guidance transaction. Any failure returns the
+   * save's failure message and commits neither change.
+   */
   const saveThreadPolicy = (input: ThreadPolicySettings) => gate.admit(() => transaction(Effect.gen(function* () {
     const before = yield* policy.get();
     if (before.generation !== input.generation) return yield* new ThreadPolicySaveFailed({message: "Chat settings changed in another tab. Reload first."});
@@ -401,7 +409,7 @@ const makeSupervisionControl = Effect.gen(function* () {
       yield* applyChatStop(id, {route: "ui", callerThreadId: null, userMessageId: null, stoppedAt: at});
     return saved;
   }))).pipe(Effect.catchCause((cause) => Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause as Cause.Cause<never>) : Effect.fail(saveFailure(Cause.squash(cause)))));
-  // the chat policy write and its Enable/Stop bookkeeping as one admission section, the bookkeeping one transaction
+  // the chat policy write and its Enable/Stop bookkeeping as one admission section and one guidance transaction
   const setChatPolicy = (threadId: string, enabled: boolean, policyGeneration: number) => gate.admit(() => transaction(Effect.gen(function* () {
     const write = yield* writeChatPolicy(threadId, !enabled, policyGeneration);
     if (write.status !== "saved") return write;

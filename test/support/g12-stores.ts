@@ -2,7 +2,7 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, FileSystem, Layer, Scope } from "effect";
 import type { SqlClient } from "effect/sql";
 import { SupervisorConfig } from "../../src/config.js";
-import { GuidanceDb, guidanceDbLayer, type PolicyDb, policyDbLayer } from "../../src/db.js";
+import { GuidanceDb, guidanceDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
@@ -49,15 +49,15 @@ export const guidanceClient = (directory: string, observe?: StatementObserver): 
   return observe ? Layer.effect(GuidanceDb, Effect.map(Effect.service(GuidanceDb), (sql) => observed(sql, observe))).pipe(Layer.provide(production)) : production;
 };
 
-/** The production thread-settings.sqlite3 client of `directory`. */
-export const policyClient = (directory: string): Layer.Layer<PolicyDb> => policyDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
-
 /** The configuration of a supervision run over `directory`; nothing reaches T3 through it. */
 export const runConfig = (directory: string): Layer.Layer<SupervisorConfig> => Layer.succeed(SupervisorConfig, {
   dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "", excludedThreadIds: [], healthPort: 0,
 } satisfies SupervisorSettings);
 
-/** The run's thread-policy store, its scope predicates over the stores and the admission gate that guards with them. */
+/**
+ * The run's thread-policy store on the guidance client its caller provides (the one the run's other stores use), its scope
+ * predicates over the stores and the admission gate that guards with them.
+ */
 export const admissionLayer = (operateRpcAvailable: boolean) => SupervisionGate.layer.pipe(
   Layer.provideMerge(SupervisionScopeService.layer(operateRpcAvailable)),
   Layer.provideMerge(ThreadPolicyStore.layer),

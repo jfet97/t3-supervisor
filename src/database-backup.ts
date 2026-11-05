@@ -28,8 +28,8 @@ export interface BackupSource {
   readonly file: string;
   /** the copy's file name inside the set */
   readonly name: string;
-  /** the format the upgrade moves the file to */
-  readonly targetFormat: number;
+  /** the format the upgrade moves the file to; null for the retired policy file, whose policy moves into guidance */
+  readonly targetFormat: number | null;
   /** the startup upgrade's client on the file */
   readonly database: UpgradeDatabase;
 }
@@ -39,7 +39,7 @@ export interface BackupEntry {
   readonly file: string;
   readonly backup: string;
   readonly format: number;
-  readonly targetFormat: number;
+  readonly targetFormat: number | null;
   readonly bytes: number;
   readonly sha256: string;
   readonly pages: number;
@@ -57,7 +57,7 @@ export interface BackupSet {
 }
 
 const ManifestEntry = Schema.Struct({
-  file: Schema.String, backup: Schema.String, format: Schema.Number, targetFormat: Schema.Number, bytes: Schema.Number, sha256: Schema.String,
+  file: Schema.String, backup: Schema.String, format: Schema.Number, targetFormat: Schema.NullOr(Schema.Number), bytes: Schema.Number, sha256: Schema.String,
   pages: Schema.Number, integrity: Schema.Literal("ok"), tables: Schema.Record(Schema.String, Schema.Number), schemaSha256: Schema.String,
   contentSha256: Schema.String,
 });
@@ -144,9 +144,10 @@ const sameSnapshot = (left: Snapshot, right: Snapshot): boolean =>
   JSON.stringify(left.tables) === JSON.stringify(right.tables);
 
 // node handles for the directory fsync: the effect FileSystem has no directory open or fsync
-const handleCall = <A>(call: () => Promise<A>, failure: BackupFailed): Effect.Effect<A, BackupFailed> =>
+const handleCall = <A, F>(call: () => Promise<A>, failure: F): Effect.Effect<A, F> =>
   Effect.tryPromise({ try: call, catch: () => failure });
-const syncDirectory = (path: string, failure: BackupFailed): Effect.Effect<void, BackupFailed> =>
+/** Syncs a directory, so the entries created or removed in it are durable; any failure is `failure`. */
+export const syncDirectory = <F>(path: string, failure: F): Effect.Effect<void, F> =>
   Effect.acquireUseRelease(
     handleCall(() => open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW), failure),
     (handle: FileHandle) => handleCall(() => handle.sync(), failure),
@@ -271,3 +272,23 @@ export const writeBackupSet = (dataDirectory: string, sources: ReadonlyArray<Bac
     yield* syncDirectory(root, failed);
     return { id, entries, reused: false };
   });
+
+// a set id as `setId` makes it, so a stored id never names a path outside the backups directory
+const setIdPattern = /^\d{8}T\d{6}Z-[0-9a-f]{8}$/u;
+
+/**
+ * The copy of `file` in the complete backup set `id`: the directory and name its manifest records, only while the copy still
+ * matches its recorded checksum, otherwise null. The copy itself is only ever read.
+ */
+export const backupCopy = (dataDirectory: string, id: string, file: string):
+  Effect.Effect<{ readonly directory: string; readonly file: string } | null, never, FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    if (!setIdPattern.test(id)) return null;
+    const fs = yield* FileSystem.FileSystem;
+    const directory = join(dataDirectory, "backups", id);
+    const manifest = yield* fs.readFileString(join(directory, "manifest.json")).pipe(Effect.flatMap(decodeManifest));
+    const entry = manifest.backupSet === id ? manifest.files.find((candidate) => candidate.file === file) : undefined;
+    if (entry === undefined) return null;
+    const bytes = yield* fs.readFile(join(directory, entry.backup));
+    return createHash("sha256").update(bytes).digest("hex") === entry.sha256 ? { directory, file: entry.backup } : null;
+  }).pipe(Effect.catch(() => Effect.succeed(null)));

@@ -1,14 +1,14 @@
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Effect, FileSystem, Layer } from "effect";
 import type { SqlClient } from "effect/sql";
-import { type DatabaseOpenError, GuidanceDb, PolicyDb } from "../../src/db.js";
+import { type DatabaseOpenError, GuidanceDb } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { makeProjectSupervisorMonitorStore, ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
-import { ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
+import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import { initializeDataDirectory } from "./data-directory.js";
 import { withDbFile } from "./sql-db-files.js";
 
@@ -77,11 +77,11 @@ export const withSupervisionStores = <A, E, R>(directory: string, use: (stores: 
     return yield* use({ db, guidance: yield* GuidanceStore, supervisors: yield* ProjectSupervisorStore, team: yield* SupervisorTeamStore, owned });
   }).pipe(Effect.provide(Layer.fresh(supervisionStores(owned)))));
 
-/** `use` on the thread-policy store of `directory` and its client; the stored policy is the one the directory was initialized with. */
+/**
+ * `use` on the thread-policy store of `directory` and the guidance client it runs on; the stored policy is the one the directory
+ * was initialized with.
+ */
 export const withThreadPolicy = <A, E, R>(directory: string,
-  use: (policy: ThreadPolicyStore["Service"], db: SqlClient.SqlClient) => Effect.Effect<A, E, R>) => {
-  const open: Effect.Effect<A, E | ThreadPolicyStoreError | DatabaseOpenError, Exclude<Exclude<R, ThreadPolicyStore>, PolicyDb> | FileSystem.FileSystem> =
-    withDbFile("policy", directory, (db) => Effect.flatMap(Effect.service(ThreadPolicyStore), (policy) => use(policy, db)).pipe(
-      Effect.provide(Layer.fresh(ThreadPolicyStore.layer)), Effect.provideService(PolicyDb, db)));
-  return Effect.provide(open, NodeFileSystem.layer);
-};
+  use: (policy: ThreadPolicyStore["Service"], db: SqlClient.SqlClient) => Effect.Effect<A, E, R>) =>
+  withGuidanceDb(directory, (db) => Effect.flatMap(Effect.service(ThreadPolicyStore), (policy) => use(policy, db)).pipe(
+    Effect.provide(Layer.fresh(ThreadPolicyStore.layer))));

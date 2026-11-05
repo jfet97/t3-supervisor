@@ -2,7 +2,6 @@ import { taskScopeRevision } from "../src/supervision-conversation-contract.js";
 import { engagedTask } from "./support/engaged-task.js";
 import assert from "node:assert/strict";
 import { describe, it } from "@effect/vitest";
-import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { stringify } from "yaml";
@@ -37,7 +36,6 @@ import { interpretationPlanDigest, type SupervisorMessageEvidence } from "../src
 import { interpretationAttemptId, interpretationSourcePin } from "../src/interpretation-submission.js";
 import { recordInterpretationSubmission } from "./support/interpretation-evidence-fixture.js";
 import { submissionArguments } from "./support/interpretation-submit.js";
-import { initializeDataDirectory } from "./support/data-directory.js";
 import {
   conversationUnit, dataDirectory, nativeClient, openStores, pinnedClock, projectSupervisorUnit, realTime, reopenPolicy, replaceMethod, writeController,
   interpretationSubmitter, TestWallClock, turnItemDetails, workflowStore, type DefinitionsLoader, type FixtureClock, type NativeHandler, type ProjectionRead,
@@ -405,10 +403,7 @@ interface FixtureOptions {
 const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: FixtureOptions = {}) {
   yield* realTime;
   const directory = yield* dataDirectory("supervisor-conversation-test-");
-  // the thread policy lives in a data directory of its own, prepared at the current formats as the run's directory is
-  const threadPolicyDirectory = join(directory, "thread-policy");
-  yield* Effect.orDie(initializeDataDirectory(threadPolicyDirectory));
-  const stores = yield* openStores(directory, threadPolicyDirectory);
+  const stores = yield* openStores(directory);
   const projectStore = stores.supervisors;
   const threadPolicy = stores.policy;
   const binding = yield* projectStore.reserve(projectId, operativeThreadId, "Project A", defaultSupervisorModel, 10, clock.now);
@@ -693,7 +688,6 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
     calls,
     itemReads,
     threadPolicy,
-    threadPolicyDirectory,
     conversation,
     addOperative,
     failNextIntroduction: () => { failNextIntroduction = true; },
@@ -701,7 +695,7 @@ const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: F
     makeProjectSupervisor: () => projectSupervisor,
     makeRestartedConversation: Effect.fnUntraced(function* () {
       // a restarted service reads the same persisted per-chat stop
-      const reopened = yield* reopenPolicy(threadPolicyDirectory);
+      const reopened = yield* reopenPolicy(directory);
       return yield* conversationUnit({stores, operate: null, projection: readProjection, definitions: definitionLoader, eligible, enabled: () => true,
         workflows, read: readItems, supervisionStopped: threadId => Effect.map(reopened.get(), (policy) => policy.excludedThreadIds.includes(threadId))});
     }),

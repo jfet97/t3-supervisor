@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
@@ -15,11 +15,12 @@ import { expectedDumpSync, type FixtureDatabaseName, fixtureShapes, materializeF
 import { decodeJson, sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
 
 /*
- * the startup coordinator (src/database-upgrade.ts) on real files: a fresh directory, a repeated start, an interrupted
- * creation, the refusals that change nothing, the backup and upgrade of format 0 files with their rows preserved, a failure
+ * the startup coordinator (src/database-upgrade.ts) on real files: a fresh directory, a repeated start, an interrupted fresh
+ * initialization, the refusals that change nothing, the backup and upgrade of format 0 and format 1 files with their rows
+ * preserved and the retired policy file imported byte for byte and removed, every restart state of that import, a failure
  * between files and its resumption, two starts at once, and every frozen historical layout of test/fixtures/persistence
- * (released schema statements with synthetic rows). The format 0 inputs are written literally here or come from those
- * fixtures, never from today's schema statements.
+ * (released schema statements with synthetic rows). The older inputs are written literally here or come from those fixtures,
+ * never from today's schema statements.
  */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-upgrade-" }));
@@ -50,7 +51,9 @@ const journalOf = (path: string): string => read(path, (db) => sqliteRow(db, Sch
 const countOf = (path: string, sql: string, ...params: Array<number>): number => read(path, (db) => sqliteRow(db, Schema.Struct({ n: Schema.Number }), sql, ...params).n);
 const Named = Schema.Struct({ name: Schema.String });
 // the parts of a backup manifest these tests read
-const BackupManifest = Schema.Struct({ files: Schema.Array(Schema.Struct({ file: Schema.String, backup: Schema.String, format: Schema.Number, sha256: Schema.String })) });
+const BackupManifest = Schema.Struct({ files: Schema.Array(Schema.Struct({
+  file: Schema.String, backup: Schema.String, format: Schema.Number, targetFormat: Schema.NullOr(Schema.Number), sha256: Schema.String,
+})) });
 const JsonObject = Schema.Record(Schema.String, Schema.Unknown);
 const digest = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
 
@@ -176,16 +179,59 @@ const legacyDirectory = (directory: string) => Effect.gen(function* () {
   legacyAccess(directory);
 });
 
-const storeFiles = ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"] as const;
-const allFiles = [...storeFiles, join("access", "login.sqlite3")] as const;
+const storeFiles = ["catalog.sqlite3", "guidance.sqlite3"] as const;
+const accessFile = join("access", "login.sqlite3");
+const allFiles = [...storeFiles, accessFile] as const;
+// the retired policy file: imported into guidance format 2, then removed
+const donorFile = "thread-settings.sqlite3";
+// the format every file the start prepares ends at
+const currentFormat: Readonly<Record<string, number>> = { "catalog.sqlite3": 1, "guidance.sqlite3": 2, [accessFile]: 1 };
 const backupSets = (directory: string): ReadonlyArray<string> => existsSync(join(directory, "backups")) ? readdirSync(join(directory, "backups")).sort() : [];
-const snapshotDirectory = (directory: string) => Object.fromEntries(allFiles.filter((file) => existsSync(join(directory, file))).map((file) => [file, tableRows(join(directory, file))]));
+// the prepared files and, while it exists, the retired policy file
+const snapshotDirectory = (directory: string) => Object.fromEntries([...allFiles, donorFile].filter((file) => existsSync(join(directory, file)))
+  .map((file) => [file, tableRows(join(directory, file))]));
+
+// a store file and its sidecars removed, as if never created
+const removeFile = (directory: string, file: string) => {
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(join(directory, `${file}${suffix}`), { force: true });
+};
+const donorGone = (directory: string) => ["", "-wal", "-shm"].every((suffix) => !existsSync(join(directory, `${donorFile}${suffix}`)));
+
+const policyRows = (directory: string) => tableRows(join(directory, "guidance.sqlite3")).thread_policy;
+const metaRow = (directory: string, key: string) => (tableRows(join(directory, "guidance.sqlite3")).meta ?? []).find((row) => row.key === key);
+const Marker = Schema.Struct({ documentSha256: Schema.String, generation: Schema.Number, backupSet: Schema.String });
+const importMarker = (directory: string) => {
+  const row = metaRow(directory, "thread_policy_import");
+  return row === undefined ? null : decodeJson(Marker, String(row.value));
+};
+// a policy document's stored bytes, as hexadecimal, and their SHA-256
+const documentHex = (path: string, table: string): string =>
+  read(path, (db) => sqliteRow(db, Schema.Struct({ hex: Schema.String }), `SELECT hex(CAST(document AS BLOB)) AS hex FROM ${table}`).hex);
+const sha256OfHex = (hex: string): string => createHash("sha256").update(Buffer.from(hex, "hex")).digest("hex");
+const generationOf = (document: unknown): number => decodeJson(Schema.Struct({ generation: Schema.Number }), String(document)).generation;
+// guidance's rows without the import marker, to compare with a file from before the import
+const withoutMarker = (rows: Rows): Rows => ({ ...rows, meta: (rows.meta ?? []).filter((row) => row.key !== "thread_policy_import") });
+// the declaration of guidance's policy table: the retired file's own table under its new name
+const threadPolicyDeclaration = () => frozenDeclarations("thread-settings")["table:settings"]?.replace("CREATE TABLE settings(", "CREATE TABLE thread_policy(");
 
 const refusedWith = (exit: Exit.Exit<UpgradeReport, DatabaseUpgradeError>, file: string | null, reason: DatabaseUpgradeError["reason"]) => {
   assert.ok(Exit.isFailure(exit), "the upgrade was refused");
   const failure = exit.cause.reasons.find((entry) => entry._tag === "Fail");
   assert.ok(failure !== undefined && failure._tag === "Fail" && failure.error instanceof DatabaseUpgradeError, "a typed upgrade failure");
   assert.deepEqual([failure.error.file, failure.error.reason], [file, reason]);
+};
+
+/*
+ * the import's evidence after an upgrade that moved the retired file's policy: guidance holds its document byte for byte (the
+ * archived copy in the backup set is the reference), the marker names its hash, generation and that set, and the file and its
+ * sidecars are gone
+ */
+const assertImported = (directory: string, backupSet: string, document: unknown) => {
+  const archived = documentHex(join(directory, "backups", backupSet, donorFile), "settings");
+  assert.equal(documentHex(join(directory, "guidance.sqlite3"), "thread_policy"), archived, "the document moved byte for byte");
+  assert.deepEqual(policyRows(directory), [{ id: 1n, document }]);
+  assert.deepEqual(importMarker(directory), { documentSha256: sha256OfHex(archived), generation: generationOf(document), backupSet });
+  assert.ok(donorGone(directory), "the retired policy file and its sidecars are removed");
 };
 
 /*
@@ -196,7 +242,7 @@ const unwhitelistedShell = "fixture-thread-unknown-keys";
 
 describe("startup upgrade of the frozen historical layouts", () => {
   for (const shape of fixtureShapes) {
-    it.live(`${shape}: backed up, upgraded in place with its rows preserved, its stores and sign-in usable, and a later start changes nothing`, () => Effect.gen(function* () {
+    it.live(`${shape}: backed up, upgraded in place with its rows preserved and its policy moved, its stores and sign-in usable, and a later start changes nothing`, () => Effect.gen(function* () {
       yield* verifyFixtureIntegrity(shape);
       const directory = yield* temporaryDirectory;
       yield* materializeFixture(shape, directory);
@@ -205,19 +251,24 @@ describe("startup upgrade of the frozen historical layouts", () => {
       assert.equal(report.fresh, false);
       assert.ok(report.backupSet !== null);
       assert.deepEqual(report.files.map((file) => [file.file, file.from, file.to]), [
-        ["access/login.sqlite3", 0, 1], ["catalog.sqlite3", 0, 1], ["guidance.sqlite3", 0, 1], ["thread-settings.sqlite3", 0, 1],
+        ["access/login.sqlite3", 0, 1], ["catalog.sqlite3", 0, 1], ["guidance.sqlite3", 0, 2],
       ]);
-      for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 1, file);
+      assert.equal(report.policyFileRemoved, true);
+      for (const file of allFiles) assert.equal(formatOf(join(directory, file)), currentFormat[file], file);
       for (const file of storeFiles) assert.equal(journalOf(join(directory, file)), "wal", file);
-      assert.equal(journalOf(join(directory, "access", "login.sqlite3")), "delete");
+      assert.equal(journalOf(join(directory, accessFile)), "delete");
 
       /*
        * every stored row keeps its identity and every original value byte for byte (documents, native evidence with unknown
-       * keys, Stops, Start records, uncertain sends, sessions and the policy at its generation), except the one shell the
-       * whitelist trims
+       * keys, Stops, Start records, uncertain sends, sessions), except the one shell the whitelist trims; the policy keeps its
+       * document and generation in guidance
        */
       const after = snapshotDirectory(directory);
-      for (const file of [...allFiles].filter((file) => file !== "catalog.sqlite3")) assertPreserved(before[file] ?? {}, after[file] ?? {});
+      const policy = before[donorFile]?.settings ?? [];
+      assert.equal(policy.length, 1, "the fixture holds one policy row");
+      assertImported(directory, report.backupSet, policy[0]?.document);
+      assertPreserved(before[accessFile] ?? {}, after[accessFile] ?? {});
+      assertPreserved(before["guidance.sqlite3"] ?? {}, withoutMarker(after["guidance.sqlite3"] ?? {}));
       assertPreserved(before["catalog.sqlite3"] ?? {}, after["catalog.sqlite3"] ?? {}, (table) => table === "threads");
       const threadsBefore = before["catalog.sqlite3"]?.threads ?? [];
       const threadsAfter = after["catalog.sqlite3"]?.threads ?? [];
@@ -236,10 +287,12 @@ describe("startup upgrade of the frozen historical layouts", () => {
         }
       });
 
-      // the verified backup set holds the format 0 files exactly as they were
+      // the verified backup set holds the format 0 files exactly as they were, the retired policy file among them
       const set = join(directory, "backups", report.backupSet);
       const manifest = decodeJson(BackupManifest, readFileSync(join(set, "manifest.json"), "utf8"));
-      assert.deepEqual(manifest.files.map((entry) => entry.file), ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
+      assert.deepEqual(manifest.files.map((entry) => [entry.file, entry.targetFormat]), [
+        ["access/login.sqlite3", 1], ["catalog.sqlite3", 1], ["guidance.sqlite3", 2], ["thread-settings.sqlite3", null],
+      ]);
       for (const entry of manifest.files) {
         assert.equal(digest(join(set, entry.backup)), entry.sha256, entry.backup);
         assert.equal(formatOf(join(set, entry.backup)), 0, entry.backup);
@@ -255,54 +308,91 @@ describe("startup upgrade of the frozen historical layouts", () => {
       yield* Effect.scoped(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)),
         Layer.provide(SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer))))));
       assert.equal(committed(), 0);
-      const grants = () => countOf(join(directory, "access", "login.sqlite3"), "SELECT count(*) AS n FROM dashboard_login_grants WHERE expires_at > ?", Date.now());
+      const grants = () => countOf(join(directory, accessFile), "SELECT count(*) AS n FROM dashboard_login_grants WHERE expires_at > ?", Date.now());
       const unexpired = grants();
       yield* forgeDashboardToken(directory);
       assert.equal(grants(), unexpired + 1);
-      assert.deepEqual(tableRows(join(directory, "access", "login.sqlite3")).dashboard_login_sessions, before[join("access", "login.sqlite3")]?.dashboard_login_sessions);
+      assert.deepEqual(tableRows(join(directory, accessFile)).dashboard_login_sessions, before[accessFile]?.dashboard_login_sessions);
 
-      // a later start finds every file current: no upgrade, no backup
+      // a later start finds every file current: no upgrade, no backup, nothing to remove
       const again = yield* upgrade(directory);
-      assert.deepEqual(again, { fresh: false, backupSet: null, files: [] });
+      assert.deepEqual(again, { fresh: false, backupSet: null, files: [], policyFileRemoved: false });
       assert.deepEqual(backupSets(directory), [report.backupSet]);
     }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
   }
 });
 
 describe("startup upgrade", () => {
-  it.live("a fresh directory gets every store file at its current format, the policy seeded once, and a repeated start changes nothing", () => Effect.gen(function* () {
+  it.live("a fresh directory gets every store file at its current format, the policy seeded once in guidance, and a repeated start changes nothing", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const first = yield* upgrade(directory, ["thread-a", "thread-b"]);
     assert.deepEqual(first, { fresh: true, backupSet: null, files: [
-      { file: "thread-settings.sqlite3", from: null, to: 1 }, { file: "catalog.sqlite3", from: null, to: 1 }, { file: "guidance.sqlite3", from: null, to: 1 },
-    ] });
-    for (const file of storeFiles) assert.deepEqual([formatOf(join(directory, file)), journalOf(join(directory, file))], [1, "wal"], file);
-    assert.deepEqual(tableRows(join(directory, "thread-settings.sqlite3")).settings, [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
-    // a fresh file declares exactly what Supervisor 0.0.27 declared, byte for byte: format 1 is that schema
+      { file: "guidance.sqlite3", from: null, to: 2 }, { file: "catalog.sqlite3", from: null, to: 1 },
+    ], policyFileRemoved: false });
+    for (const file of storeFiles) assert.deepEqual([formatOf(join(directory, file)), journalOf(join(directory, file))], [currentFormat[file], "wal"], file);
+    assert.deepEqual(policyRows(directory), [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
+    assert.equal(existsSync(join(directory, donorFile)), false, "no policy file is created");
+    /*
+     * a fresh file declares exactly what Supervisor 0.0.27 declared, byte for byte, plus guidance's policy table (the retired
+     * file's table under its new name): format 1 is that schema, and format 2 adds the table
+     */
     assert.deepEqual(declarations(join(directory, "catalog.sqlite3")), frozenDeclarations("catalog"));
-    assert.deepEqual(declarations(join(directory, "guidance.sqlite3")), frozenDeclarations("guidance"));
-    assert.deepEqual(declarations(join(directory, "thread-settings.sqlite3")), frozenDeclarations("thread-settings"));
+    assert.deepEqual(declarations(join(directory, "guidance.sqlite3")), { ...frozenDeclarations("guidance"), "table:thread_policy": threadPolicyDeclaration() });
+    // the fresh initialization completed: its pending marker is gone, and nothing was imported
     assert.deepEqual(tableRows(join(directory, "guidance.sqlite3")).meta, [
       { key: "settings", value: '{"generation":1,"evidenceHours":24}' }, { key: "supervisor_scope_version", value: "main-v1" },
     ]);
     assert.equal(existsSync(join(directory, "access")), false, "the access database is the auth service's to create");
     const before = Object.fromEntries(storeFiles.map((file) => [file, digest(join(directory, file))]));
     const again = yield* upgrade(directory, ["another-seed"]);
-    assert.deepEqual(again, { fresh: false, backupSet: null, files: [] });
+    assert.deepEqual(again, { fresh: false, backupSet: null, files: [], policyFileRemoved: false });
     assert.deepEqual(backupSets(directory), []);
-    assert.deepEqual(tableRows(join(directory, "thread-settings.sqlite3")).settings, [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
+    assert.deepEqual(policyRows(directory), [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
     assert.deepEqual(Object.fromEntries(storeFiles.map((file) => [file, digest(join(directory, file))])), before);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-  it.live("an interrupted creation resumes from the policy it left and never reseeds it", () => Effect.gen(function* () {
+  it.live("an interrupted fresh initialization is completed from the guidance it committed and never reseeds the policy", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* upgrade(directory, ["thread-a"]);
-    // as if the first start stopped after the policy: catalog and guidance not created yet
-    for (const file of ["catalog.sqlite3", "guidance.sqlite3"]) rmSync(join(directory, file), { force: true });
-    for (const file of ["catalog.sqlite3", "guidance.sqlite3"]) for (const sidecar of ["-wal", "-shm"]) rmSync(join(directory, `${file}${sidecar}`), { force: true });
+    const guidance = join(directory, "guidance.sqlite3");
+    const policy = policyRows(directory);
+    // guidance committed with its policy and pending marker, the catalog not created yet
+    exec(guidance, "INSERT INTO meta VALUES('bootstrap_pending','{}');");
+    removeFile(directory, "catalog.sqlite3");
     const resumed = yield* upgrade(directory, ["different-seed"]);
-    assert.deepEqual(resumed, { fresh: false, backupSet: null, files: [{ file: "catalog.sqlite3", from: null, to: 1 }, { file: "guidance.sqlite3", from: null, to: 1 }] });
-    assert.deepEqual(tableRows(join(directory, "thread-settings.sqlite3")).settings, [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a"]}' }]);
+    assert.deepEqual(resumed, { fresh: false, backupSet: null, files: [{ file: "catalog.sqlite3", from: null, to: 1 }], policyFileRemoved: false });
+    assert.deepEqual(policyRows(directory), policy, "the committed policy is kept, never reseeded");
+    assert.equal(metaRow(directory, "bootstrap_pending"), undefined);
+    // the catalog created but the marker not cleared yet: only the marker goes
+    exec(guidance, "INSERT INTO meta VALUES('bootstrap_pending','{}');");
+    assert.deepEqual(yield* upgrade(directory, ["different-seed"]), { fresh: false, backupSet: null, files: [], policyFileRemoved: false });
+    assert.equal(metaRow(directory, "bootstrap_pending"), undefined);
+    assert.deepEqual(policyRows(directory), policy);
+
+    // the first transaction did not commit: a table-less guidance file leaves a fresh directory, created as one
+    const retried = yield* temporaryDirectory;
+    exec(join(retried, "guidance.sqlite3"), "PRAGMA journal_mode=WAL;");
+    assert.equal((yield* upgrade(retried, ["thread-b"])).fresh, true);
+    assert.deepEqual(policyRows(retried), [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-b"]}' }]);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  it.live("an interrupted fresh initialization beside catalog data or an old policy file is refused unchanged", () => Effect.gen(function* () {
+    const withData = yield* temporaryDirectory;
+    yield* upgrade(withData);
+    exec(join(withData, "guidance.sqlite3"), "INSERT INTO meta VALUES('bootstrap_pending','{}');");
+    exec(join(withData, "catalog.sqlite3"), "INSERT INTO environment_binding VALUES (1, 'environment-1');");
+    const dataBefore = snapshotDirectory(withData);
+    refusedWith(yield* Effect.exit(upgrade(withData)), "catalog.sqlite3", "interrupted_bootstrap");
+    assert.deepEqual(snapshotDirectory(withData), dataBefore);
+
+    const withPolicyFile = yield* temporaryDirectory;
+    yield* upgrade(withPolicyFile);
+    exec(join(withPolicyFile, "guidance.sqlite3"), "INSERT INTO meta VALUES('bootstrap_pending','{}');");
+    legacyPolicy(withPolicyFile);
+    const policyBefore = snapshotDirectory(withPolicyFile);
+    refusedWith(yield* Effect.exit(upgrade(withPolicyFile)), donorFile, "policy_conflict");
+    assert.deepEqual(snapshotDirectory(withPolicyFile), policyBefore);
+    assert.deepEqual(backupSets(withPolicyFile), []);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
   it.live("an existing directory without its policy, or with guidance state but no catalog, is refused unchanged", () => Effect.gen(function* () {
@@ -310,8 +400,8 @@ describe("startup upgrade", () => {
     legacyCatalog(withoutPolicy);
     legacyGuidance(withoutPolicy);
     const before = snapshotDirectory(withoutPolicy);
-    refusedWith(yield* Effect.exit(upgrade(withoutPolicy, ["seed"])), "thread-settings.sqlite3", "missing_policy");
-    assert.equal(existsSync(join(withoutPolicy, "thread-settings.sqlite3")), false, "the policy is never reseeded");
+    refusedWith(yield* Effect.exit(upgrade(withoutPolicy, ["seed"])), donorFile, "missing_policy");
+    assert.equal(existsSync(join(withoutPolicy, donorFile)), false, "the policy is never reseeded");
     assert.deepEqual(snapshotDirectory(withoutPolicy), before);
     assert.deepEqual(backupSets(withoutPolicy), []);
     assert.deepEqual([formatOf(join(withoutPolicy, "catalog.sqlite3")), formatOf(join(withoutPolicy, "guidance.sqlite3"))], [0, 0]);
@@ -322,16 +412,23 @@ describe("startup upgrade", () => {
     refusedWith(yield* Effect.exit(upgrade(withoutCatalog)), "catalog.sqlite3", "missing_catalog");
     assert.equal(existsSync(join(withoutCatalog, "catalog.sqlite3")), false);
     assert.deepEqual(backupSets(withoutCatalog), []);
+
+    // a guidance file at format 2 without a policy row is never reseeded either
+    const withoutRow = yield* temporaryDirectory;
+    yield* upgrade(withoutRow);
+    exec(join(withoutRow, "guidance.sqlite3"), "DELETE FROM thread_policy;");
+    refusedWith(yield* Effect.exit(upgrade(withoutRow, ["seed"])), "guidance.sqlite3", "invalid_policy");
+    assert.deepEqual(policyRows(withoutRow), []);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
   it.live("a newer format, an unknown layout or an invalid policy is refused before anything is backed up or written", () => Effect.gen(function* () {
     const newer = yield* temporaryDirectory;
     yield* upgrade(newer);
-    exec(join(newer, "guidance.sqlite3"), "PRAGMA user_version=2;");
+    exec(join(newer, "guidance.sqlite3"), "PRAGMA user_version=3;");
     const newerBefore = snapshotDirectory(newer);
     refusedWith(yield* Effect.exit(upgrade(newer)), "guidance.sqlite3", "future_format");
     assert.deepEqual(snapshotDirectory(newer), newerBefore);
-    assert.equal(formatOf(join(newer, "guidance.sqlite3")), 2);
+    assert.equal(formatOf(join(newer, "guidance.sqlite3")), 3);
 
     const unknown = yield* temporaryDirectory;
     yield* legacyDirectory(unknown);
@@ -340,7 +437,7 @@ describe("startup upgrade", () => {
     refusedWith(yield* Effect.exit(upgrade(unknown)), "guidance.sqlite3", "unknown_layout");
     assert.deepEqual(snapshotDirectory(unknown), unknownBefore);
     assert.deepEqual(backupSets(unknown), []);
-    for (const file of allFiles) assert.equal(formatOf(join(unknown, file)), 0, file);
+    for (const file of [...allFiles, donorFile]) assert.equal(formatOf(join(unknown, file)), 0, file);
 
     // every name as a release wrote it, but the threads table declared without its primary key: never stamped format 1
     const redeclared = yield* temporaryDirectory;
@@ -361,11 +458,28 @@ describe("startup upgrade", () => {
     legacyCatalog(invalid);
     legacyGuidance(invalid);
     legacyPolicy(invalid, '{"generation":"seven"}');
-    refusedWith(yield* Effect.exit(upgrade(invalid)), "thread-settings.sqlite3", "invalid_policy");
+    refusedWith(yield* Effect.exit(upgrade(invalid)), donorFile, "invalid_policy");
     assert.deepEqual(backupSets(invalid), []);
+
+    // a policy file with another table, or at a format it never had, is no policy to import
+    for (const statement of ["CREATE TABLE extra(id TEXT);", "PRAGMA user_version=2;"]) {
+      const strange = yield* temporaryDirectory;
+      yield* legacyDirectory(strange);
+      exec(join(strange, donorFile), statement);
+      const strangeBefore = snapshotDirectory(strange);
+      refusedWith(yield* Effect.exit(upgrade(strange)), donorFile, "unknown_layout");
+      assert.deepEqual(snapshotDirectory(strange), strangeBefore);
+      assert.deepEqual(backupSets(strange), []);
+    }
+
+    // a current guidance file whose policy row does not decode
+    const undecodable = yield* temporaryDirectory;
+    yield* upgrade(undecodable);
+    exec(join(undecodable, "guidance.sqlite3"), `UPDATE thread_policy SET document='{"generation":"one"}';`);
+    refusedWith(yield* Effect.exit(upgrade(undecodable)), "guidance.sqlite3", "invalid_policy");
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
-  it.live("format 0 files are backed up and verified, then upgraded in place with every stored row preserved; a later start upgrades nothing", () => Effect.gen(function* () {
+  it.live("format 0 files are backed up and verified, then upgraded in place with every stored row preserved and the policy moved; a later start upgrades nothing", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* legacyDirectory(directory);
     const before = snapshotDirectory(directory);
@@ -373,31 +487,119 @@ describe("startup upgrade", () => {
     assert.equal(report.fresh, false);
     assert.ok(report.backupSet !== null);
     assert.deepEqual(report.files, [
-      { file: "access/login.sqlite3", from: 0, to: 1 }, { file: "catalog.sqlite3", from: 0, to: 1 },
-      { file: "guidance.sqlite3", from: 0, to: 1 }, { file: "thread-settings.sqlite3", from: 0, to: 1 },
+      { file: "access/login.sqlite3", from: 0, to: 1 }, { file: "catalog.sqlite3", from: 0, to: 1 }, { file: "guidance.sqlite3", from: 0, to: 2 },
     ]);
-    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 1, file);
-    assert.equal(journalOf(join(directory, "access", "login.sqlite3")), "delete");
+    assert.equal(report.policyFileRemoved, true);
+    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), currentFormat[file], file);
+    assert.equal(journalOf(join(directory, accessFile)), "delete");
     const after = snapshotDirectory(directory);
-    for (const file of allFiles) assertPreserved(before[file] ?? {}, after[file] ?? {});
+    for (const file of [accessFile, "catalog.sqlite3"]) assertPreserved(before[file] ?? {}, after[file] ?? {});
+    assertPreserved(before["guidance.sqlite3"] ?? {}, withoutMarker(after["guidance.sqlite3"] ?? {}));
     // the backup set holds the format 0 files exactly as they were, with a manifest naming each
     assert.deepEqual(backupSets(directory), [report.backupSet]);
     const set = join(directory, "backups", report.backupSet);
     const manifest = decodeJson(BackupManifest, readFileSync(join(set, "manifest.json"), "utf8"));
-    assert.deepEqual(manifest.files.map((entry) => [entry.file, entry.backup, entry.format]), [
-      ["access/login.sqlite3", "access-login.sqlite3", 0], ["catalog.sqlite3", "catalog.sqlite3", 0],
-      ["guidance.sqlite3", "guidance.sqlite3", 0], ["thread-settings.sqlite3", "thread-settings.sqlite3", 0],
+    assert.deepEqual(manifest.files.map((entry) => [entry.file, entry.backup, entry.format, entry.targetFormat]), [
+      ["access/login.sqlite3", "access-login.sqlite3", 0, 1], ["catalog.sqlite3", "catalog.sqlite3", 0, 1],
+      ["guidance.sqlite3", "guidance.sqlite3", 0, 2], [donorFile, donorFile, 0, null],
     ]);
     for (const entry of manifest.files) {
       assert.equal(digest(join(set, entry.backup)), entry.sha256, entry.backup);
       assert.equal(formatOf(join(set, entry.backup)), 0, entry.backup);
       assert.deepEqual(tableRows(join(set, entry.backup)), before[entry.file], entry.backup);
     }
-    // the session survives, and the policy keeps its generation and document byte for byte
-    assert.deepEqual(after[join("access", "login.sqlite3")]?.dashboard_login_sessions, [{ token_hash: sessionHash, issued_at: 1762300000000n, expires_at: 1762300000001n }]);
-    assert.deepEqual(after["thread-settings.sqlite3"]?.settings, [{ id: 1n, document: '{"generation":7,"excludedThreadIds":["thread-excluded"]}' }]);
+    // the session survives, and the policy keeps its generation and document byte for byte in guidance
+    assert.deepEqual(after[accessFile]?.dashboard_login_sessions, [{ token_hash: sessionHash, issued_at: 1762300000000n, expires_at: 1762300000001n }]);
+    assertImported(directory, report.backupSet, '{"generation":7,"excludedThreadIds":["thread-excluded"]}');
     const again = yield* upgrade(directory);
-    assert.deepEqual(again, { fresh: false, backupSet: null, files: [] });
+    assert.deepEqual(again, { fresh: false, backupSet: null, files: [], policyFileRemoved: false });
+    assert.deepEqual(backupSets(directory), [report.backupSet]);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  it.live("the policy document moves byte for byte whatever its layout, its unknown fields included", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* legacyDirectory(directory);
+    rmSync(join(directory, donorFile));
+    const document = '{ "excludedThreadIds" : [ "thread-é" ], "generation": 12, "native": {"kept": [1, 2.50]} }';
+    legacyPolicy(directory, document);
+    const report = yield* upgrade(directory);
+    assert.ok(report.backupSet !== null);
+    assertImported(directory, report.backupSet, document);
+    assert.equal(documentHex(join(directory, "guidance.sqlite3"), "thread_policy"), Buffer.from(document, "utf8").toString("hex").toUpperCase());
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  /*
+   * the foundation's formats, as an earlier version of this upgrade left them: every file of the frozen 0.0.27 layout stamped
+   * format 1 (format 1 declares exactly that schema), the policy still in its own file at format 1
+   */
+  it.live("an incomplete format 1 layout is refused before backup or migration writes", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* materializeFixture("format0-current-unversioned", directory);
+    for (const file of [...allFiles, donorFile]) exec(join(directory, file), "PRAGMA user_version=1;");
+    exec(join(directory, "guidance.sqlite3"), "DROP INDEX supervisor_main_binding_thread;");
+    const before = snapshotDirectory(directory);
+    refusedWith(yield* Effect.exit(upgrade(directory)), "guidance.sqlite3", "incomplete_schema");
+    assert.deepEqual(snapshotDirectory(directory), before);
+    assert.deepEqual(backupSets(directory), []);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  it.live("a directory at the foundation's formats moves guidance to format 2 with the policy file imported and removed", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* materializeFixture("format0-current-unversioned", directory);
+    for (const file of [...allFiles, donorFile]) exec(join(directory, file), "PRAGMA user_version=1;");
+    const before = snapshotDirectory(directory);
+    const unchanged = Object.fromEntries([accessFile, "catalog.sqlite3"].map((file) => [file, digest(join(directory, file))]));
+    const report = yield* upgrade(directory);
+    assert.ok(report.backupSet !== null);
+    assert.deepEqual(report.files, [{ file: "guidance.sqlite3", from: 1, to: 2 }]);
+    assert.equal(report.policyFileRemoved, true);
+    assert.equal(formatOf(join(directory, "guidance.sqlite3")), 2);
+    assert.deepEqual(Object.fromEntries([accessFile, "catalog.sqlite3"].map((file) => [file, digest(join(directory, file))])), unchanged, "current files are not touched");
+    const manifest = decodeJson(BackupManifest, readFileSync(join(directory, "backups", report.backupSet, "manifest.json"), "utf8"));
+    assert.deepEqual(manifest.files.map((entry) => [entry.file, entry.format, entry.targetFormat]), [["guidance.sqlite3", 1, 2], [donorFile, 1, null]]);
+    assertPreserved(before["guidance.sqlite3"] ?? {}, withoutMarker(snapshotDirectory(directory)["guidance.sqlite3"] ?? {}));
+    assertImported(directory, report.backupSet, before[donorFile]?.settings?.[0]?.document);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
+  it.live("a policy file left after its import is removed once proven the same document; a different, unreadable or unarchived one refuses the start", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* legacyDirectory(directory);
+    const report = yield* upgrade(directory);
+    assert.ok(report.backupSet !== null);
+    const archived = join(directory, "backups", report.backupSet, donorFile);
+    const guidance = digest(join(directory, "guidance.sqlite3"));
+    // the import committed, but the start stopped before removing the file: the next start removes it, with no other backup
+    copyFileSync(archived, join(directory, donorFile));
+    assert.deepEqual(yield* upgrade(directory), { fresh: false, backupSet: null, files: [], policyFileRemoved: true });
+    assert.ok(donorGone(directory));
+    // only the sidecars were left, the main file already gone: the import marker proves they can go
+    writeFileSync(join(directory, `${donorFile}-wal`), "");
+    writeFileSync(join(directory, `${donorFile}-shm`), "");
+    assert.deepEqual(yield* upgrade(directory), { fresh: false, backupSet: null, files: [], policyFileRemoved: true });
+    assert.ok(donorGone(directory));
+    // a policy file that differs from the imported document (an older Supervisor ran meanwhile) is neither removed nor read
+    legacyPolicy(directory, '{"generation":8,"excludedThreadIds":[]}');
+    const changed = snapshotDirectory(directory);
+    refusedWith(yield* Effect.exit(upgrade(directory)), donorFile, "policy_conflict");
+    assert.deepEqual(snapshotDirectory(directory), changed);
+    removeFile(directory, donorFile);
+    // an unreadable one refuses too, and stays as it is
+    writeFileSync(join(directory, donorFile), "not a database");
+    refusedWith(yield* Effect.exit(upgrade(directory)), donorFile, "unreadable");
+    assert.equal(readFileSync(join(directory, donorFile), "utf8"), "not a database");
+    removeFile(directory, donorFile);
+    // the same document while its archived copy is missing: the file stays until the archive is back
+    const saved = join(directory, "backups", "saved-copy.sqlite3");
+    copyFileSync(archived, saved);
+    copyFileSync(archived, join(directory, donorFile));
+    rmSync(archived);
+    refusedWith(yield* Effect.exit(upgrade(directory)), donorFile, "backup_failed");
+    assert.ok(existsSync(join(directory, donorFile)), "kept while its archive is missing");
+    copyFileSync(saved, archived);
+    rmSync(saved);
+    assert.equal((yield* upgrade(directory)).policyFileRemoved, true);
+    assert.ok(donorGone(directory));
+    assert.equal(digest(join(directory, "guidance.sqlite3")), guidance, "no removal changes guidance");
     assert.deepEqual(backupSets(directory), [report.backupSet]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
@@ -405,21 +607,26 @@ describe("startup upgrade", () => {
     const directory = yield* temporaryDirectory;
     yield* legacyDirectory(directory);
     const before = snapshotDirectory(directory);
-    yield* upgrade(directory);
+    const report = yield* upgrade(directory);
     const rewritten = join(directory, "guidance.sqlite3");
     exec(rewritten, "UPDATE meta SET value=json_set(value,'$.nativeExtra',NULL) WHERE key='supervisor_unbound_stop:thread-stopped';");
-    assert.throws(() => assertPreserved(before["guidance.sqlite3"] ?? {}, tableRows(rewritten)));
-    exec(join(directory, "access", "login.sqlite3"), "DELETE FROM dashboard_login_sessions;");
-    assert.throws(() => assertPreserved(before[join("access", "login.sqlite3")] ?? {}, tableRows(join(directory, "access", "login.sqlite3"))));
+    assert.throws(() => assertPreserved(before["guidance.sqlite3"] ?? {}, withoutMarker(tableRows(rewritten))));
+    exec(join(directory, accessFile), "DELETE FROM dashboard_login_sessions;");
+    assert.throws(() => assertPreserved(before[accessFile] ?? {}, tableRows(join(directory, accessFile))));
+    // an import that reformats the document, the same policy in other bytes, fails the byte-for-byte check
+    exec(rewritten, "UPDATE thread_policy SET document=replace(document,':',': ');");
+    assert.throws(() => assertImported(directory, report.backupSet ?? "", before[donorFile]?.settings?.[0]?.document));
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
   it.live("a failure between files leaves earlier files upgraded and later ones untouched, and the next start resumes after the cause is fixed", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* legacyDirectory(directory);
+    const formats = () => Object.fromEntries([...allFiles, donorFile].map((file) => [file, formatOf(join(directory, file))]));
     // a stored thread shell without its title: the catalog step cannot carry it forward (as its open could not read it)
     exec(join(directory, "catalog.sqlite3"), `UPDATE threads SET document='{"id":"thread-1","lineage":{}}' WHERE id='thread-1';`);
     refusedWith(yield* Effect.exit(upgrade(directory)), "catalog.sqlite3", "migration_failed");
-    assert.deepEqual(allFiles.map((file) => formatOf(join(directory, file))), [0, 0, 0, 1], "access committed first; catalog rolled back; the rest untouched");
+    assert.deepEqual(formats(), { [accessFile]: 1, "catalog.sqlite3": 0, "guidance.sqlite3": 0, [donorFile]: 0 },
+      "access committed first; catalog rolled back; the rest untouched");
     const [firstSet] = backupSets(directory);
     assert.ok(firstSet !== undefined && existsSync(join(directory, "backups", firstSet, "manifest.json")));
     // a start that fails again with nothing changed reuses its verified set: a restart loop never piles up copies
@@ -427,11 +634,13 @@ describe("startup upgrade", () => {
     assert.deepEqual(backupSets(directory), [firstSet]);
     exec(join(directory, "catalog.sqlite3"), `UPDATE threads SET document='{"id":"thread-1","title":"A chat","lineage":{}}' WHERE id='thread-1';`);
     const resumed = yield* upgrade(directory);
-    assert.deepEqual(resumed.files.map((file) => file.file), ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
+    assert.deepEqual(resumed.files.map((file) => file.file), ["catalog.sqlite3", "guidance.sqlite3"]);
+    assert.equal(resumed.policyFileRemoved, true);
     assert.equal(backupSets(directory).length, 2, "a new set for the files still changing; the first one is kept");
     const manifest = decodeJson(BackupManifest, readFileSync(join(directory, "backups", resumed.backupSet ?? "", "manifest.json"), "utf8"));
-    assert.deepEqual(manifest.files.map((entry) => entry.file), ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
-    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 1, file);
+    assert.deepEqual(manifest.files.map((entry) => entry.file), ["catalog.sqlite3", "guidance.sqlite3", donorFile]);
+    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), currentFormat[file], file);
+    assert.ok(donorGone(directory));
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
   it.live("two starts at once upgrade each file exactly once and agree on the result", () => Effect.gen(function* () {
@@ -441,18 +650,22 @@ describe("startup upgrade", () => {
     const [left, right] = yield* Effect.all([Effect.exit(upgrade(directory)), Effect.exit(upgrade(directory))], { concurrency: 2 });
     const reports = [left, right].filter(Exit.isSuccess).map((exit) => exit.value);
     assert.ok(reports.length >= 1, "at least one start completed");
+    // a start that lost the race failed closed: its backup, its policy file or its removal was already the other start's
     for (const exit of [left, right]) if (Exit.isFailure(exit)) {
       const failure = exit.cause.reasons.find((entry) => entry._tag === "Fail");
-      assert.ok(failure?._tag === "Fail" && failure.error instanceof DatabaseUpgradeError && ["backup_failed", "concurrent_change"].includes(failure.error.reason),
-        "a start that lost the race failed closed");
+      assert.ok(failure?._tag === "Fail" && failure.error instanceof DatabaseUpgradeError &&
+        ["backup_failed", "concurrent_change", "unreadable", "cleanup_failed"].includes(failure.error.reason), "a start that lost the race failed closed");
     }
     const upgraded = reports.flatMap((report) => report.files.map((file) => file.file)).sort();
     assert.equal(new Set(upgraded).size, upgraded.length, "no file was upgraded twice");
     if (reports.length === 2) assert.deepEqual(upgraded, [...allFiles].sort());
     // a start that failed closed leaves the rest to the next start
     yield* upgrade(directory);
-    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 1, file);
+    for (const file of allFiles) assert.equal(formatOf(join(directory, file)), currentFormat[file], file);
     const after = snapshotDirectory(directory);
-    for (const file of allFiles) assertPreserved(before[file] ?? {}, after[file] ?? {});
+    for (const file of [accessFile, "catalog.sqlite3"]) assertPreserved(before[file] ?? {}, after[file] ?? {});
+    assertPreserved(before["guidance.sqlite3"] ?? {}, withoutMarker(after["guidance.sqlite3"] ?? {}));
+    assert.deepEqual(policyRows(directory), before[donorFile]?.settings);
+    assert.ok(donorGone(directory));
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 });

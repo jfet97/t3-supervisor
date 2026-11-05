@@ -14,7 +14,7 @@ import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
 import { initializeDataDirectory } from "./data-directory.js";
-import { guidanceLayer, ids, policyLayer, type SupervisionStoreServices } from "./g11-stores.js";
+import { guidanceLayer, ids, type SupervisionStoreServices } from "./g11-stores.js";
 import { dbSeam, seamWorker, type DbSeam } from "./psx-sql.js";
 
 export interface GuidanceOpen {
@@ -52,9 +52,9 @@ export const openSupervisors = (directory: string, guidance: GuidanceOpen, scope
   Effect.gen(function* () {
     const built = yield* Layer.buildWithScope(SupervisionStoresLive.pipe(
       Layer.provide(Layer.succeedContext(guidance.context)), Layer.provide(Layer.succeed(SupervisorOwnership, owned))), scope).pipe(Effect.orDie);
-    const policyContext = yield* Layer.buildWithScope(policyLayer(directory), scope).pipe(Effect.orDie);
-    const policy = Context.get(policyContext, ThreadPolicyStore);
-    const context = Context.merge(guidance.context, built).pipe(Context.add(SupervisorOwnership, owned), Context.add(ThreadPolicyStore, policy));
+    // the thread-policy store of the same guidance client
+    const policy = Context.get(guidance.context, ThreadPolicyStore);
+    const context = Context.merge(guidance.context, built).pipe(Context.add(SupervisorOwnership, owned));
     return {
       ...guidance, owned, policy, context, sql: guidance.sql, db: guidance.db, guidance: guidance.guidance,
       supervisors: Context.get(context, ProjectSupervisorStore), requests: Context.get(context, SupervisorConversationStore),

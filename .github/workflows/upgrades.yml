@@ -347,6 +347,7 @@ jobs:
               ] | join(", ")' <<< "$report") || wrong="inputs of an unexpected shape"
             [ -z "$wrong" ] || problems+=("the report names $wrong instead of this journey's frozen inputs")
             passed=$(jq -r '.passed == true and .outcome == "passed"' <<< "$report")
+            if [ "$(jq -r '.outcome' <<< "$report")" = passed ] && [ "$passed" != true ]; then problems+=("the journey reported passed without a passing flag"); fi
             if [ "$passed" = true ] && [ "$status" != 0 ]; then problems+=("the journey exited ${status:-without a status} despite a passing report"); fi
             if [ "$passed" != true ] && [ "$status" = 0 ]; then problems+=("the journey exited 0 despite a report that did not pass"); fi
           fi
