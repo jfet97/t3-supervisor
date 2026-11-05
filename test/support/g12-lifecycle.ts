@@ -1,5 +1,5 @@
 import { Context, Effect, Exit, Layer, Scope } from "effect";
-import { GuidanceDb, type PolicyDb } from "../../src/db.js";
+import { GuidanceDb } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
@@ -15,7 +15,7 @@ import { T3Native } from "../../src/t3-native/index.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
-import { admissionLayer, guidanceClient, policyClient, runConfig, supervisorIds } from "./g12-stores.js";
+import { admissionLayer, guidanceClient, runConfig, supervisorIds } from "./g12-stores.js";
 import { fakeNativeLayer } from "./native-access.js";
 
 // one process of the scope-lifecycle suites: the production lifecycle beside the production conversation, admission gate,
@@ -52,9 +52,11 @@ export const operateRpc = (call: OperateCall): NativeRpcShape => ({
   initiate: (tag, payload) => Effect.sync(() => ({ sent: Effect.succeed(true), result: call(tag, { ...payload }), release: Effect.void })),
 });
 
-// the stores in the production order over the run's clients, the workflow state store whose owner check admits every scope (as
-// the baseline suites constructed it), the scope predicates over the thread policy with their admission gate, then the
-// conversation and the lifecycle with the operate credential and no helper team
+/*
+ * the stores in the production order over the run's guidance client, the workflow state store whose owner check admits every
+ * scope (as the baseline suites constructed it), the thread policy on that same client with the scope predicates over it and
+ * their admission gate, then the conversation and the lifecycle with the operate credential and no helper team
+ */
 const processLayer = (directory: string, natives: LifecycleNatives) => {
   const t3 = t3Projections(natives.read);
   const operate = operateRpc(natives.rpc);
@@ -69,8 +71,8 @@ const processLayer = (directory: string, natives: LifecycleNatives) => {
   );
 };
 
-const services = (directory: string, natives: LifecycleNatives, clients: Context.Context<GuidanceDb | PolicyDb>) =>
-  processLayer(directory, natives).pipe(Layer.provideMerge(Layer.succeedContext(clients)));
+const services = (directory: string, natives: LifecycleNatives, client: Context.Context<GuidanceDb>) =>
+  processLayer(directory, natives).pipe(Layer.provideMerge(Layer.succeedContext(client)));
 
 type ProcessServices = Layer.Success<ReturnType<typeof services>>;
 
@@ -85,18 +87,20 @@ export interface LifecycleProcess {
   readonly conversation: SupervisorConversation["Service"];
   readonly lifecycle: SupervisorLifecycle["Service"];
   readonly context: Context.Context<ProcessServices>;
-  // closes the process's database clients under its services, as a crash ends the process's connections; the services close
-  // with the test scope
+  /*
+   * closes the process's database client under its services, as a crash ends the process's connection; the services close
+   * with the test scope
+   */
   readonly crash: Effect.Effect<void>;
 }
 
-/** Opens one process on the files of `directory`, closed with the current scope (its services before its clients). */
+/** Opens one process on the files of `directory`, closed with the current scope (its services before its client). */
 export const openLifecycleProcess = (directory: string, natives: LifecycleNatives): Effect.Effect<LifecycleProcess, never, Scope.Scope> =>
   Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const clientScope = yield* Scope.fork(scope, "sequential");
-    const clients = yield* Layer.buildWithScope(Layer.mergeAll(guidanceClient(directory), policyClient(directory)), clientScope);
-    const context = yield* Layer.buildWithScope(services(directory, natives, clients), yield* Scope.fork(scope, "sequential")).pipe(Effect.orDie);
+    const client = yield* Layer.buildWithScope(guidanceClient(directory), clientScope);
+    const context = yield* Layer.buildWithScope(services(directory, natives, client), yield* Scope.fork(scope, "sequential")).pipe(Effect.orDie);
     return {
       context, crash: Scope.close(clientScope, Exit.void),
       sql: Context.get(context, GuidanceDb), ids: Context.get(context, SupervisorIds), store: Context.get(context, ProjectSupervisorStore),

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, it } from "@effect/vitest";
@@ -7,8 +8,8 @@ import { referenceSignature } from "../src/database-upgrade.js";
 import { DatabaseFormats } from "../src/db.js";
 import {
   type BackupManifest, type BackupObservation, backupProblems, catalogIdentities, changingFiles, contractMismatch, type DatabaseFile, databaseFiles, eventLines,
-  type FileRows, type FileShape, type Formats, journeyOutcome, requiredMeta, rowDifferences, SeedFile, seedLabel, selectSeedSet, startupFailure, statementTable,
-  upgradeEventProblems,
+  type FileRows, type FileShape, type Formats, journeyOutcome, movedPolicyProblems, requiredMeta, rowDifferences, SeedFile, seedLabel, selectSeedSet,
+  startupFailure, statementTable, upgradeEventProblems, withoutImportMarker,
 } from "../scripts/upgrade-journey-evidence.js";
 import { expectedDumpSync, fixturesDirectory } from "./support/persistence-fixtures.js";
 
@@ -22,7 +23,7 @@ import { expectedDumpSync, fixturesDirectory } from "./support/persistence-fixtu
 const seeds = Schema.decodeUnknownSync(Schema.fromJsonString(SeedFile))(readFileSync(new URL("./fixtures/upgrade-journeys/seed-sets.json", import.meta.url), "utf8"));
 const current: Formats = {
   "access/login.sqlite3": DatabaseFormats.access, "catalog.sqlite3": DatabaseFormats.catalog,
-  "guidance.sqlite3": DatabaseFormats.guidance, "thread-settings.sqlite3": DatabaseFormats.policy,
+  "guidance.sqlite3": DatabaseFormats.guidance, "thread-settings.sqlite3": null,
 };
 const compact = (sql: string) => sql.replace(/\s+/gu, "");
 const setOf = (format: number) => {
@@ -32,14 +33,18 @@ const setOf = (format: number) => {
 };
 const formatZero = setOf(0);
 const formatOne = setOf(1);
+const formatTwo = setOf(2);
 const omit = <V>(record: Readonly<Record<string, V>>, key: string): Readonly<Record<string, V>> =>
   Object.fromEntries(Object.entries(record).filter(([name]) => name !== key));
 
 // the guidance file as a journey reads it, by default with exactly what the format 0 set requires
 const guidance = (format: number, changes: {readonly declarations?: Readonly<Record<string, string>>; readonly meta?: Readonly<Record<string, string>>} = {}): FileShape =>
   ({file: "guidance.sqlite3", present: true, format, declarations: changes.declarations ?? formatZero.requires.declarations, meta: changes.meta ?? formatZero.requires.meta});
+// a directory whose guidance is at `format`: access and the catalog at the format that goes with it, the policy file retired at guidance format 2
 const directory = (format: number, guidanceShape: FileShape = guidance(format)): ReadonlyArray<FileShape> => [
-  ...(["access/login.sqlite3", "catalog.sqlite3", "thread-settings.sqlite3"] as const).map((file): FileShape => ({file, present: true, format, declarations: {}, meta: {}})),
+  ...(["access/login.sqlite3", "catalog.sqlite3"] as const).map((file): FileShape => ({file, present: true, format: Math.min(format, 1), declarations: {}, meta: {}})),
+  format < 2 ? {file: "thread-settings.sqlite3", present: true, format, declarations: {}, meta: {}}
+    : {file: "thread-settings.sqlite3", present: false, format: null, declarations: {}, meta: {}},
   guidanceShape,
 ];
 
@@ -47,7 +52,7 @@ describe("the frozen seed sets", () => {
   it("are labelled fixture input, copied verbatim from the frozen 0.0.27 rows, and write only the tables their contracts declare", () => {
     assert.equal(seeds.label, seedLabel);
     const frozen = readFileSync(join(fixturesDirectory, "format0-current-unversioned", "guidance.rows.sql"), "utf8").split("\n");
-    assert.deepEqual(seeds.sets.map((set) => [set.file, set.format]), [["guidance.sqlite3", 0], ["guidance.sqlite3", 1]]);
+    assert.deepEqual(seeds.sets.map((set) => [set.file, set.format]), [["guidance.sqlite3", 0], ["guidance.sqlite3", 1], ["guidance.sqlite3", 2]]);
     for (const set of seeds.sets) {
       const statements = seeds.statements[set.statements];
       assert.ok(statements !== undefined && statements.length > 0, set.id);
@@ -71,9 +76,9 @@ describe("the frozen seed sets", () => {
     }
   });
 
-  it.live("bind format 1 to the candidate's declared guidance schema", () => Effect.gen(function* () {
-    const reference = yield* referenceSignature("guidance");
-    for (const [key, declaration] of Object.entries(formatOne.requires.declarations)) assert.equal(compact(reference.get(key) ?? ""), compact(declaration), key);
+  it.live("bind formats 1 and 2 to the candidate's declared guidance schema at those formats", () => Effect.gen(function* () {
+    for (const [set, reference] of [[formatOne, yield* referenceSignature("guidance", 1)], [formatTwo, yield* referenceSignature("guidance")]] as const)
+      for (const [key, declaration] of Object.entries(set.requires.declarations)) assert.equal(compact(reference.get(key) ?? ""), compact(declaration), `${set.id} ${key}`);
   }));
 });
 
@@ -84,6 +89,9 @@ describe("seed set selection", () => {
     assert.equal(zero.kind === "recognized" ? zero.statements.length : 0, 7);
     const one = selectSeedSet(seeds, directory(1), current);
     assert.equal(one.kind === "recognized" ? one.set.id : one.reason, "format1-supervision-history");
+    // the candidate's own format: its policy file retired, so the directory has none
+    const two = selectSeedSet(seeds, directory(2), current);
+    assert.equal(two.kind === "recognized" ? two.set.id : two.reason, "format2-supervision-history");
   });
 
   it("fails visibly on a newer format, a changed declaration, a missing table or scope version and a missing file", () => {
@@ -92,7 +100,7 @@ describe("seed set selection", () => {
       assert.equal(selection.kind, "unsupported");
       return selection.kind === "unsupported" ? selection.reason : "";
     };
-    assert.match(unsupported(directory(1, guidance(2))), /guidance\.sqlite3 has format 2, newer than format 1/u);
+    assert.match(unsupported(directory(2, guidance(3))), /guidance\.sqlite3 has format 3, newer than format 2/u);
     const widened = {...formatZero.requires.declarations, "table:supervisor_owned_threads": "CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY, extra TEXT)"};
     assert.match(unsupported(directory(0, guidance(0, {declarations: widened}))), /declares table:supervisor_owned_threads differently/u);
     const withoutEvidence = omit(formatZero.requires.declarations, "table:supervisor_workflow_write_evidence");
@@ -143,7 +151,7 @@ describe("stored rows", () => {
 const before: Readonly<Partial<Record<DatabaseFile, FileRows>>> = Object.fromEntries(databaseFiles.map((file) => [file, rows] as const));
 const manifestOf = (set: string, files: ReadonlyArray<{readonly file: DatabaseFile; readonly format: number}>): BackupManifest => ({
   kind: "t3-supervisor-backup", manifestFormat: 1, backupSet: set,
-  files: files.map(({file, format}) => ({file, backup: file.replace("/", "-"), format, targetFormat: 1, sha256: `${file}-digest`, integrity: "ok"})),
+  files: files.map(({file, format}) => ({file, backup: file.replace("/", "-"), format, targetFormat: current[file], sha256: `${file}-digest`, integrity: "ok"})),
 });
 const observation = (changes: Partial<BackupObservation> = {}): BackupObservation => ({
   setsBefore: [], setsAfter: ["20261105T120000Z-1a2b3c4d"],
@@ -155,9 +163,11 @@ const observation = (changes: Partial<BackupObservation> = {}): BackupObservatio
 describe("the backup a start leaves", () => {
   const expected = changingFiles(directory(0), current);
 
-  it("names every file at an older format with its format, and none at the current formats", () => {
-    assert.deepEqual(expected.map((change) => [change.file, change.format, change.targetFormat]), databaseFiles.map((file) => [file, 0, 1]));
-    assert.deepEqual(changingFiles(directory(1), current), []);
+  it("names every file at an older format with its format, the retired policy file without one, and none at the current formats", () => {
+    assert.deepEqual(expected.map((change) => [change.file, change.format, change.targetFormat]), databaseFiles.map((file) => [file, 0, current[file]]));
+    assert.deepEqual(changingFiles(directory(1), current).map((change) => [change.file, change.format, change.targetFormat]),
+      [["guidance.sqlite3", 1, 2], ["thread-settings.sqlite3", 1, null]]);
+    assert.deepEqual(changingFiles(directory(2), current), []);
   });
 
   it("is exactly one new verified set whose copies hold the files as they were", () => {
@@ -168,7 +178,7 @@ describe("the backup a start leaves", () => {
     assert.match(backupProblems(expected, before, observation({manifest: manifestOf("20261105T120000Z-1a2b3c4d",
       databaseFiles.slice(1).map((file) => ({file, format: 0})))})).join(), /instead of access\/login\.sqlite3, catalog\.sqlite3/u);
     assert.match(backupProblems(expected, before, observation({manifest: manifestOf("20261105T120000Z-1a2b3c4d",
-      databaseFiles.map((file) => ({file, format: file === "guidance.sqlite3" ? 1 : 0})))})).join(), /records guidance\.sqlite3 at format 1 to 1 instead of 0 to 1/u);
+      databaseFiles.map((file) => ({file, format: file === "guidance.sqlite3" ? 1 : 0})))})).join(), /records guidance\.sqlite3 at format 1 to 2 instead of 0 to 2/u);
     const tampered = {...observation().copies, "guidance.sqlite3": {sha256: "other", format: 0, rows: {...rows, supervisor_owned_threads: []}}};
     const problems = backupProblems(expected, before, observation({copies: tampered})).join("; ");
     assert.match(problems, /the copy guidance\.sqlite3 does not have its recorded SHA-256/u);
@@ -193,17 +203,56 @@ describe("the candidate's own events", () => {
     assert.equal(startupFailure(eventLines(output({event: "supervisor_started"}))), null);
   });
 
-  it("log one completed upgrade naming the new set and every changed file, and none at the current formats", () => {
+  it("log one completed upgrade naming the new set, every format change and the policy import, the retired file's one removal, and none at the current formats", () => {
     const expected = changingFiles(directory(0), current);
-    const completed = {event: "database_upgrade_completed", backup_set: "set-1", files: databaseFiles.map((file) => `${file}:0>1`).join(",")};
-    assert.deepEqual(upgradeEventProblems(eventLines(output(completed)), expected, "set-1"), []);
+    const completed = {event: "database_upgrade_completed", backup_set: "set-1", files: "access/login.sqlite3:0>1,catalog.sqlite3:0>1,guidance.sqlite3:0>2", policy_imported: true};
+    const removed = {event: "database_policy_file_removed", file: "thread-settings.sqlite3", backup_set: "set-1"};
+    assert.deepEqual(upgradeEventProblems(eventLines(output(completed, removed)), expected, "set-1"), []);
     assert.deepEqual(upgradeEventProblems(eventLines(output()), expected, "set-1"), ["the start logged 0 completed upgrades instead of one"]);
-    assert.deepEqual(upgradeEventProblems(eventLines(output(completed)), expected, "set-2"), ["the completed upgrade does not name the new backup set"]);
-    assert.match(upgradeEventProblems(eventLines(output({...completed, files: "catalog.sqlite3:0>1"})), expected, "set-1").join(), /names catalog\.sqlite3:0>1 instead of/u);
+    assert.deepEqual(upgradeEventProblems(eventLines(output(completed, removed)), expected, "set-2"),
+      ["the completed upgrade does not name the new backup set", "the start logged 1 removal(s) of the retired policy file instead of one under the new set"]);
+    assert.match(upgradeEventProblems(eventLines(output({...completed, files: "catalog.sqlite3:0>1"}, removed)), expected, "set-1").join(), /names catalog\.sqlite3:0>1 instead of/u);
+    // the import must be recorded and the retired file removed exactly once
+    assert.deepEqual(upgradeEventProblems(eventLines(output({...completed, policy_imported: false}, removed)), expected, "set-1"),
+      ["the completed upgrade does not record the policy import"]);
+    assert.deepEqual(upgradeEventProblems(eventLines(output(completed)), expected, "set-1"),
+      ["the start logged 0 removal(s) of the retired policy file instead of one under the new set"]);
+    assert.deepEqual(upgradeEventProblems(eventLines(output(removed)), [], null), ["a start at the current formats logged 1 removal(s) of a retired file"]);
     assert.deepEqual(upgradeEventProblems(eventLines(output()), [], null), []);
     assert.deepEqual(upgradeEventProblems(eventLines(output(completed)), [], null), ["a start at the current formats logged 1 upgrade(s)"]);
     assert.deepEqual(upgradeEventProblems(eventLines(output({event: "database_upgrade_failed", file: null, reason: "backup_failed"})), [], null),
       ["the start logged 1 failed upgrade(s)"]);
+  });
+});
+
+describe("the policy a start moves", () => {
+  const document = '{ "generation": 7, "excludedThreadIds": ["thread-excluded"] }';
+  const retired: FileRows = {settings: [row({id: 1n, document})]};
+  const marker = {documentSha256: createHash("sha256").update(document, "utf8").digest("hex"), generation: 7, backupSet: "set-1"};
+  const moved = (changes: {readonly policy?: string; readonly marker?: Readonly<Record<string, unknown>> | null} = {}): FileRows => ({
+    ...rows, thread_policy: [row({id: 1n, document: changes.policy ?? document})],
+    meta: [...(rows.meta ?? []), ...(changes.marker === null ? [] : [row({key: "thread_policy_import", value: JSON.stringify(changes.marker ?? marker)})])],
+  });
+
+  it("is the retired file's row byte for byte in guidance with a marker naming its hash, generation and backup set, and the file gone", () => {
+    assert.deepEqual(movedPolicyProblems(retired, moved(), false, ["set-1"]), []);
+    assert.deepEqual(movedPolicyProblems(retired, moved(), true, ["set-1"]), ["the retired policy file is still there"]);
+    assert.deepEqual(movedPolicyProblems(retired, moved({policy: document.replace(": ", ":")}), false, ["set-1"]),
+      ["guidance's thread_policy is not the policy row byte for byte"]);
+    assert.deepEqual(movedPolicyProblems(retired, moved({marker: {...marker, documentSha256: "0".repeat(64)}}), false, ["set-1"]),
+      ["the import marker does not name the document's SHA-256"]);
+    assert.deepEqual(movedPolicyProblems(retired, moved({marker: null}), false, ["set-1"]), ["guidance has no import marker"]);
+    assert.deepEqual(movedPolicyProblems(retired, moved({marker: {...marker, generation: 8}}), false, ["set-1"]), ["the import marker does not name the document's generation"]);
+    assert.deepEqual(movedPolicyProblems(retired, moved(), false, ["set-2"]), ["the import marker names no backup set of the directory"]);
+    // a directory whose creator had retired the file already has nothing to move, and nothing may bring the file back
+    assert.deepEqual(movedPolicyProblems(undefined, rows, false, []), []);
+    assert.deepEqual(movedPolicyProblems(undefined, rows, true, []), ["the retired policy file appeared"]);
+  });
+
+  it("adds only the import marker to guidance's meta, which the byte-for-byte comparison leaves aside unless it was there before", () => {
+    assert.deepEqual(rowDifferences(rows, withoutImportMarker(rows, moved())), []);
+    assert.deepEqual(rowDifferences(rows, moved()), ["meta holds 2 rows instead of 1"]);
+    assert.deepEqual(withoutImportMarker(moved(), moved({marker: {...marker, backupSet: "set-2"}})), moved({marker: {...marker, backupSet: "set-2"}}));
   });
 });
 

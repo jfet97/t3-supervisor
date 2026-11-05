@@ -8,7 +8,6 @@ import { it } from "@effect/vitest";
 import { Cause, Clock, Effect, Exit, Fiber, FileSystem, Layer, Logger, type Scope, Stream, SubscriptionRef, Tracer } from "effect";
 import { vi } from "vitest";
 import { SupervisorConfig as Configuration } from "../src/config.js";
-import { policyDbLayer } from "../src/db.js";
 import { NativeEnvelope } from "../src/native-envelope.js";
 import { SupervisorOwnership } from "../src/project-supervisor-store.js";
 import { forgeDashboardToken, ServiceAuth } from "../src/service-auth.js";
@@ -16,7 +15,6 @@ import { makeStore, type Store } from "../src/store.js";
 import { NativeRpc, SupervisorRpcError } from "../src/supervisor-native.js";
 import { createStatus, NativeTransportLive, readiness, supervise, SupervisorStatusRef, type SupervisorStatus } from "../src/supervisor.js";
 import { makeT3Client, T3Client, T3TransportError, type T3ClientShape } from "../src/t3.js";
-import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { startFakeT3, untilTraffic, type FakeT3Options } from "./support/cli-fake-t3.js";
 import { fakeNativeLayer } from "./support/native-access.js";
@@ -127,12 +125,13 @@ const config = (dataDirectory: string, uiPort?: number): SupervisorConfig => ({
 const liveStatus = (settings: SupervisorConfig) => Effect.flatMap(Clock.currentTimeMillis, (now) => SubscriptionRef.make(createStatus(settings, now)));
 
 /**
- * The services of the run: the given catalog and T3 client with the root's read-only T3Native over that client, the status and the
- * root thread-policy (on its own client of the data directory) and ownership services.
+ * The services of the run, as the root provides them (src/supervisor.ts): the given catalog and T3 client with the root's
+ * read-only T3Native over that client, the status and the ownership services. Each supervision run builds its thread-policy
+ * store on its own guidance client.
  */
 const services = (settings: SupervisorConfig, status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, base: Layer.Layer<Store | T3Client, unknown>) => Layer.mergeAll(
   Layer.unwrap(Effect.map(Effect.service(T3Client), (client) => fakeNativeLayer({ t3: client, baseUrl: settings.t3Url }))).pipe(Layer.provideMerge(base)),
-  Layer.succeed(SupervisorStatusRef, status), ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory))), SupervisorOwnership.layer,
+  Layer.succeed(SupervisorStatusRef, status), SupervisorOwnership.layer,
   NativeTransportLive, DashboardUpdates.layer,
 ).pipe(Layer.provideMerge(Layer.succeed(Configuration, settings)), Layer.provideMerge(NodeFileSystem.layer));
 

@@ -4,7 +4,7 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, FileSystem, Layer, Redacted } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
 import { GuidanceRuntime } from "../../src/guidance.js";
-import { guidanceDbLayer, policyDbLayer } from "../../src/db.js";
+import { guidanceDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
@@ -29,9 +29,9 @@ export const dashboard = (options: GuidanceUiOptions = {}) => Effect.gen(functio
   const config = uiConfig(directory);
   // the startup coordinator prepares the directory at the current formats, its policy seeded with the configured excluded chats
   yield* initializeDataDirectory(directory, {excludedThreadIds: config.excludedThreadIds});
-  // the guidance store, and the process's policy store and ownership set, in the caller's scope
-  const stores = yield* Layer.build(Layer.mergeAll(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer)),
-    ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(directory))),
+  // the run's guidance client with its guidance and thread-policy stores, and the process's ownership set, in the caller's scope
+  const stores = yield* Layer.build(Layer.mergeAll(
+    Layer.mergeAll(GuidanceStore.layer, ThreadPolicyStore.layer).pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer)),
     SupervisorOwnership.layer).pipe(Layer.provide(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer, DashboardUpdates.layer))));
   const runtime = yield* GuidanceRuntime.make(config, {catalog: () => Effect.succeed({projects: [], threads: []})}).pipe(Effect.provide(stores));
   const context = yield* Layer.build(GuidanceUi.layer(config, options).pipe(

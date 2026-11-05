@@ -328,7 +328,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
   }
   const parent = yield* Effect.scope;
   let process = yield* Scope.fork(parent, "sequential");
-  let stores = yield* openStores(directory, directory).pipe(Effect.provideService(Scope.Scope, process));
+  let stores = yield* openStores(directory).pipe(Effect.provideService(Scope.Scope, process));
   let seeded = false;
   const seedManual = Effect.gen(function* () {
     if (seeded) return;
@@ -525,7 +525,7 @@ export const makeFixture = Effect.fnUntraced(function* (initial: Array<{ threadI
     restart: Effect.gen(function* () {
       yield* Scope.close(process, Exit.void);
       process = yield* Scope.fork(parent, "sequential");
-      stores = yield* openStores(directory, directory).pipe(Effect.provideService(Scope.Scope, process));
+      stores = yield* openStores(directory).pipe(Effect.provideService(Scope.Scope, process));
     }),
     addTurn: (threadId: string, projectId: string, turn: Turn) => {
       const turns = [...(turnsByThread.get(threadId) ?? []), turn];

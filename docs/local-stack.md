@@ -639,18 +639,22 @@ the image's description, the sign-in token the image's own `t3-supervisor auth f
 2. reads every database file read only: its format and its declarations. The persisted format
    and structural contract select one frozen seed set of `test/fixtures/upgrade-journeys/`,
    never a release name, and the journey writes its statements, labelled fixture input, for
-   history a published binary cannot produce without a provider. A missing file, a newer format
-   or a layout no set recognizes fails the journey as an unsupported shape; nothing is ever
-   seeded from the candidate instead;
+   history a published binary cannot produce without a provider. A missing file (the retired
+   `thread-settings.sqlite3` aside), a newer format or a layout no set recognizes fails the
+   journey as an unsupported shape; nothing is ever seeded from the candidate instead;
 3. runs the candidate's own rollout scan of the directory and starts the candidate on it: every
-   file must be at the candidate's format; files at an older format must have been copied into
-   exactly one new verified backup set whose manifest names each with its format and whose copies
-   hold the files exactly as they were, with one completed upgrade logged, and a directory at the
-   current formats must get no backup and no upgrade; the creator's dashboard session must still
-   sign in; the thread policy, the project settings and No Project mode must read as saved; the
-   rows of `access/login.sqlite3`, `guidance.sqlite3` and `thread-settings.sqlite3`, the seeded
-   identities and native evidence included, must be kept byte for byte, the catalog's
-   environment, project and chat identities kept, and the workflow MCP bearer unchanged;
+   file must be at the candidate's format and the retired `thread-settings.sqlite3` gone; files
+   at an older format and the retired file must have been copied into exactly one new verified
+   backup set whose manifest names each with its format and whose copies hold the files exactly
+   as they were, with one completed upgrade logged that records the policy import and the
+   retired file's one removal under the same set, and a directory at the current formats must
+   get no backup and no upgrade; the creator's dashboard session must still sign in; the thread
+   policy, the project settings and No Project mode must read as saved; the rows of
+   `access/login.sqlite3` and `guidance.sqlite3` (its import marker aside), the seeded
+   identities and native evidence included, must be kept byte for byte, the retired file's
+   policy row must be guidance's `thread_policy` row byte for byte with an import marker naming
+   its SHA-256, generation and backup set, the catalog's environment, project and chat
+   identities kept, and the workflow MCP bearer unchanged;
 4. restarts the candidate: ready again, no new backup set, no upgrade logged, every row kept and
    the session still signed in; each stop must exit 130.
 

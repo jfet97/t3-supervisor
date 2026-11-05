@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { Data, Effect, Schema } from "effect";
-import type { SqlClient } from "effect/sql";
+import { SqlClient } from "effect/sql";
 import type { SqlError } from "effect/sql/SqlError";
 import { rewhitelistStoredShell } from "./store.js";
-import { ThreadPolicy } from "./thread-policy-contract.js";
+import { ThreadPolicy, type ThreadPolicySettings } from "./thread-policy-contract.js";
 
 /*
  * the format steps of the store files (PRAGMA user_version) and the declared schema each current format must have. A step is a
@@ -15,6 +16,9 @@ import { ThreadPolicy } from "./thread-policy-contract.js";
  * an upgraded one go through the same program. Every published release declared each object exactly as format 1 does, so the
  * column additions only unpublished prototypes needed are gone: no file the upgrade recognizes lacks those columns. The
  * constructors keep only their restart recovery.
+ *
+ * Guidance format 2 adds the excluded-chat policy, which earlier formats kept in thread-settings.sqlite3; that file is retired
+ * once the startup upgrade imported its policy (src/database-upgrade.ts).
  */
 
 /** A step that cannot carry a file forward: an unexpected layout or a stored row it cannot read; it names a table, never a row. */
@@ -23,10 +27,17 @@ export class MigrationRefused extends Data.TaggedError("MigrationRefused")<{
   readonly reason: "row_invalid" | "layout";
 }> {}
 
+/**
+ * Where guidance format 2 takes its one policy row from: the configured excluded chats of a genuinely fresh directory, the
+ * retired policy file's document (its stored bytes, with the marker the import records), or nowhere, for every other file.
+ */
+export type PolicySource =
+  | { readonly kind: "fresh"; readonly excludedThreadIds: ReadonlyArray<string> }
+  | { readonly kind: "import"; readonly bytes: Uint8Array; readonly marker: PolicyImportMarker }
+  | { readonly kind: "none" };
+
 export interface MigrationContext {
-  /** the directory is genuinely fresh: the only case in which the configured excluded chats seed the policy */
-  readonly fresh: boolean;
-  readonly excludedThreadIds: ReadonlyArray<string>;
+  readonly policy: PolicySource;
 }
 
 export interface MigrationStep {
@@ -298,30 +309,72 @@ const guidanceFormat1 = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
   yield* scopeReset(sql);
 });
 
-export const guidanceMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1, apply: guidanceFormat1 }];
+// ---- the excluded-chat policy, in guidance from format 2
 
-// ---- thread-settings.sqlite3
+// one row: the policy document as the policy store reads and writes it
+const threadPolicyStatement = "CREATE TABLE IF NOT EXISTS thread_policy(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)";
 
-const policyStatement = "CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)";
-const decodePolicyRow = Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.Literal(1), document: Schema.fromJsonString(ThreadPolicy) }));
+/** The meta row of an imported policy: the SHA-256 of the document's stored bytes, its generation and the backup set holding the retired file. */
+export const policyImportKey = "thread_policy_import";
+export const PolicyImportMarker = Schema.Struct({ documentSha256: Schema.String, generation: Schema.Number, backupSet: Schema.String });
+export type PolicyImportMarker = typeof PolicyImportMarker.Type;
 
-/** Exactly one stored policy row that the policy store reads; anything else is never repaired or reseeded. */
-export const requirePolicyRow = (sql: SqlClient.SqlClient): Effect.Effect<void, SqlError | MigrationRefused> =>
-  sql`SELECT id, document FROM settings`.pipe(Effect.flatMap((rows) => rows.length === 1
-    ? Effect.asVoid(decodePolicyRow(rows[0]).pipe(Effect.mapError(() => new MigrationRefused({ table: "settings", reason: "row_invalid" }))))
-    : Effect.fail(new MigrationRefused({ table: "settings", reason: "row_invalid" }))));
+/** The meta row of a fresh initialization that committed guidance but has not yet verified its catalog. */
+export const bootstrapPendingKey = "bootstrap_pending";
+
+/** A stored policy row: the document as the policy store decodes it, its exact stored bytes and their SHA-256. */
+export interface StoredPolicy {
+  readonly policy: ThreadPolicySettings;
+  readonly bytes: Uint8Array;
+  readonly sha256: string;
+}
+
+const PolicyRows = Schema.Tuple([Schema.Struct({ id: Schema.Literal(1), document: Schema.fromJsonString(ThreadPolicy), bytes: Schema.Uint8Array })]);
+const decodePolicyRows = Schema.decodeUnknownEffect(PolicyRows);
+
+/**
+ * The one policy row of `table` (the retired file's settings, or guidance's thread_policy): id 1 with a document the policy store
+ * decodes, read with its stored bytes. Anything else is refused, never repaired or reseeded.
+ */
+export const readStoredPolicy = (sql: SqlClient.SqlClient, table: "settings" | "thread_policy"): Effect.Effect<StoredPolicy, SqlError | MigrationRefused> =>
+  sql.unsafe(`SELECT id, document, CAST(document AS BLOB) AS bytes FROM ${table}`).pipe(
+    Effect.provideService(SqlClient.SafeIntegers, false),
+    Effect.flatMap((rows) => decodePolicyRows(rows).pipe(Effect.mapError(() => new MigrationRefused({ table, reason: "row_invalid" })))),
+    Effect.map(([row]) => ({ policy: row.document, bytes: row.bytes, sha256: createHash("sha256").update(row.bytes).digest("hex") })));
 
 /*
- * format 1: the policy table as the policy store's open created it; only a genuinely fresh directory seeds it, at generation 1,
- * from the configured excluded chats; an existing file must already hold its one valid row
+ * format 2: the excluded-chat policy moves into guidance, so Stop, Enable and Start write it and their bookkeeping in one
+ * transaction. A genuinely fresh directory gets the configured excluded chats at generation 1 and the fresh initialization's
+ * pending marker; an existing installation gets the retired file's document byte for byte, with the import marker. Without
+ * either there is no policy to write, and the step refuses.
  */
-const policyFormat1 = (sql: SqlClient.SqlClient, context: MigrationContext) => Effect.gen(function* () {
-  yield* sql.unsafe(policyStatement);
-  if (context.fresh) yield* sql`INSERT OR IGNORE INTO settings VALUES(1,${JSON.stringify({ generation: 1, excludedThreadIds: context.excludedThreadIds })})`;
-  yield* requirePolicyRow(sql);
+const guidanceFormat2 = (sql: SqlClient.SqlClient, context: MigrationContext) => Effect.gen(function* () {
+  yield* sql.unsafe(threadPolicyStatement);
+  const source = context.policy;
+  if (source.kind === "none") return yield* new MigrationRefused({ table: "thread_policy", reason: "row_invalid" });
+  if (source.kind === "fresh") {
+    yield* sql`INSERT INTO thread_policy VALUES(1,${JSON.stringify({ generation: 1, excludedThreadIds: source.excludedThreadIds })})`;
+    yield* sql`INSERT INTO meta VALUES(${bootstrapPendingKey},'{}')`;
+  } else {
+    // the stored bytes themselves, so the copy is the document exactly as the retired file held it
+    yield* sql`INSERT INTO thread_policy VALUES(1,CAST(${source.bytes} AS TEXT))`;
+    yield* sql`INSERT INTO meta VALUES(${policyImportKey},${JSON.stringify(source.marker)})`;
+  }
+  const stored = yield* readStoredPolicy(sql, "thread_policy");
+  if (source.kind === "import" && stored.sha256 !== source.marker.documentSha256) return yield* new MigrationRefused({ table: "thread_policy", reason: "row_invalid" });
 });
 
-export const policyMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1, apply: policyFormat1 }];
+export const guidanceMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1, apply: guidanceFormat1 }, { from: 1, to: 2, apply: guidanceFormat2 }];
+
+// ---- the retired thread-settings.sqlite3
+
+/*
+ * the one table of the retired policy file, as Supervisor 0.0.27 created it and format 1 kept it; the startup upgrade imports its
+ * row into guidance format 2 and then removes the file, and nothing else opens it
+ */
+export const policyDonorStatement = "CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)";
+/** The formats of the retired policy file an upgrade imports: the unversioned file of 0.0.27 and earlier, and format 1. */
+export const policyDonorFormats: ReadonlyArray<number> = [0, 1];
 
 // ---- the declared schema of each current format, and the format 0 layouts an upgrade recognizes
 
@@ -405,8 +458,6 @@ export const catalogLegacy: LegacyLayout = {
 export const guidanceLegacy: LegacyLayout = {
   required: { tables: ["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"], indexes: ["activity_notice"] },
 };
-
-export const policyLegacy: LegacyLayout = { required: { tables: ["settings"], indexes: [] } };
 
 const SchemaObject = Schema.Struct({ type: Schema.String, name: Schema.String });
 const decodeObjects = Schema.decodeUnknownEffect(Schema.Array(SchemaObject));

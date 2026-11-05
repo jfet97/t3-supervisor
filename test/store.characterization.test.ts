@@ -7,6 +7,7 @@ import { it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { CatalogDb, catalogDbLayer } from "../src/db.js";
 import { makeStore, Store, StoreError, type StoreShape } from "../src/store.js";
+import { ThreadPolicyStore } from "../src/thread-policy.js";
 import type { ProjectInfo, SourceItem, ThreadInfo } from "../src/types.js";
 import { initializeDataDirectory } from "./support/data-directory.js";
 import { dataDirectory, withGuidanceStore, withThreadPolicy } from "./support/g9-stores.js";
@@ -159,26 +160,25 @@ it.live("CT-FILES-MODE-01: after first open and one write the stores keep privat
   const policyDirectory = yield* dataDirectoryAt("policy");
   yield* withThreadPolicy(policyDirectory, policy => Effect.gen(function* () {
     yield* policy.save({ generation: 1, excludedThreadIds: ["thread-1"] });
-    assert.deepEqual(databaseModes(policyDirectory, "thread-settings.sqlite3"), [0o600, 0o600, 0o600]);
+    assert.deepEqual(databaseModes(policyDirectory, "guidance.sqlite3"), [0o600, 0o600, 0o600]);
   }));
 
-  // main.ts opens the thread policy store, then the catalog store, then supervision opens the guidance store
+  // main.ts opens the catalog store, then supervision opens the guidance client with the guidance and thread-policy stores over it
   const startup = yield* dataDirectoryAt("startup");
-  yield* withThreadPolicy(startup, startupPolicy => Effect.gen(function* () {
-    yield* startupPolicy.save({ generation: 1, excludedThreadIds: ["thread-1"] });
-    const modes = yield* withStore(startup, store => Effect.gen(function* () {
-      yield* store.activate("environment-1", 1_000);
-      return yield* withGuidanceStore(startup, startupGuidance => Effect.gen(function* () {
-        yield* startupGuidance.bind("environment-1");
-        return {
-          directory: mode(startup),
-          files: ["thread-settings.sqlite3", "catalog.sqlite3", "guidance.sqlite3"].map(file => databaseModes(startup, file)),
-        };
-      }));
-    }));
-    assert.deepEqual(modes, {
-      directory: 0o700,
-      files: [[0o600, 0o600, 0o600], [0o600, 0o600, 0o600], [0o600, 0o600, 0o600]],
-    });
+  const modes = yield* withStore(startup, store => Effect.gen(function* () {
+    yield* store.activate("environment-1", 1_000);
+    return yield* withGuidanceStore(startup, startupGuidance => Effect.gen(function* () {
+      const startupPolicy = yield* ThreadPolicyStore;
+      yield* startupGuidance.bind("environment-1");
+      yield* startupPolicy.save({ generation: 1, excludedThreadIds: ["thread-1"] });
+      return {
+        directory: mode(startup),
+        files: ["catalog.sqlite3", "guidance.sqlite3"].map(file => databaseModes(startup, file)),
+      };
+    }).pipe(Effect.provide(Layer.fresh(ThreadPolicyStore.layer))));
   }));
+  assert.deepEqual(modes, {
+    directory: 0o700,
+    files: [[0o600, 0o600, 0o600], [0o600, 0o600, 0o600]],
+  });
 }), { timeout: 10_000 });

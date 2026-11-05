@@ -212,7 +212,7 @@ const activation = asRpcBaseline(() => Effect.succeed({version: 2 as const, snap
 export const makeWorkflowFixture = (initialDefinitions: ProjectDefinitionSnapshot = definitionSnapshot()) => Effect.gen(function* () {
   yield* realTime;
   const directory = yield* dataDirectory("project-supervisor-workflow-test-");
-  const stores = yield* openStores(directory, directory);
+  const stores = yield* openStores(directory);
   const source = sourceProjection();
   const projections = new Map<string, Projection>([[sourceThreadId, source]]);
   const operations: Array<{tag: string; payload: Record<string, unknown>}> = [];

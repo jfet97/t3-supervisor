@@ -7,7 +7,7 @@ import { NativeOperateRpc, NativeShell, type NativeRpcShape } from "../../src/su
 import { Store, type StoreShape } from "../../src/store.js";
 import { T3Client, type T3ClientShape } from "../../src/t3.js";
 import type { SupervisorConfig } from "../../src/types.js";
-import { policyLayer, supervisionStoresLayer } from "./g11-stores.js";
+import { supervisionStoresLayer } from "./g11-stores.js";
 import { fakeNativeLayer } from "./native-access.js";
 
 // one supervision run of src/supervision-live.ts over the stores of a temporary data directory, as runGuidanceApplication
@@ -37,10 +37,10 @@ export const forbiddenNatives = (catalog: Pick<StoreShape, "catalog">) => {
     forbiddenHttp);
 };
 
-/** The run's services over the stores of the configuration's data directory, the process's policy store and the natives. */
+/** The run's services over the stores of the configuration's data directory, its thread-policy store among them, and the natives. */
 export const supervisionRun = (config: SupervisorConfig, natives: ReturnType<typeof forbiddenNatives>) =>
   SupervisionLive({ operateRpcAvailable: true }).pipe(
     Layer.provideMerge(natives),
-    Layer.provideMerge(Layer.mergeAll(supervisionStoresLayer(config.dataDirectory), policyLayer(config.dataDirectory), Layer.succeed(Configuration, config))),
+    Layer.provideMerge(Layer.mergeAll(supervisionStoresLayer(config.dataDirectory), Layer.succeed(Configuration, config))),
     // the run's own ids draw from the platform crypto
     Layer.provide(NodeCrypto.layer));

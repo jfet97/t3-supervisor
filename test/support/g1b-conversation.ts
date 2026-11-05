@@ -4,7 +4,7 @@ import { FetchHttpClient } from "effect/http";
 import type { SqlClient } from "effect/sql";
 import { TestClock } from "effect/testing";
 import { SupervisorConfig } from "../../src/config.js";
-import { GuidanceDb, guidanceDbLayer, type PolicyDb, policyDbLayer } from "../../src/db.js";
+import { GuidanceDb, guidanceDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
@@ -29,10 +29,12 @@ import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { initializeDataDirectory } from "./data-directory.js";
 import { fakeNativeLayer } from "./native-access.js";
 
-// the g1b conversation suites' processes: the production conversation, admission gate, workflow state and supervision stores of a
-// temporary data directory, and the production project supervisor beside them, each built from its production layer
-// (src/supervision-live.ts order) over the production database clients; the native side is one effect fake of T3 (its projection
-// reads, the operate and read credentials, the definitions source), whose state the suites change as T3 would
+/*
+ * the g1b conversation suites' processes: the production conversation, admission gate, workflow state and supervision stores of a
+ * temporary data directory, and the production project supervisor beside them, each built from its production layer
+ * (src/supervision-live.ts order) over the production guidance client; the native side is one effect fake of T3 (its projection
+ * reads, the operate and read credentials, the definitions source), whose state the suites change as T3 would
+ */
 
 /** The wall clock of a suite whose services read the real clock: a fixed instant after every time its fixtures record. */
 export const wallClock = Date.parse("2026-10-23T10:00:00.000Z");
@@ -247,9 +249,9 @@ export const makeFakeT3 = (options: FakeT3Options): Effect.Effect<FakeT3, never,
 
 // ---- the conversation process ----
 
-/** The production database clients of a process, ended by its crash. */
-const clientsLayer = (directory: string, policyDirectory: string): Layer.Layer<GuidanceDb | PolicyDb> =>
-  Layer.mergeAll(guidanceDbLayer(directory), policyDbLayer(policyDirectory)).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
+/** The production guidance client of a process, which its thread policy shares, ended by its crash. */
+const clientLayer = (directory: string): Layer.Layer<GuidanceDb> =>
+  guidanceDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer), Layer.orDie);
 
 const supervisorIds: Layer.Layer<SupervisorIds> = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
 
@@ -271,10 +273,12 @@ const suiteScopeLayer = (eligible: (thread: ThreadInfo) => boolean) => Layer.eff
   return new SuiteScope(yield* SupervisorConfig, { guidance: yield* GuidanceStore, supervisors: yield* ProjectSupervisorStore, policy: yield* ThreadPolicyStore }, eligible);
 }));
 
-// the stores in the production order over the process's clients (the guidance store, the thread policy, the supervision stores),
-// the workflow state store whose owner check admits every scope (as the baseline suites constructed it), the suite's scope
-// predicates with their admission gate, and the conversation over the fake's T3 client, credentials and definitions, with no
-// helper team
+/*
+ * the stores in the production order over the process's guidance client (the guidance store, the thread policy, the supervision
+ * stores), the workflow state store whose owner check admits every scope (as the baseline suites constructed it), the suite's
+ * scope predicates with their admission gate, and the conversation over the fake's T3 client, credentials and definitions, with
+ * no helper team
+ */
 const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: ThreadInfo) => boolean, config: Partial<SupervisorSettings> = {}) => {
   const settings = {...runSettings(directory), ...config};
   return SupervisorConversation.layer.pipe(
@@ -291,7 +295,7 @@ const conversationLayer = (directory: string, fake: FakeT3, eligible: (thread: T
   );
 };
 
-type ConversationServices = Layer.Success<ReturnType<typeof conversationLayer>> | GuidanceDb | PolicyDb;
+type ConversationServices = Layer.Success<ReturnType<typeof conversationLayer>> | GuidanceDb;
 
 export interface ConversationProcess {
   readonly sql: GuidanceDb["Service"];
@@ -304,20 +308,22 @@ export interface ConversationProcess {
   readonly gate: SupervisionGate["Service"];
   readonly conversation: SupervisorConversation["Service"];
   readonly context: Context.Context<ConversationServices>;
-  // closes the process's database clients under its services, as a crash ends the process's connections without any further
-  // write; the services close with the scope
+  /*
+   * closes the process's database client under its services, as a crash ends the process's connection without any further
+   * write; the services close with the scope
+   */
   readonly crash: Effect.Effect<void>;
 }
 
-/** Opens one process on the files of `directory` (its thread policy in `policyDirectory`) and its settings over `config`, closed with the scope. */
-export const openConversationProcess = (input: {directory: string; policyDirectory: string; fake: FakeT3; eligible: (thread: ThreadInfo) => boolean;
+/** Opens one process on the files of `directory` (its thread policy on its guidance client) and its settings over `config`, closed with the scope. */
+export const openConversationProcess = (input: {directory: string; fake: FakeT3; eligible: (thread: ThreadInfo) => boolean;
   config?: Partial<SupervisorSettings>}):
   Effect.Effect<ConversationProcess, never, Scope.Scope> => Effect.gen(function* () {
     const scope = yield* Effect.scope;
     const clientScope = yield* Scope.fork(scope, "sequential");
-    const clients = yield* Layer.buildWithScope(clientsLayer(input.directory, input.policyDirectory), clientScope);
+    const client = yield* Layer.buildWithScope(clientLayer(input.directory), clientScope);
     const context: Context.Context<ConversationServices> = yield* Layer.buildWithScope(
-      conversationLayer(input.directory, input.fake, input.eligible, input.config).pipe(Layer.provideMerge(Layer.succeedContext(clients))),
+      conversationLayer(input.directory, input.fake, input.eligible, input.config).pipe(Layer.provideMerge(Layer.succeedContext(client))),
       yield* Scope.fork(scope, "sequential")).pipe(Effect.orDie);
     return {
       context, crash: Scope.close(clientScope, Exit.void),

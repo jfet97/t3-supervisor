@@ -1,14 +1,14 @@
 import { dashboardInvalidation } from "./dashboard-updates.js";
 import { Context, Data, Effect, Layer, Schema } from "effect";
-import { PolicyDb, untracedSql } from "./db.js";
+import { GuidanceDb, untracedSql } from "./db.js";
 import { type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, type StoredRowScan, tableExists } from "./guidance-sql.js";
 import type { SqlError } from "effect/sql";
 
 import { ThreadPolicy as ThreadPolicyDocument, type ThreadPolicySettings } from "./thread-policy-contract.js";
 const validId = (id: string) => id.length > 0 && id.length <= 512 && !/[\s\x00-\x1f\x7f]/u.test(id);
 
-// a thread-settings.sqlite3 failure: a statement failed (sqlReason is the driver's classification) or the stored policy
-// row did not decode; it carries no statement text, row content or cause, and a missing or invalid row is never read as
+// a failure of the policy row in guidance.sqlite3: a statement failed (sqlReason is the driver's classification) or the stored
+// policy row did not decode; it carries no statement text, row content or cause, and a missing or invalid row is never read as
 // absent
 export class ThreadPolicyStoreError extends Data.TaggedError("ThreadPolicyStoreError")<{
   readonly reason: "sql_failed" | "row_invalid";
@@ -35,7 +35,7 @@ const rowInvalid = () => new ThreadPolicyStoreError({ reason: "row_invalid", sql
 
 const policySql = mapSqlError((error) => new ThreadPolicyStoreError({ reason: "sql_failed", sqlReason: error.reason._tag }));
 
-/** The excluded-chat policy of the instance (thread-settings.sqlite3). */
+/** The excluded-chat policy of the instance (its one row in guidance.sqlite3). */
 export interface ThreadPolicyStoreShape {
   /** An authoritative read of the stored policy on every call; nothing is cached. */
   readonly get: () => Effect.Effect<ThreadPolicySettings, ThreadPolicyStoreError>;
@@ -44,15 +44,16 @@ export interface ThreadPolicyStoreShape {
 }
 
 /**
- * Builds the thread-policy store on the process's PolicyDb client. The table and its one row exist from the startup upgrade,
- * which seeds the configured excluded chats only into a genuinely fresh directory; a missing or invalid row is never repaired
- * here and fails every read as row_invalid.
+ * Builds the thread-policy store on the run's guidance client, the one its consumers' transactions run on, so a save inside a
+ * guidance transaction commits or rolls back with that transaction's bookkeeping. The table and its one row exist from the
+ * startup upgrade, which seeds the configured excluded chats only into a genuinely fresh directory and otherwise imports the
+ * retired thread-settings.sqlite3; a missing or invalid row is never repaired here and fails every read as row_invalid.
  */
 export const makeThreadPolicyStore = () => Effect.gen(function* () {
-  const db = yield* PolicyDb;
+  const db = yield* GuidanceDb;
   const invalidate = yield* dashboardInvalidation(db);
 
-  const get = () => policySql(db`SELECT document FROM settings WHERE id=1`.pipe(
+  const get = () => policySql(db`SELECT document FROM thread_policy WHERE id=1`.pipe(
     Effect.flatMap(([row]) => decodePolicyRow(row).pipe(Effect.mapError(rowInvalid))),
     Effect.map((row) => row.document)));
 
@@ -62,7 +63,7 @@ export const makeThreadPolicyStore = () => Effect.gen(function* () {
       !input.excludedThreadIds.every(validId) || new Set(input.excludedThreadIds).size !== input.excludedThreadIds.length)
       return yield* new ThreadPolicyInvalid({ message: "Choose valid, unique chat IDs." });
     const next = { ...input, generation: input.generation + 1 };
-    const updated = yield* db`UPDATE settings SET document=${JSON.stringify(next)} WHERE id=1 AND json_extract(document,'$.generation')=${input.generation}`.raw.pipe(
+    const updated = yield* db`UPDATE thread_policy SET document=${JSON.stringify(next)} WHERE id=1 AND json_extract(document,'$.generation')=${input.generation}`.raw.pipe(
       Effect.flatMap((result) => decodeChanges(result).pipe(Effect.mapError(rowInvalid))));
     if (!updated.changes) return yield* new ThreadPolicyConflict({ message: "Chat settings changed in another tab. Reload first." });
     yield* invalidate(null);
@@ -72,25 +73,23 @@ export const makeThreadPolicyStore = () => Effect.gen(function* () {
   return ThreadPolicyStore.of({ get, save });
 }).pipe(untracedSql);
 
-/** The thread-policy store on the process's PolicyDb client. */
+/** The thread-policy store on the run's guidance client. */
 export class ThreadPolicyStore extends Context.Service<ThreadPolicyStore, ThreadPolicyStoreShape>()("t3-supervisor/ThreadPolicyStore") {
-  static readonly layer: Layer.Layer<ThreadPolicyStore, never, PolicyDb> = Layer.effect(ThreadPolicyStore, makeThreadPolicyStore());
+  static readonly layer: Layer.Layer<ThreadPolicyStore, never, GuidanceDb> = Layer.effect(ThreadPolicyStore, makeThreadPolicyStore());
 }
 
 /**
- * The rollout scan of thread-settings.sqlite3 (read only): the stored policy row through the decoder of every read, which each
- * supervision cycle and Stop check performs. Only the startup upgrade of a genuinely fresh directory creates the table and seeds
- * the row; an existing directory without them is refused.
+ * The rollout scan of the policy in guidance.sqlite3 (read only): the stored policy row through the decoder of every read, which
+ * each supervision cycle and Stop check performs. A guidance file below format 2 has no policy table yet: its start creates it
+ * with the policy it imports from the retired thread-settings.sqlite3.
  */
-export const checkThreadPolicyRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, PolicyDb> = Effect.gen(function* () {
-  const db = yield* PolicyDb;
-  const rows = yield* rowsOf(db, "settings", "SELECT id,document FROM settings");
-  const findings = yield* rowFindings(rows, { table: "settings", kind: "thread policy", problem: "undecodable", read: "cycle" }, (row) => rowKey(row, ["id"]), decodePolicyRow);
-  /*
-   * a policy table without its row is never reseeded: the startup upgrade refuses it (a table-less file is the upgrade's to judge:
-   * part of a fresh directory, or a missing policy beside existing state)
-   */
-  const missing = rows.length === 0 && (yield* tableExists(db, "settings"))
-    ? [{ table: "settings", kind: "thread policy", key: "1", problem: "incompatible" as const, read: "open" as const }] : [];
+export const checkThreadPolicyRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
+  const db = yield* GuidanceDb;
+  if (!(yield* tableExists(db, "thread_policy")))
+    return { findings: [], changes: [{ table: "thread_policy", change: "created by the upgrade with the policy imported from thread-settings.sqlite3", rows: 1 }] };
+  const rows = yield* rowsOf(db, "thread_policy", "SELECT id,document FROM thread_policy");
+  const findings = yield* rowFindings(rows, { table: "thread_policy", kind: "thread policy", problem: "undecodable", read: "cycle" }, (row) => rowKey(row, ["id"]), decodePolicyRow);
+  // a policy table without its row is never reseeded: the startup upgrade refuses it
+  const missing = rows.length === 0 ? [{ table: "thread_policy", kind: "thread policy", key: "1", problem: "incompatible" as const, read: "open" as const }] : [];
   return { findings: [...findings, ...missing], changes: [] };
 });

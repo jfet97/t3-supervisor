@@ -3,7 +3,7 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, FileSystem, Layer, Scope } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
-import { GuidanceDb, guidanceDbLayer, policyDbLayer } from "../../src/db.js";
+import { GuidanceDb, guidanceDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import type { ProjectDefinitionSnapshot } from "../../src/project-definitions-contract.js";
@@ -125,15 +125,15 @@ export type StoreServices = GuidanceDb | SupervisorIds | GuidanceStore | Supervi
 
 const ids = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
 
-// thread-settings.sqlite3 of `directory` and its store; the stored policy is the one the directory was initialized with
-const policyLayer = (directory: string) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(directory)), Layer.provide(NodeFileSystem.layer));
-
-// guidance.sqlite3 of `directory` with the guidance store, then the supervision stores of one run in their production order
-// (src/supervision-live.ts) over the ownership set, beside the run's thread-policy store
-const storesLayer = (directory: string, policyDirectory: string) => SupervisionStoresLive.pipe(
-  Layer.provideMerge(GuidanceStore.layer),
+/*
+ * guidance.sqlite3 of `directory` with the guidance store and the run's thread-policy store over it (as the run builds them, so
+ * a policy save joins the transaction of its bookkeeping; the stored policy is the one the directory was initialized with), then
+ * the supervision stores of one run in their production order (src/supervision-live.ts) over the ownership set
+ */
+const storesLayer = (directory: string) => SupervisionStoresLive.pipe(
+  Layer.provideMerge(Layer.mergeAll(GuidanceStore.layer, ThreadPolicyStore.layer)),
   Layer.provideMerge(Layer.mergeAll(guidanceDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer)), ids,
-    Layer.sync(SupervisorOwnership, () => new Set<string>()), policyLayer(policyDirectory))));
+    Layer.sync(SupervisorOwnership, () => new Set<string>()))));
 
 /** The stores of one supervision run on its guidance client, with the run's thread-policy store. */
 export interface ConversationStores {
@@ -148,9 +148,9 @@ export interface ConversationStores {
   readonly context: Context.Context<StoreServices>;
 }
 
-/** Opens the stores of `directory` and the thread policy of `policyDirectory` in the current scope. */
-export const openStores = Effect.fnUntraced(function* (directory: string, policyDirectory: string): Effect.fn.Return<ConversationStores, never, Scope.Scope> {
-  const context = yield* Layer.build(storesLayer(directory, policyDirectory)).pipe(Effect.orDie);
+/** Opens the stores of `directory`, the thread policy among them on their guidance client, in the current scope. */
+export const openStores = Effect.fnUntraced(function* (directory: string): Effect.fn.Return<ConversationStores, never, Scope.Scope> {
+  const context = yield* Layer.build(storesLayer(directory)).pipe(Effect.orDie);
   return {
     directory, context, sql: Context.get(context, GuidanceDb), guidance: Context.get(context, GuidanceStore), supervisors: Context.get(context, ProjectSupervisorStore),
     requests: Context.get(context, SupervisorConversationStore), monitor: Context.get(context, ProjectSupervisorMonitorStore),
@@ -158,9 +158,13 @@ export const openStores = Effect.fnUntraced(function* (directory: string, policy
   };
 });
 
-/** A second client of the thread policy of `directory` and its store, as a restarted process opens it, in the current scope. */
+/**
+ * The thread-policy store on a second guidance client of `directory`, as a restarted process opens it to read the persisted
+ * policy, in the current scope.
+ */
 export const reopenPolicy = (directory: string): Effect.Effect<ThreadPolicyStore["Service"], never, Scope.Scope> =>
-  Effect.map(Layer.build(policyLayer(directory)).pipe(Effect.orDie), (context) => Context.get(context, ThreadPolicyStore));
+  Effect.map(Layer.build(ThreadPolicyStore.layer.pipe(Layer.provide(guidanceDbLayer(directory)), Layer.provide(NodeFileSystem.layer))).pipe(Effect.orDie),
+    (context) => Context.get(context, ThreadPolicyStore));
 
 /** The workflow state store over the run's stores with `isEnabled` as its workflow-editing answer, in the current scope. */
 export const workflowStore = (stores: ConversationStores, isEnabled: (projectId: string, mainThreadId?: string) => boolean = () => true) =>

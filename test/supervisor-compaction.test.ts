@@ -18,7 +18,7 @@ import { nativeWrites, rpcRequests, startScenario } from "./support/scenario-dri
 // the real scoped controller, stores, policy and admission gate; only native I/O is synthetic
 const fixture = Effect.fnUntraced(function* () {
   const directory = yield* dataDirectory("supervisor-compaction-");
-  const stores = yield* openStores(directory, directory);
+  const stores = yield* openStores(directory);
   const store = stores.supervisors;
   yield* store.saveControl("project-a", 0, true, {version: 2, snapshotSequence: 1, threads: []});
   const reserved = yield* store.reserve("project-a", "main", "Local task", defaultSupervisorModel, 1, Date.parse(baseTime));
@@ -203,7 +203,7 @@ it.effect("lost replies retain one immutable attempt, and only its exact root me
   yield* f.event(compaction);
   const receipt = (yield* f.store.binding("project-a", "main"))!.compactionReminder!;
   assert.equal(receipt.state, "uncertain");
-  const reopened = yield* openStores(f.directory, f.directory);
+  const reopened = yield* openStores(f.directory);
   assert.deepEqual((yield* reopened.supervisors.binding("project-a", "main"))?.compactionReminder, receipt, "the uncertain identity survives reopening stores");
   yield* f.event(compaction);
   f.projection.runs[0]!.status = "completed";

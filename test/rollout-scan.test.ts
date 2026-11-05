@@ -14,12 +14,16 @@ import { temporaryDirectory } from "./support/psx-stores.js";
  * the read-only rollout scan on fixture files: each database file is reported with its presence and its format (user_version)
  * beside the format this version runs; one stored row of each kind that the stores would not read as stored is reported by file,
  * table, row kind, problem, read point and key, the report never carries row content, what the service's start changes in a
- * format 0 file is listed, a newer format is reported without judging its rows, and the scan writes no file.
+ * format 0 file is listed, the retired thread-settings.sqlite3 is reported with its one policy row, a newer format is reported
+ * without judging its rows, and the scan writes no file.
  * it.live: the production startup upgrade, the scan and the fixture writes use real sqlite files. The directory snapshot below is
  * the native observation that the scan wrote nothing.
  */
 
 const marker = "SECRET-CONTENT";
+// the last format of the retired policy file, which the scan reports it against
+const retiredFormat = 1;
+const policyTable = "CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL);";
 
 /*
  * one row of each failing kind, written with the raw driver into a data directory the startup upgrade created; the retired reminder
@@ -69,7 +73,8 @@ const failingRows = `
   INSERT INTO supervisor_helper_deliveries VALUES('owner-bad',1,'message-bad','not json');
   INSERT INTO supervisor_team_tool_receipts VALUES('owner-bad','actor-bad',1,0,'op-bad','hash','item','not json');
   INSERT INTO supervisor_workflow_write_receipts VALUES('op-bad','ns','hash','p','m','s',1,'not json',1);
-  INSERT INTO supervisor_workflow_write_evidence VALUES('s','item-bad','op','ns','hash','p','m',1,'{}','not json',1,1);`;
+  INSERT INTO supervisor_workflow_write_evidence VALUES('s','item-bad','op','ns','hash','p','m',1,'{}','not json',1,1);
+  UPDATE thread_policy SET document='not json ${marker}' WHERE id=1;`;
 
 const expected = [
   "guidance.sqlite3 | activity | activity | undecodable | call | activity-bad",
@@ -113,7 +118,8 @@ const expected = [
   "guidance.sqlite3 | supervisor_workflow_state | workflow state | undecodable | call | workflow-bad",
   "guidance.sqlite3 | supervisor_workflow_write_evidence | write evidence | undecodable | call | s item-bad",
   "guidance.sqlite3 | supervisor_workflow_write_receipts | write receipt | incompatible | call | p m s 1 ns op-bad",
-  "thread-settings.sqlite3 | settings | thread policy | undecodable | cycle | 1",
+  "guidance.sqlite3 | thread_policy | thread policy | undecodable | cycle | 1",
+  "thread-settings.sqlite3 | settings | thread policy | undecodable | open | 1",
 ];
 
 const flattened = (scan: RolloutScan) => scan.files.flatMap((file) => (file.rows?.findings ?? []).flatMap((group) =>
@@ -134,15 +140,16 @@ const snapshot = (directory: string) => readdirSync(directory, {encoding: "utf8"
 it.live("the rollout scan reports each file's format and one stored row of each failing kind by file, table, kind, problem, read point and key, and writes nothing", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("rollout-scan-");
   /*
-   * a new data directory as the service's start creates it: catalog, guidance and thread-settings with every table and default row
-   * of their current formats; the access database comes later, when the service starts its dashboard
+   * a new data directory as the service's start creates it: catalog and guidance with every table and default row of their current
+   * formats; the access database comes later, when the service starts its dashboard. A retired policy file beside it holds a row
+   * the import could not read
    */
   yield* initializeDataDirectory(directory);
   const guidance = new DatabaseSync(join(directory, "guidance.sqlite3"));
   guidance.exec(failingRows);
   guidance.close();
   const policy = new DatabaseSync(join(directory, "thread-settings.sqlite3"));
-  policy.exec(`UPDATE settings SET document='not json ${marker}' WHERE id=1`);
+  policy.exec(`${policyTable} INSERT INTO settings VALUES(1,'not json ${marker}');`);
   policy.close();
 
   const before = snapshot(directory);
@@ -152,7 +159,7 @@ it.live("the rollout scan reports each file's format and one stored row of each 
     ["access/login.sqlite3", false, null, DatabaseFormats.access],
     ["catalog.sqlite3", true, DatabaseFormats.catalog, DatabaseFormats.catalog],
     ["guidance.sqlite3", true, DatabaseFormats.guidance, DatabaseFormats.guidance],
-    ["thread-settings.sqlite3", true, DatabaseFormats.policy, DatabaseFormats.policy],
+    ["thread-settings.sqlite3", true, 0, retiredFormat],
   ]);
   assert.deepEqual(flattened(scan), [...expected].sort());
   assert.equal(scan.blocking, expected.filter((line) => !line.includes(" | call | ")).length);
@@ -177,6 +184,10 @@ it.live("the rollout scan reports format 0 for unversioned files and lists what 
     INSERT INTO supervisor_main_bindings VALUES('legacy-binding');
     INSERT INTO meta VALUES('supervisor_activation_sequence','4');`);
   legacy.close();
+  // the retired policy file of the same installation, whose policy the start imports
+  const legacyPolicy = new DatabaseSync(join(directory, "thread-settings.sqlite3"));
+  legacyPolicy.exec(`${policyTable} INSERT INTO settings VALUES(1,'{"generation":3,"excludedThreadIds":[]}');`);
+  legacyPolicy.close();
   // a login database that no version stamped with a format; the scan reads only its format
   mkdirSync(join(directory, "access"), {mode: 0o700});
   const access = new DatabaseSync(join(directory, "access", "login.sqlite3"));
@@ -190,7 +201,7 @@ it.live("the rollout scan reports format 0 for unversioned files and lists what 
     ["access/login.sqlite3", true, 0, DatabaseFormats.access],
     ["catalog.sqlite3", false, null, DatabaseFormats.catalog],
     ["guidance.sqlite3", true, 0, DatabaseFormats.guidance],
-    ["thread-settings.sqlite3", false, null, DatabaseFormats.policy],
+    ["thread-settings.sqlite3", true, 0, retiredFormat],
   ], "absent files are reported, not created");
   const guidance = scan.files.find((file) => file.file === "guidance.sqlite3");
   const changes = (guidance?.rows?.changes ?? []).map((change) => `${change.table}: ${change.change} (${change.rows})`);
@@ -200,7 +211,10 @@ it.live("the rollout scan reports format 0 for unversioned files and lists what 
     "supervisor_main_bindings: cleared by the upgrade's one-time reset (no stored scope version) (1)",
     "meta: activation rows cleared by the upgrade's one-time reset (1)",
     "supervisor_definition_user_saves: table created (0)",
+    "thread_policy: created by the upgrade with the policy imported from thread-settings.sqlite3 (1)",
   ]) assert.ok(changes.includes(expectedChange), `${expectedChange} in ${changes.join("; ")}`);
+  const retired = scan.files.find((file) => file.file === "thread-settings.sqlite3");
+  assert.deepEqual(retired?.rows?.changes, [{table: "settings", change: "imported into guidance.sqlite3 by the upgrade, then the file is removed", rows: 1}]);
   // the conditional create keeps a prototype table of another shape, so its readers fail on it
   assert.deepEqual(flattened(scan), ["guidance.sqlite3 | supervisor_main_bindings | binding table | incompatible | cycle | supervisor_main_bindings"]);
   assert.equal(scan.blocking, 1);
@@ -209,6 +223,7 @@ it.live("the rollout scan reports format 0 for unversioned files and lists what 
     `access/login.sqlite3: present, format 0 (older than format ${DatabaseFormats.access}, which this version runs: the service's start upgrades it, or refuses a layout it does not recognize)`,
     "catalog.sqlite3: absent (only the service's start creates it, for a new installation)",
     `guidance.sqlite3: present, format 0 (older than format ${DatabaseFormats.guidance}, which this version runs: the service's start upgrades it, or refuses a layout it does not recognize)`,
+    "thread-settings.sqlite3: present, format 0 (retired: the service's start imports its policy into guidance.sqlite3 and removes it, or refuses one that differs from the policy guidance already imported)",
     "  what the service's start changes, in its upgrade or when its stores open:",
   ]) assert.ok(report.includes(line), report);
 }), {timeout: 30_000});
@@ -227,21 +242,22 @@ it.live("the rollout scan reads a live writer's committed rows through its write
 it.live("the rollout scan reads a newer format a live writer committed to its write-ahead log, leaves that file's rows unjudged and refuses the run", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("rollout-scan-");
   yield* initializeDataDirectory(directory);
-  const newer = DatabaseFormats.policy + 1;
-  const writer = new DatabaseSync(join(directory, "thread-settings.sqlite3"));
+  const newer = DatabaseFormats.guidance + 1;
+  const writer = new DatabaseSync(join(directory, "guidance.sqlite3"));
   yield* Effect.addFinalizer(() => Effect.sync(() => writer.close()));
   writer.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;");
   // a later version's format and a row this version cannot read, both committed to the log only
-  writer.exec(`PRAGMA user_version=${newer}; UPDATE settings SET document='not json ${marker}' WHERE id=1;`);
+  writer.exec(`PRAGMA user_version=${newer}; UPDATE thread_policy SET document='not json ${marker}' WHERE id=1;`);
   const scan = yield* rolloutScan(directory);
-  assert.deepEqual(scan.files.find((file) => file.file === "thread-settings.sqlite3"),
-    {file: "thread-settings.sqlite3", present: true, format: newer, current: DatabaseFormats.policy, rows: null});
-  assert.deepEqual(scan.unsupported, ["thread-settings.sqlite3"]);
+  assert.deepEqual(scan.files.find((file) => file.file === "guidance.sqlite3"),
+    {file: "guidance.sqlite3", present: true, format: newer, current: DatabaseFormats.guidance, rows: null});
+  assert.deepEqual(scan.unsupported, ["guidance.sqlite3"]);
   assert.deepEqual(flattened(scan), [], "this version's readers do not judge the rows of a newer format");
   const report = renderRolloutScan(directory, scan);
   assert.equal(report.includes(marker), false, "the report carries keys only, never row content");
   for (const line of [
-    `thread-settings.sqlite3: present, format ${newer} (newer than format ${DatabaseFormats.policy}, which this version runs: the service refuses to start on it)`,
-    "verdict: the service refuses to start on thread-settings.sqlite3, at a newer format than this version runs",
+    `guidance.sqlite3: present, format ${newer} (newer than format ${DatabaseFormats.guidance}, which this version runs: the service refuses to start on it)`,
+    "thread-settings.sqlite3: absent (retired: guidance.sqlite3 holds the policy)",
+    "verdict: the service refuses to start on guidance.sqlite3, at a newer format than this version runs",
   ]) assert.ok(report.includes(line), report);
 }), {timeout: 30_000});
