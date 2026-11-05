@@ -7,11 +7,13 @@ import { join } from "node:path";
 import { it } from "@effect/vitest";
 import { Effect } from "effect";
 import { parse } from "yaml";
+import { t3Release } from "../scripts/local-stack.js";
 
 /*
   The published Supervisor upgrades workflow (docs/ci.md): the daily advisory canary, a manual reproduction and the version PR's gate, all
-  from one frozen T3 target lock and one frozen release lock. Its own shell steps run here for real over stand-in files: the journey
-  selection, the record of the locks, their verification and the judge of a journey. Nothing resolves, pulls or starts anything.
+  from one frozen release lock on the repository's T3 pin, never a slot of the T3 compatibility matrix. Its own shell steps run here for
+  real over stand-in files: the journey selection, the record of the lock, its verification and the judge of a journey. Nothing resolves,
+  pulls or starts anything.
 */
 
 interface Step {
@@ -76,11 +78,7 @@ const inFolder = <A>(use: (dir: string) => A): A => {
   }
 };
 
-// the frozen locks as the resolvers write them, and their SHA-256
-const t3Lock = `${JSON.stringify({resolvedAt: "2026-11-05T05:11:00.000Z", source: "https://api.github.com/repos/pingdotgg/t3code/releases?per_page=100",
-  targets: [["stable", "0.1.7"], ["nightly", "0.1.8-nightly.20261104.4165"], ["nightly-1", "0.1.8-nightly.20261103.4119"], ["nightly-2", "0.1.8-nightly.20261102.4100"]]
-    .map(([slot, version]) => ({slot, version, tag: `v${version}`, publishedAt: "2026-11-04T04:00:00Z", baseUrl: "https://github.com/pingdotgg/t3code/releases/download",
-      archives: {"linux-arm64": "a".repeat(64), "linux-x64": "b".repeat(64)}}))}, null, 2)}\n`;
+// the frozen release lock as the resolver writes it, and its SHA-256
 const amd64 = `sha256:${"e".repeat(64)}`;
 const releasesLock = `${JSON.stringify({resolvedAt: "2026-11-05T05:11:00.000Z", repository: "ghcr.io/jfet97/t3-supervisor", releases: [
   {channel: "stable", tag: "latest", version: "0.0.27", revision: "4".repeat(40), index: `sha256:${"a".repeat(64)}`,
@@ -99,37 +97,39 @@ it("runs only by its daily schedule, a manual dispatch or check.yml's version PR
   assert.deepEqual(workflow.permissions, {contents: "read"});
   assert.deepEqual(Object.fromEntries(Object.entries(workflow.jobs).map(([name, {permissions}]) => [name, permissions])),
     {"earlier-lock": {actions: "read"}, lock: {contents: "read"}, journey: {contents: "read"}});
-  assert.doesNotMatch(source, /\bsecrets\.|\bvars\.|\bGITHUB_TOKEN\b/u);
-  // the automatic read-only token reaches ./dev on the T3 resolve step alone; the earlier locks' download reads another run's artifact with it
+  assert.doesNotMatch(source, /\bsecrets\.|\bvars\.|\bGITHUB_TOKEN\b|T3SUP_DEV_GITHUB_TOKEN/u);
+  // the automatic read-only token reads an earlier run's artifact and reaches no ./dev command; the release resolver holds no credential
   const holders = Object.entries(workflow.jobs).flatMap(([name, {steps}]) => steps.filter((candidate) => JSON.stringify(candidate).includes("github.token"))
     .map((candidate) => `${name}: ${candidate.name ?? ""}`));
-  assert.deepEqual(holders, ["earlier-lock: Fetch the earlier run's frozen locks", "lock: Resolve the T3 targets once"]);
-  assert.deepEqual(step("lock", "targets").env, {T3SUP_DEV_GITHUB_TOKEN: "${{ github.token }}"});
+  assert.deepEqual(holders, ["earlier-lock: Fetch the earlier run's frozen release lock"]);
   assert.equal(step("lock", "releases").env, undefined);
   // every job and every long step is bounded, the journey step within its job, and a failing journey never cancels another
   for (const [name, {"timeout-minutes": minutes}] of Object.entries(workflow.jobs)) assert.ok(typeof minutes === "number" && minutes > 0, name);
   assert.ok((step("journey", "journey")["timeout-minutes"] ?? Number.POSITIVE_INFINITY) < (job("journey")["timeout-minutes"] ?? 0));
-  for (const id of ["prepare", "targets", "releases"]) assert.ok(Number.isFinite(step("lock", id)["timeout-minutes"] ?? Number.POSITIVE_INFINITY), id);
+  for (const id of ["prepare", "releases"]) assert.ok(Number.isFinite(step("lock", id)["timeout-minutes"] ?? Number.POSITIVE_INFINITY), id);
   assert.equal(job("journey").strategy?.["fail-fast"], false);
   assert.equal(job("journey").name, "${{ matrix.journey }} journey");
 });
 
-it("keeps the locks and every journey's evidence as artifacts, also after a failure, and runs the contributors' own ./dev commands", () => {
+it("keeps the release lock and every journey's evidence as artifacts, also after a failure, and runs the contributors' own ./dev commands", () => {
   const uploads = (jobName: string) => job(jobName).steps.filter((candidate) => candidate.uses?.startsWith("actions/upload-artifact@") === true);
   const [lock] = uploads("lock");
   assert.deepEqual([lock?.if, lock?.with?.name, lock?.with?.path], ["${{ !cancelled() && steps.record.outputs.releases_sha256 != '' }}", "upgrade-lock",
-    "upgrade/lock/t3-lock.json\nupgrade/lock/supervisor-releases.json\n"]);
+    "upgrade/lock/supervisor-releases.json"]);
+  const [earlier] = uploads("earlier-lock");
+  assert.equal(earlier?.with?.path, "earlier/supervisor-releases.json");
   const [evidence] = uploads("journey");
   assert.deepEqual([evidence?.if, evidence?.with?.name, evidence?.with?.path], ["${{ always() }}", "upgrade-${{ matrix.journey }}-${{ github.run_attempt }}", "upgrade/"]);
   assert.equal(step("journey", "judge").if, "${{ always() }}");
   assert.equal(job("journey").if, "${{ !cancelled() && needs.lock.outputs.matrix != '' }}");
   const commands = (jobName: string) => job(jobName).steps.flatMap((candidate) => (candidate.run ?? "").split("\n").map((line) => line.trim())
     .filter((line) => line.startsWith("./dev")).map((line) => line.split(" 2>")[0]));
-  assert.deepEqual(commands("lock"), ["./dev setup", "./dev pnpm dev:targets resolve --out upgrade/lock/t3-lock.json | tee upgrade/resolve-t3.log",
-    "./dev pnpm dev:releases resolve --out upgrade/lock/supervisor-releases.json | tee upgrade/resolve-releases.log"]);
+  assert.deepEqual(commands("lock"), ["./dev setup", "./dev pnpm dev:releases resolve --out upgrade/lock/supervisor-releases.json | tee upgrade/resolve-releases.log"]);
   assert.deepEqual(commands("journey"), ['./dev upgrade "${args[@]}"']);
-  // a journey downloads the locks its run recorded and never resolves again
-  assert.ok(!JSON.stringify(job("journey")).includes("dev:targets") && !JSON.stringify(job("journey")).includes("dev:releases"));
+  // a journey downloads the release lock its run recorded and never resolves again; the journeys' T3 is the repository's pin, so no job
+  // resolves the T3 compatibility matrix's targets, keeps a T3 lock or hands one to a journey
+  assert.ok(!JSON.stringify(job("journey")).includes("dev:releases"));
+  assert.ok(!source.includes("dev:targets") && !source.includes("t3-lock") && !source.includes("--t3-lock"));
 });
 
 const selection = (env: Readonly<Record<string, string>>) => inFolder((dir) =>
@@ -157,73 +157,72 @@ it.live("selects every journey for the version PR's gate and the daily canary, a
   }
 }), 30_000);
 
-const record = (env: Readonly<Record<string, string>>, files: {readonly t3?: string; readonly releases?: string; readonly t3Log?: string; readonly releasesLog?: string}) =>
+const record = (env: Readonly<Record<string, string>>, files: {readonly releases?: string; readonly releasesLog?: string}) =>
   inFolder((dir) => {
     mkdirSync(join(dir, "upgrade", "lock"), {recursive: true});
-    if (files.t3 !== undefined) writeFileSync(join(dir, "upgrade", "lock", "t3-lock.json"), files.t3);
     if (files.releases !== undefined) writeFileSync(join(dir, "upgrade", "lock", "supervisor-releases.json"), files.releases);
-    if (files.t3Log !== undefined) writeFileSync(join(dir, "upgrade", "resolve-t3.log"), files.t3Log);
     if (files.releasesLog !== undefined) writeFileSync(join(dir, "upgrade", "resolve-releases.log"), files.releasesLog);
     return runStep(script("lock", "record"), dir, {SOURCE: "resolve", PURPOSE: "canary", LOCK_RUN: "", FETCHED: "skipped", PREPARED: "success",
-      TARGETS: "success", RELEASES: "success", ...env});
+      RELEASES: "success", ...env});
   });
 // a resolver's stdout after pnpm's script header: its outcome as the last JSON line
 const resolverLine = (outcome: string, message: string) => `> @jfet97/t3-supervisor dev:releases /workspace\n${JSON.stringify({outcome, message})}\n`;
 
-it.live("records both frozen locks with their SHA-256, or the failing resolver's outcome, and never locks it cannot use", () => Effect.sync(() => {
-  const resolved = record({}, {t3: t3Lock, releases: releasesLock});
+it.live("records the frozen release lock with its SHA-256, or the resolver's outcome, and never a lock it cannot use", () => Effect.sync(() => {
+  const resolved = record({}, {releases: releasesLock});
   assert.ok(resolved.ok, resolved.stderr);
-  assert.deepEqual(resolved.outputs, {outcome: "resolved", message: "", t3_sha256: sha256(t3Lock), releases_sha256: sha256(releasesLock)});
-  assert.match(resolved.summary, /^### Frozen upgrade locks: resolved$/mu);
+  assert.deepEqual(resolved.outputs, {outcome: "resolved", message: "", releases_sha256: sha256(releasesLock)});
+  assert.match(resolved.summary, /^### Frozen release lock: resolved$/mu);
   assert.ok(resolved.summary.includes(`| stable | 0.0.27 | ${"4".repeat(40)} | sha256:${"a".repeat(64)} |`));
-  assert.match(resolved.summary, /T3 stable 0\.1\.7/u);
-  const reused = record({SOURCE: "earlier", PURPOSE: "reproduction", LOCK_RUN: "123456789", FETCHED: "success", PREPARED: "", TARGETS: "", RELEASES: ""},
-    {t3: t3Lock, releases: releasesLock});
+  assert.match(resolved.summary, /on the repository's T3 pin/u);
+  const reused = record({SOURCE: "earlier", PURPOSE: "reproduction", LOCK_RUN: "123456789", FETCHED: "success", PREPARED: "", RELEASES: ""}, {releases: releasesLock});
   assert.equal(reused.outputs.outcome, "reused");
   assert.match(reused.summary, /from run 123456789/u);
   for (const [env, files, outcome, message] of [
-    [{SOURCE: "earlier", LOCK_RUN: "123456789", FETCHED: "failure", PREPARED: "", TARGETS: "", RELEASES: ""}, {}, "unavailable", /run 123456789 has no upgrade-lock artifact/u],
-    [{RELEASES: "failure"}, {t3: t3Lock, releasesLog: resolverLine("unavailable", "GET https://ghcr.io/token returned HTTP 503")}, "unavailable", /HTTP 503/u],
-    [{RELEASES: "failure"}, {t3: t3Lock, releasesLog: resolverLine("invalid", "the latest tag's index: it does not name exactly one linux/arm64 image")}, "invalid", /linux\/arm64/u],
-    [{TARGETS: "failure", RELEASES: "skipped"}, {t3Log: resolverLine("unavailable", "GET https://api.github.com/x returned HTTP 403")}, "unavailable", /HTTP 403/u],
-    [{RELEASES: "failure"}, {t3: t3Lock, releasesLog: "the registry broke off\n"}, "harness", /without reporting its outcome/u],
-    [{PREPARED: "failure", TARGETS: "skipped", RELEASES: "skipped"}, {}, "harness", /could not be prepared/u],
-    [{}, {t3: t3Lock, releases: releasesLock.replace('"nightly",\n      "tag"', '"beta",\n      "tag"')}, "invalid", /do not hold the T3 slots and the stable and nightly releases/u],
+    [{SOURCE: "earlier", LOCK_RUN: "123456789", FETCHED: "failure", PREPARED: "", RELEASES: ""}, {}, "unavailable", /run 123456789 has no upgrade-lock artifact/u],
+    // a resolver's failure piped through tee leaves its step successful, but it writes no lock and reports its outcome
+    [{}, {releasesLog: resolverLine("unavailable", "GET https://ghcr.io/token returned HTTP 503")}, "unavailable", /HTTP 503/u],
+    [{RELEASES: "failure"}, {releasesLog: resolverLine("invalid", "the latest tag's index: it does not name exactly one linux/arm64 image")}, "invalid", /linux\/arm64/u],
+    [{RELEASES: "failure"}, {releasesLog: "the registry broke off\n"}, "harness", /without reporting its outcome/u],
+    [{PREPARED: "failure", RELEASES: "skipped"}, {}, "harness", /could not be prepared/u],
+    [{}, {releases: releasesLock.replace('"nightly",\n      "tag"', '"beta",\n      "tag"')}, "invalid", /does not hold the stable and nightly releases in this order/u],
   ] as const) {
     const run = record(env, files);
     assert.equal(run.ok, false, outcome);
-    assert.deepEqual([run.outputs.outcome, run.outputs.t3_sha256, run.outputs.releases_sha256], [outcome, "", ""], outcome);
+    assert.deepEqual([run.outputs.outcome, run.outputs.releases_sha256], [outcome, ""], outcome);
     assert.match(run.outputs.message ?? "", message, outcome);
   }
 }), 30_000);
 
-const verify = (journey: string, changes: {readonly t3Sha?: string; readonly releases?: string} = {}) => inFolder((dir) => {
+const verify = (journey: string, changes: {readonly releasesSha?: string; readonly releases?: string} = {}) => inFolder((dir) => {
   mkdirSync(join(dir, "upgrade", "lock"), {recursive: true});
-  writeFileSync(join(dir, "upgrade", "lock", "t3-lock.json"), t3Lock);
   writeFileSync(join(dir, "upgrade", "lock", "supervisor-releases.json"), changes.releases ?? releasesLock);
   for (const args of [["init", "-q"], ["-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "c"]])
     spawnSync("git", args, {cwd: dir, env: {PATH: process.env.PATH ?? "", HOME: dir}});
-  return runStep(script("journey", "lock"), dir, {JOURNEY: journey, T3_SHA256: changes.t3Sha ?? sha256(t3Lock), RELEASES_SHA256: sha256(releasesLock)});
+  return runStep(script("journey", "lock"), dir, {JOURNEY: journey, RELEASES_SHA256: changes.releasesSha ?? sha256(releasesLock)});
 });
 
-it.live("verifies the downloaded locks by their SHA-256 and names the T3 stable slot and the journey's own release and image", () => Effect.sync(() => {
+it.live("verifies the downloaded release lock by its SHA-256 and names the journey's own release and image", () => Effect.sync(() => {
   const stable = verify("stable");
   assert.ok(stable.ok, stable.stderr);
-  assert.deepEqual([stable.outputs.t3_version, stable.outputs.version, stable.outputs.image], ["0.1.7", "0.0.27", `ghcr.io/jfet97/t3-supervisor@${amd64}`]);
+  assert.deepEqual([stable.outputs.version, stable.outputs.image], ["0.0.27", `ghcr.io/jfet97/t3-supervisor@${amd64}`]);
   assert.match(stable.outputs.commit ?? "", /^[0-9a-f]{40}$/u);
+  assert.equal(stable.outputs.t3_version, undefined);
   const baseline = verify("baseline");
   assert.deepEqual([baseline.ok, baseline.outputs.version, baseline.outputs.image], [true, "", ""]);
-  assert.equal(verify("stable", {t3Sha: "0".repeat(64)}).ok, false);
+  assert.equal(verify("stable", {releasesSha: "0".repeat(64)}).ok, false);
   assert.equal(verify("nightly", {releases: releasesLock.replace("0.0.27", "0.0.26")}).ok, false);
 }), 30_000);
 
+// the T3 build a journey's report names: the repository's pin with the x64 archive digest its installation verified
+const pinned = {source: "pin", version: t3Release.version, platform: "linux-x64", archive: t3Release.archives["linux-x64"] ?? "", cached: false};
 // a journey's report as scripts/upgrade-journey.ts writes it
 const report = (journey: string, changes: Readonly<Record<string, unknown>> = {}) => ({
   journey, outcome: "passed", passed: true, reason: "every check passed",
   inputs: {
     published: journey === "baseline" ? null : {channel: journey, version: "0.0.27", revision: "4".repeat(40), image: `ghcr.io/jfet97/t3-supervisor@${amd64}`,
       index: `sha256:${"a".repeat(64)}`, platform: "linux/amd64", releases: {file: "upgrade/lock/supervisor-releases.json", sha256: sha256(releasesLock)}},
-    t3: {version: "0.1.7", source: "lock", lock: {file: "upgrade/lock/t3-lock.json", sha256: sha256(t3Lock)}},
+    t3: pinned,
     supervisor: {revision: commit, clean: true},
   },
   checks: [{name: "persisted shape recognized", ok: true, detail: "every file format 0; seed set format0-supervision-history"}],
@@ -235,8 +234,8 @@ const judge = (env: Readonly<Record<string, string>>, files: {readonly report?: 
   mkdirSync(join(dir, "upgrade", "evidence", env.JOURNEY ?? "stable"), {recursive: true});
   if (files.report !== undefined) writeFileSync(join(dir, "upgrade", "evidence", env.JOURNEY ?? "stable", "report.json"), JSON.stringify(files.report));
   if (files.status !== undefined) writeFileSync(join(dir, "upgrade", "journey.status"), files.status);
-  return runStep(script("journey", "judge"), dir, {JOURNEY: "stable", NATIVE: "success", LOCK_OUTCOME: "resolved", LOCK_MESSAGE: "", T3_SHA256: sha256(t3Lock),
-    RELEASES_SHA256: sha256(releasesLock), VERIFIED: "success", T3_VERSION: "0.1.7", VERSION: "0.0.27", IMAGE: `ghcr.io/jfet97/t3-supervisor@${amd64}`,
+  return runStep(script("journey", "judge"), dir, {JOURNEY: "stable", NATIVE: "success", LOCK_OUTCOME: "resolved", LOCK_MESSAGE: "",
+    RELEASES_SHA256: sha256(releasesLock), VERIFIED: "success", VERSION: "0.0.27", IMAGE: `ghcr.io/jfet97/t3-supervisor@${amd64}`,
     COMMIT: commit, ...env});
 });
 
@@ -246,6 +245,11 @@ it.live("passes a journey only on a passing report of exactly its frozen inputs,
   assert.match(passed.summary, /^### stable journey: passed$/mu);
   assert.match(passed.summary, /\| persisted shape recognized \| passed \|/u);
   assert.match(passed.summary, /Separate finding, npm install path: boot_failed/u);
+  // the summary names the T3 build the journey ran: the pin's version and the archive digest it verified
+  assert.match(pinned.archive, /^[0-9a-f]{64}$/u);
+  assert.ok(passed.summary.includes(`T3 \`${t3Release.version}\` (pin): linux-x64 archive SHA-256 \`${pinned.archive}\`, downloaded and verified.`));
+  assert.ok(judge({}, {report: report("stable", {inputs: {...report("stable").inputs, t3: {...pinned, cached: true}}}), status: "0 300"}).summary
+    .includes("installed earlier from that archive."));
   const baseline = judge({JOURNEY: "baseline", VERSION: "", IMAGE: ""}, {report: report("baseline"), status: "0 200"});
   assert.ok(baseline.ok, baseline.summary);
   for (const [files, outcome, problem] of [
@@ -254,7 +258,11 @@ it.live("passes a journey only on a passing report of exactly its frozen inputs,
     [{report: report("stable", {outcome: "unsupported_shape", passed: false}), status: "1 300"}, "unsupported_shape", null],
     [{report: report("nightly"), status: "0 300"}, "harness", /names journey nightly/u],
     [{report: {...report("stable"), inputs: {...report("stable").inputs, supervisor: {revision: commit, clean: false}}}, status: "0 300"}, "harness", /a tree that was not clean/u],
-    [{report: {...report("stable"), inputs: {...report("stable").inputs, t3: {version: "0.1.7", source: "pin", lock: null}}}, status: "0 300"}, "harness", /T3 0\.1\.7 from pin/u],
+    // a T3 lock's slot, a pin without its verified archive or another platform's archive is never the T3 a journey must run
+    [{report: {...report("stable"), inputs: {...report("stable").inputs, t3: {version: "0.1.7", source: "lock", lock: {file: "t3-lock.json", sha256: "0".repeat(64)}}}}, status: "0 300"},
+      "harness", /T3 0\.1\.7 from lock rather than the repository pin/u],
+    [{report: {...report("stable"), inputs: {...report("stable").inputs, t3: {...pinned, archive: null}}}, status: "0 300"}, "harness", /rather than the repository pin/u],
+    [{report: {...report("stable"), inputs: {...report("stable").inputs, t3: {...pinned, platform: "linux-arm64"}}}, status: "0 300"}, "harness", /rather than the repository pin/u],
     [{report: report("stable"), status: "1 300"}, "harness", /exited 1 despite a passing report/u],
     [{report: report("stable", {outcome: "failed", passed: false}), status: "0 300"}, "harness", /exited 0 despite a report that did not pass/u],
     [{status: "1 30"}, "harness", /exited 1 without a report/u],
@@ -264,7 +272,7 @@ it.live("passes a journey only on a passing report of exactly its frozen inputs,
     assert.match(run.summary, new RegExp(`^### stable journey: ${outcome}$`, "mu"), outcome);
     if (problem !== null) assert.match(run.summary, problem, outcome);
   }
-  const unusable = judge({LOCK_OUTCOME: "unavailable", LOCK_MESSAGE: "GHCR did not answer", RELEASES_SHA256: "", T3_SHA256: "", VERIFIED: "skipped"});
+  const unusable = judge({LOCK_OUTCOME: "unavailable", LOCK_MESSAGE: "GHCR did not answer", RELEASES_SHA256: "", VERIFIED: "skipped"});
   assert.match(unusable.summary, /^### stable journey: unavailable$/mu);
   assert.match(unusable.summary, /GHCR did not answer/u);
 }), 30_000);

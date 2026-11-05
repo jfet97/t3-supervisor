@@ -9,9 +9,8 @@ import { groupAlive, tsxLoader } from "../test/support/cli-process.js";
 import { httpGet, runProcess, startProcess, waitForHttp, type RunningProcess } from "../test/support/g8-process.js";
 import { checkoutInputs, createRun, isolatedEnv, readMarker, removeRun, repositoryRoot, type RunFolder } from "./local-run.js";
 import { decodeDescriptor, installRuntime, issueSession, orchestrationProtocol, platformKey, serveArguments, t3Command, t3Environment, t3Release,
-  type StageTiming, type T3Cli, type T3Release } from "./local-stack.js";
+  type StageTiming, type T3Cli } from "./local-stack.js";
 import { channelRelease, decodeReleaseLock, imagePlatforms, imageReference, ReleaseChannel, sourceRepository, type ImagePlatform } from "./supervisor-releases.js";
-import { decodeTargetLock, targetRelease } from "./t3-targets.js";
 import {
   backupProblems, catalogIdentities, changingFiles, databaseFiles, type DatabaseFile, eventLines, type FileRows, type Formats, type JourneyCheck,
   journeyOutcome, type JourneyOutcome, requiredMeta, rowDifferences, SeedFile, selectSeedSet, startupFailure, upgradeEventProblems,
@@ -20,7 +19,8 @@ import { backupObservation, type DirectorySnapshot, fileShape, seedFile, snapsho
 
 /*
   `pnpm dev:upgrade`: the provider-free published Supervisor upgrade journeys (docs/local-stack.md, "Published upgrade journeys"), run by
-  `./dev upgrade`. A journey owns one marked run folder in the cache volume: a T3 of its own, its read-only session, a disposable
+  `./dev upgrade`. A journey owns one marked run folder in the cache volume: a T3 of its own, always the repository's published T3 pin
+  (t3Release in scripts/local-stack.ts) whatever the T3 compatibility matrix holds, its read-only session, a disposable
   project with two chats and the Supervisor data directory. The creator, the published release run from its official image by digest
   (`stable`, `nightly`) or this checkout's candidate (`baseline`), initializes that directory and takes the provider-free writes: a
   dashboard sign-in, a chat's Stop and Enable and another chat's Stop, project settings and No Project mode. Once it stopped, the
@@ -65,9 +65,9 @@ const Plan = Schema.Struct({
   createdAt: Schema.String,
   out: Schema.NullOr(Schema.String),
   checkout: Schema.Struct({revision: Schema.NullOr(Schema.String), clean: Schema.NullOr(Schema.Boolean)}),
+  // the repository's T3 pin: its version and the SHA-256 of this platform's archive, which its installation verified or a cache hit names
   t3: Schema.Struct({
-    version: Schema.String, baseUrl: Schema.String, archives: Schema.Record(Schema.String, Schema.String), executable: Schema.String,
-    source: Schema.Literals(["pin", "lock"]), lock: Schema.NullOr(LockInput),
+    source: Schema.Literal("pin"), version: Schema.String, platform: Schema.String, archive: Schema.String, cached: Schema.Boolean, executable: Schema.String,
   }),
   published: Schema.NullOr(Schema.Struct({
     channel: ReleaseChannel, version: Schema.String, revision: Schema.String, index: Schema.String, platform: Schema.Literals(imagePlatforms),
@@ -161,7 +161,7 @@ const readLockInput = (file: string) => Effect.gen(function* () {
 
 const planJourney = (args: ReadonlyArray<string>) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  const valued = ["--journey", "--releases", "--t3-lock", "--out", "--cache-dir"];
+  const valued = ["--journey", "--releases", "--out", "--cache-dir"];
   const unknown = args.filter((arg, index) => !["--keep", ...valued].includes(arg) && !valued.includes(args[index - 1] ?? ""));
   if (unknown.length > 0) return yield* failure(`unknown argument ${unknown[0]}\n${usage}`);
   const value = (name: string) => {const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined;};
@@ -173,14 +173,10 @@ const planJourney = (args: ReadonlyArray<string>) => Effect.gen(function* () {
     return yield* failure(journey === "baseline" ? "the baseline journey runs no published release; drop --releases" : `the ${journey} journey needs --releases <file>`);
   const platform = imagePlatform();
   if (platform === undefined) return yield* failure(`no published image runs natively on ${process.arch}`);
-  // the T3 build: the stable slot of a frozen target lock, else the repository's pin
-  const t3LockFile = value("--t3-lock");
-  const t3 = t3LockFile === undefined ? {release: t3Release, source: "pin" as const, lock: null}
-    : yield* Effect.gen(function* () {
-      const read = yield* readLockInput(t3LockFile);
-      const lock = yield* decodeTargetLock(read.text, `target lock ${t3LockFile}`).pipe(Effect.mapError((error) => failure(error.message)));
-      return {release: targetRelease(lock, "stable") satisfies T3Release, source: "lock" as const, lock: read.input};
-    });
+  // the T3 build: always the repository's pin, installed only from an archive with the pinned SHA-256 of this platform
+  const t3Platform = platformKey();
+  const t3Archive = t3Release.archives[t3Platform];
+  if (t3Archive === undefined) return yield* failure(`the T3 pin ${t3Release.version} has no archive for ${t3Platform}`);
   const channel = journey === "baseline" ? null : journey;
   const published = releasesFile === undefined || channel === null ? null : yield* Effect.gen(function* () {
     const read = yield* readLockInput(releasesFile);
@@ -193,14 +189,16 @@ const planJourney = (args: ReadonlyArray<string>) => Effect.gen(function* () {
   const out = outValue === undefined ? null : resolve(repositoryRoot, outValue);
   if (out !== null && (relative(repositoryRoot, out).startsWith("..") || relative(repositoryRoot, out) === "" || relative(repositoryRoot, out).split("/")[0] === ".git"))
     return yield* failure("--out names a folder inside this checkout, outside .git");
-  const runtime = yield* installRuntime(cacheRoot, t3.release, platformKey()).pipe(Effect.mapError((error) => failure(`T3 ${t3.release.version} could not be installed: ${messageOf(error)}`)));
+  const runtime = yield* installRuntime(cacheRoot, t3Release, t3Platform).pipe(
+    Effect.mapError((error) => failure(`the pinned T3 ${t3Release.version} could not be installed: ${messageOf(error)}`)));
   const folder = yield* Effect.scoped(createRun("upgrade", {keep: true}));
   for (const part of ["home", "tmp", "t3", "projects", "records", "secrets", "supervisor", "npm-probe"]) yield* fs.makeDirectory(folder.dir(part), {recursive: true});
   for (const part of ["secrets", "supervisor"]) yield* fs.chmod(folder.dir(part), 0o700);
   const plan: Plan = {journey, createdAt: new Date(yield* Clock.currentTimeMillis).toISOString(), out, checkout: yield* checkoutInputs,
-    t3: {version: t3.release.version, baseUrl: t3.release.baseUrl, archives: t3.release.archives, executable: runtime.executable, source: t3.source, lock: t3.lock},
+    t3: {source: "pin", version: t3Release.version, platform: t3Platform, archive: t3Archive, cached: runtime.cached, executable: runtime.executable},
     published};
   yield* writeRecord(folder, "plan.json", plan);
+  yield* Console.error(`the T3 pin ${t3Release.version}: ${t3Platform} archive SHA-256 ${t3Archive}, ${runtime.cached ? "installed earlier from that archive" : "downloaded and verified"}`);
   // the only lines the host reads: the folder and, for a published journey, the image by its platform digest
   yield* Console.log(`folder=${folder.path}`);
   yield* Console.log(`image=${published?.image ?? ""}`);
@@ -720,7 +718,7 @@ const finish = (folder: RunFolder) => Effect.gen(function* () {
     inputs: {
       published: plan.published === null ? null : {channel: plan.published.channel, version: plan.published.version, revision: plan.published.revision,
         image: plan.published.image, index: plan.published.index, platform: plan.published.platform, releases: plan.published.lock},
-      t3: {version: plan.t3.version, source: plan.t3.source, lock: plan.t3.lock},
+      t3: {source: plan.t3.source, version: plan.t3.version, platform: plan.t3.platform, archive: plan.t3.archive, cached: plan.t3.cached},
       supervisor: plan.checkout,
     },
     formats, seedSet, checks, findings, stages, totalMs: (yield* Clock.currentTimeMillis) - startedAt,
@@ -740,7 +738,7 @@ const finish = (folder: RunFolder) => Effect.gen(function* () {
 });
 
 const usage = [
-  "usage: pnpm dev:upgrade plan --journey stable|nightly|baseline --cache-dir <dir> [--releases <file>] [--t3-lock <file>] [--out <dir>] [--keep]",
+  "usage: pnpm dev:upgrade plan --journey stable|nightly|baseline --cache-dir <dir> [--releases <file>] [--out <dir>] [--keep]",
   "       pnpm dev:upgrade serve|setup|await|baseline|finish|discard <journey folder>",
   "       pnpm dev:upgrade image|drive <journey folder>   (reads docker image inspect output or the forged token on stdin)",
   "       pnpm dev:upgrade record <journey folder> creator-exit|creator-log   (reads the text on stdin)",

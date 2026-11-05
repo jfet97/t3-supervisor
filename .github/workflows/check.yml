@@ -273,8 +273,9 @@ jobs:
       gate: true
 
   # the published Supervisor upgrade journeys (docs/ci.md): only a version branch run calls upgrades.yml, which resolves the latest stable and
-  # nightly releases and one T3 target lock once and runs the stable, nightly and baseline journeys from them. Ordinary PRs never call it, and
-  # main only reuses the version PR run's verdict; actions: read is the ceiling for the reproduction job of that workflow, which never runs here
+  # nightly releases once and runs the stable, nightly and baseline journeys from them on the repository's T3 pin, resolving no T3 target.
+  # Ordinary PRs never call it, and main only reuses the version PR run's verdict; actions: read is the ceiling for the reproduction job of
+  # that workflow, which never runs here
   supervisor-upgrades:
     needs: plan
     if: ${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}

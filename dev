@@ -26,10 +26,10 @@ usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
   fixture [ARGS]      the dashboard fixture: production Supervisor over scripted T3 states
   ui-fixture [ARGS]   the synthetic dashboard API fixture
   check [ARGS]        a disposable published-T3 stack check, removed when it ends
-  upgrade --journey stable|nightly|baseline [--releases FILE] [--t3-lock FILE] [--out DIR] [--keep]
-                      a provider-free published Supervisor upgrade journey: the published release runs from its official
-                      image, pinned by digest in the release lock FILE (pnpm dev:releases), or this checkout creates the
-                      directory (baseline); then this checkout upgrades it (scripts/upgrade-journey.ts)
+  upgrade --journey stable|nightly|baseline [--releases FILE] [--out DIR] [--keep]
+                      a provider-free published Supervisor upgrade journey on the pinned T3: the published release runs
+                      from its official image, pinned by digest in the release lock FILE (pnpm dev:releases), or this
+                      checkout creates the directory (baseline); then this checkout upgrades it (scripts/upgrade-journey.ts)
   e2e [ARGS]          the browser journeys: builds the dashboard, then runs vitest with vitest.e2e.config.ts in the e2e
                       image (ARGS go to vitest); each journey owns its Supervisor, scripted T3 and Chromium
   soak [ARGS]         the scripted soaks: vitest with vitest.soak.config.ts in the toolchain container (ARGS go to vitest);
