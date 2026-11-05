@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Effect, Exit, FileSystem, Layer } from "effect";
+import { Effect, Exit, FileSystem, Layer, Schema } from "effect";
 import { catalogContract, guidanceContract, policyContract, type SchemaContract } from "../src/database-migrations.js";
 import { DatabaseUpgradeError, type UpgradeReport, upgradeDataDirectory } from "../src/database-upgrade.js";
 import { guidanceDbLayer } from "../src/db.js";
@@ -13,12 +13,15 @@ import { GuidanceStore } from "../src/guidance-store.js";
 import { SupervisorIds } from "../src/ids.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
 import { fixtureShapes, materializeFixture, verifyFixtureIntegrity } from "./support/persistence-fixtures.js";
+import { decodeJson, sqliteRow, sqliteRows } from "./support/sqlite-rows.js";
 
-// the startup coordinator (src/database-upgrade.ts) on real files: a fresh directory, a repeated start, an interrupted
-// creation, the refusals that change nothing, the backup and upgrade of format 0 files with their rows preserved, a failure
-// between files and its resumption, two starts at once, and every frozen historical layout of test/fixtures/persistence
-// (released schema statements with synthetic rows). The format 0 inputs are written literally here or come from those
-// fixtures, never from today's schema statements.
+/*
+ * the startup coordinator (src/database-upgrade.ts) on real files: a fresh directory, a repeated start, an interrupted
+ * creation, the refusals that change nothing, the backup and upgrade of format 0 files with their rows preserved, a failure
+ * between files and its resumption, two starts at once, and every frozen historical layout of test/fixtures/persistence
+ * (released schema statements with synthetic rows). The format 0 inputs are written literally here or come from those
+ * fixtures, never from today's schema statements.
+ */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-upgrade-" }));
 
@@ -43,15 +46,20 @@ const read = <A>(path: string, use: (db: DatabaseSync) => A): A => {
   }
 };
 
-const formatOf = (path: string): number => read(path, (db) => Number((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version));
-const journalOf = (path: string): string => read(path, (db) => String((db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode));
+const formatOf = (path: string): number => read(path, (db) => sqliteRow(db, Schema.Struct({ user_version: Schema.Number }), "PRAGMA user_version").user_version);
+const journalOf = (path: string): string => read(path, (db) => sqliteRow(db, Schema.Struct({ journal_mode: Schema.String }), "PRAGMA journal_mode").journal_mode);
+const countOf = (path: string, sql: string, ...params: Array<number>): number => read(path, (db) => sqliteRow(db, Schema.Struct({ n: Schema.Number }), sql, ...params).n);
+const Named = Schema.Struct({ name: Schema.String });
+// the parts of a backup manifest these tests read
+const BackupManifest = Schema.Struct({ files: Schema.Array(Schema.Struct({ file: Schema.String, backup: Schema.String, format: Schema.Number, sha256: Schema.String })) });
+const JsonObject = Schema.Record(Schema.String, Schema.Unknown);
 const digest = (path: string): string => createHash("sha256").update(readFileSync(path)).digest("hex");
 
 // every row of every table, values typed exactly, for preservation checks
 type Rows = Readonly<Record<string, ReadonlyArray<Readonly<Record<string, unknown>>>>>;
 const tableRows = (path: string): Rows => read(path, (db) => {
   const result: Record<string, ReadonlyArray<Record<string, unknown>>> = {};
-  const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name").all() as Array<{ name: string }>;
+  const tables = sqliteRows(db, Named, "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name");
   for (const { name } of tables) {
     const statement = db.prepare(`SELECT * FROM "${name}" ORDER BY rowid`);
     statement.setReadBigInts(true);
@@ -79,10 +87,10 @@ const assertPreserved = (before: Rows, after: Rows, allowed: (table: string) => 
 
 // the live schema of a file against a contract: exactly its tables and columns for a fresh file
 const liveSchema = (path: string) => read(path, (db) => {
-  const objects = db.prepare("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'").all() as Array<{ type: string; name: string }>;
+  const objects = sqliteRows(db, Schema.Struct({ type: Schema.String, name: Schema.String }), "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\'");
   const tables: Record<string, Array<string>> = {};
   for (const { name } of objects.filter((object) => object.type === "table"))
-    tables[name] = (db.prepare(`PRAGMA table_info("${name}")`).all() as Array<{ name: string }>).map((column) => column.name).sort();
+    tables[name] = sqliteRows(db, Named, `PRAGMA table_info("${name}")`).map((column) => column.name).sort();
   return { tables, indexes: objects.filter((object) => object.type === "index").map((object) => object.name).sort() };
 });
 const sortedContract = (contract: SchemaContract) => ({
@@ -168,8 +176,10 @@ const refusedWith = (exit: Exit.Exit<UpgradeReport, DatabaseUpgradeError>, file:
   assert.deepEqual([failure.error.file, failure.error.reason], [file, reason]);
 };
 
-// the shell the frozen fixtures store with keys outside the catalog whitelist: the catalog step rewrites it once, as every open
-// of the releases that wrote it did
+/*
+ * the shell the frozen fixtures store with keys outside the catalog whitelist: the catalog step rewrites it once, as every open
+ * of the releases that wrote it did
+ */
 const unwhitelistedShell = "fixture-thread-unknown-keys";
 
 describe("startup upgrade of the frozen historical layouts", () => {
@@ -189,9 +199,11 @@ describe("startup upgrade of the frozen historical layouts", () => {
       for (const file of storeFiles) assert.equal(journalOf(join(directory, file)), "wal", file);
       assert.equal(journalOf(join(directory, "access", "login.sqlite3")), "delete");
 
-      // every stored row keeps its identity and every original value byte for byte (documents, native evidence with unknown
-      // keys, Stops, Start records, uncertain sends, sessions and the policy at its generation), except the one shell the
-      // whitelist trims
+      /*
+       * every stored row keeps its identity and every original value byte for byte (documents, native evidence with unknown
+       * keys, Stops, Start records, uncertain sends, sessions and the policy at its generation), except the one shell the
+       * whitelist trims
+       */
       const after = snapshotDirectory(directory);
       for (const file of [...allFiles].filter((file) => file !== "catalog.sqlite3")) assertPreserved(before[file] ?? {}, after[file] ?? {});
       assertPreserved(before["catalog.sqlite3"] ?? {}, after["catalog.sqlite3"] ?? {}, (table) => table === "threads");
@@ -204,8 +216,8 @@ describe("startup upgrade of the frozen historical layouts", () => {
         assert.deepEqual({ ...upgraded, document: null }, { ...row, document: null }, `thread row ${String(row.id)} identity kept`);
         if (row.id !== unwhitelistedShell) assert.equal(upgraded.document, row.document, `thread ${String(row.id)} document kept byte for byte`);
         else {
-          const original = JSON.parse(String(row.document)) as Record<string, unknown>;
-          const trimmed = JSON.parse(String(upgraded.document)) as Record<string, unknown>;
+          const original = decodeJson(JsonObject, String(row.document));
+          const trimmed = decodeJson(JsonObject, String(upgraded.document));
           assert.ok(Object.keys(trimmed).every((key) => Object.hasOwn(original, key)), "the whitelist only removes keys");
           assert.ok(Object.keys(trimmed).length < Object.keys(original).length, "keys outside the whitelist are removed");
           assert.deepEqual([trimmed.id, trimmed.title, trimmed.projectId], [original.id, original.title, original.projectId]);
@@ -214,7 +226,7 @@ describe("startup upgrade of the frozen historical layouts", () => {
 
       // the verified backup set holds the format 0 files exactly as they were
       const set = join(directory, "backups", report.backupSet);
-      const manifest = JSON.parse(readFileSync(join(set, "manifest.json"), "utf8")) as { files: Array<{ file: string; backup: string; format: number; sha256: string }> };
+      const manifest = decodeJson(BackupManifest, readFileSync(join(set, "manifest.json"), "utf8"));
       assert.deepEqual(manifest.files.map((entry) => entry.file), ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
       for (const entry of manifest.files) {
         assert.equal(digest(join(set, entry.backup)), entry.sha256, entry.backup);
@@ -222,14 +234,16 @@ describe("startup upgrade of the frozen historical layouts", () => {
         assert.deepEqual(tableRows(join(set, entry.backup)), before[entry.file], entry.backup);
       }
 
-      // the stores open the upgraded files and still run their own restart recovery (committed notices), and the forge issues
-      // a token on the upgraded access database
-      const committed = () => Number((read(join(directory, "guidance.sqlite3"), (db) => db.prepare("SELECT count(*) AS n FROM notices WHERE state='committed'").get()) as { n: number }).n);
+      /*
+       * the stores open the upgraded files and still run their own restart recovery (committed notices), and the forge issues
+       * a token on the upgraded access database
+       */
+      const committed = () => countOf(join(directory, "guidance.sqlite3"), "SELECT count(*) AS n FROM notices WHERE state='committed'");
       assert.ok(committed() > 0, "the fixture holds committed notices from before a restart");
       yield* Effect.scoped(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)),
         Layer.provide(SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer))))));
       assert.equal(committed(), 0);
-      const grants = () => Number((read(join(directory, "access", "login.sqlite3"), (db) => db.prepare("SELECT count(*) AS n FROM dashboard_login_grants WHERE expires_at > ?").get(Date.now())) as { n: number }).n);
+      const grants = () => countOf(join(directory, "access", "login.sqlite3"), "SELECT count(*) AS n FROM dashboard_login_grants WHERE expires_at > ?", Date.now());
       const unexpired = grants();
       yield* forgeDashboardToken(directory);
       assert.equal(grants(), unexpired + 1);
@@ -342,7 +356,7 @@ describe("startup upgrade", () => {
     // the backup set holds the format 0 files exactly as they were, with a manifest naming each
     assert.deepEqual(backupSets(directory), [report.backupSet]);
     const set = join(directory, "backups", report.backupSet);
-    const manifest = JSON.parse(readFileSync(join(set, "manifest.json"), "utf8")) as { files: Array<{ file: string; backup: string; format: number; sha256: string }> };
+    const manifest = decodeJson(BackupManifest, readFileSync(join(set, "manifest.json"), "utf8"));
     assert.deepEqual(manifest.files.map((entry) => [entry.file, entry.backup, entry.format]), [
       ["access/login.sqlite3", "access-login.sqlite3", 0], ["catalog.sqlite3", "catalog.sqlite3", 0],
       ["guidance.sqlite3", "guidance.sqlite3", 0], ["thread-settings.sqlite3", "thread-settings.sqlite3", 0],
@@ -388,7 +402,7 @@ describe("startup upgrade", () => {
     const resumed = yield* upgrade(directory);
     assert.deepEqual(resumed.files.map((file) => file.file), ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
     assert.equal(backupSets(directory).length, 2, "a new set for the files still changing; the first one is kept");
-    const manifest = JSON.parse(readFileSync(join(directory, "backups", resumed.backupSet ?? "", "manifest.json"), "utf8")) as { files: Array<{ file: string }> };
+    const manifest = decodeJson(BackupManifest, readFileSync(join(directory, "backups", resumed.backupSet ?? "", "manifest.json"), "utf8"));
     assert.deepEqual(manifest.files.map((entry) => entry.file), ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
     for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 1, file);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });

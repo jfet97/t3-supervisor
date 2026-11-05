@@ -86,8 +86,10 @@ export const checkThreadPolicyRows: Effect.Effect<StoredRowScan, SqlError.SqlErr
   const db = yield* PolicyDb;
   const rows = yield* rowsOf(db, "settings", "SELECT id,document FROM settings");
   const findings = yield* rowFindings(rows, { table: "settings", kind: "thread policy", problem: "undecodable", read: "cycle" }, (row) => rowKey(row, ["id"]), decodePolicyRow);
-  // a policy table without its row is never reseeded: the startup upgrade refuses it (a table-less file is the upgrade's to judge:
-  // part of a fresh directory, or a missing policy beside existing state)
+  /*
+   * a policy table without its row is never reseeded: the startup upgrade refuses it (a table-less file is the upgrade's to judge:
+   * part of a fresh directory, or a missing policy beside existing state)
+   */
   const missing = rows.length === 0 && (yield* tableExists(db, "settings"))
     ? [{ table: "settings", kind: "thread policy", key: "1", problem: "incompatible" as const, read: "open" as const }] : [];
   return { findings: [...findings, ...missing], changes: [] };

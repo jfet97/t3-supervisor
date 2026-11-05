@@ -16,8 +16,10 @@ import { workflowMcpLayer } from "./mcp-controllers.js";
 // controller tools, which these suites never call
 export const guidanceUi = (config: SupervisorConfig, runtime: GuidanceRuntime["Service"], options: GuidanceUiOptions = {},
   workflows?: Layer.Layer<WorkflowMcp>, policy?: ThreadPolicyStore["Service"]) => {
-  // the process's thread-policy store: the given one, else the data directory's own, as the root opens it (the caller prepared
-  // the directory at the current formats first, as the startup coordinator does)
+  /*
+   * the process's thread-policy store: the given one, else the data directory's own, as the root opens it (the caller prepared
+   * the directory at the current formats first, as the startup coordinator does)
+   */
   const policyStore = policy ? Layer.succeed(ThreadPolicyStore, policy)
     : ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)));
   const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),

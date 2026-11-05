@@ -319,8 +319,10 @@ const validateDatabase = (db: SqlClient.SqlClient): Effect.Effect<void, ServiceA
 const accessClient = (path: string): Effect.Effect<SqlClient.SqlClient, ServiceAuthUnavailable, Scope.Scope> =>
   Layer.build(accessDbLayer(path)).pipe(Effect.map(Context.get(AccessDb)), Effect.mapError(() => new ServiceAuthUnavailable({ part: "database" })));
 
-// identity before the open (O_NOFOLLOW handle, size bounds, fchmod 0600) and lstat re-check after it, then validation; the
-// client is the current-format access client, or the startup upgrade's unguarded one
+/*
+ * identity before the open (O_NOFOLLOW handle, size bounds, fchmod 0600) and lstat re-check after it, then validation; the
+ * client is the current-format access client, or the startup upgrade's unguarded one
+ */
 const openPrivateClient = <C extends { readonly sql: SqlClient.SqlClient }>(fs: FileSystem.FileSystem, path: string,
   client: Effect.Effect<C, unknown, Scope.Scope>): Effect.Effect<C, ServiceAuthUnavailable, Scope.Scope> =>
   Effect.gen(function* () {

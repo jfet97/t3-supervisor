@@ -233,8 +233,10 @@ const workerClient = (config: WorkerDatabaseConfig): Effect.Effect<WorkerClient,
     beginTransaction: config.readonly ? "BEGIN" : "BEGIN IMMEDIATE",
     spanAttributes: [["db.system.name", "sqlite"]],
   }).pipe(Effect.provide(Reactivity.layer));
-  // inside a transaction of this client the caller already holds the lease it would wait for; any other fiber's transaction
-  // only delays the backup until it ends
+  /*
+   * inside a transaction of this client the caller already holds the lease it would wait for; any other fiber's transaction
+   * only delays the backup until it ends
+   */
   const backup = (destination: string): Effect.Effect<BackupMetadata, SqlError> => Effect.flatMap(Effect.serviceOption(client.transactionService),
     (transaction) => Option.isSome(transaction)
       ? Effect.fail(insideTransaction)

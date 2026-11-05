@@ -1034,9 +1034,11 @@ it.effect("settlement starts exactly at quietSince+60000 and an uncertain one re
   assert.equal((yield* f.store.binding("p", "main"))?.settlement?.state, "uncertain");
 }), {timeout: 10_000});
 
-// the one-time reset of the disposable prototype state, and its atomicity when the scope version insert fails (CT-RESET-01), are
-// the guidance format 1 step of the startup upgrade (test/supervisor-state-reset-service.test.ts); a store's construction only
-// reads the stored scope version
+/*
+ * the one-time reset of the disposable prototype state, and its atomicity when the scope version insert fails (CT-RESET-01), are
+ * the guidance format 1 step of the startup upgrade (test/supervisor-state-reset-service.test.ts); a store's construction only
+ * reads the stored scope version
+ */
 
 it.effect("background provider work, completion delivery, goals and PR watches all prevent parking", () => Effect.gen(function* () {
   for (const kind of ["roster", "delivery", "goal", "watch"]) {

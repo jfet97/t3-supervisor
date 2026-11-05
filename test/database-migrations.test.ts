@@ -12,9 +12,11 @@ import { DatabaseUpgradeError, upgradeDataDirectory } from "../src/database-upgr
 import { type DatabaseKind, openUpgradeDatabase, readOnlyDatabase } from "../src/db.js";
 import { initializeDataDirectory } from "./support/data-directory.js";
 
-// the format steps and the live schema contracts (src/database-migrations.ts) on real files: what the stores' constructors used to
-// do at every open now happens once, in the step's transaction. The format 0 inputs are written literally (test input), never
-// with today's statements.
+/*
+ * the format steps and the live schema contracts (src/database-migrations.ts) on real files: what the stores' constructors used to
+ * do at every open now happens once, in the step's transaction. The format 0 inputs are written literally (test input), never
+ * with today's statements.
+ */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-migrations-" }));
 

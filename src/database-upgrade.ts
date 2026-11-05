@@ -13,14 +13,16 @@ import {
 import { logEvent } from "./logging.js";
 import { openExistingAccessDatabase, verifyAccessDatabase } from "./service-auth.js";
 
-// the startup coordinator of a data directory: the only code that creates store files or moves them between formats. The
-// service start runs it before any store, seeding, listener, watch or worker (src/supervisor.ts), while readiness stays false.
-// It reads every file first (read only), refuses anything it cannot carry forward without touching it, backs up and verifies
-// every existing file whose format changes, then upgrades one file at a time, each in one BEGIN IMMEDIATE transaction that
-// rereads the format after taking the lock, so a concurrent start never applies a step twice. Different files never share a
-// transaction: a failure leaves earlier files upgraded and later ones as they were, and the next start resumes from the
-// committed formats. Upgrades are offline: an older Supervisor must not run on the directory meanwhile, and there is no
-// supported downgrade or automatic restore.
+/*
+ * the startup coordinator of a data directory: the only code that creates store files or moves them between formats. The
+ * service start runs it before any store, seeding, listener, watch or worker (src/supervisor.ts), while readiness stays false.
+ * It reads every file first (read only), refuses anything it cannot carry forward without touching it, backs up and verifies
+ * every existing file whose format changes, then upgrades one file at a time, each in one BEGIN IMMEDIATE transaction that
+ * rereads the format after taking the lock, so a concurrent start never applies a step twice. Different files never share a
+ * transaction: a failure leaves earlier files upgraded and later ones as they were, and the next start resumes from the
+ * committed formats. Upgrades are offline: an older Supervisor must not run on the directory meanwhile, and there is no
+ * supported downgrade or automatic restore.
+ */
 
 export interface UpgradeOptions {
   readonly dataDirectory: string;

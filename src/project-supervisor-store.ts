@@ -773,8 +773,10 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return expiredIds;
   }));
 
-  // ---- acquisition: the scope check, the preparing-Start recovery and the ownership preload. The schema, the column addition
-  // and the one-time scope reset belong to the startup upgrade (src/database-migrations.ts)
+  /*
+   * ---- acquisition: the scope check, the preparing-Start recovery and the ownership preload. The schema, the column addition
+   * and the one-time scope reset belong to the startup upgrade (src/database-migrations.ts)
+   */
   const scopeCompatible = yield* run(Effect.gen(function* () {
     // an unknown stored scope disables supervision
     const compatible = yield* reset.scopeCompatible();

@@ -162,8 +162,10 @@ const assertNoLeak = (label: string, outputs: ReadonlyArray<string>, secrets: Se
 it.live("CT-REDACT-01: native transport failures carrying a token, a native error body and a webhook URL leave only phase classifications in logs, status and spans",
   () => Effect.gen(function* () {
     const secrets = makeSecrets();
-    // the data directories are prepared at the current formats before the observation, as the startup coordinator prepares
-    // them before the run starts
+    /*
+     * the data directories are prepared at the current formats before the observation, as the startup coordinator prepares
+     * them before the run starts
+     */
     const refusedDirectory = yield* temporaryDirectory("log-privacy-descriptor-");
     const watchDirectory = yield* temporaryDirectory("log-privacy-watch-");
     const observation = yield* observe;

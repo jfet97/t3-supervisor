@@ -17,12 +17,14 @@ import { checkThreadPolicyRows } from "./thread-policy.js";
 import { checkWorkflowStateRows } from "./workflow-state-store.js";
 import { checkWorkflowWriteRows } from "./workflow-write-controller.js";
 
-// the read-only rollout scan of a data directory before a version is started on it: every database file is opened read only
-// (no file is created, no pragma or statement writes) and reported with its format, its SQLite user_version, beside the format
-// this version runs; only the service's start creates or upgrades a file (src/database-upgrade.ts). The rows of guidance.sqlite3
-// and thread-settings.sqlite3 go through the decoders their readers use, and what the service's start changes in them is listed:
-// its upgrade creates tables and columns and clears the one-time reset's rows, the stores' open recovers committed notices.
-// Nothing contacts T3
+/*
+ * the read-only rollout scan of a data directory before a version is started on it: every database file is opened read only
+ * (no file is created, no pragma or statement writes) and reported with its format, its SQLite user_version, beside the format
+ * this version runs; only the service's start creates or upgrades a file (src/database-upgrade.ts). The rows of guidance.sqlite3
+ * and thread-settings.sqlite3 go through the decoders their readers use, and what the service's start changes in them is listed:
+ * its upgrade creates tables and columns and clears the one-time reset's rows, the stores' open recovers committed notices.
+ * Nothing contacts T3
+ */
 
 /** The findings of one row kind, with the keys of its rows (never their content). */
 export interface FindingGroup {
@@ -83,8 +85,10 @@ interface RowChecks<S> {
   readonly checks: ReadonlyArray<Effect.Effect<StoredRowScan, unknown, S>>;
 }
 
-// one file read only through its own read-only client (src/db.ts), or absent; a missing file is reported, never created. Its
-// format is read first (through a live write-ahead log too), its rows only at a format this version runs or upgrades
+/*
+ * one file read only through its own read-only client (src/db.ts), or absent; a missing file is reported, never created. Its
+ * format is read first (through a live write-ahead log too), its rows only at a format this version runs or upgrades
+ */
 const scanFile = <S>(directory: string, file: string, current: number, rows?: RowChecks<S>): Effect.Effect<FileScan, unknown> =>
   Effect.scoped(Effect.gen(function* () {
     if (!existsSync(join(directory, file))) return {file, present: false, format: null, current, rows: null} satisfies FileScan;
@@ -110,9 +114,11 @@ export const rolloutScan = (directory: string): Effect.Effect<RolloutScan, unkno
   return {files, blocking, unsupported};
 });
 
-// what the service's start does with a file: the auth service creates a missing access database when the service starts its
-// dashboard, the startup upgrade creates the other files only in a new data directory, upgrades an older format whose layout
-// it recognizes (its own preflight decides; the scan does not repeat it) and refuses a newer one
+/*
+ * what the service's start does with a file: the auth service creates a missing access database when the service starts its
+ * dashboard, the startup upgrade creates the other files only in a new data directory, upgrades an older format whose layout
+ * it recognizes (its own preflight decides; the scan does not repeat it) and refuses a newer one
+ */
 const fileLine = (file: FileScan): string => {
   if (file.format === null) return `${file.file}: absent (${file.file === accessFile
     ? "the service creates it when it starts the dashboard" : "only the service's start creates it, for a new installation"})`;

@@ -5,14 +5,17 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Effect, FileSystem } from "effect";
+import { Effect, FileSystem, Schema } from "effect";
 import { type BackupSource, writeBackupSet } from "../src/database-backup.js";
 import { openUpgradeDatabase, type UpgradeDatabase } from "../src/db.js";
 import { buildInfo } from "../src/version.js";
+import { decodeJson } from "./support/sqlite-rows.js";
 
-// the verified backup set of the startup upgrade (src/database-backup.ts) on real files: a new private directory per set, each
-// copy made with SQLite's online backup API through the worker connection (committed write-ahead log included) and checked
-// read only against its source, and the manifest written last; a copy that does not match leaves the set without a manifest
+/*
+ * the verified backup set of the startup upgrade (src/database-backup.ts) on real files: a new private directory per set, each
+ * copy made with SQLite's online backup API through the worker connection (committed write-ahead log included) and checked
+ * read only against its source, and the manifest written last; a copy that does not match leaves the set without a manifest
+ */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-backup-" }));
 
@@ -58,7 +61,11 @@ describe("verified backup sets", () => {
     assert.deepEqual([mode(join(directory, "backups")), mode(setDirectory), mode(copy), mode(join(setDirectory, "manifest.json"))], ["700", "700", "600", "600"]);
     assert.deepEqual(rowsOf(copy), rowsOf(join(directory, "catalog.sqlite3")));
     assert.equal(rowsOf(copy).length, 3);
-    const manifest = JSON.parse(readFileSync(join(setDirectory, "manifest.json"), "utf8")) as Record<string, unknown>;
+    // the manifest's contract as a reader of the backup set relies on it
+    const manifest = decodeJson(Schema.Struct({
+      kind: Schema.String, backupSet: Schema.String, supervisor: Schema.Struct({ version: Schema.String, revision: Schema.NullOr(Schema.String) }),
+      files: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+    }), readFileSync(join(setDirectory, "manifest.json"), "utf8"));
     const bytes = readFileSync(copy);
     assert.equal(manifest.kind, "t3-supervisor-backup");
     assert.equal(manifest.backupSet, set.id);

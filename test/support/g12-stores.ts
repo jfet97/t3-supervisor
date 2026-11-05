@@ -75,8 +75,10 @@ export interface WorkflowStoreOptions {
   readonly observe?: StatementObserver | undefined;
 }
 
-// the client, the ids and a fresh ownership set, then the guidance store, the state reset service (the scope check), the
-// project supervision store and the workflow state store, in the production order
+/*
+ * the client, the ids and a fresh ownership set, then the guidance store, the state reset service (the scope check), the
+ * project supervision store and the workflow state store, in the production order
+ */
 const workflowStoresLayer = (directory: string, options: WorkflowStoreOptions): Layer.Layer<WorkflowStoreServices> => {
   const base = Layer.mergeAll(guidanceClient(directory, options.observe), supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()));
   const workflows = options.isEnabled ? WorkflowStateStore.layerWith(options.isEnabled) : WorkflowStateStore.layer;

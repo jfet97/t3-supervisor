@@ -137,8 +137,10 @@ const completedConversation = (thread: ThreadInfo, request: {id: string; text: s
 export const startupSession = (options: StartupSessionOptions = {}): Effect.Effect<StartupSession, never, Scope.Scope> => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = options.directory ?? (yield* temporaryDirectory("startup-integration-"));
-  // the startup coordinator prepares the data directory at the current formats before the application opens any store, as
-  // `t3-supervisor start` does; a restart below finds it current
+  /*
+   * the startup coordinator prepares the data directory at the current formats before the application opens any store, as
+   * `t3-supervisor start` does; a restart below finds it current
+   */
   yield* initializeDataDirectory(directory);
   const workspaceRoot = posix.normalize(join(directory, "workspace"));
   yield* fs.makeDirectory(workspaceRoot);

@@ -21,8 +21,10 @@ export class ListenerUnavailable extends Data.TaggedError("ListenerUnavailable")
   override readonly message: string = this.reason;
 }
 
-// the fixed reason a failed supervisor program is reported with; typed failures name their own, nothing else is rendered (a
-// failed startup upgrade names its fixed reason, src/database-upgrade.ts, which logs the file itself)
+/*
+ * the fixed reason a failed supervisor program is reported with; typed failures name their own, nothing else is rendered (a
+ * failed startup upgrade names its fixed reason, src/database-upgrade.ts, which logs the file itself)
+ */
 export const failureReason = (cause: Cause.Cause<unknown>): string => {
   const failure = Cause.squash(cause);
   if (failure instanceof InvalidConfiguration || failure instanceof T3TokenUnavailable || failure instanceof ListenerUnavailable) return failure.reason;

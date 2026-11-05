@@ -10,10 +10,12 @@ import { accessDbLayer, catalogDbLayer, DatabaseOpenError, guidanceDbLayer, poli
 import { forgeDashboardToken } from "../src/service-auth.js";
 import { initializeDataDirectory } from "./support/data-directory.js";
 
-// the format guard of every store open (src/db.ts): only a file at its current format opens. A missing file is never created,
-// an older one asks for the service to start once (only the startup upgrade migrates), a newer one is refused, and none of
-// them is changed: the format is read through the connection, so a version committed only in the write-ahead log counts.
-// The forge and the maintenance paths go through the same opens.
+/*
+ * the format guard of every store open (src/db.ts): only a file at its current format opens. A missing file is never created,
+ * an older one asks for the service to start once (only the startup upgrade migrates), a newer one is refused, and none of
+ * them is changed: the format is read through the connection, so a version committed only in the write-ahead log counts.
+ * The forge and the maintenance paths go through the same opens.
+ */
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-guard-" }));
 
@@ -57,9 +59,14 @@ describe("database format guard", () => {
   it.live("a missing store file is not created: the open asks for the service to start once", () => Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const directory = yield* temporaryDirectory;
-    for (const [layer, file] of [[catalogDbLayer(directory), "catalog.sqlite3"], [guidanceDbLayer(directory), "guidance.sqlite3"],
-      [policyDbLayer(directory), "thread-settings.sqlite3"]] as const) {
-      const error = yield* refusal(layer);
+    // one refusal per store layer, each with its own layer type
+    const refusals = [
+      { file: "catalog.sqlite3", refused: refusal(catalogDbLayer(directory)) },
+      { file: "guidance.sqlite3", refused: refusal(guidanceDbLayer(directory)) },
+      { file: "thread-settings.sqlite3", refused: refusal(policyDbLayer(directory)) },
+    ];
+    for (const { file, refused } of refusals) {
+      const error = yield* refused;
       assert.equal(error.reason, "not_initialized", file);
       assert.equal(error.file, file);
       assert.match(error.message, /start the service once/u);

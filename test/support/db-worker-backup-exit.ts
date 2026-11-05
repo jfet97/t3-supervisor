@@ -6,8 +6,10 @@ import * as Predicate from "effect/Predicate";
 import { WorkerRunnerPlatform } from "effect/workers/WorkerRunner";
 import { serveDatabase } from "../../src/db-worker-serve.js";
 
-// a database worker for test/db-worker-backup.test.ts: the production worker, except that this thread exits as soon as it
-// receives a backup request, before answering it (a backup whose outcome the main thread cannot know)
+/*
+ * a database worker for test/db-worker-backup.test.ts: the production worker, except that this thread exits as soon as it
+ * receives a backup request, before answering it (a backup whose outcome the main thread cannot know)
+ */
 
 const exitOnBackup = Layer.effect(WorkerRunnerPlatform, Effect.map(WorkerRunnerPlatform, (platform) => WorkerRunnerPlatform.of({
   start: <O, I>() => Effect.map(platform.start<O, I>(), (runner) => ({

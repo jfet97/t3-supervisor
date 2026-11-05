@@ -78,8 +78,10 @@ describe("CatalogDb", () => {
       const fs = yield* FileSystem.FileSystem;
       const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-access-db-" });
       const path = join(directory, "login.sqlite3");
-      // the service creates and validates the file before any client opens it; here an empty private database at the current
-      // access format, with the delete journal, stands in
+      /*
+       * the service creates and validates the file before any client opens it; here an empty private database at the current
+       * access format, with the delete journal, stands in
+       */
       yield* Effect.scoped(fs.open(path, { flag: "a", mode: 0o600 }));
       yield* Effect.sync(() => {
         const raw = new DatabaseSync(path);

@@ -188,8 +188,10 @@ const catalog = Layer.unwrap(SupervisorConfig.useSync((config) => makeStore(conf
 export type SupervisorServices = DashboardUpdates | SupervisorConfig | SupervisorStatusRef | Store | T3Client | T3Native | ThreadPolicyStore | SupervisorOwnership |
   NativeTransport | FileSystem.FileSystem;
 
-// the process's thread-policy store on its own PolicyDb client (thread-settings.sqlite3); the startup upgrade seeded it once, when
-// the directory was fresh
+/*
+ * the process's thread-policy store on its own PolicyDb client (thread-settings.sqlite3); the startup upgrade seeded it once, when
+ * the directory was fresh
+ */
 const threadPolicy = Layer.unwrap(SupervisorConfig.useSync((config) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)))));
 
 /**
@@ -205,14 +207,18 @@ export const SupervisorServicesLive = Layer.mergeAll(catalog, SupervisorStatusRe
   Layer.provideMerge(DashboardUpdates.layer),
 );
 
-// the startup upgrade of the configured data directory (src/database-upgrade.ts): provided to the root services, it is built
-// before any of them, so no store, seeding, listener, watch or worker starts until every database file has its current format,
-// and the health listener (readiness) is not up meanwhile; a failure fails the start
+/*
+ * the startup upgrade of the configured data directory (src/database-upgrade.ts): provided to the root services, it is built
+ * before any of them, so no store, seeding, listener, watch or worker starts until every database file has its current format,
+ * and the health listener (readiness) is not up meanwhile; a failure fails the start
+ */
 const persistence = Layer.unwrap(SupervisorConfig.useSync((config) =>
   persistenceStartup({ dataDirectory: config.dataDirectory, excludedThreadIds: config.excludedThreadIds })));
 
-// the server graph over the current ConfigProvider: the configuration, the node file system, the startup upgrade and the
-// root services
+/*
+ * the server graph over the current ConfigProvider: the configuration, the node file system, the startup upgrade and the
+ * root services
+ */
 export const SupervisorLive = SupervisorServicesLive.pipe(
   Layer.provideMerge(persistence),
   Layer.provideMerge(SupervisorConfig.layer),

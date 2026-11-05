@@ -10,17 +10,21 @@ import { renderRolloutScan, rolloutScan, type RolloutScan } from "../src/rollout
 import { initializeDataDirectory } from "./support/data-directory.js";
 import { temporaryDirectory } from "./support/psx-stores.js";
 
-// the read-only rollout scan on fixture files: each database file is reported with its presence and its format (user_version)
-// beside the format this version runs; one stored row of each kind that the stores would not read as stored is reported by file,
-// table, row kind, problem, read point and key, the report never carries row content, what the service's start changes in a
-// format 0 file is listed, a newer format is reported without judging its rows, and the scan writes no file.
-// it.live: the production startup upgrade, the scan and the fixture writes use real sqlite files. The directory snapshot below is
-// the native observation that the scan wrote nothing.
+/*
+ * the read-only rollout scan on fixture files: each database file is reported with its presence and its format (user_version)
+ * beside the format this version runs; one stored row of each kind that the stores would not read as stored is reported by file,
+ * table, row kind, problem, read point and key, the report never carries row content, what the service's start changes in a
+ * format 0 file is listed, a newer format is reported without judging its rows, and the scan writes no file.
+ * it.live: the production startup upgrade, the scan and the fixture writes use real sqlite files. The directory snapshot below is
+ * the native observation that the scan wrote nothing.
+ */
 
 const marker = "SECRET-CONTENT";
 
-// one row of each failing kind, written with the raw driver into a data directory the startup upgrade created; the retired reminder
-// rules' rows (rules, budget, episodes) are never read any more, so the scan reports none of them
+/*
+ * one row of each failing kind, written with the raw driver into a data directory the startup upgrade created; the retired reminder
+ * rules' rows (rules, budget, episodes) are never read any more, so the scan reports none of them
+ */
 const failingRows = `
   UPDATE meta SET value='{"${marker}":1}' WHERE key='settings';
   UPDATE meta SET value='main-v0' WHERE key='supervisor_scope_version';
@@ -117,8 +121,10 @@ const flattened = (scan: RolloutScan) => scan.files.flatMap((file) => (file.rows
 
 const formats = (scan: RolloutScan) => scan.files.map((file) => [file.file, file.present, file.format, file.current]);
 
-// every entry below the directory with its bytes (a file's hash) and modification time. node:fs is the observation that the scan
-// touches nothing.
+/*
+ * every entry below the directory with its bytes (a file's hash) and modification time. node:fs is the observation that the scan
+ * touches nothing.
+ */
 const snapshot = (directory: string) => readdirSync(directory, {encoding: "utf8", recursive: true}).sort().map((name) => {
   const path = join(directory, name);
   const stat = statSync(path);
@@ -127,8 +133,10 @@ const snapshot = (directory: string) => readdirSync(directory, {encoding: "utf8"
 
 it.live("the rollout scan reports each file's format and one stored row of each failing kind by file, table, kind, problem, read point and key, and writes nothing", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("rollout-scan-");
-  // a new data directory as the service's start creates it: catalog, guidance and thread-settings with every table and default row
-  // of their current formats; the access database comes later, when the service starts its dashboard
+  /*
+   * a new data directory as the service's start creates it: catalog, guidance and thread-settings with every table and default row
+   * of their current formats; the access database comes later, when the service starts its dashboard
+   */
   yield* initializeDataDirectory(directory);
   const guidance = new DatabaseSync(join(directory, "guidance.sqlite3"));
   guidance.exec(failingRows);

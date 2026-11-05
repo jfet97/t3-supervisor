@@ -4,12 +4,13 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Effect, FileSystem, Layer } from "effect";
+import { Effect, FileSystem, Layer, Schema } from "effect";
 import { guidanceMigrations } from "../src/database-migrations.js";
 import { GuidanceDb, openUpgradeDatabase } from "../src/db.js";
 import { GuidanceStore } from "../src/guidance-store.js";
 import { SupervisorStateReset, type SupervisorStateResetShape } from "../src/supervisor-state-reset.js";
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
+import { sqliteRow } from "./support/sqlite-rows.js";
 
 /* The approved one-time reset of the project-scoped prototype is part of the guidance format 1 step (src/database-migrations.ts):
  * a format 0 file without a stored scope version has its disposable prototype state cleared and main-v1 recorded, in the step's
@@ -35,8 +36,10 @@ const tableDigest = (db: GuidanceDb["Service"]) => Effect.gen(function* () {
 
 const count = (db: GuidanceDb["Service"], table: string) => Effect.map(rows(db, `SELECT count(*) AS n FROM ${table}`), ([row]) => Number(row?.n));
 
-// a format 0 guidance file as an earlier release left it: disposable prototype state in tables the reset clears, beside
-// permanent ownership, the default settings and unrelated state (literal statements, not today's schema)
+/*
+ * a format 0 guidance file as an earlier release left it: disposable prototype state in tables the reset clears, beside
+ * permanent ownership, the default settings and unrelated state (literal statements, not today's schema)
+ */
 const legacyGuidance = (path: string, scopeVersion: string | null) => Effect.sync(() => {
   const db = new DatabaseSync(path);
   try {
@@ -106,7 +109,7 @@ describe("SupervisorStateReset", () => {
       const db = new DatabaseSync(path, { readOnly: true });
       try {
         return ["supervisor_project_bindings", "supervisor_main_bindings", "supervisor_conversation_requests", "meta"].map((table) =>
-          Number((db.prepare(`SELECT count(*) AS n FROM ${table}`).get() as { n: number }).n));
+          sqliteRow(db, Schema.Struct({ n: Schema.Number }), `SELECT count(*) AS n FROM ${table}`).n);
       } finally {
         db.close();
       }

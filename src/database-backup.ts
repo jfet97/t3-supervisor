@@ -8,12 +8,14 @@ import { readFormat, readOnlyDatabase, type UpgradeDatabase } from "./db.js";
 import { snapshotRead } from "./guidance-sql.js";
 import { buildInfo } from "./version.js";
 
-// the verified backup set the startup upgrade writes before it changes the format of any existing file
-// (<data directory>/backups/<backup set id>/): each changing file is copied with SQLite's online backup API through its own
-// worker connection (a consistent snapshot, the committed WAL included; never a copy of the live main file), the copy is
-// checked read only (integrity, format, schema and every row against the source as it is after the copy), and the manifest,
-// written last and exclusively, records the checksums and provenance. A set without a manifest is incomplete. Nothing here
-// overwrites or later touches a backup.
+/*
+ * the verified backup set the startup upgrade writes before it changes the format of any existing file
+ * (<data directory>/backups/<backup set id>/): each changing file is copied with SQLite's online backup API through its own
+ * worker connection (a consistent snapshot, the committed WAL included; never a copy of the live main file), the copy is
+ * checked read only (integrity, format, schema and every row against the source as it is after the copy), and the manifest,
+ * written last and exclusively, records the checksums and provenance. A set without a manifest is incomplete. Nothing here
+ * overwrites or later touches a backup.
+ */
 
 /** A backup set could not be completed: the stage that failed and the file, never a path, row or cause. */
 export class BackupFailed extends Data.TaggedError("BackupFailed")<{
@@ -66,8 +68,10 @@ const privateFile = 0o600;
 const privateDirectory = 0o700;
 const pageRows = 500;
 
-// the logical content of a database as one snapshot: its format, its schema rows and every row of every table in rowid order,
-// with each value typed (integers exactly, as bigints), so a copy can be compared with its source
+/*
+ * the logical content of a database as one snapshot: its format, its schema rows and every row of every table in rowid order,
+ * with each value typed (integers exactly, as bigints), so a copy can be compared with its source
+ */
 interface Snapshot {
   readonly format: number;
   readonly tables: Readonly<Record<string, number>>;
@@ -91,10 +95,18 @@ const typed = (value: unknown): unknown => {
   return { u: String(value) };
 };
 
+// the first value of a paged row is its rowid, an exact integer while SafeIntegers is on
+const decodeRowId = Schema.decodeUnknownEffect(Schema.BigInt);
+const quoted = (identifier: string): string => `"${identifier.replaceAll('"', '""')}"`;
+
+/*
+ * Rows are read as positional values (each table's columns in declaration order, the rowid first where it pages): the only
+ * row shape the comparison needs, so no row is cast to a record type.
+ */
 const snapshotOf = (sql: SqlClient.SqlClient) => snapshotRead(sql)(Effect.gen(function* () {
   const format = yield* readFormat(sql);
-  const schema = yield* sql.unsafe("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name");
-  const schemaSha256 = createHash("sha256").update(JSON.stringify(schema.map((row) => Object.values(row).map(typed)))).digest("hex");
+  const schema = yield* sql.unsafe("SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name").values;
+  const schemaSha256 = createHash("sha256").update(JSON.stringify(schema.map((row) => row.map(typed)))).digest("hex");
   const tables = yield* sql.unsafe(
     "SELECT name, wr FROM pragma_table_list WHERE schema='main' AND type='table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
   ).pipe(Effect.flatMap(decodeTables));
@@ -104,22 +116,22 @@ const snapshotOf = (sql: SqlClient.SqlClient) => snapshotRead(sql)(Effect.gen(fu
     content.update(JSON.stringify({ table: table.name }));
     let count = 0;
     if (Number(table.wr) !== 0) {
-      for (const row of yield* sql.unsafe(`SELECT * FROM "${table.name}"`)) {
-        content.update(JSON.stringify(Object.values(row).map(typed)));
+      for (const row of yield* sql.unsafe(`SELECT * FROM ${quoted(table.name)}`).values) {
+        content.update(JSON.stringify(row.map(typed)));
         count++;
       }
     } else {
       // pages in rowid order, so a large table never crosses the worker boundary at once
       let after: bigint | null = null;
       for (;;) {
-        const rows: ReadonlyArray<Record<string, unknown>> = yield* (after === null
-          ? sql.unsafe(`SELECT rowid AS "rowid", * FROM "${table.name}" ORDER BY rowid LIMIT ${pageRows}`)
-          : sql.unsafe(`SELECT rowid AS "rowid", * FROM "${table.name}" WHERE rowid > ? ORDER BY rowid LIMIT ${pageRows}`, [after]));
-        for (const row of rows) content.update(JSON.stringify(Object.values(row).map(typed)));
+        const rows = yield* (after === null
+          ? sql.unsafe(`SELECT rowid, * FROM ${quoted(table.name)} ORDER BY rowid LIMIT ${pageRows}`).values
+          : sql.unsafe(`SELECT rowid, * FROM ${quoted(table.name)} WHERE rowid > ? ORDER BY rowid LIMIT ${pageRows}`, [after]).values);
+        for (const row of rows) content.update(JSON.stringify(row.map(typed)));
         count += rows.length;
-        const last = rows.at(-1)?.rowid;
-        if (rows.length < pageRows || typeof last !== "bigint") break;
-        after = last;
+        const last = rows.at(-1);
+        if (rows.length < pageRows || last === undefined) break;
+        after = yield* decodeRowId(last[0]);
       }
     }
     counts[table.name] = count;
@@ -170,8 +182,10 @@ const makeSetDirectory = (dataDirectory: string) => Effect.gen(function* () {
   return yield* failed;
 });
 
-// one source: an exclusive private file, the online backup into it, then the read-only verification of the copy against the
-// source as it is after the copy (a source that changed in between fails, as a concurrent writer would make it)
+/*
+ * one source: an exclusive private file, the online backup into it, then the read-only verification of the copy against the
+ * source as it is after the copy (a source that changed in between fails, as a concurrent writer would make it)
+ */
 const backupOne = (directory: string, source: BackupSource) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const copyFailed = new BackupFailed({ file: source.file, stage: "copy" });
@@ -196,9 +210,11 @@ const backupOne = (directory: string, source: BackupSource) => Effect.gen(functi
   } satisfies BackupEntry;
 });
 
-// the newest earlier complete set (with its manifest) that already holds every source with the same format, schema and rows, its
-// copies still matching their recorded checksums: a start that failed after writing it is retried without another copy, so a
-// restart loop never fills the disk with identical sets. A set that cannot be read or does not match is simply not reused.
+/*
+ * the newest earlier complete set (with its manifest) that already holds every source with the same format, schema and rows, its
+ * copies still matching their recorded checksums: a start that failed after writing it is retried without another copy, so a
+ * restart loop never fills the disk with identical sets. A set that cannot be read or does not match is simply not reused.
+ */
 const reusableSet = (dataDirectory: string, sources: ReadonlyArray<{ readonly source: BackupSource; readonly snapshot: Snapshot }>) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;

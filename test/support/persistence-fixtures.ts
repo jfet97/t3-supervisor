@@ -5,11 +5,13 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Data, Effect, Schema } from "effect";
 
-// The frozen historical persistence fixtures (test/fixtures/persistence/<shape>/): their manifests, an integrity check, the
-// materialization of their database files and a dump to compare files with. A small synchronous adapter over node:sqlite and
-// node:fs (the fixture files are written and read the way an external SQLite client would), with Effect wrappers for the
-// suites. It imports nothing from src/: the fixtures stand for files that older releases wrote, so neither their text nor
-// their materialization may follow today's schema code, serializers or factories.
+/*
+ * The frozen historical persistence fixtures (test/fixtures/persistence/<shape>/): their manifests, an integrity check, the
+ * materialization of their database files and a dump to compare files with. A small synchronous adapter over node:sqlite and
+ * node:fs (the fixture files are written and read the way an external SQLite client would), with Effect wrappers for the
+ * suites. It imports nothing from src/: the fixtures stand for files that older releases wrote, so neither their text nor
+ * their materialization may follow today's schema code, serializers or factories.
+ */
 
 /** The directory of the frozen fixtures, one subdirectory per persisted layout. */
 export const fixturesDirectory = fileURLToPath(new URL("../fixtures/persistence/", import.meta.url));

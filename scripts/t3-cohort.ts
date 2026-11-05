@@ -568,8 +568,10 @@ export const setupScaffold = [
 
 type Catalog = {readonly _tag: "Ready"; readonly store: StoreShape; readonly root: string} | {readonly _tag: "Failed"; readonly result: Classified};
 
-// Supervisor's catalog store fed by the read credential's shell watch until it connected, as Supervisor's root ingests T3 (src/supervisor.ts);
-// its fresh data directory is first prepared by the startup upgrade, as the service's first start prepares one
+/*
+ * Supervisor's catalog store fed by the read credential's shell watch until it connected, as Supervisor's root ingests T3 (src/supervisor.ts);
+ * its fresh data directory is first prepared by the startup upgrade, as the service's first start prepares one
+ */
 const catalogOf = (ctx: ProbeContext) => Effect.gen(function* () {
   const failed = (result: Classified): Catalog => ({_tag: "Failed", result});
   const directory = ctx.stack.run.dir("cohort", "catalog");
@@ -676,8 +678,10 @@ const gitProbeStep = (ctx: ProbeContext, root: string) => runStep(ctx, "git-prob
   const python = yield* onT3Path(ctx.stack, "python3");
   const stty = yield* onT3Path(ctx.stack, "stty");
   if (!python || !stty) return finished<never>(harness(`python3 on T3's PATH ${python}, stty on T3's PATH ${stty}`));
-  // the probe keeps its pending sessions in a guidance database of its own, in a fresh data directory the startup upgrade prepares as
-  // the service's first start does, composed as src/guidance-application.ts composes the run's
+  /*
+   * the probe keeps its pending sessions in a guidance database of its own, in a fresh data directory the startup upgrade prepares as
+   * the service's first start does, composed as src/guidance-application.ts composes the run's
+   */
   const directory = ctx.stack.run.dir("cohort", "guidance");
   const guidance = yield* Effect.result(upgradeDataDirectory({dataDirectory: directory, excludedThreadIds: []}).pipe(
     Effect.andThen(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer))))));

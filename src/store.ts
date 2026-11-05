@@ -346,8 +346,10 @@ const make = Effect.gen(function* () {
     return { advance: true, paired: false };
   });
 
-  // the schema and the one-time shell whitelisting belong to the startup upgrade: the catalog client only opens a file at
-  // the current format, and this store reads and writes its rows
+  /*
+   * the schema and the one-time shell whitelisting belong to the startup upgrade: the catalog client only opens a file at
+   * the current format, and this store reads and writes its rows
+   */
 
   const catalog = () => sql.withTransaction(Effect.gen(function* () {
     const projects = yield* Effect.forEach(yield* sql`SELECT document,deleted FROM projects ORDER BY id`, (row) =>

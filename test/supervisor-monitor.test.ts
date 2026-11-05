@@ -1267,8 +1267,10 @@ it.effect("invalid input fails typed, and the pending scan is incomplete on inva
       { status: "complete", pending: true }, "a match in the third chunk of 400 ids is found");
   })));
 
-// the activation, capacity, read-item and active columns an older monitor schema gains once, the activation ordinal starting at
-// the stored source ordinal, are the guidance format 1 step of the startup upgrade (test/database-migrations.test.ts)
+/*
+ * the activation, capacity, read-item and active columns an older monitor schema gains once, the activation ordinal starting at
+ * the stored source ordinal, are the guidance format 1 step of the startup upgrade (test/database-migrations.test.ts)
+ */
 
 it.effect("a repeated frozen acknowledgement keeps its result but emits no dashboard invalidation", () => {
   const hints: unknown[] = [];

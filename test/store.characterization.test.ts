@@ -11,8 +11,10 @@ import type { ProjectInfo, SourceItem, ThreadInfo } from "../src/types.js";
 import { initializeDataDirectory } from "./support/data-directory.js";
 import { dataDirectory, withGuidanceStore, withThreadPolicy } from "./support/g9-stores.js";
 
-// it.live: real database files, an external node:sqlite connection as the other actor (it reads the raw catalog file without
-// the production layer's pragmas or modes) and node:fs inspection of the files and their modes
+/*
+ * it.live: real database files, an external node:sqlite connection as the other actor (it reads the raw catalog file without
+ * the production layer's pragmas or modes) and node:fs inspection of the files and their modes
+ */
 
 const project = (id: string, title = `Project ${id}`): ProjectInfo => ({ id, title, workspaceRoot: `/work/${id}` });
 
@@ -95,9 +97,11 @@ it.live("CT-STORE-01: a snapshot ingest failing mid-way leaves projects, threads
       [["thread-a", "active"], ["thread-b", "removed"]]);
   })), { timeout: 10_000 });
 
-// CT-STORE-02's rule, the one-time rewrite of stored legacy shells through the whitelist, and an unreadable stored shell that
-// fails it with the file unchanged, is the catalog format 1 step of the startup upgrade (test/database-migrations.test.ts); the
-// store's open rewrites nothing
+/*
+ * CT-STORE-02's rule, the one-time rewrite of stored legacy shells through the whitelist, and an unreadable stored shell that
+ * fails it with the file unchanged, is the catalog format 1 step of the startup upgrade (test/database-migrations.test.ts); the
+ * store's open rewrites nothing
+ */
 
 it.live("CT-STORE-03: the store connection carries the pragma golden and only journal_mode persists", () =>
   withTemporaryDirectory(directory => Effect.gen(function* () {
@@ -124,8 +128,10 @@ it.live("CT-STORE-03: the store connection carries the pragma golden and only jo
 it.live("CT-FILES-MODE-01: after first open and one write the stores keep private file modes", () => Effect.gen(function* () {
   yield* Effect.acquireRelease(Effect.sync(() => process.umask(0o022)), (previousMask) => Effect.sync(() => process.umask(previousMask)));
   const root = yield* dataDirectory("t3-supervisor-file-modes-");
-  // a data directory that exists before startup with the umask-default 0755 mode; the startup coordinator prepares it before
-  // any store opens it, as `t3-supervisor start` does
+  /*
+   * a data directory that exists before startup with the umask-default 0755 mode; the startup coordinator prepares it before
+   * any store opens it, as `t3-supervisor start` does
+   */
   const dataDirectoryAt = (name: string) => Effect.gen(function* () {
     const path = join(root, name);
     mkdirSync(path);

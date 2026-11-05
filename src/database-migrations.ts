@@ -4,14 +4,16 @@ import type { SqlError } from "effect/sql/SqlError";
 import { rewhitelistStoredShell } from "./store.js";
 import { ThreadPolicy } from "./thread-policy-contract.js";
 
-// the format steps of the store files (PRAGMA user_version) and the live schema each current format must have. A step is a
-// plain Effect program on the startup upgrade's client (src/database-upgrade.ts), which runs every pending step of one file
-// and its new format in one BEGIN IMMEDIATE transaction; this is not a migration framework.
-//
-// Format 1 is the schema Supervisor 0.0.27 left in place at open: its stores created every table, added the later columns and
-// wrote the default rows in their constructors, every time they opened. Those statements moved here verbatim, in the order a
-// run's stores executed them (the stored DDL text is golden: fresh and upgraded files get the same text), so a fresh file and
-// an upgraded one go through the same program. The constructors keep only their restart recovery.
+/*
+ * the format steps of the store files (PRAGMA user_version) and the live schema each current format must have. A step is a
+ * plain Effect program on the startup upgrade's client (src/database-upgrade.ts), which runs every pending step of one file
+ * and its new format in one BEGIN IMMEDIATE transaction; this is not a migration framework.
+ *
+ * Format 1 is the schema Supervisor 0.0.27 left in place at open: its stores created every table, added the later columns and
+ * wrote the default rows in their constructors, every time they opened. Those statements moved here verbatim, in the order a
+ * run's stores executed them (the stored DDL text is golden: fresh and upgraded files get the same text), so a fresh file and
+ * an upgraded one go through the same program. The constructors keep only their restart recovery.
+ */
 
 /** A step that cannot carry a file forward: an unexpected layout or a stored row it cannot read; it names a table, never a row. */
 export class MigrationRefused extends Data.TaggedError("MigrationRefused")<{
@@ -225,8 +227,10 @@ const teamToolReceiptsStatement = `CREATE TABLE IF NOT EXISTS supervisor_team_to
 
 const decodeThreadRow = Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String, document: Schema.String }));
 
-// format 1: the catalog tables, and the one-time re-whitelisting of every stored thread shell that each open did up to format 0
-// (a shell that is not readable refuses the upgrade, as it failed that open); an unchanged shell is not rewritten
+/*
+ * format 1: the catalog tables, and the one-time re-whitelisting of every stored thread shell that each open did up to format 0
+ * (a shell that is not readable refuses the upgrade, as it failed that open); an unchanged shell is not rewritten
+ */
 const catalogFormat1 = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
   yield* run(sql, catalogStatements);
   for (const raw of yield* sql`SELECT id, document FROM threads`) {
@@ -240,8 +244,10 @@ export const catalogMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1
 
 // ---- guidance.sqlite3
 
-// the prototype tables the approved one-time reset clears when a file has no supervision scope version yet (format 0 only;
-// supervisor-state-reset.ts keeps its own list for the test reset)
+/*
+ * the prototype tables the approved one-time reset clears when a file has no supervision scope version yet (format 0 only;
+ * supervisor-state-reset.ts keeps its own list for the test reset)
+ */
 const disposableSupervisionTables = [
   "supervisor_project_bindings", "supervisor_main_bindings", "supervisor_task_interpretations",
   "supervisor_conversation_requests", "supervisor_workflow_introductions", "supervisor_workflow_agreement_candidates",
@@ -250,9 +256,11 @@ const disposableSupervisionTables = [
 
 const decodeScopeVersion = Schema.decodeUnknownEffect(Schema.Struct({ value: Schema.String }));
 
-// the reset of the project-scoped prototype, as the project supervision store's open applied it: without a stored scope
-// version the disposable state is cleared and main-v1 recorded; a known or an unknown version is kept as it is (an unknown
-// one leaves supervision disabled)
+/*
+ * the reset of the project-scoped prototype, as the project supervision store's open applied it: without a stored scope
+ * version the disposable state is cleared and main-v1 recorded; a known or an unknown version is kept as it is (an unknown
+ * one leaves supervision disabled)
+ */
 const scopeReset = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
   const [row] = yield* sql`SELECT value FROM meta WHERE key='supervisor_scope_version'`;
   if (row !== undefined) {
@@ -291,8 +299,10 @@ const guidanceFormat1 = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
     "ALTER TABLE supervisor_monitor_threads ADD COLUMN untracked_count INTEGER NOT NULL DEFAULT 0");
   yield* addColumn(sql, "supervisor_monitor_items", "read_item_id", "ALTER TABLE supervisor_monitor_items ADD COLUMN read_item_id TEXT");
   yield* addColumn(sql, "supervisor_monitor_items", "active", "ALTER TABLE supervisor_monitor_items ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
-  // the team store, the workflow state store, the workflow write receipts and evidence, the helper transport and the team
-  // controller's tool receipts
+  /*
+   * the team store, the workflow state store, the workflow write receipts and evidence, the helper transport and the team
+   * controller's tool receipts
+   */
   yield* run(sql, teamStatements);
   yield* run(sql, workflowStateStatements);
   yield* run(sql, workflowWriteStatements);
@@ -315,8 +325,10 @@ export const requirePolicyRow = (sql: SqlClient.SqlClient): Effect.Effect<void, 
     ? Effect.asVoid(decodePolicyRow(rows[0]).pipe(Effect.mapError(() => new MigrationRefused({ table: "settings", reason: "row_invalid" }))))
     : Effect.fail(new MigrationRefused({ table: "settings", reason: "row_invalid" }))));
 
-// format 1: the policy table as the policy store's open created it; only a genuinely fresh directory seeds it, at generation 1,
-// from the configured excluded chats; an existing file must already hold its one valid row
+/*
+ * format 1: the policy table as the policy store's open created it; only a genuinely fresh directory seeds it, at generation 1,
+ * from the configured excluded chats; an existing file must already hold its one valid row
+ */
 const policyFormat1 = (sql: SqlClient.SqlClient, context: MigrationContext) => Effect.gen(function* () {
   yield* sql.unsafe(policyStatement);
   if (context.fresh) yield* sql`INSERT OR IGNORE INTO settings VALUES(1,${JSON.stringify({ generation: 1, excludedThreadIds: context.excludedThreadIds })})`;

@@ -983,8 +983,10 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
       members: yield* membersFor(binding), assignments: yield* assignmentsFor(binding), notifications, events } satisfies SupervisorTeamSnapshot;
   }));
 
-  // ---- acquisition: restart recovery (sending notifications become uncertain before any reconcile), once per layer; the
-  // schema belongs to the startup upgrade (src/database-migrations.ts)
+  /*
+   * ---- acquisition: restart recovery (sending notifications become uncertain before any reconcile), once per layer; the
+   * schema belongs to the startup upgrade (src/database-migrations.ts)
+   */
   yield* run(sql`UPDATE supervisor_team_notifications SET state='uncertain',document=json_set(document,'$.state','uncertain') WHERE state='sending'`);
 
   return {

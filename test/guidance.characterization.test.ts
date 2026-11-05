@@ -224,8 +224,10 @@ it.live("CT-APP-03: a failed descriptor read marks the dashboard disconnected wi
   assert.equal(app.rootSleeps(), 3, "no cycle ran without a clock adjustment");
 }), {timeout: 10_000});
 
-// CT-GDB-02's rule, the episode and notice generation columns a pre-migration file gains once with their defaults while it keeps
-// its rows, is the guidance format 1 step of the startup upgrade (test/database-migrations.test.ts); the store's open adds none
+/*
+ * CT-GDB-02's rule, the episode and notice generation columns a pre-migration file gains once with their defaults while it keeps
+ * its rows, is the guidance format 1 step of the startup upgrade (test/database-migrations.test.ts); the store's open adds none
+ */
 
 const securityHeaders = {"cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
   "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin"};

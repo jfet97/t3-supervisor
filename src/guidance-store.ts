@@ -73,8 +73,10 @@ const makeGuidanceStore = Effect.gen(function* () {
     return activity;
   });
 
-  // the restart recovery of committed notices, in one transaction; the schema, the default settings row and the column
-  // additions belong to the startup upgrade (src/database-migrations.ts)
+  /*
+   * the restart recovery of committed notices, in one transaction; the schema, the default settings row and the column
+   * additions belong to the startup upgrade (src/database-migrations.ts)
+   */
   yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
     const recovering = yield* Effect.forEach(yield* db`SELECT * FROM notices WHERE state='committed'`, (row) => decodeNoticeRow(row));
     yield* db`UPDATE notices SET state=CASE WHEN dispatch_started=0 THEN 'not_delivered_restart' ELSE 'uncertain' END WHERE state='committed'`;

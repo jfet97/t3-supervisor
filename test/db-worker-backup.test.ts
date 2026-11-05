@@ -3,15 +3,18 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, FileSystem } from "effect";
+import { Deferred, Effect, Fiber, FileSystem, Schema } from "effect";
 import { SqlError } from "effect/sql/SqlError";
 import { DatabaseWorker, type DatabaseWorkerEntry, openUpgradeDatabase } from "../src/db.js";
+import { sqliteRows } from "./support/sqlite-rows.js";
 
-// the online backup of the database worker (src/db.ts, src/db-worker-serve.ts) on real worker threads and real files. The
-// worker leases its one connection for its whole life, so the stock client's own backup (which leases the connection again)
-// could never run there; the backup request runs the connection's SQLite backup inside the worker's one-request-at-a-time
-// permit while the main thread holds the client's lease, so it neither deadlocks nor interleaves with another fiber's
-// transaction, and a worker that stops during it poisons the client like any statement in flight.
+/*
+ * the online backup of the database worker (src/db.ts, src/db-worker-serve.ts) on real worker threads and real files. The
+ * worker leases its one connection for its whole life, so the stock client's own backup (which leases the connection again)
+ * could never run there; the backup request runs the connection's SQLite backup inside the worker's one-request-at-a-time
+ * permit while the main thread holds the client's lease, so it neither deadlocks nor interleaves with another fiber's
+ * transaction, and a worker that stops during it poisons the client like any statement in flight.
+ */
 
 const directory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-db-backup-" }));
 
@@ -19,9 +22,9 @@ const directory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirec
 const copiedRows = (path: string): ReadonlyArray<string> => {
   const db = new DatabaseSync(path, { readOnly: true });
   try {
-    const integrity = db.prepare("PRAGMA integrity_check").all() as ReadonlyArray<{ integrity_check: string }>;
+    const integrity = sqliteRows(db, Schema.Struct({ integrity_check: Schema.String }), "PRAGMA integrity_check");
     assert.deepEqual(integrity.map((row) => row.integrity_check), ["ok"]);
-    return (db.prepare("SELECT v FROM t ORDER BY id").all() as ReadonlyArray<{ v: string }>).map((row) => row.v);
+    return sqliteRows(db, Schema.Struct({ v: Schema.String }), "SELECT v FROM t ORDER BY id").map((row) => row.v);
   } finally {
     db.close();
   }

@@ -8,9 +8,11 @@ import { Effect, FileSystem } from "effect";
 import { dumpDatabase, expectedDump, fixtureDatabaseNames, fixtureShapes, fixturesDirectory, materializeFixture, verifyFixtureIntegrity,
   type DatabaseDump } from "./support/persistence-fixtures.js";
 
-// it.live: the frozen fixtures are read from the checkout and materialized into real SQLite files in temporary directories.
-// The fixtures stand for files older releases wrote, so their checks use no production module: the manifest records their
-// provenance and integrity, the expected dumps their layout at format 0.
+/*
+ * it.live: the frozen fixtures are read from the checkout and materialized into real SQLite files in temporary directories.
+ * The fixtures stand for files older releases wrote, so their checks use no production module: the manifest records their
+ * provenance and integrity, the expected dumps their layout at format 0.
+ */
 
 const mode = (path: string): number => statSync(path).mode & 0o777;
 const syntheticLabel = "synthetic fixture input, not old-binary output";
