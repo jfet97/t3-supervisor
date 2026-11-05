@@ -30,5 +30,18 @@ gets a new directory. File names must not match the repository's ignored databas
 
 The `*.expected.json` dumps and the SHA-256s were produced once by executing the frozen statements and rows with
 `node:sqlite` (node 24.22.1) outside the repository's Docker environment; that run is not acceptance evidence. The
-committed `test/persistence-fixtures.test.ts` is the check, and a capture of the published binaries' files (their
-`sqlite_master`, `PRAGMA table_info`, `user_version` and journal modes) is the comparison that confirms the schema text.
+committed `test/persistence-fixtures.test.ts` checks the files against each other.
+
+The schema text was then compared with files the published binaries themselves created, in the repository's Docker
+environment (2026-11-05), each started on a new data directory with a read-only T3 session and stopped cleanly:
+
+| Published binary | Source | Compared with | Result |
+| --- | --- | --- | --- |
+| `ghcr.io/jfet97/t3-supervisor:0.0.27`, ARM64 image `sha256:62b60c1746d3ab3708f714d7d7f90ec4ed9fb8e9d74a686e1fab3bffe27ba2c3` | `4ce0259` | `format0-current-unversioned/` | all four files equal in `sqlite_master` text, `PRAGMA table_info`, `user_version`, header journal mode and creation order |
+| `ghcr.io/jfet97/t3-supervisor:0.0.11`, image `sha256:d87e3f729452ce9e1a4c46d54248eddb92fad53700ff57ed2d611efcb3667154` | `a378a4c` | `format0-pre-coverage-pre-planning/` | the same, all four files equal |
+
+This confirms the schema statements only. The rows remain synthetic fixture input; the capture compared no row content.
+On the pinned T3, 0.0.11 reached `supervisionState` `ready` but never connected (`t3Connected` false, last error phase
+`t3_stream`), so the capture says nothing about that old runtime's compatibility. The captures used the published
+images, whose dependency set is frozen: a fresh `npm install` of the 0.0.27 package resolves newer transitive Effect
+packages and fails to start, so it cannot produce the files.
