@@ -13,7 +13,8 @@ import { ThreadPolicy, type ThreadPolicySettings } from "./thread-policy-contrac
  * Format 1 is the schema Supervisor 0.0.27 left in place at open: its stores created every table, added the later columns and
  * wrote the default rows in their constructors, every time they opened. Those statements moved here verbatim, in the order a
  * run's stores executed them (the stored DDL text is golden: fresh and upgraded files get the same text), so a fresh file and
- * an upgraded one go through the same program. Every published release declared each object exactly as format 1 does, so the
+ * an upgraded one go through the same program, except that a created file no longer gets the retired reminder rules' tables an
+ * existing one keeps. Every published release declared each object exactly as format 1 does, so the
  * column additions only unpublished prototypes needed are gone: no file the upgrade recognizes lacks those columns. The
  * constructors keep only their restart recovery.
  *
@@ -38,6 +39,8 @@ export type PolicySource =
 
 export interface MigrationContext {
   readonly policy: PolicySource;
+  /** the step builds a new, table-less file: it gets the live schema, without the tables of retired features an upgrade keeps */
+  readonly creating: boolean;
 }
 
 export interface MigrationStep {
@@ -113,6 +116,14 @@ const guidanceStoreStatements = [
   "CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL)",
   "CREATE INDEX IF NOT EXISTS activity_notice ON activity(json_extract(document,'$.noticeId'),created_at)",
 ];
+
+/*
+ * the tables of the retired reminder rules, which nothing reads or writes any more. Format 1 declares them, as every release
+ * created them, so an existing file keeps them and their rows; a file this version creates no longer gets them
+ */
+const retiredReminderTables: ReadonlyArray<string> = ["rules", "mutes", "observations", "episodes", "budget"];
+const createsRetiredTable = (statement: string): boolean =>
+  retiredReminderTables.some((table) => statement.startsWith(`CREATE TABLE IF NOT EXISTS ${table}(`));
 
 const supervisionStatements = [
   "CREATE TABLE IF NOT EXISTS supervisor_owned_threads(id TEXT PRIMARY KEY)",
@@ -285,11 +296,11 @@ const scopeReset = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
   yield* sql`INSERT INTO meta VALUES('supervisor_scope_version','main-v1')`;
 });
 
-const guidanceFormat1 = (sql: SqlClient.SqlClient) => Effect.gen(function* () {
-  // the guidance store: its tables, the default settings row and its later columns
-  yield* run(sql, guidanceStoreStatements);
+const guidanceFormat1 = (sql: SqlClient.SqlClient, context: MigrationContext) => Effect.gen(function* () {
+  // the guidance store: its tables (a created file without the retired ones), the default settings row and its later columns
+  yield* run(sql, context.creating ? guidanceStoreStatements.filter((statement) => !createsRetiredTable(statement)) : guidanceStoreStatements);
   yield* sql`INSERT OR IGNORE INTO meta VALUES('settings',${JSON.stringify({ generation: 1, evidenceHours: 24 })})`;
-  yield* addColumn(sql, "episodes", "object_id", "ALTER TABLE episodes ADD COLUMN object_id TEXT");
+  if (!context.creating) yield* addColumn(sql, "episodes", "object_id", "ALTER TABLE episodes ADD COLUMN object_id TEXT");
   for (const column of ["rule_generation", "settings_generation"])
     yield* addColumn(sql, "notices", column, `ALTER TABLE notices ADD COLUMN ${column} INTEGER NOT NULL DEFAULT -1`);
   // the project supervision store, the conversation store and the monitor store
@@ -393,9 +404,10 @@ const wordCharacter = (char: string): boolean => char >= "\u0080" || /[A-Za-z0-9
 /*
  * a stored declaration with its layout normalized, so the same statement laid out differently still matches: whitespace between
  * tokens is dropped, except one space between two words, which would otherwise read as one (`document TEXT` is no
- * `documentTEXT`). Quoted text keeps every byte, since whitespace there is data: a 'string literal' of a check, default or
- * partial index, or a "quoted", `quoted` or [quoted] identifier; a doubled quote character stays inside its quoted text, as
- * SQLite reads it. Only SQLite's five whitespace characters count as layout
+ * `documentTEXT`), and one between a closing quote and an opening quote of its kind, which would otherwise read as a doubled
+ * quote (`"a" "b"` is no `"a""b"`). Quoted text keeps every byte, since whitespace there is data: a 'string literal' of a
+ * check, default or partial index, or a "quoted", `quoted` or [quoted] identifier; a doubled quote character stays inside its
+ * quoted text, as SQLite reads it. Only SQLite's five whitespace characters count as layout
  */
 const declarationText = (sql: string): string => {
   let text = "";
@@ -414,7 +426,9 @@ const declarationText = (sql: string): string => {
       separated = true;
       continue;
     }
-    if (separated && wordCharacter(text.charAt(text.length - 1)) && wordCharacter(char)) text += " ";
+    // outside quoted text, a last character that is a quote closed its quoted text
+    const last = text.charAt(text.length - 1);
+    if (separated && (wordCharacter(last) && wordCharacter(char) || (char === "'" || char === '"' || char === "`") && char === last)) text += " ";
     separated = false;
     if (char === "'" || char === '"' || char === "`" || char === "[") close = char === "[" ? "]" : char;
     text += char;

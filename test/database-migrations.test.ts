@@ -7,9 +7,9 @@ import { describe, it } from "@effect/vitest";
 import { Effect, Exit, FileSystem } from "effect";
 import {
   catalogLegacy, catalogMigrations, guidanceLegacy, guidanceMigrations, type MigrationStep, type PolicySource, recognizeLegacy, schemaDifferences,
-  type SchemaSignature,
+  schemaSignature, type SchemaSignature,
 } from "../src/database-migrations.js";
-import { DatabaseUpgradeError, referenceSignature, upgradeDataDirectory } from "../src/database-upgrade.js";
+import { DatabaseUpgradeError, liveSignature, referenceSignature, upgradeDataDirectory } from "../src/database-upgrade.js";
 import { type DatabaseKind, openUpgradeDatabase, readOnlyDatabase } from "../src/db.js";
 
 /*
@@ -40,11 +40,11 @@ const query = (path: string, sql: string): ReadonlyArray<Record<string, unknown>
 
 const schemaText = (path: string) => query(path, "SELECT type, name, sql FROM sqlite_master ORDER BY type, name");
 
-// one step on the file through the startup upgrade's client, in one transaction, as the coordinator runs it
+// one step on an existing file through the startup upgrade's client, in one transaction, as the coordinator upgrades it
 const applyStep = (directory: string, kind: DatabaseKind, step: MigrationStep | undefined, policy: PolicySource = { kind: "none" }) => Effect.scoped(Effect.gen(function* () {
   assert.ok(step !== undefined);
   const { sql } = yield* openUpgradeDatabase(directory, kind, { create: false });
-  yield* sql.withTransaction(step.apply(sql, { policy }));
+  yield* sql.withTransaction(step.apply(sql, { policy, creating: false }));
 }));
 
 const recognition = (directory: string, file: "guidance.sqlite3" | "catalog.sqlite3", reference: SchemaSignature) =>
@@ -208,6 +208,43 @@ describe("declared schema and recognized layouts", () => {
     exec(join(literal, "catalog.sqlite3"), "DROP TABLE cursors; CREATE TABLE cursors (stream TEXT PRIMARY KEY CHECK(stream IN ('active', 'arc hive')), sequence INTEGER NOT NULL);");
     assert.deepEqual(yield* differences(literal, "catalog.sqlite3", reference), ["table:cursors"]);
     assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: literal, excludedThreadIds: [] }))), ["catalog.sqlite3", "incomplete_schema"]);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
+  it.live("a new guidance file gets the live schema, without the retired reminder rules' tables that format 1 declares and an upgrade keeps", () => Effect.gen(function* () {
+    const retired = ["table:budget", "table:episodes", "table:mutes", "table:observations", "table:rules"];
+    const history = yield* referenceSignature("guidance");
+    const live = yield* liveSignature("guidance");
+    // the live schema is the declared one without the retired tables, with every other object declared alike
+    assert.deepEqual([...history.keys()].filter((key) => !live.has(key)).sort(), retired);
+    for (const [key, declaration] of live) assert.equal(history.get(key), declaration, key);
+    // format 1, the layout every release declared, keeps them: format 0 files are still recognized against all of it
+    const releases = yield* referenceSignature("guidance", 1);
+    for (const key of retired) assert.ok(releases.has(key), key);
+    // the catalog retired nothing
+    assert.deepEqual(yield* liveSignature("catalog"), yield* referenceSignature("catalog"));
+    // a new directory's guidance has the live schema only and starts again unchanged; a missing live table is still refused
+    const directory = yield* temporaryDirectory;
+    yield* upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] });
+    assert.deepEqual(yield* differences(directory, "guidance.sqlite3", history), retired);
+    assert.deepEqual(yield* differences(directory, "guidance.sqlite3", live), []);
+    assert.deepEqual((yield* upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] })).files, []);
+    exec(join(directory, "guidance.sqlite3"), "DROP TABLE classifications;");
+    assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }))), ["guidance.sqlite3", "incomplete_schema"]);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
+  it.live("a layout's whitespace is not its declaration, but a space between two quoted identifiers of one kind is: they never read as one doubled quote", () => Effect.gen(function* () {
+    const signature = (statement: string) => Effect.gen(function* () {
+      const directory = yield* temporaryDirectory;
+      exec(join(directory, "guidance.sqlite3"), statement);
+      return yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, "guidance.sqlite3"), schemaSignature));
+    });
+    // a column named a"b, and a column a whose declared type is "b" TEXT; likewise with backquotes
+    for (const quote of ['"', "`"]) {
+      const doubled = yield* signature(`CREATE TABLE t(${quote}a${quote}${quote}b${quote} TEXT);`);
+      const apart = yield* signature(`CREATE TABLE t(${quote}a${quote} ${quote}b${quote} TEXT);`);
+      assert.notDeepEqual(apart, doubled, quote);
+      assert.deepEqual(yield* signature(`CREATE TABLE t(\n  ${quote}a${quote}   ${quote}b${quote}\tTEXT\n);`), apart, `only the layout differs (${quote})`);
+    }
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
   it.live("format 0 layouts: table-less is empty, a release's declarations with its first transaction are recognized, anything else is unknown", () => Effect.gen(function* () {

@@ -129,13 +129,13 @@ const stores: Readonly<Record<DatabaseKind, StoreSpec>> = {
 };
 
 /*
- * the declared schema of each store file at its current format, computed at most once per run and only when an existing file
- * needs it: a fresh directory's files come from the same steps on an empty file and are never compared with it
+ * a declared schema of each store file, computed at most once per run and only when an existing file needs it: a fresh
+ * directory's files come from the same steps on an empty file and are never compared with it
  */
 type References = Readonly<Record<DatabaseKind, Effect.Effect<SchemaSignature, DatabaseUpgradeError>>>;
 
-// the context of every step but guidance's, whose format 2 is the only one that writes a policy
-const noPolicy: MigrationContext = { policy: { kind: "none" } };
+// the policy of every step but guidance's, whose format 2 is the only one that writes a policy
+const noPolicy: PolicySource = { kind: "none" };
 
 // format 1 of the access database is the schema the auth service has always validated exactly; the step only records it
 const accessSteps: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1, apply: () => Effect.void }];
@@ -161,26 +161,38 @@ const stepsBetween = (steps: ReadonlyArray<MigrationStep>, from: number, to: num
   return chain;
 };
 
-/**
- * The declared schema of a store file at `format` (its current one by default): its steps applied to an empty private in-memory
- * database, the program a fresh file goes through. Existing files are compared with it, never with a second copy of the
- * statements. Format 1 is the layout every release declared, which format 0 files are recognized against.
- */
-export const referenceSignature = (kind: DatabaseKind, format: number = DatabaseFiles[kind].format): Effect.Effect<SchemaSignature, DatabaseUpgradeError> => {
+// the schema the steps of `kind` up to `format` give an empty private in-memory database, creating a new file or replaying history
+const stepsSignature = (kind: DatabaseKind, format: number, creating: boolean): Effect.Effect<SchemaSignature, DatabaseUpgradeError> => {
   const { file } = DatabaseFiles[kind];
   return Effect.scoped(Effect.gen(function* () {
     const steps = stepsBetween(stores[kind].steps, 0, format);
     if (steps === null) return yield* refusal(file, "migration_failed");
     const sql = yield* memoryDatabase;
-    const context: MigrationContext = { policy: { kind: "fresh", excludedThreadIds: [] } };
+    const context: MigrationContext = { policy: { kind: "fresh", excludedThreadIds: [] }, creating };
     yield* sql.withTransaction(Effect.forEach(steps, (step) => step.apply(sql, context), { discard: true }));
     return yield* schemaSignature(sql);
   })).pipe(asUpgradeError(file, "migration_failed"));
 };
 
+/**
+ * The declared schema of a store file at `format` (its current one by default) as its history built it: its steps applied to an
+ * empty private in-memory database as they upgrade an existing file, never a second copy of the statements. Format 1 is the
+ * layout every release declared: format 0 files are recognized against it, and a format 1 file must declare all of it.
+ */
+export const referenceSignature = (kind: DatabaseKind, format: number = DatabaseFiles[kind].format): Effect.Effect<SchemaSignature, DatabaseUpgradeError> =>
+  stepsSignature(kind, format, false);
+
+/**
+ * The live schema of a store file at its current format: what this version creates for a new file, its steps applied to an empty
+ * private in-memory database. Every current file must declare it; an upgraded one also keeps the tables of retired features.
+ */
+export const liveSignature = (kind: DatabaseKind): Effect.Effect<SchemaSignature, DatabaseUpgradeError> =>
+  stepsSignature(kind, DatabaseFiles[kind].format, true);
+
 /*
  * the preflight of one store file, read only: a read-only client never writes, creates no file and leaves a live WAL as it is. A
- * current file is compared with `reference`, a format 0 file is recognized against `releases`, the layout every release declared
+ * current file is compared with `reference`, the live schema; a format 0 file is recognized against `releases`, the layout every
+ * release declared, which an older file with a format must declare whole
  */
 const inspect = (dataDirectory: string, spec: StoreSpec, reference: Effect.Effect<SchemaSignature, DatabaseUpgradeError>,
   releases: Effect.Effect<SchemaSignature, DatabaseUpgradeError>): Effect.Effect<FileState, DatabaseUpgradeError, FileSystem.FileSystem> => {
@@ -302,7 +314,7 @@ interface Migration {
   readonly target: number;
   readonly steps: ReadonlyArray<MigrationStep>;
   /*
-   * the declared schema an upgraded file must have before the commit; none for a file this run creates (the same steps on an
+   * the live schema an upgraded file must declare before the commit; none for a file this run creates (the same steps on an
    * empty file) or for the access database, which the auth service validates exactly
    */
   readonly reference: SchemaSignature | null;
@@ -341,25 +353,26 @@ const migrate = (database: UpgradeDatabase, migration: Migration): Effect.Effect
   }).pipe(asUpgradeError(migration.file, "migration_failed"));
 };
 
-const storeMigration = (spec: StoreSpec, state: FileState, context: MigrationContext, reference: SchemaSignature | null): Migration => {
+const storeMigration = (spec: StoreSpec, state: FileState, policy: PolicySource, reference: SchemaSignature | null): Migration => {
   const { file, format, journal } = DatabaseFiles[spec.kind];
+  const creating = state.state !== "upgradable";
   return {
-    file, target: format, steps: spec.steps, reference, journal, context,
+    file, target: format, steps: spec.steps, reference, journal, creating, context: { policy, creating },
     from: state.state === "upgradable" ? state.format : 0,
-    creating: state.state !== "upgradable",
   };
 };
 
-const upgradeStore = (dataDirectory: string, spec: StoreSpec, state: FileState, context: MigrationContext, reference: SchemaSignature | null) =>
+const upgradeStore = (dataDirectory: string, spec: StoreSpec, state: FileState, policy: PolicySource, reference: SchemaSignature | null) =>
   Effect.scoped(Effect.flatMap(
     openUpgradeDatabase(dataDirectory, spec.kind, { create: state.state === "absent" }).pipe(asUpgradeError(DatabaseFiles[spec.kind].file, "unreadable")),
-    (database) => migrate(database, storeMigration(spec, state, context, reference))));
+    (database) => migrate(database, storeMigration(spec, state, policy, reference))));
 
 const upgradeAccess = (dataDirectory: string, from: number) => Effect.scoped(Effect.gen(function* () {
   const opened = yield* openExistingAccessDatabase(dataDirectory).pipe(asUpgradeError(accessFile, "access_invalid"));
   if (opened === null || opened.database === null) return yield* refusal(accessFile, "concurrent_change");
   return yield* migrate(opened.database, {
-    file: accessFile, from, target: DatabaseFormats.access, steps: accessSteps, reference: null, creating: false, journal: "delete", context: noPolicy,
+    file: accessFile, from, target: DatabaseFormats.access, steps: accessSteps, reference: null, creating: false, journal: "delete",
+    context: { policy: noPolicy, creating: false },
   });
 }));
 
@@ -441,13 +454,16 @@ const completeBootstrap = (dataDirectory: string) => Effect.gen(function* () {
 export const upgradeDataDirectory = (options: UpgradeOptions): Effect.Effect<UpgradeReport, DatabaseUpgradeError, FileSystem.FileSystem> => {
   const { dataDirectory } = options;
   return Effect.gen(function* () {
-    // 0. the declared schema of every file at its current format, from its own statements, once and only if a file needs it
+    // 0. the live schema of every file at its current format, from its own statements, once and only if a file needs it
     const references: References = {
-      catalog: yield* Effect.cached(referenceSignature("catalog")),
-      guidance: yield* Effect.cached(referenceSignature("guidance")),
+      catalog: yield* Effect.cached(liveSignature("catalog")),
+      guidance: yield* Effect.cached(liveSignature("guidance")),
     };
     // the layout every release declared, format 1: the catalog's current one, guidance's before its policy table
-    const releases: References = { catalog: references.catalog, guidance: yield* Effect.cached(referenceSignature("guidance", 1)) };
+    const releases: References = {
+      catalog: yield* Effect.cached(referenceSignature("catalog", 1)),
+      guidance: yield* Effect.cached(referenceSignature("guidance", 1)),
+    };
     const donorReference = yield* Effect.cached(donorSignature());
     // 1. the read-only preflight of every file; nothing is written before every file passed it
     const access = yield* inspectAccess(dataDirectory);
@@ -493,7 +509,7 @@ export const upgradeDataDirectory = (options: UpgradeOptions): Effect.Effect<Upg
       const state = files[kind];
       if (state.state === "current") continue;
       const reference = state.state === "upgradable" ? yield* references[kind] : null;
-      yield* upgradeStore(dataDirectory, stores[kind], state, kind === "guidance" ? { policy } : noPolicy, reference)
+      yield* upgradeStore(dataDirectory, stores[kind], state, kind === "guidance" ? policy : noPolicy, reference)
         .pipe(Effect.map(record(DatabaseFiles[kind].file, state, DatabaseFiles[kind].format)));
     }
 

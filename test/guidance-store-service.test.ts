@@ -64,10 +64,10 @@ describe("GuidanceStore", () => {
       yield* store.classify("project-a", "scratch", settings.generation);
       return { schema: yield* schema(db), settings, saved: yield* store.settings() };
     }));
-    // the guidance store's own tables, the retired reminder tables among them: existing installations keep their rows
+    // the guidance store's own tables; a new file no longer gets the retired reminder rules' tables, which existing installations keep
     const tables = new Set(initialized.filter((row) => row.type === "table").map((row) => String(row.name)));
-    for (const table of ["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"])
-      assert.ok(tables.has(table), `the initialized file has ${table}`);
+    for (const table of ["meta", "classifications", "notices", "activity"]) assert.ok(tables.has(table), `the initialized file has ${table}`);
+    for (const table of ["rules", "mutes", "observations", "episodes", "budget"]) assert.ok(!tables.has(table), `the initialized file has no ${table}`);
     assert.deepEqual(first.settings, defaults);
     assert.deepEqual(first.saved, { ...defaults, generation: 2 });
     // building the store twice ran no DDL: the schema is still the one the startup upgrade created
@@ -211,7 +211,7 @@ describe("GuidanceStore", () => {
     assert.equal(observed.activities.some((item) => item.noticeId === "uncertain-a" && item.reason !== "unreconciled_notice"), false);
   }), { timeout: 10_000 });
 
-  it.effect("prune blanks old notice text and activity detail, deletes month-old activity and week-old budget days", () => Effect.gen(function* () {
+  it.effect("prune blanks old notice text and activity detail and deletes month-old activity", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     const now = Date.parse("2026-10-23T12:00:00.000Z");
     yield* TestClock.setTime(now);
@@ -221,17 +221,14 @@ describe("GuidanceStore", () => {
       yield* store.record({ kind: "owner_action", threadId: null, ruleId: null, runId: null, state: "done", reason: "old", detail: "old detail" }, old);
       yield* store.record({ kind: "owner_action", threadId: null, ruleId: null, runId: null, state: "done", reason: "new", detail: "new detail" }, now);
       yield* store.record({ kind: "owner_action", threadId: null, ruleId: null, runId: null, state: "done", reason: "ancient", detail: null }, now - 31 * 86_400_000);
-      yield* db`INSERT INTO budget VALUES('2026-10-15',1),('2026-10-16',2),('2026-10-23',3)`;
       yield* store.prune();
       return {
         notices: yield* rows(db, "SELECT id,text FROM notices ORDER BY id"),
         activity: yield* rows(db, "SELECT json_extract(document,'$.reason') AS reason, json_extract(document,'$.detail') AS detail FROM activity ORDER BY created_at"),
-        budget: yield* rows(db, "SELECT day FROM budget ORDER BY day"),
       };
     }));
     assert.deepEqual(observed.notices, [{ id: "new-visible", text: "new text" }, { id: "old-uncertain", text: "kept text" }, { id: "old-visible", text: "" }]);
     assert.deepEqual(observed.activity, [{ reason: "old", detail: null }, { reason: "new", detail: "new detail" }]);
-    assert.deepEqual(observed.budget, [{ day: "2026-10-16" }, { day: "2026-10-23" }]);
   }), { timeout: 10_000 });
 
   it.live("CC-GDB-IMPLICIT: a prune that meets an activity row it cannot decode fails typed and leaves every row as it was", () => Effect.gen(function* () {
