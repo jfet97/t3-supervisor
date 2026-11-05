@@ -179,6 +179,13 @@ describe("declared schema and recognized layouts", () => {
     exec(join(redeclared, "catalog.sqlite3"), "DROP TABLE thread_revisions; CREATE TABLE thread_revisions (thread_id TEXT, revision INTEGER NOT NULL);");
     assert.deepEqual(yield* differences(redeclared, "catalog.sqlite3", reference), ["table:thread_revisions"]);
     assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: redeclared, excludedThreadIds: [] }))), ["catalog.sqlite3", "incomplete_schema"]);
+
+    // a check whose literal differs only by a space inside the quotes: a different constraint, not a different layout
+    const literal = yield* temporaryDirectory;
+    yield* upgradeDataDirectory({ dataDirectory: literal, excludedThreadIds: [] });
+    exec(join(literal, "catalog.sqlite3"), "DROP TABLE cursors; CREATE TABLE cursors (stream TEXT PRIMARY KEY CHECK(stream IN ('active', 'arc hive')), sequence INTEGER NOT NULL);");
+    assert.deepEqual(yield* differences(literal, "catalog.sqlite3", reference), ["table:cursors"]);
+    assert.deepEqual(refusal(yield* Effect.exit(upgradeDataDirectory({ dataDirectory: literal, excludedThreadIds: [] }))), ["catalog.sqlite3", "incomplete_schema"]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
   it.live("format 0 layouts: table-less is empty, a release's declarations with its first transaction are recognized, anything else is unknown", () => Effect.gen(function* () {
@@ -217,5 +224,15 @@ describe("declared schema and recognized layouts", () => {
     assert.deepEqual(yield* catalog(catalogTables.replace("threads (id TEXT PRIMARY KEY,", "threads (id TEXT,")), { kind: "unknown", object: "threads" });
     assert.deepEqual(yield* catalog(catalogTables.replace(" CHECK(stream IN ('active', 'archive'))", "")), { kind: "unknown", object: "cursors" });
     assert.deepEqual(yield* catalog(catalogTables.replace("ON threads(project_id)", "ON threads(document)")), { kind: "unknown", object: "threads_project" });
+    // whitespace between tokens is layout, whitespace inside a quoted literal is data: another check, another partial index
+    assert.deepEqual(yield* catalog(catalogTables.replace("CHECK(stream IN ('active', 'archive'))", "CHECK(stream IN ('active', 'arc hive'))")),
+      { kind: "unknown", object: "cursors" });
+    const members = (condition: string) => `${guidanceCore}
+      CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,
+        epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id));
+      CREATE UNIQUE INDEX supervisor_team_member_identity ON supervisor_team_members(member_thread_id) WHERE ${condition};`;
+    assert.deepEqual(yield* guidance(members("state<>'retired'")), { kind: "recognized" });
+    assert.deepEqual(yield* guidance(members("state <> 'retired'")), { kind: "recognized" });
+    assert.deepEqual(yield* guidance(members("state<>'ret ired'")), { kind: "unknown", object: "supervisor_team_member_identity" });
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 });

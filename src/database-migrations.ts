@@ -327,19 +327,42 @@ export const policyMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1,
 
 /**
  * A file's schema as SQLite stores it: every user object (table, index, view or trigger, without SQLite's internal ones) keyed
- * as `type:name`, with its stored declaration without whitespace. Equal signatures mean the same tables with the same columns,
- * types, defaults, keys and constraints, and the same index definitions.
+ * as `type:name`, with its stored declaration without the whitespace between tokens. Equal signatures mean the same tables with
+ * the same columns, types, defaults, keys and constraints, and the same index definitions.
  */
 export type SchemaSignature = ReadonlyMap<string, string>;
 
 const Declaration = Schema.Struct({ type: Schema.String, name: Schema.String, sql: Schema.String });
 const decodeDeclarations = Schema.decodeUnknownEffect(Schema.Array(Declaration));
 
+/*
+ * a stored declaration without the whitespace between its tokens, so the same statement laid out differently still matches.
+ * Quoted text keeps every byte, since whitespace there is data: a 'string literal' of a check, default or partial index, or a
+ * "quoted", `quoted` or [quoted] identifier; a doubled quote character stays inside its quoted text, as SQLite reads it
+ */
+const declarationText = (sql: string): string => {
+  let text = "";
+  let close: string | null = null;
+  for (let index = 0; index < sql.length; index++) {
+    const char = sql.charAt(index);
+    if (close !== null) {
+      text += char;
+      if (char !== close) continue;
+      if (close !== "]" && sql.charAt(index + 1) === close) text += sql.charAt(++index);
+      else close = null;
+    } else if (char === "'" || char === '"' || char === "`" || char === "[") {
+      close = char === "[" ? "]" : char;
+      text += char;
+    } else if (!/\s/u.test(char)) text += char;
+  }
+  return text;
+};
+
 /** The signature of the schema a file stores. */
 export const schemaSignature = (sql: SqlClient.SqlClient): Effect.Effect<SchemaSignature, SqlError | MigrationRefused> =>
   sql.unsafe("SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name").pipe(
     Effect.flatMap((rows) => decodeDeclarations(rows).pipe(Effect.mapError(() => new MigrationRefused({ table: "sqlite_master", reason: "layout" })))),
-    Effect.map((rows) => new Map(rows.map((row): readonly [string, string] => [`${row.type}:${row.name}`, row.sql.replace(/\s+/gu, "")]))));
+    Effect.map((rows) => new Map(rows.map((row): readonly [string, string] => [`${row.type}:${row.name}`, declarationText(row.sql)]))));
 
 /**
  * The objects of `reference` (the signature the current format's steps give an empty database) that a file does not have or

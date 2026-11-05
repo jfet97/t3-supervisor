@@ -84,16 +84,16 @@ const assertPreserved = (before: Rows, after: Rows, allowed: (table: string) => 
   }
 };
 
-// a file's user objects with their stored declarations, whitespace removed, keyed as type:name
+// a file's user objects with their stored declarations, byte for byte, keyed as type:name
 const Declared = Schema.Struct({ type: Schema.String, name: Schema.String, sql: Schema.String });
 const declarations = (path: string) => read(path, (db) => Object.fromEntries(
   sqliteRows(db, Declared, "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY type, name")
-    .map((row) => [`${row.type}:${row.name}`, row.sql.replace(/\s+/gu, "")])));
+    .map((row) => [`${row.type}:${row.name}`, row.sql])));
 
 // the same for the frozen Supervisor 0.0.27 layout (test/fixtures/persistence), an independent record of the declarations
 const frozenDeclarations = (name: FixtureDatabaseName) => Object.fromEntries(expectedDumpSync("format0-current-unversioned", name).sqliteMaster
   .filter((row) => !row.name.startsWith("sqlite_"))
-  .map((row) => [`${row.type}:${row.name}`, (row.sql ?? "").replace(/\s+/gu, "")]));
+  .map((row) => [`${row.type}:${row.name}`, row.sql ?? ""]));
 
 // format 0 files as Supervisor 0.0.27 left them, written literally (test input, not today's statements)
 const legacyCatalog = (directory: string, threadDocument = '{"id":"thread-1","title":"A chat","projectId":"project-1","lineage":{"parentThreadId":null,"relationshipToParent":null}}') =>
@@ -278,7 +278,7 @@ describe("startup upgrade", () => {
     ] });
     for (const file of storeFiles) assert.deepEqual([formatOf(join(directory, file)), journalOf(join(directory, file))], [1, "wal"], file);
     assert.deepEqual(tableRows(join(directory, "thread-settings.sqlite3")).settings, [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
-    // a fresh file declares exactly what Supervisor 0.0.27 declared: format 1 is that schema
+    // a fresh file declares exactly what Supervisor 0.0.27 declared, byte for byte: format 1 is that schema
     assert.deepEqual(declarations(join(directory, "catalog.sqlite3")), frozenDeclarations("catalog"));
     assert.deepEqual(declarations(join(directory, "guidance.sqlite3")), frozenDeclarations("guidance"));
     assert.deepEqual(declarations(join(directory, "thread-settings.sqlite3")), frozenDeclarations("thread-settings"));
