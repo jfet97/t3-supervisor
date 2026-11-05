@@ -40,7 +40,6 @@ export type Journey = typeof Journey.Type;
 export const journeyPorts = {t3: 3773, ui: 9008, health: 9007, probeUi: 9018, probeHealth: 9017} as const;
 const t3Url = `http://127.0.0.1:${journeyPorts.t3}`;
 const origin = `http://127.0.0.1:${journeyPorts.ui}`;
-const sessionSubject = "t3-supervisor-upgrade:";
 const readCredential = {name: "read", variable: "T3_TOKEN_FILE", scopes: ["orchestration:read", "filesystem:read"]} as const;
 const readyTimeoutMs = 180_000;
 const seedFilePath = join(repositoryRoot, "test", "fixtures", "upgrade-journeys", "seed-sets.json");
@@ -210,22 +209,17 @@ const planJourney = (args: ReadonlyArray<string>) => Effect.gen(function* () {
 
 // ---- serve: T3 for the journey's lifetime, in the journey container's main process
 
-const SessionList = Schema.Array(Schema.Struct({sessionId: Schema.String, subject: Schema.optionalKey(Schema.NullOr(Schema.String))}));
-const decodeSessions = Schema.decodeUnknownEffect(Schema.fromJsonString(SessionList));
-
-// every session this journey issued, found by its subject also when its issuance reply was lost, is revoked
-const revokeJourneySessions = (cli: T3Cli) => Effect.gen(function* () {
-  const listed = yield* decodeSessions((yield* t3Command(cli, ["auth", "session", "list", "--json"])).trim());
-  for (const session of listed) if (session.subject?.startsWith(sessionSubject) === true) yield* t3Command(cli, ["auth", "session", "revoke", session.sessionId]);
-});
-
+/* On the container's stop the journey's read session, as setup recorded it, is revoked, then T3 stops within its bound, before the
+ * process harness kills the rest. The session is issued without a subject, the form every published T3 slot accepts; T3's data dies
+ * with the journey folder in any case.
+ */
 const serve = (folder: RunFolder) => Effect.scoped(Effect.gen(function* () {
   const plan = yield* readPlan(folder);
   const cli = journeyCli(folder, plan);
   const server = yield* startProcess(cli.executable, serveArguments(folder, journeyPorts.t3), {env: cli.env, cwd: cli.cwd});
-  // on the container's stop: the journey's sessions revoked, then T3 stopped within its bound, before the process harness kills the rest
   yield* Effect.addFinalizer(() => Effect.gen(function* () {
-    yield* Effect.ignore(revokeJourneySessions(cli));
+    const stack = yield* readRecord(folder, "stack.json", decodeStack);
+    if (Option.isSome(stack)) yield* Effect.ignore(t3Command(cli, ["auth", "session", "revoke", stack.value.sessionId]));
     if (groupAlive(server.pid)) process.kill(-server.pid, "SIGTERM");
     yield* Effect.ignore(server.closed(20_000));
   }));
@@ -248,7 +242,7 @@ const setup = (folder: RunFolder) => Effect.gen(function* () {
   if (descriptor.serverVersion !== plan.t3.version || descriptor.orchestrationProtocolVersion !== orchestrationProtocol)
     return yield* failure(`T3 reports ${descriptor.serverVersion} on protocol ${descriptor.orchestrationProtocolVersion}, not ${plan.t3.version} on ${orchestrationProtocol}`);
   const session = yield* issueSession(cli, readCredential, {file: folder.dir("secrets", "t3-read-token"), ttl: "8h",
-    label: "t3-supervisor-upgrade-read", subject: `${sessionSubject}read`}).pipe(Effect.mapError((error) => failure(error.message)));
+    label: "t3-supervisor-upgrade-read"}).pipe(Effect.mapError((error) => failure(error.message)));
   const path = folder.dir("projects", "upgrade-journey");
   yield* fs.makeDirectory(path, {recursive: true});
   yield* fs.writeFileString(join(path, "README.md"), "# Upgrade journey\n\nA disposable project created by `pnpm dev:upgrade`.\n");
