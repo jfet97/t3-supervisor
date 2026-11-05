@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Option, Schema } from "effect";
 
@@ -11,7 +12,8 @@ import { Option, Schema } from "effect";
 /** The database files of a data directory in the order the startup upgrade prepares them (src/database-upgrade.ts). */
 export const databaseFiles = ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"] as const;
 export type DatabaseFile = typeof databaseFiles[number];
-export type Formats = Readonly<Record<DatabaseFile, number>>;
+/** Each file's format at the candidate; null for a retired file, whose content the candidate moves into another file before removing it. */
+export type Formats = Readonly<Record<DatabaseFile, number | null>>;
 
 /** A stored SQLite value, typed exactly: an integer as its decimal text, a real as its text, a string or a blob as it is stored. */
 export type StoredValue = null | {readonly i: string} | {readonly r: string} | {readonly s: string} | {readonly b: string};
@@ -81,9 +83,12 @@ export type SeedSelection =
  */
 export const selectSeedSet = (seeds: SeedFile, shapes: ReadonlyArray<FileShape>, current: Formats): SeedSelection => {
   for (const file of databaseFiles) {
+    const target = current[file];
+    // a retired file is absent when the binary that created the directory had retired it already; the candidate judges any format of it
+    if (target === null) continue;
     const shape = shapes.find((candidate) => candidate.file === file);
     if (shape === undefined || !shape.present || shape.format === null) return {kind: "unsupported", reason: `${file} is missing`};
-    if (shape.format > current[file]) return {kind: "unsupported", reason: `${file} has format ${shape.format}, newer than format ${current[file]}, which the candidate runs`};
+    if (shape.format > target) return {kind: "unsupported", reason: `${file} has format ${shape.format}, newer than format ${target}, which the candidate runs`};
   }
   const matching = seeds.sets.filter((set) => {
     const shape = shapes.find((candidate) => candidate.file === set.file);
@@ -103,18 +108,22 @@ export const selectSeedSet = (seeds: SeedFile, shapes: ReadonlyArray<FileShape>,
 /** The table each literal seed statement writes, or none for a statement of another form. */
 export const statementTable = (statement: string): string | undefined => /^INSERT INTO ([a-z_]+)\(/u.exec(statement)?.[1];
 
-/** A file whose format a start changes: its format before and the candidate's current one. */
+/** A file a start changes: its format before and the candidate's current one, null for a retired file whose content it moves. */
 export interface ChangingFile {
   readonly file: DatabaseFile;
   readonly format: number;
-  readonly targetFormat: number;
+  readonly targetFormat: number | null;
 }
 
-/** The files a start must back up before changing them: every file at an older format than the candidate runs, in upgrade order. */
+/**
+ * The files a start must back up before changing them, in upgrade order: every file at an older format than the candidate runs, and
+ * a retired file, which the candidate imports into another file and then removes.
+ */
 export const changingFiles = (shapes: ReadonlyArray<FileShape>, current: Formats): ReadonlyArray<ChangingFile> =>
   databaseFiles.flatMap((file) => {
     const shape = shapes.find((candidate) => candidate.file === file);
-    return shape?.present === true && shape.format !== null && shape.format < current[file] ? [{file, format: shape.format, targetFormat: current[file]}] : [];
+    const target = current[file];
+    return shape?.present === true && shape.format !== null && (target === null || shape.format < target) ? [{file, format: shape.format, targetFormat: target}] : [];
   });
 
 /** The parts of a backup set's manifest.json (src/database-backup.ts) the journey checks. */
@@ -123,7 +132,7 @@ export const BackupManifest = Schema.Struct({
   manifestFormat: Schema.Literal(1),
   backupSet: Schema.String,
   files: Schema.Array(Schema.Struct({
-    file: Schema.String, backup: Schema.String, format: Schema.Number, targetFormat: Schema.Number, sha256: Schema.String, integrity: Schema.Literal("ok"),
+    file: Schema.String, backup: Schema.String, format: Schema.Number, targetFormat: Schema.NullOr(Schema.Number), sha256: Schema.String, integrity: Schema.Literal("ok"),
   })),
 });
 export type BackupManifest = typeof BackupManifest.Type;
@@ -208,6 +217,40 @@ export const rowDifferences = (before: FileRows, after: FileRows, allowAdditions
   return problems;
 };
 
+// the meta key of guidance's import marker (src/database-migrations.ts): the one row the policy's move adds to meta
+const importKey = "thread_policy_import";
+const ImportMarker = Schema.Struct({documentSha256: Schema.String, generation: Schema.Number, backupSet: Schema.String});
+const decodeImportMarker = Schema.decodeUnknownOption(Schema.fromJsonString(ImportMarker));
+const decodeGeneration = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Struct({generation: Schema.Number})));
+const textOf = (value: StoredValue | undefined): string | null => value !== null && value !== undefined && "s" in value ? value.s : null;
+const isImportMarker = (stored: StoredRow): boolean => textOf(stored.key) === importKey;
+
+/** Guidance's rows `after` a start without its import marker, unless `before` held one already: the one row the policy's move adds. */
+export const withoutImportMarker = (before: FileRows, after: FileRows): FileRows =>
+  (before.meta ?? []).some(isImportMarker) || after.meta === undefined ? after : {...after, meta: after.meta.filter((stored) => !isImportMarker(stored))};
+
+/**
+ * What contradicts the move of a retired thread-settings.sqlite3's policy into guidance: the file's one row must be guidance's
+ * thread_policy row byte for byte, the import marker must name the document's SHA-256, its generation and a backup set of the
+ * directory, and the file must be gone. A directory whose creator had retired the file already has nothing to move.
+ */
+export const movedPolicyProblems = (retired: FileRows | undefined, guidance: FileRows | undefined, retiredPresent: boolean,
+  sets: ReadonlyArray<string>): ReadonlyArray<string> => {
+  const policy = retired?.settings;
+  if (policy === undefined) return retiredPresent ? ["the retired policy file appeared"] : [];
+  const problems = retiredPresent ? ["the retired policy file is still there"] : [];
+  if (!isDeepStrictEqual(guidance?.thread_policy, policy)) problems.push("guidance's thread_policy is not the policy row byte for byte");
+  const document = textOf(policy[0]?.document);
+  const marker = Option.flatMap(Option.fromNullishOr(textOf((guidance?.meta ?? []).find(isImportMarker)?.value)), decodeImportMarker);
+  if (Option.isNone(marker)) return [...problems, "guidance has no import marker"];
+  if (document === null || marker.value.documentSha256 !== createHash("sha256").update(document, "utf8").digest("hex"))
+    problems.push("the import marker does not name the document's SHA-256");
+  if (!Option.exists(document === null ? Option.none() : decodeGeneration(document), (value) => value.generation === marker.value.generation))
+    problems.push("the import marker does not name the document's generation");
+  if (!sets.includes(marker.value.backupSet)) problems.push("the import marker names no backup set of the directory");
+  return problems;
+};
+
 /**
  * The identities the catalog keeps across a start that may rebuild its documents from T3: the environment binding and activations,
  * the projects and each conversation with its project.
@@ -231,6 +274,7 @@ const EventLine = Schema.Struct({
   file: Schema.optionalKey(Schema.NullOr(Schema.String)),
   backup_set: Schema.optionalKey(Schema.String),
   files: Schema.optionalKey(Schema.String),
+  policy_imported: Schema.optionalKey(Schema.Boolean),
 });
 export type EventLine = typeof EventLine.Type;
 const decodeEventLine = Schema.decodeUnknownOption(Schema.fromJsonString(EventLine));
@@ -246,18 +290,29 @@ export const startupFailure = (events: ReadonlyArray<EventLine>): string | null 
   return events.find((event) => event.event === "supervisor_failed")?.reason ?? null;
 };
 
-/** What a start's own events must say about its upgrade: one completed upgrade naming the new set, or none at the current formats. */
+/**
+ * What a start's own events must say about its upgrade: one completed upgrade naming the new set and every format change, recording
+ * whether it imported a retired file's policy, and that file's one removal under the same set; none of it at the current formats.
+ */
 export const upgradeEventProblems = (events: ReadonlyArray<EventLine>, expected: ReadonlyArray<ChangingFile>, set: string | null): ReadonlyArray<string> => {
   const completed = events.filter((event) => event.event === "database_upgrade_completed");
   const failed = events.filter((event) => event.event === "database_upgrade_failed");
+  const removals = events.filter((event) => event.event === "database_policy_file_removed");
   const problems = failed.length > 0 ? [`the start logged ${failed.length} failed upgrade(s)`] : [];
-  if (expected.length === 0) return completed.length > 0 ? [...problems, `a start at the current formats logged ${completed.length} upgrade(s)`] : problems;
+  if (expected.length === 0) return [...problems, ...(completed.length > 0 ? [`a start at the current formats logged ${completed.length} upgrade(s)`] : []),
+    ...(removals.length > 0 ? [`a start at the current formats logged ${removals.length} removal(s) of a retired file`] : [])];
   if (completed.length !== 1) return [...problems, `the start logged ${completed.length} completed upgrades instead of one`];
   const [event] = completed;
   if (event?.backup_set !== set) problems.push("the completed upgrade does not name the new backup set");
+  // a retired file changes no format: the upgrade records its import, and its removal follows under the same set
+  const imported = expected.some((change) => change.targetFormat === null);
   const logged = (event?.files ?? "").split(",").filter(Boolean).sort();
-  const wanted = expected.map((change) => `${change.file}:${change.format}>${change.targetFormat}`).sort();
+  const wanted = expected.filter((change) => change.targetFormat !== null).map((change) => `${change.file}:${change.format}>${change.targetFormat}`).sort();
   if (!isDeepStrictEqual(logged, wanted)) problems.push(`the completed upgrade names ${logged.join(", ") || "no file"} instead of ${wanted.join(", ")}`);
+  if ((event?.policy_imported === true) !== imported) problems.push(imported ? "the completed upgrade does not record the policy import" : "the completed upgrade records a policy import");
+  const named = removals.filter((removal) => removal.backup_set === set).length;
+  if (imported ? removals.length !== 1 || named !== 1 : removals.length > 0)
+    problems.push(`the start logged ${removals.length} removal(s) of the retired policy file${imported ? " instead of one under the new set" : ""}`);
   return problems;
 };
 

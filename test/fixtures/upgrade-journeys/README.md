@@ -19,5 +19,6 @@ native key included. They are fixture input, labelled as such, never published-b
 The statements are copied verbatim from
 `test/fixtures/persistence/format0-current-unversioned/guidance.rows.sql`, and the declarations from that layout's
 `guidance.expected.json`; `test/upgrade-journey-evidence.test.ts` checks both against those frozen files and the format 1
-contract against the candidate's declared schema. Never edit them or regenerate them from current schema code: a new
+contract against the candidate's declared schema at format 1. Guidance format 2 adds only the policy table, which no seed
+statement writes, so its set carries the format 1 contract at format 2 and is checked against the candidate's format 2 schema. Never edit them or regenerate them from current schema code: a new
 persisted format or layout gets a new set. File names must not match the repository's ignored database patterns.
