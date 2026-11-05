@@ -267,7 +267,7 @@ Main reuses a version branch run only when the proof finds every job of its gate
 each named after the calling job, such as `t3-compatibility / nightly-1 on x64` or
 `supervisor-upgrades / stable journey`. Main then records that reuse in the plan step
 **Reuse the version PR compatibility evidence** and links that run, whose `t3-lock` and
-`upgrade-lock` artifacts are the frozen locks. A merged version PR publishes
+`upgrade-lock` artifacts are the frozen T3 target lock and release lock. A merged version PR publishes
 stable automatically only when main's run recorded that reuse. An explicit stable dispatch
 stays the existing manual path and does not check that record, so the gate does not cover
 every stable publication. A version merge that main had to validate in full, for example
@@ -287,38 +287,42 @@ The **Published Supervisor upgrades** workflow (`upgrades.yml`) runs the provide
 `./dev upgrade` command contributors run: `stable` and `nightly` start from the latest stable
 and the latest published nightly Supervisor, each run from its official image by digest, and
 `baseline` starts from a directory this checkout's candidate created itself. It runs as the
-daily canary, as a manual reproduction and as the version PR's gate, apart from the
-published-T3 compatibility workflow and never crossed with its slots. Its only credential is
-GitHub's automatic, read-only workflow token.
+daily canary, as a manual reproduction and as the version PR's gate. Every journey runs on
+the repository's published T3 pin (`t3Release` in `scripts/local-stack.ts`,
+[moving the T3 pin](local-stack.md#moving-the-t3-pin)), apart from the published-T3
+compatibility workflow and independent of its slots: the workflow resolves no T3 target and
+keeps no T3 lock. Its only credential is GitHub's automatic, read-only workflow token, which
+only the job that reads an earlier run's lock holds.
 
-A run resolves both of its locks once, in its `lock` job: the T3 target lock
-(`./dev pnpm dev:targets resolve`, with the token as for the compatibility workflow) and the
-release lock (`./dev pnpm dev:releases resolve`, which reads GHCR with an anonymous pull token
-and npm's public record and holds no credential). It records both locks' SHA-256 and the
-releases in its summary and keeps the locks as the run's `upgrade-lock` artifact. Each journey
-runs on a native x64 runner, checks that it downloaded exactly those bytes, and runs against
-the T3 lock's `stable` slot, its one pinned published T3. Nothing resolves again. A lock the
-run could not produce fails every journey with that outcome instead of skipping it:
-`unavailable` when a registry did not answer as needed or the earlier run kept no readable
-locks, `invalid` when the publications cannot fill the channels or a lock is malformed,
-`harness` when the environment could not be prepared.
+A run resolves its release lock once, in its `lock` job (`./dev pnpm dev:releases resolve`,
+which reads GHCR with an anonymous pull token and npm's public record and holds no
+credential), records its SHA-256 and the releases in its summary and keeps the lock as the
+run's `upgrade-lock` artifact. Each journey runs on a native x64 runner, checks that it
+downloaded exactly those bytes and installs the pinned T3 only from an archive with the
+pinned SHA-256, as `./dev check` does. Nothing resolves again. A lock the run could not
+produce fails every journey with that outcome instead of skipping it: `unavailable` when a
+registry did not answer as needed or the earlier run kept no readable lock, `invalid` when
+the publications cannot fill the channels or the lock is malformed, `harness` when the
+environment could not be prepared.
 
-A journey passes only when its report passed and names this journey, both locks' SHA-256, the
-T3 stable slot's version, its Supervisor release and image digest, and the checked commit
-with a clean tree; a report of other inputs, a missing report or an exit status that
-contradicts its report is a harness failure, never a pass. Its outcome is `passed`, `failed`
+A journey passes only when its report passed and names this journey, the release lock's
+SHA-256, its Supervisor release and image digest, the T3 pin with the version and the
+`linux-x64` archive digest it verified, and the checked commit with a clean tree; a report of
+other inputs, a missing report or an exit status that contradicts its report is a harness
+failure, never a pass. Its outcome is `passed`, `failed`
 (a check contradicted), `unsupported_shape` (the published release left a persisted shape no
 frozen seed set recognizes), `creator_unready` (the published image never became ready on
 that T3) or `harness`. Every journey runs even when another fails, and the run fails when any
-journey did not pass. Each journey writes a step summary with its inputs, every check and its
-detail, the stage timings and its separate findings, such as whether a fresh npm install of
-the same version boots, which never decide its outcome. It keeps its report, logs and locks
-as an artifact also after a failure or a timeout. Every job and every long step is bounded.
+journey did not pass. Each journey writes a step summary with its inputs, the T3 build it ran,
+every check and its detail, the stage timings and its separate findings, such as whether a
+fresh npm install of the same version boots, which never decide its outcome. It keeps its
+report, logs and release lock as an artifact also after a failure or a timeout. Every job and
+every long step is bounded.
 
 The daily canary runs every journey at 06:11 Europe/Rome from the default branch. Like the
 compatibility canary it is advisory: not part of the `check` aggregate, no release gate, no
 issue and nothing written to the repository. A dispatch runs the chosen `journeys`, `all` or
 a comma-separated list; with `lock_run`, the ID of an earlier run that kept an `upgrade-lock`
-artifact, it reruns those frozen releases and T3 build unchanged. Only the job that reads the
-earlier run's artifact holds `actions: read`. As part of the [version PR gate](#version-pr-gate)
-every journey runs from new locks.
+artifact, it reruns those frozen releases unchanged, on the T3 pin of the checked commit. Only
+the job that reads the earlier run's artifact holds `actions: read`. As part of the
+[version PR gate](#version-pr-gate) every journey runs from a new release lock.

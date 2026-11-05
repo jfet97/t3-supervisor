@@ -595,10 +595,9 @@ reproduction from a frozen lock and as the version PR's gate
 
 ```sh
 ./dev pnpm dev:releases resolve --out /cache/supervisor-releases.json
-./dev pnpm dev:targets resolve --out /cache/t3-lock.json
-./dev upgrade --journey stable --releases /cache/supervisor-releases.json --t3-lock /cache/t3-lock.json [--out DIR] [--keep]
-./dev upgrade --journey nightly --releases /cache/supervisor-releases.json --t3-lock /cache/t3-lock.json [--out DIR] [--keep]
-./dev upgrade --journey baseline --t3-lock /cache/t3-lock.json [--out DIR] [--keep]
+./dev upgrade --journey stable --releases /cache/supervisor-releases.json [--out DIR] [--keep]
+./dev upgrade --journey nightly --releases /cache/supervisor-releases.json [--out DIR] [--keep]
+./dev upgrade --journey baseline [--out DIR] [--keep]
 ```
 
 A journey checks, without a provider, that this checkout's candidate upgrades the data
@@ -615,8 +614,10 @@ integrity from the same revision, or none where npm has no such version; that re
 only the npm probe below. A reply of another shape, a missing tag, image or label, or images,
 tags or npm records that disagree fail the resolution as invalid; a network error, a timeout
 or an HTTP error fails it as unavailable. Nothing falls back to another tag, version or
-registry. The T3 build is the `stable` slot of `--t3-lock`, or the pin without it; a journey
-never runs another T3 slot.
+registry. The T3 build is always the pin ([moving the T3 pin](#moving-the-t3-pin)), whatever
+the published T3 targets hold: a journey installs it as `./dev check` does, only from an
+archive with the pinned SHA-256 of its platform, and refuses a T3 whose descriptor reports
+another version. No journey resolves or runs a target slot.
 
 The journey owns one marked run folder in the cache volume: a T3 of its own, a read-only
 session issued for the journey (`orchestration:read` and `filesystem:read`, no other
@@ -665,8 +666,9 @@ finding and never decides the journey's outcome.
 
 The journey prints one line per check and per finding, then one JSON report: its outcome
 (`passed`, `failed`, `unsupported_shape`, `creator_unready` or `harness`), the reason, its
-inputs (the release with its image digest and the release lock's SHA-256, the T3 version and
-the target lock's SHA-256 or the pin, this checkout's commit and whether its tree was clean),
+inputs (the release with its image digest and the release lock's SHA-256, the T3 build as
+source `pin` with its version, platform and the archive SHA-256 its installation verified,
+this checkout's commit and whether its tree was clean),
 the formats it found, the seed set, every check and finding and the stage timings. `--out`
 names a folder of this checkout that receives the report and the logs. It exits non-zero unless
 it passed. The containers are removed at the end and the folder too unless `--keep` is given;
@@ -703,7 +705,8 @@ The pin is `t3Release` in `scripts/local-stack.ts`: one exact published nightly,
 channel or a stable fallback. Set `t3Release.version` and copy the `linux-arm64` and
 `linux-x64` archive digests from that release's `SHA256SUMS`. Then run `./dev check` and
 `./dev up` on each architecture you can; both refuse a T3 whose descriptor reports
-another version. The check refuses when T3 rejects a scope or issues different ones. A
+another version. The pin is also the T3 of every published upgrade journey, so the moved pin
+is what the next canary and version PR gate run them on. The check refuses when T3 rejects a scope or issues different ones. A
 release that requires other scopes for the same calls instead leaves those Supervisor
 features unavailable, and only some of them are checked; compare the release's
 authorization of Supervisor's native calls and update the `credentials` table.

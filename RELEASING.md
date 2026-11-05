@@ -28,8 +28,9 @@ evidence selects all four main shards and the harness too. Manual **Check Superv
 Every version PR run, fast-tracked or fully validated, also runs the
 [version PR gate](docs/ci.md#version-pr-gate): the published-T3 compatibility from one
 frozen target lock and the [published Supervisor upgrades](docs/ci.md#published-supervisor-upgrades)
-from the latest stable and nightly images, frozen with that run's own T3 lock. `check`
-requires both; main reuses that gated run and never resolves T3 targets or releases again.
+from the latest stable and nightly images, frozen in that run's release lock, on the
+repository's T3 pin. `check` requires both; main reuses that gated run and never resolves
+T3 targets or releases again.
 
 ### Version bot authentication
 
