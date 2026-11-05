@@ -47,14 +47,29 @@ const applyStep = (directory: string, kind: DatabaseKind, step: MigrationStep | 
   yield* sql.withTransaction(step.apply(sql, { fresh, excludedThreadIds: ["seed"] }));
 }));
 
-// a guidance file from before the later columns were added (tables as their first releases created them)
-const olderGuidance = (path: string) => exec(path, `
-  PRAGMA journal_mode=WAL;
+/*
+ * the guidance store's own tables as the first releases created them, in the file's first transaction (episodes and notices
+ * without the columns later releases added)
+ */
+const guidanceCore = `
   CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-  INSERT INTO meta VALUES('settings','{"generation":2,"evidenceHours":24}'),('supervisor_scope_version','main-v1');
+  CREATE TABLE rules(id TEXT PRIMARY KEY,document TEXT NOT NULL);
+  CREATE TABLE mutes(rule_id TEXT NOT NULL,scope_id TEXT NOT NULL,PRIMARY KEY(rule_id,scope_id));
+  CREATE TABLE classifications(project_id TEXT PRIMARY KEY,classification TEXT NOT NULL);
+  CREATE TABLE observations(thread_id TEXT PRIMARY KEY,hash TEXT NOT NULL,observed_at INTEGER NOT NULL);
   CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id));
   CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,state TEXT NOT NULL,
     text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,dispatch_started INTEGER NOT NULL DEFAULT 0);
+  CREATE TABLE activity(id TEXT PRIMARY KEY,document TEXT NOT NULL,created_at INTEGER NOT NULL);
+  CREATE TABLE budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL);
+  CREATE INDEX activity_notice ON activity(json_extract(document,'$.noticeId'),created_at);
+`;
+
+// a guidance file from before the later columns were added (tables as their first releases created them)
+const olderGuidance = (path: string) => exec(path, `
+  PRAGMA journal_mode=WAL;
+  ${guidanceCore}
+  INSERT INTO meta VALUES('settings','{"generation":2,"evidenceHours":24}'),('supervisor_scope_version','main-v1');
   INSERT INTO notices VALUES('notice-1','thread','rule','run',0,'uncertain','text',NULL,1,1);
   CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,
     PRIMARY KEY(project_id,workspace_root));
@@ -170,23 +185,33 @@ describe("live schema and recognized layouts", () => {
     assert.deepEqual([failure.error.file, failure.error.reason], ["catalog.sqlite3", "incomplete_schema"]);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
-  it.live("format 0 layouts: table-less is empty, known tables and historical ones are recognized, anything else is unknown", () => Effect.gen(function* () {
-    const recognition = (statements: string) => Effect.gen(function* () {
+  it.live("format 0 layouts: table-less is empty, a release's first transaction with later and historical tables is recognized, anything else is unknown", () => Effect.gen(function* () {
+    const recognition = (file: "guidance.sqlite3" | "catalog.sqlite3", statements: string) => Effect.gen(function* () {
       const directory = yield* temporaryDirectory;
-      exec(join(directory, "guidance.sqlite3"), statements);
-      return yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, "guidance.sqlite3"), (sql) => recognizeLegacy(sql, guidanceContract, guidanceLegacy)));
+      exec(join(directory, file), statements);
+      const contract = file === "catalog.sqlite3" ? catalogContract : guidanceContract;
+      const legacy = file === "catalog.sqlite3" ? catalogLegacy : guidanceLegacy;
+      return yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(directory, file), (sql) => recognizeLegacy(sql, contract, legacy)));
     });
-    assert.deepEqual(yield* recognition(""), { kind: "empty" });
-    assert.deepEqual(yield* recognition("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);"),
-      { kind: "recognized" });
-    assert.deepEqual(yield* recognition("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL,extra TEXT);"), { kind: "unknown", object: "meta" });
-    assert.deepEqual(yield* recognition("CREATE TABLE meta(key TEXT PRIMARY KEY);"), { kind: "unknown", object: "meta" });
-    assert.deepEqual(yield* recognition("CREATE TABLE constructor(id TEXT);"), { kind: "unknown", object: "constructor" });
-    assert.deepEqual(yield* recognition("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE VIEW recent AS SELECT key FROM meta;"),
-      { kind: "unknown", object: "recent" });
-    const catalog = yield* temporaryDirectory;
-    exec(join(catalog, "catalog.sqlite3"), catalogTables);
-    assert.deepEqual(yield* Effect.scoped(Effect.flatMap(readOnlyDatabase(catalog, "catalog.sqlite3"), (sql) => recognizeLegacy(sql, catalogContract, catalogLegacy))),
-      { kind: "recognized" });
+    const guidance = (statements: string) => recognition("guidance.sqlite3", statements);
+    const catalog = (statements: string) => recognition("catalog.sqlite3", statements);
+    assert.deepEqual(yield* guidance(""), { kind: "empty" });
+    // a run that stopped after the guidance store's own transaction, then the same with a later and a historical table
+    assert.deepEqual(yield* guidance(guidanceCore), { kind: "recognized" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY);
+      CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);`), { kind: "recognized" });
+    // part of that first transaction is missing: no release wrote such a file, so it is not repaired into one
+    assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY);"),
+      { kind: "unknown", object: "rules" });
+    assert.deepEqual(yield* guidance(guidanceCore.replace(/CREATE INDEX activity_notice[^;]*;/u, "")), { kind: "unknown", object: "activity_notice" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE INDEX someone_elses ON meta(value);`), { kind: "unknown", object: "someone_elses" });
+    assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL,extra TEXT);"), { kind: "unknown", object: "meta" });
+    assert.deepEqual(yield* guidance("CREATE TABLE meta(key TEXT PRIMARY KEY);"), { kind: "unknown", object: "meta" });
+    assert.deepEqual(yield* guidance("CREATE TABLE constructor(id TEXT);"), { kind: "unknown", object: "constructor" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE VIEW recent AS SELECT key FROM meta;`), { kind: "unknown", object: "recent" });
+    // the catalog schema is one transaction; only shell_coverage came with a later release
+    assert.deepEqual(yield* catalog(catalogTables), { kind: "recognized" });
+    assert.deepEqual(yield* catalog(catalogTables.replace(/CREATE TABLE shell_coverage[^;]*;/u, "")), { kind: "recognized" });
+    assert.deepEqual(yield* catalog(catalogTables.replace(/CREATE TABLE thread_revisions[^;]*;/u, "")), { kind: "unknown", object: "thread_revisions" });
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 });

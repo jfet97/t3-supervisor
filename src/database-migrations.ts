@@ -409,19 +409,31 @@ export const guidanceContract: SchemaContract = {
 export const policyContract: SchemaContract = { tables: { settings: ["id", "document"] }, indexes: [] };
 
 /**
- * The format 0 layouts an upgrade carries forward: every table is a current one or a known historical one; a current table has
- * at least its original columns (all but the ones a later release added) and no column the current format does not know.
+ * The format 0 layouts an upgrade carries forward: the file has every table and index its first schema transaction created in
+ * every release, every table is a current one or a known historical one, every named index is a current one, and a current
+ * table has at least its original columns (all but the ones a later release added) and no column the current format does not
+ * know. Tables a later constructor would have created may be missing (a release stopped before it, or predates it); the step
+ * creates them. A file without part of its first transaction was never written that way by a release and is not upgraded.
  */
 export interface LegacyLayout {
+  /** the tables and indexes that every release created together, in the file's first transaction */
+  readonly required: { readonly tables: ReadonlyArray<string>; readonly indexes: ReadonlyArray<string> };
   /** per current table, the columns later releases added with ALTER TABLE */
   readonly added: Readonly<Record<string, ReadonlyArray<string>>>;
   /** tables earlier releases created that the current format no longer uses; they are kept as they are */
   readonly historical: ReadonlyArray<string>;
 }
 
-export const catalogLegacy: LegacyLayout = { added: {}, historical: [] };
+// the whole catalog schema is one transaction; shell_coverage came with a later release
+export const catalogLegacy: LegacyLayout = {
+  required: { tables: ["activations", "environment_binding", "cursors", "projects", "threads", "thread_revisions"], indexes: ["threads_project"] },
+  added: {},
+  historical: [],
+};
 
+// the guidance store's own tables come first, in one transaction; the supervision stores add theirs later, one by one
 export const guidanceLegacy: LegacyLayout = {
+  required: { tables: ["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"], indexes: ["activity_notice"] },
   added: {
     episodes: ["object_id"],
     notices: ["rule_generation", "settings_generation"],
@@ -433,7 +445,7 @@ export const guidanceLegacy: LegacyLayout = {
   historical: ["supervisor_project_bindings", "supervisor_monitor_project_clock"],
 };
 
-export const policyLegacy: LegacyLayout = { added: {}, historical: [] };
+export const policyLegacy: LegacyLayout = { required: { tables: ["settings"], indexes: [] }, added: {}, historical: [] };
 
 const SchemaObject = Schema.Struct({ type: Schema.String, name: Schema.String });
 const decodeObjects = Schema.decodeUnknownEffect(Schema.Array(SchemaObject));
@@ -462,7 +474,7 @@ export const missingSchema = (sql: SqlClient.SqlClient, contract: SchemaContract
     return missing;
   });
 
-/** How a format 0 file looks to the upgrade: table-less, a recognized earlier layout, or unknown (naming the first unknown object). */
+/** How a format 0 file looks to the upgrade: table-less, a recognized earlier layout, or unknown (naming the first unknown or missing object). */
 export type LegacyRecognition = { readonly kind: "empty" } | { readonly kind: "recognized" } | { readonly kind: "unknown"; readonly object: string };
 
 export const recognizeLegacy = (sql: SqlClient.SqlClient, contract: SchemaContract, legacy: LegacyLayout): Effect.Effect<LegacyRecognition, SqlError | MigrationRefused> =>
@@ -470,7 +482,10 @@ export const recognizeLegacy = (sql: SqlClient.SqlClient, contract: SchemaContra
     const objects = yield* schemaObjects(sql);
     if (objects.length === 0) return { kind: "empty" } as const;
     for (const object of objects) {
-      if (object.type === "index") continue;
+      if (object.type === "index") {
+        if (!contract.indexes.includes(object.name)) return { kind: "unknown", object: object.name } as const;
+        continue;
+      }
       if (object.type !== "table") return { kind: "unknown", object: object.name } as const;
       // own entries only: a table named like an object property is simply unknown
       const current = Object.hasOwn(contract.tables, object.name) ? contract.tables[object.name] : undefined;
@@ -483,5 +498,7 @@ export const recognizeLegacy = (sql: SqlClient.SqlClient, contract: SchemaContra
       if (present.some((column) => !current.includes(column)) || current.some((column) => !added.includes(column) && !present.includes(column)))
         return { kind: "unknown", object: object.name } as const;
     }
-    return { kind: "recognized" } as const;
+    const has = (type: string, name: string) => objects.some((object) => object.type === type && object.name === name);
+    const missing = legacy.required.tables.find((name) => !has("table", name)) ?? legacy.required.indexes.find((name) => !has("index", name));
+    return missing === undefined ? { kind: "recognized" } as const : { kind: "unknown", object: missing } as const;
   });

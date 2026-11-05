@@ -125,11 +125,24 @@ const legacyPolicy = (directory: string, document = '{"generation":7,"excludedTh
     INSERT INTO settings VALUES(1,'${document}');
   `);
 
-// an early guidance file: only the meta table with its settings, scope version and a stop marker
+/*
+ * a guidance file with only the guidance store's own tables (the file's first transaction; the step creates the supervision
+ * stores' tables), its settings, scope version and a stop marker in meta
+ */
 const legacyGuidance = (directory: string) =>
   exec(join(directory, "guidance.sqlite3"), `
     PRAGMA journal_mode=WAL;
     CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+    CREATE TABLE rules(id TEXT PRIMARY KEY,document TEXT NOT NULL);
+    CREATE TABLE mutes(rule_id TEXT NOT NULL,scope_id TEXT NOT NULL,PRIMARY KEY(rule_id,scope_id));
+    CREATE TABLE classifications(project_id TEXT PRIMARY KEY,classification TEXT NOT NULL);
+    CREATE TABLE observations(thread_id TEXT PRIMARY KEY,hash TEXT NOT NULL,observed_at INTEGER NOT NULL);
+    CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id));
+    CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,epoch INTEGER NOT NULL,state TEXT NOT NULL,
+      text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,dispatch_started INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE activity(id TEXT PRIMARY KEY,document TEXT NOT NULL,created_at INTEGER NOT NULL);
+    CREATE TABLE budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL);
+    CREATE INDEX activity_notice ON activity(json_extract(document,'$.noticeId'),created_at);
     INSERT INTO meta VALUES('settings','{"generation":5,"evidenceHours":24}');
     INSERT INTO meta VALUES('supervisor_scope_version','main-v1');
     INSERT INTO meta VALUES('supervisor_unbound_stop:thread-stopped','{"threadId":"thread-stopped","stoppedAt":1762300000000,"nativeExtra":{"opaque":[1,2]}}');
