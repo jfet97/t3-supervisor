@@ -201,7 +201,7 @@ const inspect = (dataDirectory: string, spec: StoreSpec, reference: Effect.Effec
         const recognition = yield* recognizeLegacy(sql, yield* releases, spec.legacy);
         if (recognition.kind === "empty") return { state: "empty" } as const;
         if (recognition.kind === "unknown") return yield* refusal(file, "unknown_layout");
-      } else if ((yield* schemaObjects(sql)).length === 0) return yield* refusal(file, "unknown_layout");
+      } else if ((yield* schemaDifferences(sql, yield* releases)).length > 0) return yield* refusal(file, "incomplete_schema");
       if (stepsBetween(spec.steps, format, target) === null) return yield* refusal(file, "unknown_layout");
       return { state: "upgradable", format } as const;
     }));

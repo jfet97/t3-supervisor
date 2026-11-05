@@ -532,6 +532,17 @@ describe("startup upgrade", () => {
    * the foundation's formats, as an earlier version of this upgrade left them: every file of the frozen 0.0.27 layout stamped
    * format 1 (format 1 declares exactly that schema), the policy still in its own file at format 1
    */
+  it.live("an incomplete format 1 layout is refused before backup or migration writes", () => Effect.gen(function* () {
+    const directory = yield* temporaryDirectory;
+    yield* materializeFixture("format0-current-unversioned", directory);
+    for (const file of [...allFiles, donorFile]) exec(join(directory, file), "PRAGMA user_version=1;");
+    exec(join(directory, "guidance.sqlite3"), "DROP INDEX supervisor_main_binding_thread;");
+    const before = snapshotDirectory(directory);
+    refusedWith(yield* Effect.exit(upgrade(directory)), "guidance.sqlite3", "incomplete_schema");
+    assert.deepEqual(snapshotDirectory(directory), before);
+    assert.deepEqual(backupSets(directory), []);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+
   it.live("a directory at the foundation's formats moves guidance to format 2 with the policy file imported and removed", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
     yield* materializeFixture("format0-current-unversioned", directory);
