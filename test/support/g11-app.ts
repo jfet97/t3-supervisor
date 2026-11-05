@@ -6,19 +6,20 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Queue, type Scope, Stream } from "effect";
 import { WebSocketServer, type WebSocket } from "ws";
 import { SupervisorConfig as Configuration } from "../../src/config.js";
-import { policyDbLayer } from "../../src/db.js";
 import { runGuidanceApplication } from "../../src/guidance-application.js";
 import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
 import type { StoreShape } from "../../src/store.js";
 import { NativeTransportLive } from "../../src/supervisor.js";
 import { makeT3Client, T3Client, type T3ClientShape } from "../../src/t3.js";
-import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { ProjectInfo, SupervisorConfig, ThreadInfo } from "../../src/types.js";
 import { freePort, within } from "./g11-http.js";
 
-// the running guidance application of src/guidance-application.ts over a loopback T3 peer, in the caller's scope, with the
-// process's services the root provides (the configuration, the thread-policy store on its own client and the ownership
-// set); the peer serves the environment descriptor and answers each websocket Request frame through the case's effect
+/*
+ * the running guidance application of src/guidance-application.ts over a loopback T3 peer, in the caller's scope, with the
+ * process's services the root provides (the configuration and the ownership set; the run builds its thread-policy store on its
+ * own guidance client); the peer serves the environment descriptor and answers each websocket Request frame through the case's
+ * effect
+ */
 
 export const environmentId = "c3b-environment";
 export const readToken = "c3b-read-token";
@@ -140,10 +141,11 @@ export const runApp = (config: SupervisorConfig, t3: T3ClientShape, catalog: () 
       return clock.sleep(duration);
     }),
   };
-  // the process's services the run reads, as the root provides them (src/supervisor.ts): the configuration, the thread-policy
-  // store on its own client and the ownership set
-  const process = Layer.mergeAll(Layer.succeed(Configuration, config), SupervisorOwnership.layer,
-    ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory))));
+  /*
+   * the process's services the run reads, as the root provides them (src/supervisor.ts): the configuration and the ownership
+   * set; the run builds its thread-policy store on its own guidance client
+   */
+  const process = Layer.mergeAll(Layer.succeed(Configuration, config), SupervisorOwnership.layer);
   const application = Effect.scoped(runGuidanceApplication(config, source, t3, () => Deferred.doneUnsafe(ready, Effect.void))).pipe(Effect.provide(DashboardUpdates.layer)).pipe(
     Effect.provide(Layer.mergeAll(NativeTransportLive, process).pipe(Layer.provideMerge(NodeFileSystem.layer))),
     Effect.onExit((exit) => Exit.isFailure(exit) ? Deferred.fail(ready, new Error("the application stopped before it was ready")) : Effect.void));

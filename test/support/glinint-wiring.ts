@@ -5,7 +5,7 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, FileSystem, Layer, type Scope } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient, HttpClientRequest } from "effect/http";
 import { SupervisorConfig as Configuration } from "../../src/config.js";
-import { GuidanceDb, guidanceDbLayer, policyDbLayer } from "../../src/db.js";
+import { GuidanceDb, guidanceDbLayer } from "../../src/db.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { GuidanceUi } from "../../src/guidance-ui.js";
@@ -113,11 +113,13 @@ const sourceOf = (input: IntRunInput): Pick<StoreShape, "catalog"> => ({catalog:
 const intRunLayer = (input: IntRunInput, config: SupervisorSettings) => {
   const read = {baseUrl: config.t3Url, token: readToken};
   const ids = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
-  // the run's guidance client and store, the supervision stores over them and the process's ownership set
+  /*
+   * the run's guidance client with its guidance and thread-policy stores (as guidance-application.ts builds them, so a policy
+   * save joins the transaction of its bookkeeping), the supervision stores over them and the process's ownership set
+   */
   const stores = SupervisionStoresLive.pipe(
-    Layer.provideMerge(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)))),
+    Layer.provideMerge(Layer.mergeAll(GuidanceStore.layer, ThreadPolicyStore.layer).pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)))),
     Layer.provideMerge(Layer.mergeAll(ids, Layer.sync(SupervisorOwnership, () => new Set<string>()))));
-  const policy = ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)));
   // the root's native clients: the read client with its shell reads, the operate client, the T3 client, the catalog and the
   // definitions
   const natives = Layer.mergeAll(
@@ -141,7 +143,7 @@ const intRunLayer = (input: IntRunInput, config: SupervisorSettings) => {
     Layer.provideMerge(SupervisionTeamLive),
     Layer.provideMerge(SupervisionScopeLive(true)),
     Layer.provideMerge(Layer.mergeAll(ScopeLocks.layer, SupervisorIds.layer, InterpretationWake.layer)),
-    Layer.provideMerge(Layer.mergeAll(access, stores, policy, fetch)),
+    Layer.provideMerge(Layer.mergeAll(access, stores, fetch)),
     Layer.provideMerge(Layer.succeed(Configuration, config)),
     Layer.provide(Layer.mergeAll(NodeCrypto.layer, NodeFileSystem.layer)),
   );

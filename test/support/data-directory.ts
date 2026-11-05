@@ -3,7 +3,9 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { Effect, FileSystem } from "effect";
 import { type DatabaseUpgradeError, upgradeDataDirectory } from "../../src/database-upgrade.js";
 
-const storeFiles = ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"] as const;
+const storeFiles = ["catalog.sqlite3", "guidance.sqlite3"] as const;
+// files whose presence makes a directory an existing one: the store files, the retired policy file and the access database
+const existingFiles = [...storeFiles, "thread-settings.sqlite3", join("access", "login.sqlite3")] as const;
 
 /*
  * the files the production startup upgrade writes for a fresh directory, kept per test module and excluded-chat list: no file
@@ -29,18 +31,18 @@ const writtenByTheCoordinator = (excludedThreadIds: ReadonlyArray<string>) => Ef
 });
 
 /**
- * Prepares `directory` as a fresh current-format data directory as the production startup coordinator does: catalog,
- * guidance and thread-settings at their current formats, the policy seeded with `excludedThreadIds` at generation 1, the
- * directory 0700 and the files 0600. The access database is left to the auth service's own bootstrap. Stores only open files
+ * Prepares `directory` as a fresh current-format data directory as the production startup coordinator does: catalog and
+ * guidance at their current formats, guidance's policy seeded with `excludedThreadIds` at generation 1, the directory 0700 and
+ * the files 0600. The access database is left to the auth service's own bootstrap. Stores only open files
  * the coordinator prepared, so a test that opens them on a temporary directory calls this first. A directory that already
- * holds a store file or an access database goes through the coordinator itself.
+ * holds a store file, the retired policy file or an access database goes through the coordinator itself.
  */
 export const initializeDataDirectory = (directory: string, options: { readonly excludedThreadIds?: ReadonlyArray<string> } = {}):
   Effect.Effect<void, DatabaseUpgradeError> =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const excludedThreadIds = options.excludedThreadIds ?? [];
-    const existing = yield* Effect.forEach([...storeFiles, join("access", "login.sqlite3")], (file) => fs.exists(join(directory, file))).pipe(Effect.orDie);
+    const existing = yield* Effect.forEach(existingFiles, (file) => fs.exists(join(directory, file))).pipe(Effect.orDie);
     if (existing.some((present) => present)) return yield* Effect.asVoid(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds }));
     const files = yield* writtenByTheCoordinator(excludedThreadIds);
     yield* Effect.gen(function* () {

@@ -1,7 +1,6 @@
 import { taskScopeRevision } from "../../src/supervision-conversation-contract.js";
 import { engagedTask } from "./engaged-task.js";
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import { Effect, type Scope } from "effect";
 import { TestClock } from "effect/testing";
 import { fingerprint } from "../../src/guidance-store.js";
@@ -15,7 +14,6 @@ import type { MessageInfo, Projection, RunInfo, SupervisorSettings, ThreadInfo }
 import { compactProposalDigest } from "../../src/supervisor-workflow-agreement.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "../project-definitions-fixture.js";
 import { recordInterpretationSubmission } from "./interpretation-evidence-fixture.js";
-import { initializeDataDirectory } from "./data-directory.js";
 import {
   atWallTime, makeFakeT3, noNativeRead, openConversationProcess, openProjectSupervisor, runSettings, temporaryDirectory, type ConversationProcess, type RpcCall,
 } from "./g1b-conversation.js";
@@ -276,9 +274,6 @@ const runOf = (process: ConversationProcess, mainThreadId: string, supervisor: P
 
 export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c1-conversation-");
-  // the thread policy lives in a data directory of its own, prepared at the current formats as the run's directory is
-  const threadPolicyDirectory = join(directory, "thread-policy");
-  yield* Effect.orDie(initializeDataDirectory(threadPolicyDirectory));
   const definitionSnapshot = definitions();
   const projections = new Map<string, Projection>();
   const supervisorThreadIds = new Set<string>();
@@ -348,7 +343,7 @@ export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) =
   });
   const fake = yield* makeFakeT3({projections, answer, definitions: (loadedProjectId, threadId) => ({...definitionSnapshot, projectId: loadedProjectId, threadId})});
   /** a process on the suite's files over the fake T3: its own database clients and services, closed with the test */
-  const openProcess = openConversationProcess({directory, policyDirectory: threadPolicyDirectory, fake, eligible, ...(options.config ? {config: options.config} : {})});
+  const openProcess = openConversationProcess({directory, fake, eligible, ...(options.config ? {config: options.config} : {})});
   const process = yield* openProcess;
   const projectStore = process.store;
   const binding = yield* projectStore.reserve(projectId, operativeThreadId, "Project A", defaultSupervisorModel, 10, clock.now);

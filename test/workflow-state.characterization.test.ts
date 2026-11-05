@@ -19,11 +19,13 @@ import type {ProjectDefinitionSnapshot} from "../src/project-definitions-contrac
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo, WorkflowSourceBindingInfo} from "../src/project-supervisor-contract.js";
 import type {Projection, ThreadInfo} from "../src/types.js";
 import {effectiveIndex, projectIndex} from "./project-definitions-fixture.js";
-import {admissionLayer, execute, openWorkflowStores, policyClient, query, runConfig, temporaryDirectory, type StatementObserver} from "./support/g12-stores.js";
+import {admissionLayer, execute, openWorkflowStores, query, runConfig, temporaryDirectory, type StatementObserver} from "./support/g12-stores.js";
 
-// live Effect tests on the workflow state store and write controller services over the production layers: each fixture writes a
-// real guidance.sqlite3 (and, for the controller, thread-settings.sqlite3) in a temporary directory, closed and removed with
-// the test scope; nothing here waits on time
+/*
+ * live Effect tests on the workflow state store and write controller services over the production layers: each fixture writes a
+ * real guidance.sqlite3 (for the controller, with the thread policy on the same client) in a temporary directory, closed and
+ * removed with the test scope; nothing here waits on time
+ */
 
 // store fixture: one ready binding for main-a on a temp-file guidance database, a local two-step proposal (copied from test/workflow-state.test.ts)
 type StoreFixture = {
@@ -431,7 +433,7 @@ const makeControllerFixture = Effect.gen(function* () {
   const run = yield* Layer.build(WorkflowWriteController.layer({withoutTeam: true, maxEvidenceWaitMs: 0}).pipe(
     Layer.provideMerge(admissionLayer(true)),
     Layer.provideMerge(SupervisorTeamStore.layer),
-    Layer.provide(Layer.mergeAll(Layer.succeedContext(stores.context), policyClient(directory), runConfig(directory),
+    Layer.provide(Layer.mergeAll(Layer.succeedContext(stores.context), runConfig(directory),
       Layer.succeed(WorkflowNativeAccess, native), Layer.succeed(ProjectDefinitions, loader))),
   )).pipe(Effect.orDie);
   // the run has read the catalog's classifications, as every supervision cycle does before workflow editing is enabled

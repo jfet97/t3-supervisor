@@ -51,7 +51,6 @@ describe("CatalogDb", () => {
 
   for (const [label, kind, file, expected] of [
     ["GuidanceDb", "guidance", "guidance.sqlite3", { journal_mode: "wal", synchronous: 2, busy_timeout: 5000, secure_delete: 1, max_page_count: 16384 }],
-    ["PolicyDb", "policy", "thread-settings.sqlite3", { journal_mode: "wal", synchronous: 2, busy_timeout: 5000 }],
   ] as const) {
     it.live(`${label} opens ${file} private with the baseline pragmas`, () =>
       Effect.gen(function* () {

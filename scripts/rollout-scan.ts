@@ -4,8 +4,8 @@ import { renderRolloutScan, rolloutScan } from "../src/rollout-scan.js";
 
 // the read-only rollout scan of a supervisor data directory:
 //   node --import tsx scripts/rollout-scan.ts <data-directory> [--json]
-// it opens access/login.sqlite3, catalog.sqlite3, guidance.sqlite3 and thread-settings.sqlite3 read only, writes nothing and never
-// contacts T3. It reports each file's format beside the format this version runs and, for guidance and thread-settings, names each
+// it opens access/login.sqlite3, catalog.sqlite3, guidance.sqlite3 and the retired thread-settings.sqlite3 read only, writes nothing
+// and never contacts T3. It reports each file's format beside the format this version runs and, for guidance and thread-settings, names each
 // table, row kind and key of a row the stores would not read as stored, never its content. Exit 0: nothing blocks the run; exit 2:
 // a file has a newer format than this version runs, or a row read at open or in every supervision cycle would fail the run; exit 1:
 // the scan itself failed

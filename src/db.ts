@@ -20,10 +20,8 @@ type PlatformError = Platform.PlatformError;
 
 /** catalog.sqlite3, process lifetime (S3). */
 export class CatalogDb extends Context.Service<CatalogDb, SqlClient.SqlClient>()("t3-supervisor/CatalogDb") {}
-/** guidance.sqlite3, one client per supervision run; activated with the S6d engine switch only. */
+/** guidance.sqlite3 with the excluded-chat policy, one client per supervision run; activated with the S6d engine switch only. */
 export class GuidanceDb extends Context.Service<GuidanceDb, SqlClient.SqlClient>()("t3-supervisor/GuidanceDb") {}
-/** thread-settings.sqlite3, process lifetime; activated with the S6d engine switch only. */
-export class PolicyDb extends Context.Service<PolicyDb, SqlClient.SqlClient>()("t3-supervisor/PolicyDb") {}
 /** access/login.sqlite3, dashboard server lifetime or one forge operation; activated in S6c only. */
 export class AccessDb extends Context.Service<AccessDb, SqlClient.SqlClient>()("t3-supervisor/AccessDb") {}
 
@@ -33,7 +31,7 @@ export class AccessDb extends Context.Service<AccessDb, SqlClient.SqlClient>()("
  * (src/database-upgrade.ts) creates files or moves them between formats; every other open refuses a file whose format is
  * not the current one, before any journal-mode change, write-affecting pragma or store code.
  */
-export const DatabaseFormats = { catalog: 1, guidance: 1, policy: 1, access: 1 } as const;
+export const DatabaseFormats = { catalog: 1, guidance: 2, access: 1 } as const;
 
 /** Why a database could not be opened: the file is missing, older or newer than this version, or failed to open. */
 export type DatabaseOpenFailure = "open_failed" | "not_initialized" | "upgrade_required" | "unsupported_format";
@@ -72,7 +70,6 @@ export const DatabaseFiles = {
   catalog: {file: "catalog.sqlite3", journal: "wal", format: DatabaseFormats.catalog,
     pragmas: ["synchronous=FULL", "foreign_keys=ON", "wal_autocheckpoint=256", "secure_delete=ON", `max_page_count=${maxCatalogPages}`]},
   guidance: {file: "guidance.sqlite3", journal: "wal", format: DatabaseFormats.guidance, pragmas: ["synchronous=FULL", "secure_delete=ON", "max_page_count=16384"]},
-  policy: {file: "thread-settings.sqlite3", journal: "wal", format: DatabaseFormats.policy, pragmas: ["synchronous=FULL"]},
 } as const satisfies Record<string, DatabaseFile>;
 export type DatabaseKind = keyof typeof DatabaseFiles;
 
@@ -350,10 +347,6 @@ export const catalogDbLayer = (dataDirectory: string): Layer.Layer<CatalogDb, Da
 export const guidanceDbLayer = (dataDirectory: string): Layer.Layer<GuidanceDb, DatabaseOpenError, FileSystem.FileSystem> =>
   Layer.effect(GuidanceDb, openDatabase(dataDirectory, DatabaseFiles.guidance));
 
-/** thread-settings.sqlite3 with the baseline pragmas of `thread-policy.ts`, at the current policy format. */
-export const policyDbLayer = (dataDirectory: string): Layer.Layer<PolicyDb, DatabaseOpenError, FileSystem.FileSystem> =>
-  Layer.effect(PolicyDb, openDatabase(dataDirectory, DatabaseFiles.policy));
-
 /**
  * The access database (access/login.sqlite3) on a file the caller already validated: DELETE journal, synchronous=FULL,
  * busy_timeout 5000 and max_page_count=256 (plan 3.2), at the current access format, which is checked before the pragmas.
@@ -440,9 +433,17 @@ export const readOnlyAccessDatabase = (path: string): Effect.Effect<SqlClient.Sq
  * A read-only client on an existing store file, for the startup upgrade's preflight, the rollout scan and backup verification:
  * no statement, pragma or file creation writes, and nothing is checkpointed or removed (see `readOnlyFilename`).
  */
-export const readOnlyDatabase = (directory: string, file: string): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> => {
+export const readOnlyDatabase = (directory: string, file: string): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> =>
+  Effect.map(readOnlyBackupSource(directory, file), ({ sql }) => sql);
+
+/**
+ * A read-only client on an existing file with its connection's online backup, for a file the startup upgrade copies but never
+ * writes: the retired policy file, whose policy moves into guidance. Like `readOnlyDatabase`, it creates, checkpoints and
+ * removes nothing.
+ */
+export const readOnlyBackupSource = (directory: string, file: string): Effect.Effect<UpgradeDatabase, DatabaseOpenError, Scope.Scope> => {
   const filename = readOnlyFilename(join(resolve(directory), file));
   return workerClient({filename, readonly: true, disableWAL: false, busyTimeoutMs: 5_000}).pipe(
-    Effect.map(({ client }) => client),
+    Effect.map(({ client, backup }) => ({ sql: client, backup })),
     Effect.mapError((cause) => new DatabaseOpenError({ file, reason: "open_failed", cause })), untracedSql);
 };

@@ -4,8 +4,11 @@ import { Effect, Scheduler } from "effect";
 import { ThreadPolicyConflict, ThreadPolicyInvalid } from "../src/thread-policy.js";
 import { dataDirectory, withThreadPolicy } from "./support/g9-stores.js";
 
-// the ThreadPolicyStore service over a temporary thread-settings.sqlite3 (its production client and layer); two stores
-// on one file are two clients of it, as two writers of the baseline were, and one store's concurrent saves race on its client
+/*
+ * the ThreadPolicyStore service over the policy row of a temporary guidance.sqlite3 (its production client and layer); two
+ * stores on one file are two clients of it, as two writers of the baseline were, and one store's concurrent saves race on its
+ * client
+ */
 
 const invalidIds = { message: "Choose valid, unique chat IDs." };
 const conflict = { message: "Chat settings changed in another tab. Reload first." };

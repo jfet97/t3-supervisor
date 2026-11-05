@@ -5,6 +5,7 @@ import { guidanceTransaction } from "./guidance-sql.js";
 import { GuidanceStore } from "./guidance-store.js";
 import { GuidanceRuntime } from "./guidance.js";
 import { GuidanceUi } from "./guidance-ui.js";
+import { ThreadPolicyStore } from "./thread-policy.js";
 import type { T3ClientShape } from "./t3.js";
 import type { SupervisorSettings } from "./types.js";
 import { readFile } from "node:fs/promises";
@@ -37,9 +38,9 @@ export const runGuidanceApplication = (
 ) =>
   Effect.gen(function* () {
     const updates = yield* DashboardUpdates;
-    // the run's guidance client and store: the schema, the default settings, the column additions and the restart recovery,
-    // once; the client is released with the run, after everything built over it
-    const guidance = yield* Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)),
+    // the run's guidance client with the guidance store (its restart recovery, once) and the thread-policy store over it, so a
+    // policy save joins the transaction of its bookkeeping; the client is released with the run, after everything built over it
+    const guidance = yield* Layer.build(Layer.mergeAll(GuidanceStore.layer, ThreadPolicyStore.layer).pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)),
       Layer.provideMerge(Layer.succeed(DashboardUpdates, updates)), Layer.provide(SupervisorIds.layer)));
     const store = Context.get(guidance, GuidanceStore);
     const guidanceRuntime = yield* GuidanceRuntime.make(config, source).pipe(Effect.provide(guidance));

@@ -56,7 +56,7 @@ const makeProjectSupervisor = (stores: ConversationStores, overrides: {
 const withStores = <A, E, R>(work: (stores: ConversationStores) => Effect.Effect<A, E, R>) => Effect.gen(function* () {
   yield* realTime;
   const directory = yield* dataDirectory("supervisor-control-");
-  const stores = yield* openStores(directory, directory);
+  const stores = yield* openStores(directory);
   return yield* work(stores);
 });
 
@@ -105,7 +105,7 @@ it.effect("global master starts on while project auto-detection persists the fir
   yield* store.saveControl("project-auto", 0, true);
   assert.equal((yield* store.control("project-auto")).manual, true);
   assert.equal((yield* store.control("project-auto")).enabled, true);
-  const restarted = (yield* openStores(stores.directory, stores.directory)).supervisors;
+  const restarted = (yield* openStores(stores.directory)).supervisors;
   assert.equal((yield* restarted.control("project-a")).enabled, true);
   assert.equal((yield* restarted.control("project-a")).manual, false);
   assert.equal((yield* restarted.control("project-empty")).enabled, false);
@@ -189,7 +189,7 @@ it.effect("manual project choice survives restart and global master off remains 
   assert.equal((yield* store.control("project-a")).enabled, true);
   assert.equal((yield* store.control("project-a")).effectiveEnabled, false);
   assert.equal(yield* store.useGlobalDefinitions(), false);
-  const restarted = (yield* openStores(stores.directory, stores.directory)).supervisors;
+  const restarted = (yield* openStores(stores.directory)).supervisors;
   assert.equal((yield* restarted.control(null)).enabled, false);
   assert.equal((yield* restarted.control("project-a")).enabled, true);
   assert.equal((yield* restarted.control("project-a")).effectiveEnabled, false);
@@ -375,7 +375,7 @@ it.effect("global definitions stay off by default until explicitly enabled, even
   assert.equal(events[0], "initializeGlobal");
   assert.equal(events.filter(event => event === "globalFingerprint").length, 2);
   assert.equal((yield* store.globalDefinitionsControl()).homePath, "~/.t3-supervisor");
-  const restarted = (yield* openStores(stores.directory, stores.directory)).supervisors;
+  const restarted = (yield* openStores(stores.directory)).supervisors;
   assert.equal(yield* restarted.useGlobalDefinitions("project-a"), true);
 })));
 

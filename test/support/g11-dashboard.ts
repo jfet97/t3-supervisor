@@ -16,10 +16,10 @@ import type { SupervisorConfig } from "../../src/types.js";
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
 import type { WorkflowCallCancel, WorkflowWriteController } from "../../src/workflow-write-controller.js";
 import { exchange } from "./g11-http.js";
-import { guidanceLayer, policyLayer, temporaryDirectory } from "./g11-stores.js";
+import { guidanceLayer, temporaryDirectory } from "./g11-stores.js";
 
 // the dashboard and workflow MCP listeners of src/guidance-ui.ts over their production layers, in the caller's scope: the
-// run's guidance client and store, the process's thread-policy store and ownership set, the guidance runtime over a catalog,
+// run's guidance client with its guidance and thread-policy stores, the process's ownership set, the guidance runtime over a catalog,
 // the listeners' own service auth and the workflow MCP endpoint over a controller whose tools are effect fakes, on the node
 // file system and crypto the root provides. The listeners close before the stores, and the directory is removed last
 
@@ -63,9 +63,9 @@ export const definitionsOf = (load: (projectId: string, threadId: string | null)
   });
 };
 
-/** The guidance client and store of the run, the process's thread-policy store and its ownership set. */
+/** The run's guidance client with its guidance and thread-policy stores, and the process's ownership set. */
 export const processStores = (config: SupervisorConfig) =>
-  Layer.mergeAll(guidanceLayer(config.dataDirectory), policyLayer(config.dataDirectory), SupervisorOwnership.layer);
+  Layer.mergeAll(guidanceLayer(config.dataDirectory), SupervisorOwnership.layer);
 
 /** The guidance runtime over a catalog and the stores of `processStores`. */
 export const runtimeOver = (config: SupervisorConfig, catalog: Pick<StoreShape, "catalog"> = emptyCatalog) =>

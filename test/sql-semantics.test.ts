@@ -10,8 +10,10 @@ import { repositoryRoot, tsxLoader } from "./support/cli-process.js";
 import { initializeDataDirectory } from "./support/data-directory.js";
 import { type DbFile, dbFiles, withDbFile } from "./support/sql-db-files.js";
 
-// target-regression sql semantics of the catalog, guidance and thread-settings clients on the real driver (plan 3.2 rules
-// 4, 6 and 7), each opened through its production layer
+/*
+ * target-regression sql semantics of the catalog and guidance clients on the real driver (plan 3.2 rules 4, 6 and 7), each
+ * opened through its production layer
+ */
 
 // a temporary data directory at the current formats, prepared by the startup coordinator as `t3-supervisor start` does
 const temporaryDirectory = Effect.gen(function* () {
@@ -95,8 +97,10 @@ for (const file of dbFiles) describe(`${file} sql semantics`, () => {
 
   it.live(`CT-SQL-03 (${file}): a failed COMMIT is rolled back before the connection is reused and the next transaction succeeds`, () =>
     withDb(file, (db) => Effect.gen(function* () {
-      // a deferred foreign key passes the insert and fails the COMMIT, which leaves the sqlite transaction open; the guidance
-      // and thread-settings files do not enforce foreign keys, so the case switches them on for its own connection only
+      /*
+       * a deferred foreign key passes the insert and fails the COMMIT, which leaves the sqlite transaction open; the guidance
+       * file does not enforce foreign keys, so the case switches them on for its own connection only
+       */
       if (file !== "catalog") yield* db.unsafe("PRAGMA foreign_keys=ON");
       yield* db.unsafe("CREATE TABLE parent (id INTEGER PRIMARY KEY, v TEXT)");
       yield* db.unsafe("CREATE TABLE child (id INTEGER PRIMARY KEY, v TEXT, parent_id INTEGER NOT NULL REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)");
@@ -197,15 +201,13 @@ describe("CT-SQL-04 across processes", () => {
       }).pipe(Effect.provide(Store.layer.pipe(Layer.provideMerge(Layer.fresh(catalogDbLayer(directory))))));
     }).pipe(Effect.provide(NodeServices.layer)), { timeout: 60_000 });
 
-  for (const file of ["guidance", "policy"] as const) {
-    it.live(`CT-SQL-04 (${file}): two clients on one file in two processes keep compare-and-set on the revision correct under BEGIN IMMEDIATE`, () =>
-      Effect.gen(function* () {
-        const directory = yield* temporaryDirectory;
-        yield* withDbFile(file, directory, (db) => Effect.gen(function* () {
-          yield* db.unsafe("CREATE TABLE cas (id TEXT PRIMARY KEY, revision INTEGER NOT NULL)");
-          yield* db.unsafe("INSERT INTO cas (id, revision) VALUES ('row-cas', 0)");
-          yield* compareAndSetAcrossProcesses(db, file, directory, "cas", "row-cas");
-        }));
-      }).pipe(Effect.provide(NodeServices.layer)), { timeout: 60_000 });
-  }
+  it.live("CT-SQL-04 (guidance): two clients on one file in two processes keep compare-and-set on the revision correct under BEGIN IMMEDIATE", () =>
+    Effect.gen(function* () {
+      const directory = yield* temporaryDirectory;
+      yield* withDbFile("guidance", directory, (db) => Effect.gen(function* () {
+        yield* db.unsafe("CREATE TABLE cas (id TEXT PRIMARY KEY, revision INTEGER NOT NULL)");
+        yield* db.unsafe("INSERT INTO cas (id, revision) VALUES ('row-cas', 0)");
+        yield* compareAndSetAcrossProcesses(db, "guidance", directory, "cas", "row-cas");
+      }));
+    }).pipe(Effect.provide(NodeServices.layer)), { timeout: 60_000 });
 });

@@ -2,26 +2,24 @@ import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Console, Effect, Layer, SubscriptionRef } from "effect";
 import { SupervisorConfig as Configuration } from "../../src/config.js";
-import { policyDbLayer } from "../../src/db.js";
 import { SupervisorOwnership } from "../../src/project-supervisor-store.js";
 import { makeStore } from "../../src/store.js";
 import { NativeTransportLive, SupervisorStatusRef, type SupervisorStatus } from "../../src/supervisor.js";
 import { T3Client, type T3ClientShape } from "../../src/t3.js";
-import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { SupervisorSettings } from "../../src/types.js";
 import { fakeNativeLayer } from "./native-access.js";
 
 // the root services of a supervisor run over a fake T3 client, and the test seams the supervisor suites observe it through
 
 /**
- * The services of the run: the catalog, the fake T3 client with the root's read-only T3Native over it, the status, the thread-policy
- * store on the run's PolicyDb client (thread-settings.sqlite3), the ownership set and the native transport, over the configuration.
+ * The services of the run, as the root provides them (src/supervisor.ts): the catalog, the fake T3 client with the root's read-only
+ * T3Native over it, the status, the ownership set and the native transport, over the configuration. Each supervision run builds
+ * its thread-policy store on its own guidance client.
  */
 export const rootServices = (settings: SupervisorSettings, status: SubscriptionRef.SubscriptionRef<SupervisorStatus>, client: T3ClientShape) =>
   Layer.mergeAll(
     makeStore(settings.dataDirectory), Layer.succeed(T3Client, client), fakeNativeLayer({t3: client, baseUrl: settings.t3Url}),
     Layer.succeed(SupervisorStatusRef, status),
-    ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(settings.dataDirectory)), Layer.provide(NodeFileSystem.layer)),
     SupervisorOwnership.layer, NativeTransportLive, NodeFileSystem.layer,
   ).pipe(Layer.provideMerge(DashboardUpdates.layer), Layer.provideMerge(Layer.succeed(Configuration, settings)));
 

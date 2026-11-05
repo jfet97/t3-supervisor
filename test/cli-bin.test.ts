@@ -30,9 +30,9 @@ const interruptExit = { code: 130, signal: null };
 
 const readyFiles = [
   "access", "access/login.sqlite3", "access/workflow-mcp-token",
-  "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3",
+  "catalog.sqlite3", "guidance.sqlite3",
 ];
-const readyDatabases = ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"];
+const readyDatabases = ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3"];
 
 const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized; " +
   "after an upgrade, start the service once first. If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. " +
@@ -224,7 +224,7 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
       });
       assert.deepEqual(harness.fake.traffic.requests, [], "no subscription before a descriptor");
       // the startup upgrade created every store file before any store opened; no supervision run opened the guidance file
-      const storeFiles = ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"];
+      const storeFiles = ["catalog.sqlite3", "guidance.sqlite3"];
       yield* assertReleased(harness, child.pid, storeFiles, storeFiles);
     }), { timeout: 60_000 });
 

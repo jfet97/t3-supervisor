@@ -1,7 +1,7 @@
 import { DashboardUpdates } from "../../src/dashboard-updates.js";
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Layer } from "effect";
-import { policyDbLayer } from "../../src/db.js";
+import { guidanceDbLayer } from "../../src/db.js";
 import { GuidanceRuntime } from "../../src/guidance.js";
 import { GuidanceUi, type GuidanceUiOptions } from "../../src/guidance-ui.js";
 import { ServiceAuth as ServiceAuthService } from "../../src/service-auth.js";
@@ -17,11 +17,12 @@ import { workflowMcpLayer } from "./mcp-controllers.js";
 export const guidanceUi = (config: SupervisorConfig, runtime: GuidanceRuntime["Service"], options: GuidanceUiOptions = {},
   workflows?: Layer.Layer<WorkflowMcp>, policy?: ThreadPolicyStore["Service"]) => {
   /*
-   * the process's thread-policy store: the given one, else the data directory's own, as the root opens it (the caller prepared
-   * the directory at the current formats first, as the startup coordinator does)
+   * the run's thread-policy store: the given one, else one on the data directory's guidance client, as the supervision run
+   * builds it (the dashboard opens no other guidance store here; the caller prepared the directory at the current formats first,
+   * as the startup coordinator does)
    */
   const policyStore = policy ? Layer.succeed(ThreadPolicyStore, policy)
-    : ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(config.dataDirectory)));
+    : ThreadPolicyStore.layer.pipe(Layer.provide(guidanceDbLayer(config.dataDirectory)));
   const services = Layer.mergeAll(ServiceAuthService.layer(config.dataDirectory), Layer.succeed(GuidanceRuntime, runtime),
     workflows ?? workflowMcpLayer({} as WorkflowWriteController["Service"]), policyStore).pipe(Layer.provideMerge(Layer.mergeAll(NodeFileSystem.layer, NodeCrypto.layer, DashboardUpdates.layer)));
   return Effect.map(Layer.build(GuidanceUi.layer(config, options).pipe(Layer.provide(services))), context => Context.get(context, GuidanceUi));

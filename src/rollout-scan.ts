@@ -1,10 +1,10 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { Effect, Layer } from "effect";
+import { Effect, Schema } from "effect";
 import type { SqlClient } from "effect/sql";
-import { DatabaseFormats, GuidanceDb, PolicyDb, readFormat, readOnlyDatabase } from "./db.js";
+import { DatabaseFormats, GuidanceDb, readFormat, readOnlyDatabase } from "./db.js";
 import { checkGitProbeRows } from "./git-probe.js";
-import type { OpenChange, StoredRowFinding, StoredRowScan } from "./guidance-sql.js";
+import { type OpenChange, rowFindings, rowKey, rowsOf, type StoredRowFinding, type StoredRowScan, tableExists } from "./guidance-sql.js";
 import { checkGuidanceRows } from "./guidance-store.js";
 import { checkProjectSupervisorRows } from "./project-supervisor-store.js";
 import { checkConversationRows } from "./supervisor-conversation-store.js";
@@ -14,6 +14,7 @@ import { checkScopeVersion } from "./supervisor-state-reset.js";
 import { checkTeamToolReceipts } from "./supervisor-team-controller.js";
 import { checkTeamRows } from "./supervisor-team-store.js";
 import { checkThreadPolicyRows } from "./thread-policy.js";
+import { ThreadPolicy } from "./thread-policy-contract.js";
 import { checkWorkflowStateRows } from "./workflow-state-store.js";
 import { checkWorkflowWriteRows } from "./workflow-write-controller.js";
 
@@ -21,9 +22,10 @@ import { checkWorkflowWriteRows } from "./workflow-write-controller.js";
  * the read-only rollout scan of a data directory before a version is started on it: every database file is opened read only
  * (no file is created, no pragma or statement writes) and reported with its format, its SQLite user_version, beside the format
  * this version runs; only the service's start creates or upgrades a file (src/database-upgrade.ts). The rows of guidance.sqlite3
- * and thread-settings.sqlite3 go through the decoders their readers use, and what the service's start changes in them is listed:
- * its upgrade creates tables and clears the one-time reset's rows, the stores' open recovers committed notices.
- * Nothing contacts T3
+ * go through the decoders their readers use, and what the service's start changes in them is listed: its upgrade creates tables,
+ * imports the policy and clears the one-time reset's rows, the stores' open recovers committed notices. The retired
+ * thread-settings.sqlite3, whose policy the start imports into guidance before removing it, has its one row decoded as the
+ * import reads it. Nothing contacts T3
  */
 
 /** The findings of one row kind, with the keys of its rows (never their content). */
@@ -48,8 +50,8 @@ export interface FileScan {
   /** the format this version runs */
   readonly current: number;
   /**
-   * the rows of guidance.sqlite3 and thread-settings.sqlite3 at a format this version runs or upgrades; null for another file,
-   * an absent one, or a newer format, whose rows this version's readers cannot judge
+   * the rows of guidance.sqlite3, or of the retired thread-settings.sqlite3, at a format this version runs or imports; null for
+   * another file, an absent one, or a newer format, whose rows this version's readers cannot judge
    */
   readonly rows: RowScan | null;
 }
@@ -63,10 +65,27 @@ export interface RolloutScan {
 }
 
 // the stores of guidance.sqlite3 in the order the run opens them
-const guidanceChecks = [checkGuidanceRows, checkScopeVersion, checkProjectSupervisorRows, checkConversationRows, checkMonitorRows, checkTeamRows,
-  checkWorkflowStateRows, checkHelperRows, checkTeamToolReceipts, checkWorkflowWriteRows, checkGitProbeRows];
+const guidanceChecks: ReadonlyArray<Effect.Effect<StoredRowScan, unknown, GuidanceDb>> = [checkGuidanceRows, checkThreadPolicyRows, checkScopeVersion, checkProjectSupervisorRows, checkConversationRows, checkMonitorRows,
+  checkTeamRows, checkWorkflowStateRows, checkHelperRows, checkTeamToolReceipts, checkWorkflowWriteRows, checkGitProbeRows];
 
 const accessFile = "access/login.sqlite3";
+// the retired policy file: the start imports its one row into guidance format 2, then removes it
+const donorFile = "thread-settings.sqlite3";
+// the last format of the retired file; the start imports it and every earlier one
+const donorFormat = 1;
+
+const decodeDonorRow = Schema.decodeUnknownEffect(Schema.Struct({ document: Schema.fromJsonString(ThreadPolicy) }));
+
+// the retired file's one policy row, decoded as the import reads it; a file without it fails the start, as does a second row
+const checkPolicyDonorRows = (db: SqlClient.SqlClient): Effect.Effect<StoredRowScan, unknown> => Effect.gen(function* () {
+  const rows = yield* rowsOf(db, "settings", "SELECT id,document FROM settings");
+  const findings = yield* rowFindings(rows, { table: "settings", kind: "thread policy", problem: "undecodable", read: "open" }, (row) => rowKey(row, ["id"]), decodeDonorRow);
+  const missing = rows.length !== 1 && (yield* tableExists(db, "settings"))
+    ? [{ table: "settings", kind: "thread policy", key: "1", problem: "incompatible" as const, read: "open" as const }] : [];
+  // only a row the import reads moves; any other one refuses the start, which changes nothing
+  return { findings: [...findings, ...missing], changes: rows.length === 1 && findings.length === 0
+    ? [{ table: "settings", change: "imported into guidance.sqlite3 by the upgrade, then the file is removed", rows: 1 }] : [] };
+});
 
 const grouped = (findings: ReadonlyArray<StoredRowFinding>): Array<FindingGroup> => {
   const groups = new Map<string, {group: Omit<FindingGroup, "count" | "keys">; keys: Array<string>}>();
@@ -79,24 +98,23 @@ const grouped = (findings: ReadonlyArray<StoredRowFinding>): Array<FindingGroup>
   return [...groups.values()].map(({group, keys}) => ({...group, count: keys.length, keys}));
 };
 
-/** The row checks of a file, on its read-only client behind the service its stores use. */
-interface RowChecks<S> {
-  readonly client: (sql: SqlClient.SqlClient) => Layer.Layer<S>;
-  readonly checks: ReadonlyArray<Effect.Effect<StoredRowScan, unknown, S>>;
-}
+/** The row checks of a file, on its read-only client. */
+type RowChecks = (sql: SqlClient.SqlClient) => ReadonlyArray<Effect.Effect<StoredRowScan, unknown>>;
+
+// the guidance checks on the client behind the service its stores use
+const guidanceRows: RowChecks = (sql) => guidanceChecks.map((check) => Effect.provideService(check, GuidanceDb, sql));
 
 /*
  * one file read only through its own read-only client (src/db.ts), or absent; a missing file is reported, never created. Its
  * format is read first (through a live write-ahead log too), its rows only at a format this version runs or upgrades
  */
-const scanFile = <S>(directory: string, file: string, current: number, rows?: RowChecks<S>): Effect.Effect<FileScan, unknown> =>
+const scanFile = (directory: string, file: string, current: number, rows?: RowChecks): Effect.Effect<FileScan, unknown> =>
   Effect.scoped(Effect.gen(function* () {
     if (!existsSync(join(directory, file))) return {file, present: false, format: null, current, rows: null} satisfies FileScan;
     const sql = yield* readOnlyDatabase(directory, file);
     const format = yield* readFormat(sql);
     if (rows === undefined || format > current) return {file, present: true, format, current, rows: null} satisfies FileScan;
-    const {client, checks} = rows;
-    const scans = yield* Effect.forEach(checks, (check) => Effect.provide(check, client(sql)));
+    const scans = yield* Effect.forEach(rows(sql), (check) => check);
     return {file, present: true, format, current,
       rows: {findings: grouped(scans.flatMap((scan) => scan.findings)), changes: scans.flatMap((scan) => scan.changes)}} satisfies FileScan;
   }));
@@ -106,8 +124,8 @@ export const rolloutScan = (directory: string): Effect.Effect<RolloutScan, unkno
   const files = [
     yield* scanFile(directory, accessFile, DatabaseFormats.access),
     yield* scanFile(directory, "catalog.sqlite3", DatabaseFormats.catalog),
-    yield* scanFile(directory, "guidance.sqlite3", DatabaseFormats.guidance, {client: (sql) => Layer.succeed(GuidanceDb, sql), checks: guidanceChecks}),
-    yield* scanFile(directory, "thread-settings.sqlite3", DatabaseFormats.policy, {client: (sql) => Layer.succeed(PolicyDb, sql), checks: [checkThreadPolicyRows]}),
+    yield* scanFile(directory, "guidance.sqlite3", DatabaseFormats.guidance, guidanceRows),
+    yield* scanFile(directory, donorFile, donorFormat, (sql) => [checkPolicyDonorRows(sql)]),
   ];
   const blocking = files.flatMap((file) => file.rows?.findings ?? []).filter((group) => group.read !== "call").reduce((total, group) => total + group.count, 0);
   const unsupported = files.filter((file) => file.format !== null && file.format > file.current).map((file) => file.file);
@@ -120,6 +138,9 @@ export const rolloutScan = (directory: string): Effect.Effect<RolloutScan, unkno
  * it recognizes (its own preflight decides; the scan does not repeat it) and refuses a newer one
  */
 const fileLine = (file: FileScan): string => {
+  if (file.file === donorFile) return file.format === null ? `${file.file}: absent (retired: guidance.sqlite3 holds the policy)`
+    : file.format > file.current ? `${file.file}: present, format ${file.format} (not a format of the retired policy file: the service refuses to start on it)`
+    : `${file.file}: present, format ${file.format} (retired: the service's start imports its policy into guidance.sqlite3 and removes it, or refuses one that differs from the policy guidance already imported)`;
   if (file.format === null) return `${file.file}: absent (${file.file === accessFile
     ? "the service creates it when it starts the dashboard" : "only the service's start creates it, for a new installation"})`;
   if (file.format === file.current) return `${file.file}: present, format ${file.format} (current)`;
@@ -128,7 +149,7 @@ const fileLine = (file: FileScan): string => {
     : `${file.file}: present, format ${file.format} (newer than format ${file.current}, which this version runs: the service refuses to start on it)`;
 };
 
-/** The scan as text: per file its format, and for guidance and thread-settings each finding group with its keys and what the start changes. */
+/** The scan as text: per file its format, and for guidance and the retired thread-settings each finding group with its keys and what the start changes. */
 export const renderRolloutScan = (directory: string, scan: RolloutScan): string => {
   const lines = [`rollout scan of ${directory} (read only; no file was written and T3 was not contacted)`];
   for (const file of scan.files) {

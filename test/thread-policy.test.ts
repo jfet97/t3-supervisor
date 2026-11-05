@@ -5,9 +5,11 @@ import { ThreadPolicyConflict, ThreadPolicyInvalid, ThreadPolicyStoreError } fro
 import { failsWith, rows } from "./support/guidance-store-services.js";
 import { dataDirectory, withThreadPolicy } from "./support/g9-stores.js";
 
-// the ThreadPolicyStore service over a temporary thread-settings.sqlite3 (its production client and layer): the baseline
-// case, then the authoritative read on every call and typed row failures. Seeding the configured excluded chats once into a
-// fresh directory, and never into an existing one, is the startup upgrade's (test/database-upgrade.test.ts)
+/*
+ * the ThreadPolicyStore service over the policy row of a temporary guidance.sqlite3 (its production client and layer): the
+ * baseline case, then the authoritative read on every call and typed row failures. Seeding the configured excluded chats once
+ * into a fresh directory, and never into an existing one, is the startup upgrade's (test/database-upgrade.test.ts)
+ */
 
 it.effect("excluded-thread policy persists and uses compare-and-swap generations", () => Effect.gen(function* () {
   const directory = yield* dataDirectory("supervisor-policy-", { excludedThreadIds: ["excluded"] });
@@ -30,7 +32,7 @@ it.effect("every get is an authoritative read of the stored row", () => Effect.g
   const observed = yield* withThreadPolicy(directory, (store, db) => Effect.gen(function* () {
     const stored = yield* store.get();
     // a write the store did not make is seen by the next read: nothing is cached
-    yield* db`UPDATE settings SET document=${JSON.stringify({ generation: 7, excludedThreadIds: ["written-elsewhere"] })} WHERE id=1`;
+    yield* db`UPDATE thread_policy SET document=${JSON.stringify({ generation: 7, excludedThreadIds: ["written-elsewhere"] })} WHERE id=1`;
     return { stored, reread: yield* store.get() };
   }));
   assert.deepEqual(observed, { stored: { generation: 1, excludedThreadIds: [] }, reread: { generation: 7, excludedThreadIds: ["written-elsewhere"] } });
@@ -41,12 +43,12 @@ it.effect("every get is an authoritative read of the stored row", () => Effect.g
 it.effect("a stored policy row that is missing or does not decode is a typed failure, never a default", () => Effect.gen(function* () {
   const directory = yield* dataDirectory("supervisor-policy-");
   const failures = yield* withThreadPolicy(directory, (store, db) => Effect.gen(function* () {
-    yield* db`UPDATE settings SET document='{"generation":"one"}' WHERE id=1`;
+    yield* db`UPDATE thread_policy SET document='{"generation":"one"}' WHERE id=1`;
     const invalid = yield* Effect.flip(store.get());
-    yield* db`DELETE FROM settings`;
+    yield* db`DELETE FROM thread_policy`;
     const missing = yield* Effect.flip(store.get());
     const save = yield* Effect.flip(store.save({ generation: 1, excludedThreadIds: [] }));
-    return { invalid, missing, save, rows: yield* rows(db, "SELECT * FROM settings") };
+    return { invalid, missing, save, rows: yield* rows(db, "SELECT * FROM thread_policy") };
   }));
   for (const failure of [failures.invalid, failures.missing]) {
     assert.ok(failure instanceof ThreadPolicyStoreError);

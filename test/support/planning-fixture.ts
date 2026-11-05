@@ -6,12 +6,11 @@ import { SupervisionGate } from "../../src/supervision-gate.js";
 import { SupervisorConversation } from "../../src/supervisor-conversation.js";
 import { SupervisorPlanningController } from "../../src/supervisor-planning-controller.js";
 import type { NativeRpcShape } from "../../src/supervisor-native.js";
-import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, ThreadInfo } from "../../src/types.js";
 import { workflowToolNames } from "../../src/workflow-write-evidence.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { engagedTask } from "./engaged-task.js";
-import { policyLayer, supervisionStores, temporaryDirectory } from "./g11-stores.js";
+import { supervisionStores, temporaryDirectory } from "./g11-stores.js";
 import { definitionsService } from "./g1a-conversation.js";
 import { teamControllers } from "./g11-team.js";
 
@@ -34,7 +33,7 @@ export const planningFixture = (rpc?: NativeRpcShape, options: {
 } = {}) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("planning-controller-");
   const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer(directory)), ThreadPolicyStore);
+  const policy = stores.policy;
   const binding = {...yield* stores.supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};
   yield* stores.supervisors.setBinding(binding);
   let task: TaskRecord = {id: "task-a", sourceHash: fingerprint("Update the application"), threadId: "main", projectId: "project", sourceRunId: "source-run",
