@@ -1,0 +1,39 @@
+{
+  "database": "thread-settings.sqlite3",
+  "userVersion": 0,
+  "journalMode": "wal",
+  "sqliteMaster": [
+    {
+      "type": "table",
+      "name": "settings",
+      "tbl_name": "settings",
+      "sql": "CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)"
+    }
+  ],
+  "objectOrder": [
+    "settings"
+  ],
+  "tableInfo": {
+    "settings": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ]
+  },
+  "rowCounts": {
+    "settings": 1
+  }
+}

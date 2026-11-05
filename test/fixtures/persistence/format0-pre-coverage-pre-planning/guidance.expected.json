@@ -1,0 +1,2057 @@
+{
+  "database": "guidance.sqlite3",
+  "userVersion": 0,
+  "journalMode": "wal",
+  "sqliteMaster": [
+    {
+      "type": "index",
+      "name": "activity_notice",
+      "tbl_name": "activity",
+      "sql": "CREATE INDEX activity_notice ON activity(json_extract(document,'$.noticeId'),created_at)"
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_activity_1",
+      "tbl_name": "activity",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_budget_1",
+      "tbl_name": "budget",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_classifications_1",
+      "tbl_name": "classifications",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_episodes_1",
+      "tbl_name": "episodes",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_meta_1",
+      "tbl_name": "meta",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_mutes_1",
+      "tbl_name": "mutes",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_notices_1",
+      "tbl_name": "notices",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_observations_1",
+      "tbl_name": "observations",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_rules_1",
+      "tbl_name": "rules",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_chat_enables_1",
+      "tbl_name": "supervisor_chat_enables",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_conversation_requests_1",
+      "tbl_name": "supervisor_conversation_requests",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_definition_user_saves_1",
+      "tbl_name": "supervisor_definition_user_saves",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_helper_channels_1",
+      "tbl_name": "supervisor_helper_channels",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_helper_deliveries_1",
+      "tbl_name": "supervisor_helper_deliveries",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_main_bindings_1",
+      "tbl_name": "supervisor_main_bindings",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_monitor_binding_clock_1",
+      "tbl_name": "supervisor_monitor_binding_clock",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_monitor_items_1",
+      "tbl_name": "supervisor_monitor_items",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_monitor_threads_1",
+      "tbl_name": "supervisor_monitor_threads",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_owned_threads_1",
+      "tbl_name": "supervisor_owned_threads",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_project_settings_1",
+      "tbl_name": "supervisor_project_settings",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_task_interpretations_1",
+      "tbl_name": "supervisor_task_interpretations",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_team_assignments_1",
+      "tbl_name": "supervisor_team_assignments",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_team_events_1",
+      "tbl_name": "supervisor_team_events",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_team_members_1",
+      "tbl_name": "supervisor_team_members",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_team_notifications_1",
+      "tbl_name": "supervisor_team_notifications",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_team_requests_1",
+      "tbl_name": "supervisor_team_requests",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_team_tool_receipts_1",
+      "tbl_name": "supervisor_team_tool_receipts",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_agreement_candidates_1",
+      "tbl_name": "supervisor_workflow_agreement_candidates",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_introductions_1",
+      "tbl_name": "supervisor_workflow_introductions",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_operations_1",
+      "tbl_name": "supervisor_workflow_operations",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_state_1",
+      "tbl_name": "supervisor_workflow_state",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_state_2",
+      "tbl_name": "supervisor_workflow_state",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_write_evidence_1",
+      "tbl_name": "supervisor_workflow_write_evidence",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_supervisor_workflow_write_receipts_1",
+      "tbl_name": "supervisor_workflow_write_receipts",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "supervisor_conversation_project",
+      "tbl_name": "supervisor_conversation_requests",
+      "sql": "CREATE INDEX supervisor_conversation_project ON supervisor_conversation_requests(project_id)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_main_binding_thread",
+      "tbl_name": "supervisor_main_bindings",
+      "sql": "CREATE INDEX supervisor_main_binding_thread ON supervisor_main_bindings(json_extract(document,'$.threadId'))"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_monitor_pending",
+      "tbl_name": "supervisor_monitor_items",
+      "sql": "CREATE INDEX supervisor_monitor_pending\n        ON supervisor_monitor_items(project_id, thread_id, eligible, reviewed_version)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_tasks_project",
+      "tbl_name": "supervisor_task_interpretations",
+      "sql": "CREATE INDEX supervisor_tasks_project ON supervisor_task_interpretations(project_id)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_team_events_pending",
+      "tbl_name": "supervisor_team_events",
+      "sql": "CREATE INDEX supervisor_team_events_pending ON supervisor_team_events(owner_thread_id,owner_generation,acknowledged_at,created_at)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_team_member_identity",
+      "tbl_name": "supervisor_team_members",
+      "sql": "CREATE UNIQUE INDEX supervisor_team_member_identity ON supervisor_team_members(member_thread_id) WHERE state<>'retired'"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_team_notifications_recipient",
+      "tbl_name": "supervisor_team_notifications",
+      "sql": "CREATE INDEX supervisor_team_notifications_recipient ON supervisor_team_notifications(owner_thread_id,owner_generation,recipient_thread_id,state,created_at)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_team_requests_pending",
+      "tbl_name": "supervisor_team_requests",
+      "sql": "CREATE INDEX supervisor_team_requests_pending ON supervisor_team_requests(owner_thread_id,owner_generation,state,created_at)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_workflow_agreement_project",
+      "tbl_name": "supervisor_workflow_agreement_candidates",
+      "sql": "CREATE INDEX supervisor_workflow_agreement_project ON supervisor_workflow_agreement_candidates(project_id)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_workflow_scope",
+      "tbl_name": "supervisor_workflow_state",
+      "sql": "CREATE INDEX supervisor_workflow_scope ON supervisor_workflow_state(project_id,main_thread_id)"
+    },
+    {
+      "type": "index",
+      "name": "supervisor_workflow_write_evidence_operation",
+      "tbl_name": "supervisor_workflow_write_evidence",
+      "sql": "CREATE INDEX supervisor_workflow_write_evidence_operation\n        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at)"
+    },
+    {
+      "type": "table",
+      "name": "activity",
+      "tbl_name": "activity",
+      "sql": "CREATE TABLE activity(id TEXT PRIMARY KEY,document TEXT NOT NULL,created_at INTEGER NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "budget",
+      "tbl_name": "budget",
+      "sql": "CREATE TABLE budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "classifications",
+      "tbl_name": "classifications",
+      "sql": "CREATE TABLE classifications(project_id TEXT PRIMARY KEY,classification TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "episodes",
+      "tbl_name": "episodes",
+      "sql": "CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,\n        notified INTEGER NOT NULL DEFAULT 0, object_id TEXT,PRIMARY KEY(thread_id,rule_id))"
+    },
+    {
+      "type": "table",
+      "name": "meta",
+      "tbl_name": "meta",
+      "sql": "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "mutes",
+      "tbl_name": "mutes",
+      "sql": "CREATE TABLE mutes(rule_id TEXT NOT NULL,scope_id TEXT NOT NULL,PRIMARY KEY(rule_id,scope_id))"
+    },
+    {
+      "type": "table",
+      "name": "notices",
+      "tbl_name": "notices",
+      "sql": "CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,\n        epoch INTEGER NOT NULL,state TEXT NOT NULL,text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,\n        dispatch_started INTEGER NOT NULL DEFAULT 0, rule_generation INTEGER NOT NULL DEFAULT -1, settings_generation INTEGER NOT NULL DEFAULT -1)"
+    },
+    {
+      "type": "table",
+      "name": "observations",
+      "tbl_name": "observations",
+      "sql": "CREATE TABLE observations(thread_id TEXT PRIMARY KEY,hash TEXT NOT NULL,observed_at INTEGER NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "rules",
+      "tbl_name": "rules",
+      "sql": "CREATE TABLE rules(id TEXT PRIMARY KEY,document TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_chat_enables",
+      "tbl_name": "supervisor_chat_enables",
+      "sql": "CREATE TABLE supervisor_chat_enables(thread_id TEXT PRIMARY KEY,enabled_at INTEGER NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_conversation_requests",
+      "tbl_name": "supervisor_conversation_requests",
+      "sql": "CREATE TABLE supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_definition_user_saves",
+      "tbl_name": "supervisor_definition_user_saves",
+      "sql": "CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,expected_revision TEXT NOT NULL,PRIMARY KEY(project_id,workspace_root))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_helper_channels",
+      "tbl_name": "supervisor_helper_channels",
+      "sql": "CREATE TABLE supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_helper_deliveries",
+      "tbl_name": "supervisor_helper_deliveries",
+      "sql": "CREATE TABLE supervisor_helper_deliveries(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,message_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,message_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_main_bindings",
+      "tbl_name": "supervisor_main_bindings",
+      "sql": "CREATE TABLE supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_monitor_binding_clock",
+      "tbl_name": "supervisor_monitor_binding_clock",
+      "sql": "CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_monitor_items",
+      "tbl_name": "supervisor_monitor_items",
+      "sql": "CREATE TABLE supervisor_monitor_items(\n        project_id TEXT NOT NULL,\n        thread_id TEXT NOT NULL,\n        item_id TEXT NOT NULL,\n        read_item_id TEXT,\n        type TEXT NOT NULL,\n        status TEXT NOT NULL,\n        ordinal INTEGER NOT NULL,\n        detected_at INTEGER NOT NULL,\n        version TEXT NOT NULL,\n        priority TEXT,\n        eligible INTEGER NOT NULL,\n        active INTEGER NOT NULL DEFAULT 1,\n        reviewed_version TEXT,\n        updated_at INTEGER NOT NULL,\n        PRIMARY KEY(project_id, thread_id, item_id)\n      )"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_monitor_threads",
+      "tbl_name": "supervisor_monitor_threads",
+      "sql": "CREATE TABLE supervisor_monitor_threads(\n        project_id TEXT NOT NULL,\n        thread_id TEXT NOT NULL,\n        source_ordinal INTEGER NOT NULL,\n        activation_ordinal INTEGER NOT NULL,\n        saturated INTEGER NOT NULL DEFAULT 0,\n        saturation_at INTEGER,\n        last_acknowledged_at INTEGER,\n        untracked_count INTEGER NOT NULL DEFAULT 0,\n        PRIMARY KEY(project_id, thread_id)\n      )"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_owned_threads",
+      "tbl_name": "supervisor_owned_threads",
+      "sql": "CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_project_settings",
+      "tbl_name": "supervisor_project_settings",
+      "sql": "CREATE TABLE supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_task_interpretations",
+      "tbl_name": "supervisor_task_interpretations",
+      "sql": "CREATE TABLE supervisor_task_interpretations(thread_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,updated_at INTEGER NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_team_assignments",
+      "tbl_name": "supervisor_team_assignments",
+      "sql": "CREATE TABLE supervisor_team_assignments(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,subtree_root_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,subtree_root_thread_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_team_events",
+      "tbl_name": "supervisor_team_events",
+      "sql": "CREATE TABLE supervisor_team_events(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,id TEXT NOT NULL,created_at INTEGER NOT NULL,acknowledged_at INTEGER,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_team_members",
+      "tbl_name": "supervisor_team_members",
+      "sql": "CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_team_notifications",
+      "tbl_name": "supervisor_team_notifications",
+      "sql": "CREATE TABLE supervisor_team_notifications(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,id TEXT NOT NULL,recipient_thread_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_team_requests",
+      "tbl_name": "supervisor_team_requests",
+      "sql": "CREATE TABLE supervisor_team_requests(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,request_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_team_tool_receipts",
+      "tbl_name": "supervisor_team_tool_receipts",
+      "sql": "CREATE TABLE supervisor_team_tool_receipts(\n      owner_thread_id TEXT NOT NULL,actor_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL,actor_epoch INTEGER NOT NULL,operation_id TEXT NOT NULL,\n      request_hash TEXT NOT NULL,evidence_item_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_workflow_agreement_candidates",
+      "tbl_name": "supervisor_workflow_agreement_candidates",
+      "sql": "CREATE TABLE supervisor_workflow_agreement_candidates(task_id TEXT NOT NULL,proposal_id TEXT NOT NULL,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(task_id,proposal_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_workflow_introductions",
+      "tbl_name": "supervisor_workflow_introductions",
+      "sql": "CREATE TABLE supervisor_workflow_introductions(task_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL)"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_workflow_operations",
+      "tbl_name": "supervisor_workflow_operations",
+      "sql": "CREATE TABLE supervisor_workflow_operations (project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,actor_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL,operation_namespace TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,result TEXT NOT NULL,workflow_id TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(project_id,main_thread_id,actor_thread_id,binding_generation,operation_namespace,operation_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_workflow_state",
+      "tbl_name": "supervisor_workflow_state",
+      "sql": "CREATE TABLE supervisor_workflow_state (workflow_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,thread_id TEXT NOT NULL,parent_workflow_id TEXT,parent_thread_id TEXT,revision INTEGER NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(project_id,main_thread_id,thread_id))"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_workflow_write_evidence",
+      "tbl_name": "supervisor_workflow_write_evidence",
+      "sql": "CREATE TABLE supervisor_workflow_write_evidence (\n        supervisor_thread_id TEXT NOT NULL,\n        item_id TEXT NOT NULL,\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        native_evidence TEXT NOT NULL,\n        result TEXT NOT NULL,\n        successful INTEGER NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(supervisor_thread_id,item_id)\n      )"
+    },
+    {
+      "type": "table",
+      "name": "supervisor_workflow_write_receipts",
+      "tbl_name": "supervisor_workflow_write_receipts",
+      "sql": "CREATE TABLE supervisor_workflow_write_receipts (\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        supervisor_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        result TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)\n      )"
+    }
+  ],
+  "objectOrder": [
+    "meta",
+    "sqlite_autoindex_meta_1",
+    "rules",
+    "sqlite_autoindex_rules_1",
+    "mutes",
+    "sqlite_autoindex_mutes_1",
+    "classifications",
+    "sqlite_autoindex_classifications_1",
+    "observations",
+    "sqlite_autoindex_observations_1",
+    "episodes",
+    "sqlite_autoindex_episodes_1",
+    "notices",
+    "sqlite_autoindex_notices_1",
+    "activity",
+    "sqlite_autoindex_activity_1",
+    "budget",
+    "sqlite_autoindex_budget_1",
+    "activity_notice",
+    "supervisor_owned_threads",
+    "sqlite_autoindex_supervisor_owned_threads_1",
+    "supervisor_project_settings",
+    "sqlite_autoindex_supervisor_project_settings_1",
+    "supervisor_main_bindings",
+    "sqlite_autoindex_supervisor_main_bindings_1",
+    "supervisor_task_interpretations",
+    "sqlite_autoindex_supervisor_task_interpretations_1",
+    "supervisor_definition_user_saves",
+    "sqlite_autoindex_supervisor_definition_user_saves_1",
+    "supervisor_chat_enables",
+    "sqlite_autoindex_supervisor_chat_enables_1",
+    "supervisor_tasks_project",
+    "supervisor_conversation_requests",
+    "sqlite_autoindex_supervisor_conversation_requests_1",
+    "supervisor_conversation_project",
+    "supervisor_workflow_introductions",
+    "sqlite_autoindex_supervisor_workflow_introductions_1",
+    "supervisor_workflow_agreement_candidates",
+    "sqlite_autoindex_supervisor_workflow_agreement_candidates_1",
+    "supervisor_workflow_agreement_project",
+    "supervisor_monitor_binding_clock",
+    "sqlite_autoindex_supervisor_monitor_binding_clock_1",
+    "supervisor_monitor_threads",
+    "sqlite_autoindex_supervisor_monitor_threads_1",
+    "supervisor_monitor_items",
+    "sqlite_autoindex_supervisor_monitor_items_1",
+    "supervisor_monitor_pending",
+    "supervisor_main_binding_thread",
+    "supervisor_team_members",
+    "sqlite_autoindex_supervisor_team_members_1",
+    "supervisor_team_member_identity",
+    "supervisor_team_assignments",
+    "sqlite_autoindex_supervisor_team_assignments_1",
+    "supervisor_team_notifications",
+    "sqlite_autoindex_supervisor_team_notifications_1",
+    "supervisor_team_notifications_recipient",
+    "supervisor_team_events",
+    "sqlite_autoindex_supervisor_team_events_1",
+    "supervisor_team_events_pending",
+    "supervisor_team_requests",
+    "sqlite_autoindex_supervisor_team_requests_1",
+    "supervisor_team_requests_pending",
+    "supervisor_workflow_state",
+    "sqlite_autoindex_supervisor_workflow_state_1",
+    "sqlite_autoindex_supervisor_workflow_state_2",
+    "supervisor_workflow_scope",
+    "supervisor_workflow_operations",
+    "sqlite_autoindex_supervisor_workflow_operations_1",
+    "supervisor_helper_channels",
+    "sqlite_autoindex_supervisor_helper_channels_1",
+    "supervisor_helper_deliveries",
+    "sqlite_autoindex_supervisor_helper_deliveries_1",
+    "supervisor_workflow_write_receipts",
+    "sqlite_autoindex_supervisor_workflow_write_receipts_1",
+    "supervisor_workflow_write_evidence",
+    "sqlite_autoindex_supervisor_workflow_write_evidence_1",
+    "supervisor_workflow_write_evidence_operation",
+    "supervisor_team_tool_receipts",
+    "sqlite_autoindex_supervisor_team_tool_receipts_1"
+  ],
+  "tableInfo": {
+    "activity": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "budget": [
+      {
+        "cid": 0,
+        "name": "day",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "tokens",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "classifications": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "classification",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "episodes": [
+      {
+        "cid": 0,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "rule_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "epoch",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "notified",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "object_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "meta": [
+      {
+        "cid": 0,
+        "name": "key",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "value",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "mutes": [
+      {
+        "cid": 0,
+        "name": "rule_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "scope_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      }
+    ],
+    "notices": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "rule_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "run_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "epoch",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "state",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "text",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "message_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 8,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 9,
+        "name": "dispatch_started",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      },
+      {
+        "cid": 10,
+        "name": "rule_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "-1",
+        "pk": 0
+      },
+      {
+        "cid": 11,
+        "name": "settings_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "-1",
+        "pk": 0
+      }
+    ],
+    "observations": [
+      {
+        "cid": 0,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "observed_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "rules": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_chat_enables": [
+      {
+        "cid": 0,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "enabled_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_conversation_requests": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_definition_user_saves": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "workspace_root",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "signature",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "saved_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "expected_revision",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_helper_channels": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "helper_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_helper_deliveries": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "message_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_main_bindings": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "main_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_monitor_binding_clock": [
+      {
+        "cid": 0,
+        "name": "supervisor_thread_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "last_notice_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "review_misses",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      }
+    ],
+    "supervisor_monitor_items": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "item_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "read_item_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "type",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "status",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "ordinal",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "detected_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 8,
+        "name": "version",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 9,
+        "name": "priority",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 10,
+        "name": "eligible",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 11,
+        "name": "active",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "1",
+        "pk": 0
+      },
+      {
+        "cid": 12,
+        "name": "reviewed_version",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 13,
+        "name": "updated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_monitor_threads": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "source_ordinal",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "activation_ordinal",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "saturated",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "saturation_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "last_acknowledged_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "untracked_count",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      }
+    ],
+    "supervisor_owned_threads": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      }
+    ],
+    "supervisor_project_settings": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_task_interpretations": [
+      {
+        "cid": 0,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "updated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_team_assignments": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "subtree_root_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_team_events": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "acknowledged_at",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_team_members": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "member_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "state",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "epoch",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_team_notifications": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "recipient_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "state",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_team_requests": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "owner_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "request_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "state",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "updated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_team_tool_receipts": [
+      {
+        "cid": 0,
+        "name": "owner_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "actor_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "binding_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "actor_epoch",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 4
+      },
+      {
+        "cid": 4,
+        "name": "operation_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 5
+      },
+      {
+        "cid": 5,
+        "name": "request_hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "evidence_item_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_workflow_agreement_candidates": [
+      {
+        "cid": 0,
+        "name": "task_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "proposal_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_workflow_introductions": [
+      {
+        "cid": 0,
+        "name": "task_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_workflow_operations": [
+      {
+        "cid": 0,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "main_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "actor_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 3,
+        "name": "binding_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 4
+      },
+      {
+        "cid": 4,
+        "name": "operation_namespace",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 5
+      },
+      {
+        "cid": 5,
+        "name": "operation_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 6
+      },
+      {
+        "cid": 6,
+        "name": "request_hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "result",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 8,
+        "name": "workflow_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 9,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_workflow_state": [
+      {
+        "cid": 0,
+        "name": "workflow_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "main_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "parent_workflow_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "parent_thread_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "revision",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 8,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 9,
+        "name": "updated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_workflow_write_evidence": [
+      {
+        "cid": 0,
+        "name": "supervisor_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "item_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 2,
+        "name": "operation_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "operation_namespace",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "request_hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 5,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 6,
+        "name": "main_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 7,
+        "name": "binding_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 8,
+        "name": "native_evidence",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 9,
+        "name": "result",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 10,
+        "name": "successful",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 11,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "supervisor_workflow_write_receipts": [
+      {
+        "cid": 0,
+        "name": "operation_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 6
+      },
+      {
+        "cid": 1,
+        "name": "operation_namespace",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 5
+      },
+      {
+        "cid": 2,
+        "name": "request_hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 4,
+        "name": "main_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 2
+      },
+      {
+        "cid": 5,
+        "name": "supervisor_thread_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 3
+      },
+      {
+        "cid": 6,
+        "name": "binding_generation",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 4
+      },
+      {
+        "cid": 7,
+        "name": "result",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 8,
+        "name": "created_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ]
+  },
+  "rowCounts": {
+    "activity": 2,
+    "budget": 1,
+    "classifications": 2,
+    "episodes": 1,
+    "meta": 15,
+    "mutes": 1,
+    "notices": 3,
+    "observations": 1,
+    "rules": 1,
+    "supervisor_chat_enables": 1,
+    "supervisor_conversation_requests": 2,
+    "supervisor_definition_user_saves": 0,
+    "supervisor_helper_channels": 1,
+    "supervisor_helper_deliveries": 2,
+    "supervisor_main_bindings": 2,
+    "supervisor_monitor_binding_clock": 1,
+    "supervisor_monitor_items": 1,
+    "supervisor_monitor_threads": 1,
+    "supervisor_owned_threads": 3,
+    "supervisor_project_settings": 1,
+    "supervisor_task_interpretations": 0,
+    "supervisor_team_assignments": 0,
+    "supervisor_team_events": 1,
+    "supervisor_team_members": 1,
+    "supervisor_team_notifications": 1,
+    "supervisor_team_requests": 0,
+    "supervisor_team_tool_receipts": 0,
+    "supervisor_workflow_agreement_candidates": 0,
+    "supervisor_workflow_introductions": 0,
+    "supervisor_workflow_operations": 0,
+    "supervisor_workflow_state": 0,
+    "supervisor_workflow_write_evidence": 1,
+    "supervisor_workflow_write_receipts": 1
+  }
+}

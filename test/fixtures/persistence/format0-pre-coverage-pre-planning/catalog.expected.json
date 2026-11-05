@@ -1,0 +1,243 @@
+{
+  "database": "catalog.sqlite3",
+  "userVersion": 0,
+  "journalMode": "wal",
+  "sqliteMaster": [
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_activations_1",
+      "tbl_name": "activations",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_cursors_1",
+      "tbl_name": "cursors",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_projects_1",
+      "tbl_name": "projects",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_thread_revisions_1",
+      "tbl_name": "thread_revisions",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_threads_1",
+      "tbl_name": "threads",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "threads_project",
+      "tbl_name": "threads",
+      "sql": "CREATE INDEX threads_project ON threads(project_id)"
+    },
+    {
+      "type": "table",
+      "name": "activations",
+      "tbl_name": "activations",
+      "sql": "CREATE TABLE activations (\n    environment_id TEXT PRIMARY KEY,\n    activated_at INTEGER NOT NULL\n  )"
+    },
+    {
+      "type": "table",
+      "name": "cursors",
+      "tbl_name": "cursors",
+      "sql": "CREATE TABLE cursors (\n    stream TEXT PRIMARY KEY CHECK(stream IN ('active', 'archive')),\n    sequence INTEGER NOT NULL\n  )"
+    },
+    {
+      "type": "table",
+      "name": "environment_binding",
+      "tbl_name": "environment_binding",
+      "sql": "CREATE TABLE environment_binding (\n    id INTEGER PRIMARY KEY CHECK(id=1),\n    environment_id TEXT NOT NULL\n  )"
+    },
+    {
+      "type": "table",
+      "name": "projects",
+      "tbl_name": "projects",
+      "sql": "CREATE TABLE projects (\n    id TEXT PRIMARY KEY,\n    document TEXT NOT NULL,\n    deleted INTEGER NOT NULL DEFAULT 0\n  )"
+    },
+    {
+      "type": "table",
+      "name": "thread_revisions",
+      "tbl_name": "thread_revisions",
+      "sql": "CREATE TABLE thread_revisions (\n    thread_id TEXT PRIMARY KEY,\n    revision INTEGER NOT NULL\n  )"
+    },
+    {
+      "type": "table",
+      "name": "threads",
+      "tbl_name": "threads",
+      "sql": "CREATE TABLE threads (\n    id TEXT PRIMARY KEY,\n    project_id TEXT,\n    document TEXT NOT NULL,\n    location TEXT NOT NULL CHECK(location IN ('active', 'archive', 'removed')),\n    revision INTEGER NOT NULL\n  )"
+    }
+  ],
+  "objectOrder": [
+    "activations",
+    "sqlite_autoindex_activations_1",
+    "environment_binding",
+    "cursors",
+    "sqlite_autoindex_cursors_1",
+    "projects",
+    "sqlite_autoindex_projects_1",
+    "threads",
+    "sqlite_autoindex_threads_1",
+    "thread_revisions",
+    "sqlite_autoindex_thread_revisions_1",
+    "threads_project"
+  ],
+  "tableInfo": {
+    "activations": [
+      {
+        "cid": 0,
+        "name": "environment_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "activated_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "cursors": [
+      {
+        "cid": 0,
+        "name": "stream",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "sequence",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "environment_binding": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "INTEGER",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "environment_id",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "projects": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "deleted",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": "0",
+        "pk": 0
+      }
+    ],
+    "thread_revisions": [
+      {
+        "cid": 0,
+        "name": "thread_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "revision",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "threads": [
+      {
+        "cid": 0,
+        "name": "id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "project_id",
+        "type": "TEXT",
+        "notnull": 0,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "document",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 3,
+        "name": "location",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 4,
+        "name": "revision",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ]
+  },
+  "rowCounts": {
+    "activations": 1,
+    "cursors": 2,
+    "environment_binding": 1,
+    "projects": 3,
+    "thread_revisions": 12,
+    "threads": 12
+  }
+}

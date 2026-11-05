@@ -3,16 +3,22 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { NodeFileSystem } from "@effect/platform-node";
+import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
-import { Effect, Exit, FileSystem } from "effect";
+import { Effect, Exit, FileSystem, Layer } from "effect";
 import { catalogContract, guidanceContract, policyContract, type SchemaContract } from "../src/database-migrations.js";
 import { DatabaseUpgradeError, type UpgradeReport, upgradeDataDirectory } from "../src/database-upgrade.js";
+import { guidanceDbLayer } from "../src/db.js";
+import { GuidanceStore } from "../src/guidance-store.js";
+import { SupervisorIds } from "../src/ids.js";
+import { forgeDashboardToken } from "../src/service-auth.js";
+import { fixtureShapes, materializeFixture, verifyFixtureIntegrity } from "./support/persistence-fixtures.js";
 
 // the startup coordinator (src/database-upgrade.ts) on real files: a fresh directory, a repeated start, an interrupted
 // creation, the refusals that change nothing, the backup and upgrade of format 0 files with their rows preserved, a failure
-// between files and its resumption, and two starts at once. The format 0 inputs are written literally here (and by the frozen
-// fixtures of test/fixtures/persistence), never with today's schema statements.
+// between files and its resumption, two starts at once, and every frozen historical layout of test/fixtures/persistence
+// (released schema statements with synthetic rows). The format 0 inputs are written literally here or come from those
+// fixtures, never from today's schema statements.
 
 const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-upgrade-" }));
 
@@ -161,6 +167,81 @@ const refusedWith = (exit: Exit.Exit<UpgradeReport, DatabaseUpgradeError>, file:
   assert.ok(failure !== undefined && failure._tag === "Fail" && failure.error instanceof DatabaseUpgradeError, "a typed upgrade failure");
   assert.deepEqual([failure.error.file, failure.error.reason], [file, reason]);
 };
+
+// the shell the frozen fixtures store with keys outside the catalog whitelist: the catalog step rewrites it once, as every open
+// of the releases that wrote it did
+const unwhitelistedShell = "fixture-thread-unknown-keys";
+
+describe("startup upgrade of the frozen historical layouts", () => {
+  for (const shape of fixtureShapes) {
+    it.live(`${shape}: backed up, upgraded in place with its rows preserved, its stores and sign-in usable, and a later start changes nothing`, () => Effect.gen(function* () {
+      yield* verifyFixtureIntegrity(shape);
+      const directory = yield* temporaryDirectory;
+      yield* materializeFixture(shape, directory);
+      const before = snapshotDirectory(directory);
+      const report = yield* upgrade(directory, ["ignored-for-an-existing-directory"]);
+      assert.equal(report.fresh, false);
+      assert.ok(report.backupSet !== null);
+      assert.deepEqual(report.files.map((file) => [file.file, file.from, file.to]), [
+        ["access/login.sqlite3", 0, 1], ["catalog.sqlite3", 0, 1], ["guidance.sqlite3", 0, 1], ["thread-settings.sqlite3", 0, 1],
+      ]);
+      for (const file of allFiles) assert.equal(formatOf(join(directory, file)), 1, file);
+      for (const file of storeFiles) assert.equal(journalOf(join(directory, file)), "wal", file);
+      assert.equal(journalOf(join(directory, "access", "login.sqlite3")), "delete");
+
+      // every stored row keeps its identity and every original value byte for byte (documents, native evidence with unknown
+      // keys, Stops, Start records, uncertain sends, sessions and the policy at its generation), except the one shell the
+      // whitelist trims
+      const after = snapshotDirectory(directory);
+      for (const file of [...allFiles].filter((file) => file !== "catalog.sqlite3")) assertPreserved(before[file] ?? {}, after[file] ?? {});
+      assertPreserved(before["catalog.sqlite3"] ?? {}, after["catalog.sqlite3"] ?? {}, (table) => table === "threads");
+      const threadsBefore = before["catalog.sqlite3"]?.threads ?? [];
+      const threadsAfter = after["catalog.sqlite3"]?.threads ?? [];
+      assert.equal(threadsAfter.length, threadsBefore.length);
+      threadsBefore.forEach((row, index) => {
+        const upgraded = threadsAfter[index];
+        assert.ok(upgraded !== undefined);
+        assert.deepEqual({ ...upgraded, document: null }, { ...row, document: null }, `thread row ${String(row.id)} identity kept`);
+        if (row.id !== unwhitelistedShell) assert.equal(upgraded.document, row.document, `thread ${String(row.id)} document kept byte for byte`);
+        else {
+          const original = JSON.parse(String(row.document)) as Record<string, unknown>;
+          const trimmed = JSON.parse(String(upgraded.document)) as Record<string, unknown>;
+          assert.ok(Object.keys(trimmed).every((key) => Object.hasOwn(original, key)), "the whitelist only removes keys");
+          assert.ok(Object.keys(trimmed).length < Object.keys(original).length, "keys outside the whitelist are removed");
+          assert.deepEqual([trimmed.id, trimmed.title, trimmed.projectId], [original.id, original.title, original.projectId]);
+        }
+      });
+
+      // the verified backup set holds the format 0 files exactly as they were
+      const set = join(directory, "backups", report.backupSet);
+      const manifest = JSON.parse(readFileSync(join(set, "manifest.json"), "utf8")) as { files: Array<{ file: string; backup: string; format: number; sha256: string }> };
+      assert.deepEqual(manifest.files.map((entry) => entry.file), ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"]);
+      for (const entry of manifest.files) {
+        assert.equal(digest(join(set, entry.backup)), entry.sha256, entry.backup);
+        assert.equal(formatOf(join(set, entry.backup)), 0, entry.backup);
+        assert.deepEqual(tableRows(join(set, entry.backup)), before[entry.file], entry.backup);
+      }
+
+      // the stores open the upgraded files and still run their own restart recovery (committed notices), and the forge issues
+      // a token on the upgraded access database
+      const committed = () => Number((read(join(directory, "guidance.sqlite3"), (db) => db.prepare("SELECT count(*) AS n FROM notices WHERE state='committed'").get()) as { n: number }).n);
+      assert.ok(committed() > 0, "the fixture holds committed notices from before a restart");
+      yield* Effect.scoped(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)),
+        Layer.provide(SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer))))));
+      assert.equal(committed(), 0);
+      const grants = () => Number((read(join(directory, "access", "login.sqlite3"), (db) => db.prepare("SELECT count(*) AS n FROM dashboard_login_grants WHERE expires_at > ?").get(Date.now())) as { n: number }).n);
+      const unexpired = grants();
+      yield* forgeDashboardToken(directory);
+      assert.equal(grants(), unexpired + 1);
+      assert.deepEqual(tableRows(join(directory, "access", "login.sqlite3")).dashboard_login_sessions, before[join("access", "login.sqlite3")]?.dashboard_login_sessions);
+
+      // a later start finds every file current: no upgrade, no backup
+      const again = yield* upgrade(directory);
+      assert.deepEqual(again, { fresh: false, backupSet: null, files: [] });
+      assert.deepEqual(backupSets(directory), [report.backupSet]);
+    }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
+  }
+});
 
 describe("startup upgrade", () => {
   it.live("a fresh directory gets every store file at its current format, the policy seeded once, and a repeated start changes nothing", () => Effect.gen(function* () {

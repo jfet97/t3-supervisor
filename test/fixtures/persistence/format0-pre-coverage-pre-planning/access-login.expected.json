@@ -1,0 +1,95 @@
+{
+  "database": "access/login.sqlite3",
+  "userVersion": 0,
+  "journalMode": "delete",
+  "sqliteMaster": [
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_dashboard_login_grants_1",
+      "tbl_name": "dashboard_login_grants",
+      "sql": null
+    },
+    {
+      "type": "index",
+      "name": "sqlite_autoindex_dashboard_login_sessions_1",
+      "tbl_name": "dashboard_login_sessions",
+      "sql": null
+    },
+    {
+      "type": "table",
+      "name": "dashboard_login_grants",
+      "tbl_name": "dashboard_login_grants",
+      "sql": "CREATE TABLE dashboard_login_grants (\n        token_hash TEXT PRIMARY KEY NOT NULL CHECK(length(token_hash)=64),\n        issued_at INTEGER NOT NULL,\n        expires_at INTEGER NOT NULL CHECK(expires_at > issued_at)\n      ) STRICT"
+    },
+    {
+      "type": "table",
+      "name": "dashboard_login_sessions",
+      "tbl_name": "dashboard_login_sessions",
+      "sql": "CREATE TABLE dashboard_login_sessions (\n        token_hash TEXT PRIMARY KEY NOT NULL CHECK(length(token_hash)=64),\n        issued_at INTEGER NOT NULL,\n        expires_at INTEGER NOT NULL CHECK(expires_at > issued_at AND expires_at - issued_at <= 2592000000)\n      ) STRICT"
+    }
+  ],
+  "objectOrder": [
+    "dashboard_login_grants",
+    "sqlite_autoindex_dashboard_login_grants_1",
+    "dashboard_login_sessions",
+    "sqlite_autoindex_dashboard_login_sessions_1"
+  ],
+  "tableInfo": {
+    "dashboard_login_grants": [
+      {
+        "cid": 0,
+        "name": "token_hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "issued_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "expires_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ],
+    "dashboard_login_sessions": [
+      {
+        "cid": 0,
+        "name": "token_hash",
+        "type": "TEXT",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 1
+      },
+      {
+        "cid": 1,
+        "name": "issued_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      },
+      {
+        "cid": 2,
+        "name": "expires_at",
+        "type": "INTEGER",
+        "notnull": 1,
+        "dflt_value": null,
+        "pk": 0
+      }
+    ]
+  },
+  "rowCounts": {
+    "dashboard_login_grants": 1,
+    "dashboard_login_sessions": 2
+  }
+}
