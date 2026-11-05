@@ -1,0 +1,62 @@
+{
+  "label": "synthetic fixture input, not published-binary output",
+  "description": "Frozen rows for history a published Supervisor cannot produce without a provider: a Supervisor root bound to a main conversation, its ownership, a helper in its team with a helper channel, and one workflow write receipt with its native evidence (an unknown native key included). Each set is chosen by the persisted format and structural contract of the file it writes, never by a release name.",
+  "provenance": "Copied verbatim from test/fixtures/persistence/format0-current-unversioned/guidance.rows.sql (lines 16, 18, 17, 31, 34, 37 and 38) and their stored declarations from guidance.expected.json; never regenerated from current schema code.",
+  "sets": [
+    {
+      "id": "format0-supervision-history",
+      "file": "guidance.sqlite3",
+      "format": 0,
+      "requires": {
+        "declarations": {
+          "index:supervisor_main_binding_thread": "CREATE INDEX supervisor_main_binding_thread ON supervisor_main_bindings(json_extract(document,'$.threadId'))",
+          "index:supervisor_team_member_identity": "CREATE UNIQUE INDEX supervisor_team_member_identity ON supervisor_team_members(member_thread_id) WHERE state<>'retired'",
+          "index:supervisor_workflow_write_evidence_operation": "CREATE INDEX supervisor_workflow_write_evidence_operation\n        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at)",
+          "table:supervisor_helper_channels": "CREATE TABLE supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))",
+          "table:supervisor_main_bindings": "CREATE TABLE supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id))",
+          "table:supervisor_owned_threads": "CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY)",
+          "table:supervisor_team_members": "CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id))",
+          "table:supervisor_workflow_write_evidence": "CREATE TABLE supervisor_workflow_write_evidence (\n        supervisor_thread_id TEXT NOT NULL,\n        item_id TEXT NOT NULL,\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        native_evidence TEXT NOT NULL,\n        result TEXT NOT NULL,\n        successful INTEGER NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(supervisor_thread_id,item_id)\n      )",
+          "table:supervisor_workflow_write_receipts": "CREATE TABLE supervisor_workflow_write_receipts (\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        supervisor_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        result TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)\n      )"
+        },
+        "meta": {
+          "supervisor_scope_version": "main-v1"
+        }
+      },
+      "statements": "supervision-history"
+    },
+    {
+      "id": "format1-supervision-history",
+      "file": "guidance.sqlite3",
+      "format": 1,
+      "requires": {
+        "declarations": {
+          "index:supervisor_main_binding_thread": "CREATE INDEX supervisor_main_binding_thread ON supervisor_main_bindings(json_extract(document,'$.threadId'))",
+          "index:supervisor_team_member_identity": "CREATE UNIQUE INDEX supervisor_team_member_identity ON supervisor_team_members(member_thread_id) WHERE state<>'retired'",
+          "index:supervisor_workflow_write_evidence_operation": "CREATE INDEX supervisor_workflow_write_evidence_operation\n        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at)",
+          "table:supervisor_helper_channels": "CREATE TABLE supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))",
+          "table:supervisor_main_bindings": "CREATE TABLE supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id))",
+          "table:supervisor_owned_threads": "CREATE TABLE supervisor_owned_threads(id TEXT PRIMARY KEY)",
+          "table:supervisor_team_members": "CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id))",
+          "table:supervisor_workflow_write_evidence": "CREATE TABLE supervisor_workflow_write_evidence (\n        supervisor_thread_id TEXT NOT NULL,\n        item_id TEXT NOT NULL,\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        native_evidence TEXT NOT NULL,\n        result TEXT NOT NULL,\n        successful INTEGER NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(supervisor_thread_id,item_id)\n      )",
+          "table:supervisor_workflow_write_receipts": "CREATE TABLE supervisor_workflow_write_receipts (\n        operation_id TEXT NOT NULL,\n        operation_namespace TEXT NOT NULL,\n        request_hash TEXT NOT NULL,\n        project_id TEXT NOT NULL,\n        main_thread_id TEXT NOT NULL,\n        supervisor_thread_id TEXT NOT NULL,\n        binding_generation INTEGER NOT NULL,\n        result TEXT NOT NULL,\n        created_at INTEGER NOT NULL,\n        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)\n      )"
+        },
+        "meta": {
+          "supervisor_scope_version": "main-v1"
+        }
+      },
+      "statements": "supervision-history"
+    }
+  ],
+  "statements": {
+    "supervision-history": [
+      "INSERT INTO supervisor_owned_threads(id) VALUES('supervisor-root:00000000-0000-4000-8000-0000000000f1');",
+      "INSERT INTO supervisor_owned_threads(id) VALUES('fixture-thread-helper-1');",
+      "INSERT INTO supervisor_main_bindings(project_id,main_thread_id,document) VALUES('fixture-project-alpha','fixture-thread-main-f','{\"projectId\":\"fixture-project-alpha\",\"mainThreadId\":\"fixture-thread-main-f\",\"threadId\":\"supervisor-root:00000000-0000-4000-8000-0000000000f1\",\"modelState\":{\"projectId\":\"fixture-project-alpha\",\"generation\":2,\"modelMutationGeneration\":1,\"modelSelection\":{\"instanceId\":\"codex\",\"model\":\"gpt-6.1-sol\",\"options\":[{\"id\":\"reasoningEffort\",\"value\":\"high\"}]},\"pending\":false,\"monitoring\":{\"intervalMinutes\":2,\"activityThreshold\":10},\"planningTimeoutMs\":300000,\"teamSettings\":{\"maxHelpersPerRoot\":3},\"superviseAgentCreatedThreads\":false,\"agentCreatedThreadsEnabledAt\":null,\"applyAttempts\":0,\"applicationMessage\":null},\"title\":\"Supervisor · Fixture main F\",\"generation\":1,\"enabledAt\":1792663200000,\"enableAfterSequence\":1800,\"initialModel\":{\"instanceId\":\"codex\",\"model\":\"gpt-6.1-sol\",\"options\":[{\"id\":\"reasoningEffort\",\"value\":\"high\"}]},\"creationAttempts\":0,\"state\":\"ready\"}');",
+      "INSERT INTO supervisor_team_members(owner_thread_id,owner_generation,member_thread_id,state,epoch,document) VALUES('supervisor-root:00000000-0000-4000-8000-0000000000f1',1,'fixture-thread-helper-1','ready',1,'{\"threadId\":\"fixture-thread-helper-1\",\"taskId\":\"00000000-0000-4000-8000-0000000000e3\",\"bootstrapRunId\":\"fixture-run-helper-1\",\"title\":\"Fixture helper\",\"modelSelection\":{\"instanceId\":\"codex\",\"model\":\"gpt-6.1-sol\",\"options\":[{\"id\":\"reasoningEffort\",\"value\":\"high\"}]},\"state\":\"ready\",\"epoch\":1,\"registeredAt\":1793613600000,\"updatedAt\":1793613720000,\"lastAssessment\":null}');",
+      "INSERT INTO supervisor_helper_channels(owner_thread_id,owner_generation,helper_thread_id,document) VALUES('supervisor-root:00000000-0000-4000-8000-0000000000f1',1,'fixture-thread-helper-1','{\"taskId\":\"fixture-scheduled-task-1\",\"helperThreadId\":\"fixture-thread-helper-1\",\"createdAt\":\"2026-11-02T10:01:00.000Z\",\"state\":\"ready\"}');",
+      "INSERT INTO supervisor_workflow_write_receipts(operation_id,operation_namespace,request_hash,project_id,main_thread_id,supervisor_thread_id,binding_generation,result,created_at) VALUES('fixture-op-1','edit','c228d4c28a7e38464d33342d88c24a2b7360b4b0c6089a7bc9083919032f8db0','fixture-project-alpha','fixture-thread-main-f','supervisor-root:00000000-0000-4000-8000-0000000000f1',1,'{\"status\":\"applied\",\"operationId\":\"fixture-op-1\",\"workflowId\":\"fixture-workflow-1\",\"revision\":3,\"stateHash\":\"7780c1501d987d16cae40477760e56ec6b9342f4be1bbe7634bf03e3cb676e77\",\"formatVersion\":2,\"documentStatus\":\"underway\"}',1793628000000);",
+      "INSERT INTO supervisor_workflow_write_evidence(supervisor_thread_id,item_id,operation_id,operation_namespace,request_hash,project_id,main_thread_id,binding_generation,native_evidence,result,successful,created_at) VALUES('supervisor-root:00000000-0000-4000-8000-0000000000f1','fixture-item-w1','fixture-op-1','edit','c228d4c28a7e38464d33342d88c24a2b7360b4b0c6089a7bc9083919032f8db0','fixture-project-alpha','fixture-thread-main-f',1,'{\"actorThreadId\":\"supervisor-root:00000000-0000-4000-8000-0000000000f1\",\"fixtureNativeExtension\":{\"futureField\":{\"kept\":true},\"note\":\"unknown native evidence key\"},\"inputHash\":\"c228d4c28a7e38464d33342d88c24a2b7360b4b0c6089a7bc9083919032f8db0\",\"itemId\":\"fixture-item-w1\",\"nativeInputCanonical\":\"{\\\"action\\\":\\\"apply\\\",\\\"bindingGeneration\\\":1,\\\"expectedRevision\\\":2,\\\"mainThreadId\\\":\\\"fixture-thread-main-f\\\",\\\"operationId\\\":\\\"fixture-op-1\\\",\\\"projectId\\\":\\\"fixture-project-alpha\\\",\\\"statuses\\\":[{\\\"nodeId\\\":\\\"00000000-0000-4000-8000-0000000000b1\\\",\\\"status\\\":\\\"completed\\\"}],\\\"supervisorThreadId\\\":\\\"supervisor-root:00000000-0000-4000-8000-0000000000f1\\\",\\\"workflowId\\\":\\\"fixture-workflow-1\\\"}\",\"nativeItemRef\":{\"driver\":\"codex\",\"nativeId\":\"fixture-native-item-w1\",\"strength\":\"strong\"},\"ordinal\":7,\"owner\":{\"bindingGeneration\":1,\"mainThreadId\":\"fixture-thread-main-f\",\"projectId\":\"fixture-project-alpha\",\"supervisorThreadId\":\"supervisor-root:00000000-0000-4000-8000-0000000000f1\"},\"providerThreadId\":\"fixture-provider-thread-f\",\"runId\":\"fixture-run-11-02-14\",\"status\":\"completed\",\"toolName\":\"workflow_write\"}','{\"status\":\"applied\",\"operationId\":\"fixture-op-1\",\"workflowId\":\"fixture-workflow-1\",\"revision\":3,\"stateHash\":\"7780c1501d987d16cae40477760e56ec6b9342f4be1bbe7634bf03e3cb676e77\",\"formatVersion\":2,\"documentStatus\":\"underway\"}',1,1793628000000);"
+    ]
+  }
+}

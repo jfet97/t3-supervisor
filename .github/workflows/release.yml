@@ -351,7 +351,8 @@ jobs:
           VERSION: ${{ steps.plan.outputs.version }}
         run: |
           mkdir -p "$RUNNER_TEMP/release-install"
-          pnpm --dir "$RUNNER_TEMP/release-install" add --prod --offline --ignore-scripts "$PWD/release/t3-supervisor-$VERSION.tgz"
+          # a user's install: plain npm into an empty prefix, resolving every dependency afresh from the registry, without this checkout's lock
+          npm install --prefix "$RUNNER_TEMP/release-install" --no-save --ignore-scripts --no-audit --no-fund "$PWD/release/t3-supervisor-$VERSION.tgz"
           node --import tsx scripts/smoke-release.ts package "$RUNNER_TEMP/release-install/node_modules/.bin/t3-supervisor"
       - name: Check whether the image package exists
         if: ${{ env.PUBLISH == 'true' }}

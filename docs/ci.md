@@ -30,14 +30,27 @@ Each container build reads and writes its own GitHub Actions layer-cache scope. 
 cache only speeds up builds, so a failed cache export is logged without failing the
 check.
 
+The package smoke installs the packed archive as a user does: plain npm into an empty
+prefix, resolving every dependency afresh from the registry, with no lockfile,
+override or test pin. Before starting the installed CLI, it runs node's own module
+resolution inside the installation, from the application's entry and from every Effect
+package it reaches, and requires one copy of `effect` and of each `@effect` package,
+each at the exact version the application's manifest pins as a direct dependency. It
+prints those resolutions; a split set fails with every version and path it found. The
+installed CLI must then become ready against the scripted T3 peer, report its version
+and revision, serve the dashboard and its hashed asset, ship only the portable skills
+and exit 130 on SIGTERM. Because it resolves from the registry, an upstream release
+that breaks a fresh install of this tree fails the check. The release workflow runs
+the same smoke on the exact archive it publishes ([release guide](../RELEASING.md#what-the-workflow-verifies)).
+
 PRs explicitly check out their head commit. A successful check remains usable
 when main advances; do not update a branch solely to satisfy freshness. Changes
 to the PR itself still require a successful check on its new head. Admin bypasses
 remain exceptional.
 
-Ordinary PRs never resolve or download published T3 builds: only a run of the version
-branch calls the [published-T3 compatibility gate](#version-pr-gate), and the workload of
-every other PR and dispatch stays as described above.
+Ordinary PRs never resolve or download published T3 builds or published Supervisor releases:
+only a run of the version branch calls the [version PR gate](#version-pr-gate), and the workload
+of every other PR and dispatch stays as described above.
 
 While editing, run focused local cases, lint and types. Leave the final complete
 main and harness suites to GitHub rather than repeating them locally. The main suite
@@ -126,8 +139,8 @@ After merging, main first tries to reuse GitHub's full PR verdict. Reuse require
 - Static checks, each of the four main shards, the harness, the startup
   integration, the browser journeys and aggregate `check` all succeeded in that
   run's latest attempt. Skipped jobs do not qualify.
-- For a run of the version branch, every job of its [version PR gate](#version-pr-gate)
-  succeeded as well.
+- For a run of the version branch, every job of its [version PR gate](#version-pr-gate),
+  the published-T3 compatibility and the published Supervisor upgrades, succeeded as well.
 
 For a merged fast-tracked version PR, main instead requires the exact same tree,
 a successful latest release run with `plan`, `static`, `arm64`, `startup`, `check` and
@@ -244,14 +257,17 @@ without it, and no personal credential or secret is used. Local runs need no tok
 Only a run of the version branch `changeset-release/main`, its PR or a dispatch on it, calls
 the workflow, from the `t3-compatibility` job of **Check Supervisor**: the four slots on x64
 and the `stable` and newest `nightly` slots also on native ARM64, all from one frozen lock.
-The aggregate `check` requires that call to pass in both the release fast track and full
-validation of the version PR. Ordinary PRs never call it, and main never calls it: main
-never resolves T3 targets after the merge.
+The same run also calls the [published Supervisor upgrades](#published-supervisor-upgrades)
+from its `supervisor-upgrades` job; both calls make up the version PR gate. The aggregate
+`check` requires both to pass in both the release fast track and full validation of the
+version PR. Ordinary PRs never call them, and main never calls them: main never resolves
+T3 targets or Supervisor releases after the merge.
 
 Main reuses a version branch run only when the proof finds every job of its gate passed,
-each named after the calling job, such as `t3-compatibility / nightly-1 on x64`. Main then
-records that reuse in the plan step **Reuse the version PR compatibility evidence** and
-links that run, whose `t3-lock` artifact is the frozen lock. A merged version PR publishes
+each named after the calling job, such as `t3-compatibility / nightly-1 on x64` or
+`supervisor-upgrades / stable journey`. Main then records that reuse in the plan step
+**Reuse the version PR compatibility evidence** and links that run, whose `t3-lock` and
+`upgrade-lock` artifacts are the frozen T3 target lock and release lock. A merged version PR publishes
 stable automatically only when main's run recorded that reuse. An explicit stable dispatch
 stays the existing manual path and does not check that record, so the gate does not cover
 every stable publication. A version merge that main had to validate in full, for example
@@ -263,3 +279,50 @@ workflow declares; GitHub refuses a call that grants less, even for a job that w
 skipped. Before the first stable publication with the gate, the first real version PR runs
 must verify the gate's matrix, its job names in main's proof and the reuse of the frozen
 lock evidence by main and by the automatic stable publication.
+
+## Published Supervisor upgrades
+
+The **Published Supervisor upgrades** workflow (`upgrades.yml`) runs the provider-free
+[published upgrade journeys](local-stack.md#published-upgrade-journeys) through the same
+`./dev upgrade` command contributors run: `stable` and `nightly` start from the latest stable
+and the latest published nightly Supervisor, each run from its official image by digest, and
+`baseline` starts from a directory this checkout's candidate created itself. It runs as the
+daily canary, as a manual reproduction and as the version PR's gate. Every journey runs on
+the repository's published T3 pin (`t3Release` in `scripts/local-stack.ts`,
+[moving the T3 pin](local-stack.md#moving-the-t3-pin)), apart from the published-T3
+compatibility workflow and independent of its slots: the workflow resolves no T3 target and
+keeps no T3 lock. Its only credential is GitHub's automatic, read-only workflow token, which
+only the job that reads an earlier run's lock holds.
+
+A run resolves its release lock once, in its `lock` job (`./dev pnpm dev:releases resolve`,
+which reads GHCR with an anonymous pull token and npm's public record and holds no
+credential), records its SHA-256 and the releases in its summary and keeps the lock as the
+run's `upgrade-lock` artifact. Each journey runs on a native x64 runner, checks that it
+downloaded exactly those bytes and installs the pinned T3 only from an archive with the
+pinned SHA-256, as `./dev check` does. Nothing resolves again. A lock the run could not
+produce fails every journey with that outcome instead of skipping it: `unavailable` when a
+registry did not answer as needed or the earlier run kept no readable lock, `invalid` when
+the publications cannot fill the channels or the lock is malformed, `harness` when the
+environment could not be prepared.
+
+A journey passes only when its report passed and names this journey, the release lock's
+SHA-256, its Supervisor release and image digest, the T3 pin with the version and the
+`linux-x64` archive digest it verified, and the checked commit with a clean tree; a report of
+other inputs, a missing report or an exit status that contradicts its report is a harness
+failure, never a pass. Its outcome is `passed`, `failed`
+(a check contradicted), `unsupported_shape` (the published release left a persisted shape no
+frozen seed set recognizes), `creator_unready` (the published image never became ready on
+that T3) or `harness`. Every journey runs even when another fails, and the run fails when any
+journey did not pass. Each journey writes a step summary with its inputs, the T3 build it ran,
+every check and its detail, the stage timings and its separate findings, such as whether a
+fresh npm install of the same version boots, which never decide its outcome. It keeps its
+report, logs and release lock as an artifact also after a failure or a timeout. Every job and
+every long step is bounded.
+
+The daily canary runs every journey at 06:11 Europe/Rome from the default branch. Like the
+compatibility canary it is advisory: not part of the `check` aggregate, no release gate, no
+issue and nothing written to the repository. A dispatch runs the chosen `journeys`, `all` or
+a comma-separated list; with `lock_run`, the ID of an earlier run that kept an `upgrade-lock`
+artifact, it reruns those frozen releases unchanged, on the T3 pin of the checked commit. Only
+the job that reads the earlier run's artifact holds `actions: read`. As part of the
+[version PR gate](#version-pr-gate) every journey runs from a new release lock.

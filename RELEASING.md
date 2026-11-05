@@ -10,7 +10,9 @@ features. This patch-only policy remains in force until Andrea explicitly change
 it; do not infer approval for a minor or major bump from the size of a change.
 Write a short note describing the effect on users. A patch number does not prove
 state compatibility or downgrade safety. Infrastructure-only PRs may omit a
-changeset. Every Effect package remains exactly pinned independently of app versions.
+changeset. Every Effect package remains exactly pinned independently of app versions,
+as a direct dependency even when only an Effect adapter uses it, so an npm install
+resolves the same Effect set as the checkout.
 
 With `RELEASE_VERSIONING_ENABLED=true`, **Prepare version** collects the notes in
 a `changeset-release/main` PR, bumps `package.json`, updates `CHANGELOG.md` and
@@ -24,9 +26,11 @@ smoke checks and the production startup integration still run on the new version
 and the required aggregate `check` always runs. Any other change or uncertain
 evidence selects all four main shards and the harness too. Manual **Check Supervisor** dispatches default to full checks.
 Every version PR run, fast-tracked or fully validated, also runs the
-[published-T3 compatibility gate](docs/ci.md#version-pr-gate) from one frozen target
-lock, and `check` requires it; main reuses that gated run and never resolves T3 targets
-again.
+[version PR gate](docs/ci.md#version-pr-gate): the published-T3 compatibility from one
+frozen target lock and the [published Supervisor upgrades](docs/ci.md#published-supervisor-upgrades)
+from the latest stable and nightly images, frozen in that run's release lock, on the
+repository's T3 pin. `check` requires both; main reuses that gated run and never resolves
+T3 targets or releases again.
 
 ### Version bot authentication
 
@@ -95,8 +99,11 @@ cannot produce a new npm upload under a different workflow revision.
 
 The workflow stamps the disposable build manifest with its version and `gitHead`,
 builds an archive containing `dist`, `ui-dist` and portable skills, installs that
-exact archive outside the checkout, and starts it against a bounded native T3
-fixture. It checks health metadata, CLI version, dashboard HTML, its hashed asset
+exact archive outside the checkout with plain npm into an empty prefix, resolving
+its dependencies afresh from the registry as a user's install does, checks that the
+application and its Effect adapters resolve one copy of each Effect package at its
+exact pin ([package smoke](docs/ci.md#full-validation)), and starts it against a
+bounded native T3 fixture. It checks health metadata, CLI version, dashboard HTML, its hashed asset
 and clean cancellation. It checks a local container before pushing, then exercises
 both published image variants by their immutable index digest before moving an
 image channel or publishing the package. Each architecture is built and run on a runner
@@ -123,7 +130,9 @@ The npm package, Linux amd64/arm64 image, Git tag and GitHub release share one
 version and source revision. The release records the archive SHA256, image index
 digest and source SHA; npm publication includes provenance. Images are built from
 the frozen pnpm lockfile. A normal npm/pnpm consumer install resolves transitive
-dependency ranges at installation time; use the image digest when an immutable
+dependency ranges at installation time. The exact Effect pins hold an npm install's
+Effect packages to the checked versions, which the package smoke verifies; other
+transitive dependencies may resolve newer. Use the image digest when an immutable
 dependency tree matters.
 
 The GitHub Actions layer cache only speeds up image builds. The published build is

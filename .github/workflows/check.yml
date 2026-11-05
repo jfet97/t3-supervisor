@@ -99,10 +99,10 @@ jobs:
               core.notice('Validation evidence unavailable; running complete checks.');
             }
       # publication reads this step: a merged version PR publishes stable automatically only after main reused that PR's checked run, whose
-      # published-T3 compatibility gate passed from its frozen lock; main never resolves T3 targets itself
+      # gate passed from its frozen locks: the published-T3 compatibility and the Supervisor upgrade journeys; main never resolves them itself
       - name: Reuse the version PR compatibility evidence
         if: ${{ steps.proof.outputs.compatibility == 'reused' }}
-        run: echo "main reuses the version PR run with its published-T3 compatibility gate and frozen T3 lock"
+        run: echo "main reuses the version PR run with its gate, the published-T3 compatibility and the Supervisor upgrade journeys, and their frozen locks"
 
   static:
     needs: plan
@@ -125,7 +125,8 @@ jobs:
           node -e 'const fs=require("node:fs");const p=JSON.parse(fs.readFileSync("package.json","utf8"));p.gitHead=process.env.REVISION;fs.writeFileSync("package.json",JSON.stringify(p,null,2)+"\n");fs.appendFileSync(process.env.GITHUB_OUTPUT,"version="+p.version+"\n")'
           mkdir -p "$RUNNER_TEMP/release-package" "$RUNNER_TEMP/release-install"
           pnpm pack --ignore-scripts --out "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
-          pnpm --dir "$RUNNER_TEMP/release-install" add --prod --offline --ignore-scripts "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
+          # a user's install: plain npm into an empty prefix, resolving every dependency afresh from the registry, without this checkout's lock
+          npm install --prefix "$RUNNER_TEMP/release-install" --no-save --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/release-package/t3-supervisor-$(node -p 'require("./package.json").version').tgz"
           node --import tsx scripts/smoke-release.ts package "$RUNNER_TEMP/release-install/node_modules/.bin/t3-supervisor"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
@@ -271,9 +272,23 @@ jobs:
     with:
       gate: true
 
+  # the published Supervisor upgrade journeys (docs/ci.md): only a version branch run calls upgrades.yml, which resolves the latest stable and
+  # nightly releases once and runs the stable, nightly and baseline journeys from them on the repository's T3 pin, resolving no T3 target.
+  # Ordinary PRs never call it, and main only reuses the version PR run's verdict; actions: read is the ceiling for the reproduction job of
+  # that workflow, which never runs here
+  supervisor-upgrades:
+    needs: plan
+    if: ${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/upgrades.yml
+    with:
+      gate: true
+
   check:
     if: ${{ always() }}
-    needs: [plan, static, arm64, main, harness, startup, browser, t3-compatibility]
+    needs: [plan, static, arm64, main, harness, startup, browser, t3-compatibility, supervisor-upgrades]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -289,20 +304,27 @@ jobs:
           STARTUP_RESULT: ${{ needs.startup.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
           COMPATIBILITY_RESULT: ${{ needs.t3-compatibility.result }}
+          UPGRADES_RESULT: ${{ needs.supervisor-upgrades.result }}
         run: |
           test "$PLAN_RESULT" = success
           test "$STARTUP_RESULT" = success
-          # a version branch run requires its compatibility gate; every other run never calls it, and only main's reuse inherits it
+          # a version branch run requires its gate, the published-T3 compatibility and the Supervisor upgrade journeys; every other run never
+          # calls it, and only main's reuse inherits it
           case "$COMPATIBILITY" in
             gate)
               test "$MODE" != reuse
               test "$COMPATIBILITY_RESULT" = success
+              test "$UPGRADES_RESULT" = success
               ;;
             reused)
               test "$MODE" = reuse
               test "$COMPATIBILITY_RESULT" = skipped
+              test "$UPGRADES_RESULT" = skipped
               ;;
-            none) test "$COMPATIBILITY_RESULT" = skipped ;;
+            none)
+              test "$COMPATIBILITY_RESULT" = skipped
+              test "$UPGRADES_RESULT" = skipped
+              ;;
             *) exit 1 ;;
           esac
           case "$MODE" in

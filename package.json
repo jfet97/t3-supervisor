@@ -36,11 +36,14 @@
     "dev:fixture": "node --import tsx scripts/dev-fixture.ts",
     "dev:stack": "node --import tsx scripts/local-stack.ts",
     "dev:targets": "node --import tsx scripts/t3-targets.ts",
+    "dev:releases": "node --import tsx scripts/supervisor-releases.ts",
+    "dev:upgrade": "node --import tsx scripts/upgrade-journey.ts",
     "test:suites": "node --import tsx scripts/run-tests.ts"
   },
   "dependencies": {
     "@effect/atom-react": "4.0.6",
     "@effect/platform-node": "4.0.6",
+    "@effect/platform-node-shared": "4.0.6",
     "@effect/sql-sqlite-node": "4.0.6",
     "@modelcontextprotocol/sdk": "1.32.1",
     "effect": "4.0.6",

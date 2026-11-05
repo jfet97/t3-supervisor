@@ -5,6 +5,14 @@ the same service, dashboard and CLI. The npm package requires Node 24.22.1 or
 newer; the container supplies its own runtime. Neither requires Nix. Nix is for
 [source development](../CONTRIBUTING.md).
 
+The package pins each Effect package it uses to an exact version, so a fresh
+npm install resolves the same Effect set the release was checked with. The
+published 0.0.27 package predates that: a fresh npm install of it is known not to
+start. npm resolves newer `effect` and `@effect/platform-node-shared` releases
+than the ones it was built with, and the CLI stops with a `SyntaxError` before
+Supervisor listens or creates any state. That package stays as published; use a
+later release, or the 0.0.27 container image, which is not affected.
+
 ## Connect to T3
 
 Start your T3 server first. Obtain a native read credential through that server's

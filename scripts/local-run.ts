@@ -28,9 +28,9 @@ export const checkoutInputs = Effect.gen(function* () {
   return {revision: Option.getOrNull(revision), clean: Option.match(status, {onNone: () => null, onSome: (value) => value === ""})};
 });
 
-export type RunKind = "stack" | "fixture";
+export type RunKind = "stack" | "fixture" | "upgrade";
 
-const Marker = Schema.Struct({kind: Schema.Literals(["stack", "fixture"]), createdAt: Schema.String, pid: Schema.Number});
+const Marker = Schema.Struct({kind: Schema.Literals(["stack", "fixture", "upgrade"]), createdAt: Schema.String, pid: Schema.Number});
 const decodeMarker = Schema.decodeUnknownOption(Schema.fromJsonString(Marker));
 
 // removal was refused: the folder carries no run marker

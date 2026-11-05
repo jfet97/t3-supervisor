@@ -15,8 +15,10 @@ const repository = "jfet97/t3-supervisor";
 const manifest = '{\n  "name": "@jfet97/t3-supervisor",\n  "version": "0.0.4"\n}\n';
 const run = (id: number, head_sha: string, event: string, branch: string): typeof policy.CiRun.Type => ({id, workflow_id: 42, head_sha, head_branch: branch, event, repository: {full_name: repository}, head_repository: {full_name: repository}, status: "completed", conclusion: "success", run_attempt: 1});
 const full = (id: number) => policy.requiredFullJobs.map(name => ({name, run_id: id, conclusion: "success"}));
-// the version branch's published-T3 compatibility gate as check.yml's reusable workflow call lists it; its reproduction job never runs there
-const gate = (id: number) => [...policy.compatibilityGateJobs.map(name => ({name, run_id: id, conclusion: "success"})), {name: "t3-compatibility / earlier-lock", run_id: id, conclusion: "skipped"}];
+// the version branch's gate as check.yml's two reusable workflow calls list it, the published-T3 compatibility and the Supervisor upgrade
+// journeys; their reproduction jobs never run there
+const gate = (id: number) => [...policy.versionGateJobs.map(name => ({name, run_id: id, conclusion: "success"})),
+  ...["t3-compatibility / earlier-lock", "supervisor-upgrades / earlier-lock"].map(name => ({name, run_id: id, conclusion: "skipped"}))];
 const release = (id: number) => [...["plan", "static", "arm64", "startup", "check", "harness", "browser", "main (${{ matrix.shard }}/4)"].map(name => ({name, run_id: id, conclusion: ["plan", "static", "arm64", "startup", "check"].includes(name) ? "success" : "skipped"})), ...gate(id)];
 const pr = (merge: string | null, head: string, branch: string) => ({merged_at: merge ? "2026-10-25T00:00:00Z" : null, merge_commit_sha: merge, base: {ref: "main"}, head: {sha: head, ref: branch, repo: {full_name: repository}}});
 const rawChange = (path: string, status = "M") => `:100644 ${status === "D" ? "000000" : "100644"} ${B} ${status === "D" ? "0".repeat(40) : H} ${status}\0${path}\0`;
@@ -138,7 +140,7 @@ it.effect("main independently rederives a fast release and baseline, while ordin
   assert.deepEqual(yield* planCi({...merged, context}), {mode: "reuse", runId: 30});
 }));
 
-it.effect("main never reuses a version branch run without its whole passing published-T3 compatibility gate, in full or release mode", () => Effect.gen(function*() {
+it.effect("main never reuses a version branch run without its whole passing gate, the published-T3 compatibility and the Supervisor upgrade journeys, in full or release mode", () => Effect.gen(function*() {
   const context = {...fixture().context, eventName: "push", sha: M, ref: "refs/heads/main", payload: {}};
   for (const [label, jobs] of [
     ["release run before the gate", release(30).filter(job => !job.name.startsWith("t3-compatibility / "))],
@@ -147,6 +149,10 @@ it.effect("main never reuses a version branch run without its whole passing publ
     ["release run with a cancelled lock", release(30).map(job => job.name === "t3-compatibility / lock" ? {...job, conclusion: "cancelled"} : job)],
     ["full run before the gate", full(30)],
     ["full run with a failed slot", [...full(30), ...gate(30).map(job => job.name === "t3-compatibility / nightly on arm64" ? {...job, conclusion: "failure"} : job)]],
+    ["release run before the upgrade journeys", release(30).filter(job => !job.name.startsWith("supervisor-upgrades / "))],
+    ["release run with a failed upgrade journey", release(30).map(job => job.name === "supervisor-upgrades / nightly journey" ? {...job, conclusion: "failure"} : job)],
+    ["release run with a cancelled upgrade lock", release(30).map(job => job.name === "supervisor-upgrades / lock" ? {...job, conclusion: "cancelled"} : job)],
+    ["full run with a skipped baseline journey", [...full(30), ...gate(30).map(job => job.name === "supervisor-upgrades / baseline journey" ? {...job, conclusion: "skipped"} : job)]],
   ] as const) {
     const f = fixture();
     f.jobs.set(30, [...jobs]);
@@ -204,14 +210,17 @@ it.live("an ordinary PR keeps exactly its current jobs, and only the version bra
   assert.deepEqual(Object.fromEntries(Object.entries(jobs).map(([name, job]) => [name, job.if ?? null])), {
     plan: null, static: "${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' }}", arm64: "${{ always() && !cancelled() && needs.plan.outputs.mode != 'reuse' }}",
     main: suites, harness: suites, startup: "${{ always() && !cancelled() }}", browser: suites,
-    "t3-compatibility": "${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}", check: "${{ always() }}",
+    "t3-compatibility": "${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}",
+    "supervisor-upgrades": "${{ always() && !cancelled() && needs.plan.outputs.compatibility == 'gate' }}", check: "${{ always() }}",
   });
-  const compatibility = jobs["t3-compatibility"]!;
-  assert.equal(compatibility.uses, "./.github/workflows/compatibility.yml");
-  assert.deepEqual(compatibility.with, {gate: true});
-  assert.deepEqual(compatibility.permissions, {contents: "read", actions: "read"});
-  assert.equal(compatibility.needs, "plan");
-  assert.ok((jobs.check!.needs as Array<string>).includes("t3-compatibility"));
+  for (const [name, uses] of [["t3-compatibility", "./.github/workflows/compatibility.yml"], ["supervisor-upgrades", "./.github/workflows/upgrades.yml"]] as const) {
+    const called = jobs[name]!;
+    assert.equal(called.uses, uses);
+    assert.deepEqual(called.with, {gate: true});
+    assert.deepEqual(called.permissions, {contents: "read", actions: "read"});
+    assert.equal(called.needs, "plan");
+    assert.ok((jobs.check!.needs as Array<string>).includes(name));
+  }
   assert.equal(workflow.jobs.plan.outputs.compatibility, "${{ steps.proof.outputs.compatibility }}");
   // publication reads the plan step that records main's reuse of the version PR's compatibility evidence
   const reuse = (workflow.jobs.plan.steps as Array<{name?: string; if?: string}>).find(step => step.name === "Reuse the version PR compatibility evidence");
@@ -252,7 +261,8 @@ it.live("the actual aggregate shell rejects missing proof, a skipped or failed s
   ] as const) {
     const result = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: plan, STATIC_RESULT: stat, ARM64_RESULT: arm64,
       MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: startup, BROWSER_RESULT: browser,
-      COMPATIBILITY: mode === "release" ? "gate" : "none", COMPATIBILITY_RESULT: mode === "release" ? "success" : "skipped"}});
+      COMPATIBILITY: mode === "release" ? "gate" : "none", COMPATIBILITY_RESULT: mode === "release" ? "success" : "skipped",
+      UPGRADES_RESULT: mode === "release" ? "success" : "skipped"}});
     assert.equal(result.status === 0, succeeds, JSON.stringify({mode, plan, stat, arm64, main, harness, startup, browser}));
   }
   // a version branch run requires its compatibility gate in full and release mode, and only it runs in release mode; any other run never calls it, and main only reuses it
@@ -267,8 +277,21 @@ it.live("the actual aggregate shell rejects missing proof, a skipped or failed s
   ] as const) {
     const [stat, arm64, main, harness, browser] = passing[mode];
     const aggregate = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: "success", STATIC_RESULT: stat, ARM64_RESULT: arm64,
-      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: "success", BROWSER_RESULT: browser, COMPATIBILITY: compatibility, COMPATIBILITY_RESULT: result}});
+      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: "success", BROWSER_RESULT: browser, COMPATIBILITY: compatibility, COMPATIBILITY_RESULT: result,
+      UPGRADES_RESULT: result}});
     assert.equal(aggregate.status === 0, succeeds, JSON.stringify({mode, compatibility, result}));
+  }
+  // the upgrade journeys are required beside the compatibility jobs, never instead of them, and run only where the gate runs
+  for (const [mode, compatibility, compatibilityResult, upgradesResult, succeeds] of [
+    ["release", "gate", "success", "success", true], ["release", "gate", "success", "failure", false], ["full", "gate", "success", "skipped", false],
+    ["full", "gate", "success", "cancelled", false], ["release", "gate", "failure", "success", false], ["full", "gate", "success", "", false],
+    ["reuse", "reused", "skipped", "success", false], ["full", "none", "skipped", "success", false], ["full", "none", "skipped", "failure", false],
+  ] as const) {
+    const [stat, arm64, main, harness, browser] = passing[mode];
+    const aggregate = spawnSync("bash", ["-e", "-c", script], {env: {PATH: process.env.PATH, MODE: mode, PLAN_RESULT: "success", STATIC_RESULT: stat, ARM64_RESULT: arm64,
+      MAIN_RESULT: main, HARNESS_RESULT: harness, STARTUP_RESULT: "success", BROWSER_RESULT: browser, COMPATIBILITY: compatibility,
+      COMPATIBILITY_RESULT: compatibilityResult, UPGRADES_RESULT: upgradesResult}});
+    assert.equal(aggregate.status === 0, succeeds, JSON.stringify({mode, compatibility, compatibilityResult, upgradesResult}));
   }
   // the browser journeys run through the contributors' own entry and are selected exactly where the suites are
   assert.equal(workflow.jobs.browser.if, workflow.jobs.harness.if);

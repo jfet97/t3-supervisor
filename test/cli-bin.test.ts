@@ -15,7 +15,7 @@ import { dataFiles, InstalledBin, installedBinLayer, listenerStates, quickChecks
   waitUntilReady, type SupervisorHarness } from "./support/g8-cli.js";
 import { forgeHelp, relativeDataDirectory, rootHelp, usageError } from "./support/cli-help.js";
 import { buildInfo } from "../src/version.js";
-import { verifyReleaseDashboard } from "./support/release-smoke.js";
+import { effectFamilyProbe, verifyEffectFamily, verifyReleaseDashboard } from "./support/release-smoke.js";
 
 // process-level characterization of the supervisor entries: tsx source (main.ts, cli.ts) and the built/installed bin.
 // every case runs on the live clock: it.live, and inside the installed bin layer it.effect without the test services,
@@ -134,6 +134,9 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
     const bin = yield* InstalledBin;
     const files = yield* fs.readDirectory(bin.packageDirectory);
     for (const excluded of ["src", "test", "scripts", "knowledge", ".github"]) assert.equal(files.includes(excluded), false, excluded);
+    // the archive installed from the frozen lock: its application and every adapter resolve one copy of each Effect package it pins
+    yield* verifyEffectFamily(runProcess(process.execPath, ["-e", effectFamilyProbe, bin.packageDirectory],
+      { env: { PATH: nodePath() }, cwd: bin.root, timeoutMs: exitTimeoutMs }));
     const harness = yield* supervisorHarness();
     const child = yield* harness.start(bin.installedBin, ["start"]);
     yield* verifyReleaseDashboard(harness, child);
