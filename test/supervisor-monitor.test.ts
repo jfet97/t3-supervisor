@@ -22,12 +22,11 @@ import { defaultMonitoringSettings } from "../src/project-supervisor-contract.js
 import type { Projection } from "../src/types.js";
 import type { SqlClient } from "effect/sql";
 import { rows } from "./support/guidance-store-services.js";
-import { dataDirectory, withGuidanceDb, withMonitor } from "./support/g9-stores.js";
+import { dataDirectory, withMonitor } from "./support/g9-stores.js";
 
 // the pure extraction cases stay plain tests; the store cases run as Effect tests on the ProjectSupervisorMonitorStore
 // service over a temporary guidance.sqlite3 (its production client and layers), every time given explicitly; then
-// CT-MSTORE-02, the frozen-batch acknowledgement inside the caller's transaction (CC-MONITOR-ACK), typed input failures and
-// the schema upgrade at service level
+// CT-MSTORE-02, the frozen-batch acknowledgement inside the caller's transaction (CC-MONITOR-ACK) and typed input failures
 
 const now = Date.parse("2026-10-13T10:00:00.000Z");
 const projectId = "project-a";
@@ -1268,24 +1267,8 @@ it.effect("invalid input fails typed, and the pending scan is incomplete on inva
       { status: "complete", pending: true }, "a match in the third chunk of 400 ids is found");
   })));
 
-it.effect("the layer adds the activation, capacity, read-item and active columns to an older monitor schema", () => Effect.gen(function* () {
-  const directory = yield* dataDirectory("supervisor-monitor-schema-");
-  yield* withGuidanceDb(directory, (db) => Effect.gen(function* () {
-    yield* db.unsafe("CREATE TABLE supervisor_monitor_threads(project_id TEXT NOT NULL,thread_id TEXT NOT NULL,source_ordinal INTEGER NOT NULL,saturated INTEGER NOT NULL DEFAULT 0,saturation_at INTEGER,last_acknowledged_at INTEGER,PRIMARY KEY(project_id, thread_id))");
-    yield* db.unsafe("CREATE TABLE supervisor_monitor_items(project_id TEXT NOT NULL,thread_id TEXT NOT NULL,item_id TEXT NOT NULL,type TEXT NOT NULL,status TEXT NOT NULL,ordinal INTEGER NOT NULL,detected_at INTEGER NOT NULL,version TEXT NOT NULL,priority TEXT,eligible INTEGER NOT NULL,reviewed_version TEXT,updated_at INTEGER NOT NULL,PRIMARY KEY(project_id, thread_id, item_id))");
-    yield* db`INSERT INTO supervisor_monitor_threads(project_id,thread_id,source_ordinal) VALUES(${projectId},${threadId},3)`;
-  })).pipe(Effect.orDie);
-  const observed = yield* withMonitor(directory, (monitor, db) => Effect.gen(function* () {
-    return {
-      thread: yield* rows(db, "SELECT activation_ordinal,untracked_count FROM supervisor_monitor_threads"),
-      itemColumns: (yield* rows(db, "PRAGMA table_info(supervisor_monitor_items)")).map((row) => row.name).slice(-2),
-      state: yield* monitor.state(projectId, threadId),
-    };
-  }));
-  assert.deepEqual(observed.thread, [{ activation_ordinal: 3, untracked_count: 0 }]);
-  assert.deepEqual(observed.itemColumns, ["read_item_id", "active"]);
-  assert.equal(observed.state.sourceOrdinal, 3);
-}));
+// the activation, capacity, read-item and active columns an older monitor schema gains once, the activation ordinal starting at
+// the stored source ordinal, are the guidance format 1 step of the startup upgrade (test/database-migrations.test.ts)
 
 it.effect("a repeated frozen acknowledgement keeps its result but emits no dashboard invalidation", () => {
   const hints: unknown[] = [];

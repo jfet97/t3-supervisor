@@ -896,8 +896,10 @@ Different hosts and forwarded ports remain separate origins. Storage changes syn
 sign-in and sign-out across tabs without replaying writes; open drafts stay in their
 tab. Sign out durably revokes the session
 across service instances and restarts. Only the service initializes a missing
-auth database, with both tables together. Existing malformed or obsolete schemas
-fail closed and are never overwritten, migrated or recreated automatically.
+auth database, with both tables together and its current format. The service's
+start records that format in a valid existing database after a verified backup;
+the forge refuses a database that is not at it yet. Existing malformed or unknown
+schemas fail closed and are never overwritten or recreated automatically.
 Experimental formats may change without old-CLI or rollback compatibility.
 
 Do not use T3/provider credentials for these roles. To rotate the MCP bearer,

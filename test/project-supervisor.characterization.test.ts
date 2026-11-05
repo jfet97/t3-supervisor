@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
-import { Cause, Deferred, Effect, Exit, Fiber, Scope } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect";
+import { DatabaseFormats, DatabaseOpenError, guidanceDbLayer } from "../src/db.js";
 import { defaultSupervisorModel, ProjectSupervisorStoreError, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { failsWith, metaRows, readerRows, sqlText, tableRows, withMillis, type DbSeam } from "./support/psx-sql.js";
-import { openGuidance, openSupervisors, openWorkflows, pssSession, readOnlyDatabase, spyPrepare } from "./support/psx-stores.js";
+import { openWorkflows, pssSession, readOnlyDatabase } from "./support/psx-stores.js";
 import { retryInput } from "./support/psx-submission.js";
 import { assembleSupervisor, makeFixture, makeNoProjectFixture, supervisionStateDigest, type PsxFixture } from "./support/psx-supervisor.js";
 
@@ -567,24 +569,28 @@ it.live("CT-PSS-04: a stale global definitions generation changes nothing; a suc
   assert.deepEqual(readerRows(reader, "supervisor_task_interpretations"), yield* tableRows(db, "supervisor_task_interpretations"), "the reader sees the whole commit afterwards");
 }), {timeout: 10_000});
 
-/* The preload's robustness: absent state, a file without the ownership table and a live WAL writer beside it; the shared set's
- * commit timing is CT-PSS-05 in test/project-supervisor-store.regression.test.ts.
+/* The guarded open in front of the preload, and the preload's robustness beside a live WAL writer; the shared set's commit
+ * timing is CT-PSS-05 in test/project-supervisor-store.regression.test.ts.
  */
-it.live("CT-PSS-05: ownership preload creates nothing for absent state, tolerates a table-less file and reads committed IDs beside a live WAL writer", () => Effect.gen(function* () {
+it.live("CT-PSS-05: the guarded open refuses a format 0 file and leaves it unchanged, and the ownership preload reads committed IDs beside a live WAL writer", () => Effect.gen(function* () {
   // target: the preload is the project store layer's own read when a run opens its stores (cc-ownership); the separate
-  // read-only preload of an absent directory or under another connection's open write transaction is gone with it
+  // read-only preload of an absent directory or under another connection's open write transaction is gone with it. A file an
+  // earlier release left, here one without the ownership table, never reaches the preload: only the startup upgrade moves it
+  // to the current format
   const session = yield* pssSession("psx-pss-05-");
   const bare = join(session.directory, "bare");
   mkdirSync(bare);
-  const legacy = new DatabaseSync(join(bare, "guidance.sqlite3"));
+  const legacyPath = join(bare, "guidance.sqlite3");
+  const legacy = new DatabaseSync(legacyPath);
   legacy.exec("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)");
   legacy.close();
-  const bareScope = yield* Scope.make();
-  const bareGuidance = yield* openGuidance(bare, bareScope);
-  const bareOwned = new Set<string>();
-  yield* openSupervisors(bare, bareGuidance, bareScope, bareOwned);
-  assert.deepEqual(bareOwned, new Set(), "a file without supervisor_owned_threads yields no IDs");
-  yield* Scope.close(bareScope, Exit.void);
+  const before = readFileSync(legacyPath);
+  const refused = yield* Effect.flip(Effect.scoped(Layer.build(guidanceDbLayer(bare))).pipe(Effect.provide(NodeFileSystem.layer)));
+  assert.ok(refused instanceof DatabaseOpenError);
+  assert.deepEqual({file: refused.file, reason: refused.reason, found: refused.found, expected: refused.expected},
+    {file: "guidance.sqlite3", reason: "upgrade_required", found: 0, expected: DatabaseFormats.guidance});
+  assert.ok(readFileSync(legacyPath).equals(before), "the refused file keeps its bytes");
+  assert.deepEqual(readdirSync(bare), ["guidance.sqlite3"], "the refused open created no log, journal or other file");
 
   const {store} = yield* session.open();
   const first = yield* store.reserve("project-a", "main-a", "Main A", defaultSupervisorModel, 1, 100);
@@ -594,38 +600,24 @@ it.live("CT-PSS-05: ownership preload creates nothing for absent state, tolerate
   assert.deepEqual(alongside.ownedIds, new Set([first.threadId, second.threadId]));
 }), {timeout: 10_000});
 
-/* The one CT-PSS-07 case: it counts the migration's ALTER statements through the seam, once and then never, which its former
- * post-port variant could not.
+/* The one CT-PSS-07 case: the seam records every statement the run's guidance connection prepares while the guidance and
+ * supervision stores open on a current file. Every schema change is the startup upgrade's (the definition-save table's
+ * expected_revision and the other later columns are the guidance format 1 step in test/database-migrations.test.ts), so neither
+ * the first open nor a reopen prepares a CREATE, ALTER or DROP, and the schema stays as the upgrade created it.
  */
-it.live("CT-PSS-07: a legacy definition-save table gains expected_revision with an empty default exactly once and keeps its rows", () => Effect.gen(function* () {
+it.live("CT-PSS-07: opening the guidance and supervision stores on a current file prepares no CREATE, ALTER or DROP, at the first open or a reopen", () => Effect.gen(function* () {
   const session = yield* pssSession("psx-pss-07-");
-  // the legacy file is written by the guidance store alone, before the supervision store added the column
-  const legacyScope = yield* Scope.make();
-  const legacy = yield* openGuidance(session.directory, legacyScope);
-  yield* legacy.db.exec(`CREATE TABLE supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,PRIMARY KEY(project_id,workspace_root));
-    INSERT INTO supervisor_definition_user_saves VALUES('project-a','/work/a','signature-a',100);
-    INSERT INTO meta VALUES('supervisor_scope_version','main-v1');`);
-  yield* Scope.close(legacyScope, Exit.void);
-  const alters = (calls: ReadonlyArray<string>) => calls.filter((sql) => sql.includes("ALTER TABLE supervisor_definition_user_saves")).length;
-  const columns = (db: DbSeam) => Effect.map(db.prepare("PRAGMA table_info(supervisor_definition_user_saves)").all(), (rows) => rows.map((row) => ({...row})));
-  const expectedRow = {project_id: "project-a", workspace_root: "/work/a", signature: "signature-a", saved_at: 100, expected_revision: ""};
-
-  let firstCalls: () => ReadonlyArray<string> = () => [];
-  const first = yield* session.open((guidance) => Effect.gen(function* () {firstCalls = yield* spyPrepare(guidance.db);}));
-  assert.equal(alters(firstCalls()), 1);
-  const migratedColumns = yield* columns(first.db);
-  assert.deepEqual(migratedColumns.filter(column => column.name === "expected_revision"),
-    [{cid: 4, name: "expected_revision", type: "TEXT", notnull: 1, dflt_value: "''", pk: 0}]);
-  assert.deepEqual(yield* tableRows(first.db, "supervisor_definition_user_saves"), [expectedRow]);
-  const migratedSql = (yield* first.db.prepare("SELECT sql FROM sqlite_master WHERE name='supervisor_definition_user_saves'").get())?.sql;
+  const ddl = (statements: ReadonlyArray<string>) => statements.filter((statement) => /^\s*(?:CREATE|ALTER|DROP)\b/iu.test(statement));
+  const schema = (db: DbSeam) => Effect.map(db.prepare("SELECT type,name,sql FROM sqlite_master ORDER BY type,name").all(), (rows) => rows.map((row) => ({...row})));
+  const first = yield* session.open();
+  const opened = first.db.prepared();
+  assert.ok(opened.length > 0, "the seam recorded the open's statements");
+  assert.deepEqual(ddl(opened), [], "the first open prepares no DDL");
+  const initialized = yield* schema(first.db);
   yield* first.close;
-
-  let secondCalls: () => ReadonlyArray<string> = () => [];
-  const second = yield* session.open((guidance) => Effect.gen(function* () {secondCalls = yield* spyPrepare(guidance.db);}));
-  assert.equal(alters(secondCalls()), 0, "a migrated table is not altered again");
-  assert.deepEqual(yield* columns(second.db), migratedColumns);
-  assert.equal((yield* second.db.prepare("SELECT sql FROM sqlite_master WHERE name='supervisor_definition_user_saves'").get())?.sql, migratedSql);
-  assert.deepEqual(yield* tableRows(second.db, "supervisor_definition_user_saves"), [expectedRow]);
+  const second = yield* session.open();
+  assert.deepEqual(ddl(second.db.prepared()), [], "a reopen prepares no DDL");
+  assert.deepEqual(yield* schema(second.db), initialized, "the schema is still the one the startup upgrade created");
 }), {timeout: 10_000});
 
 /* The one CT-PSS-08 case: readers on another connection, inside the statements, and on the store's own client, racing the

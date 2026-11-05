@@ -15,8 +15,9 @@ import { forgeHelp, relativeDataDirectory, rootHelp, startHelp, usageError } fro
 // for the child processes and the service auth state on real files
 
 const command = join(repositoryRoot, "src", "cli.ts");
-const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized. " +
-  "If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. Pending tokens expire after five minutes.\n";
+const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized; " +
+  "after an upgrade, start the service once first. If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. " +
+  "Pending tokens expire after five minutes.\n";
 const tokenLine = { lines: 1, endsWithNewline: true, tokenLength: 43, canonical: true };
 
 // a private home removed with the test's scope

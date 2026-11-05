@@ -37,6 +37,7 @@ import { interpretationPlanDigest, type SupervisorMessageEvidence } from "../src
 import { interpretationAttemptId, interpretationSourcePin } from "../src/interpretation-submission.js";
 import { recordInterpretationSubmission } from "./support/interpretation-evidence-fixture.js";
 import { submissionArguments } from "./support/interpretation-submit.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 import {
   conversationUnit, dataDirectory, nativeClient, openStores, pinnedClock, projectSupervisorUnit, realTime, reopenPolicy, replaceMethod, writeController,
   interpretationSubmitter, TestWallClock, turnItemDetails, workflowStore, type DefinitionsLoader, type FixtureClock, type NativeHandler, type ProjectionRead,
@@ -404,7 +405,9 @@ interface FixtureOptions {
 const makeFixture = Effect.fnUntraced(function* (clock: FixtureClock, options: FixtureOptions = {}) {
   yield* realTime;
   const directory = yield* dataDirectory("supervisor-conversation-test-");
+  // the thread policy lives in a data directory of its own, prepared at the current formats as the run's directory is
   const threadPolicyDirectory = join(directory, "thread-policy");
+  yield* Effect.orDie(initializeDataDirectory(threadPolicyDirectory));
   const stores = yield* openStores(directory, threadPolicyDirectory);
   const projectStore = stores.supervisors;
   const threadPolicy = stores.policy;

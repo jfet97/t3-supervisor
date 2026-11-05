@@ -9,9 +9,12 @@ import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { ProjectSupervisorStore, SupervisorOwnership } from "../../src/project-supervisor-store.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
+import { initializeDataDirectory } from "./data-directory.js";
 
 // the store services on a temporary guidance database, each built through its production layer over the production
-// GuidanceDb client; nothing else opens the file while they are built
+// GuidanceDb client; nothing else opens the file while they are built. Every temporary directory here is initialized once at
+// the current formats through the startup coordinator (test/support/data-directory.ts), as `t3-supervisor start` prepares a
+// fresh data directory before any store opens it
 
 export type GuidanceStoreServices = GuidanceDb | ProjectSupervisorStore | SupervisorTeamStore | WorkflowStateStore;
 
@@ -65,10 +68,12 @@ export const openGuidanceStores = Effect.fnUntraced(function* (directory: string
   };
 });
 
-/** A temporary data directory, removed with the test scope. */
+/** A temporary data directory at the current formats, with no excluded chat, removed with the test scope. */
 export const temporaryDataDirectory = (prefix: string) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix });
+  yield* Effect.orDie(initializeDataDirectory(directory));
+  return directory;
 });
 
 /** The services of a fresh temporary directory, closed with the test scope (before the directory is removed). */
@@ -97,9 +102,12 @@ export const countingIds = Layer.effect(SupervisorIds, Effect.gen(function* () {
 
 // the store services of WP-S6d-A on a temporary data directory, each opened through the production database layer
 
+/** A temporary data directory at the current formats, with no excluded chat, removed with the test scope. */
 export const temporaryDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-s6d-" });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-s6d-" });
+  yield* Effect.orDie(initializeDataDirectory(directory));
+  return directory;
 }).pipe(Effect.provide(NodeFileSystem.layer));
 
 /** Ids in the persisted v4 format, numbered from 1 in draw order for each built layer. */

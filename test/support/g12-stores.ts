@@ -11,14 +11,19 @@ import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { SupervisorSettings } from "../../src/types.js";
 import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
+import { initializeDataDirectory } from "./data-directory.js";
 
 // the g12 suites' guidance stores on a temporary data directory, each built through its production layer over the production
-// GuidanceDb client; a suite may close the client and open the same file again, as a restart or a crash of the process does
+// GuidanceDb client; a suite may close the client and open the same file again, as a restart or a crash of the process does.
+// The directory is initialized once at the current formats through the startup coordinator (test/support/data-directory.ts),
+// as `t3-supervisor start` prepares it before any store opens it
 
-/** A temporary data directory, removed with the test scope. */
+/** A temporary data directory at the current formats, with no excluded chat, removed with the test scope. */
 export const temporaryDirectory = (prefix: string): Effect.Effect<string, never, Scope.Scope> => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix });
+  yield* initializeDataDirectory(directory);
+  return directory;
 }).pipe(Effect.orDie, Effect.provide(NodeFileSystem.layer));
 
 /**
@@ -70,8 +75,8 @@ export interface WorkflowStoreOptions {
   readonly observe?: StatementObserver | undefined;
 }
 
-// the client, the ids and a fresh ownership set, then the guidance store, the one-time state reset, the project supervision
-// store and the workflow state store, in the production order
+// the client, the ids and a fresh ownership set, then the guidance store, the state reset service (the scope check), the
+// project supervision store and the workflow state store, in the production order
 const workflowStoresLayer = (directory: string, options: WorkflowStoreOptions): Layer.Layer<WorkflowStoreServices> => {
   const base = Layer.mergeAll(guidanceClient(directory, options.observe), supervisorIds, Layer.sync(SupervisorOwnership, () => new Set<string>()));
   const workflows = options.isEnabled ? WorkflowStateStore.layerWith(options.isEnabled) : WorkflowStateStore.layer;

@@ -22,7 +22,7 @@ class CliUsageError extends Data.TaggedError("CliUsageError") {
   readonly [Runtime.errorExitCode] = 2;
 }
 
-const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized. If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. Pending tokens expire after five minutes.";
+const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized; after an upgrade, start the service once first. If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. Pending tokens expire after five minutes.";
 
 const start = Command.make("start", { dataDirectory }, ({ dataDirectory }) => Effect.gen(function* () {
   // the server program reads DATA_DIRECTORY from the process environment when it starts

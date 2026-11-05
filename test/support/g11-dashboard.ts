@@ -65,7 +65,7 @@ export const definitionsOf = (load: (projectId: string, threadId: string | null)
 
 /** The guidance client and store of the run, the process's thread-policy store and its ownership set. */
 export const processStores = (config: SupervisorConfig) =>
-  Layer.mergeAll(guidanceLayer(config.dataDirectory), policyLayer(config), SupervisorOwnership.layer);
+  Layer.mergeAll(guidanceLayer(config.dataDirectory), policyLayer(config.dataDirectory), SupervisorOwnership.layer);
 
 /** The guidance runtime over a catalog and the stores of `processStores`. */
 export const runtimeOver = (config: SupervisorConfig, catalog: Pick<StoreShape, "catalog"> = emptyCatalog) =>
@@ -136,10 +136,13 @@ export interface StartedUi extends Dashboard {
   readonly close: Effect.Effect<void>;
 }
 
-/** The dashboard of a data directory (a fresh one by default) in its own scope, closed with the test scope or by `close`. */
+/**
+ * The dashboard of a data directory (by default a fresh one at the current formats, its policy seeded with the configured
+ * excluded chats) in its own scope, closed with the test scope or by `close`.
+ */
 export const startUi = (options: ListenerOptions & {readonly directory?: string | undefined; readonly config?: Partial<SupervisorConfig> | undefined} = {}) =>
   Effect.gen(function* () {
-    const directory = options.directory ?? (yield* temporaryDirectory("c3b-ui-"));
+    const directory = options.directory ?? (yield* temporaryDirectory("c3b-ui-", {excludedThreadIds: options.config?.excludedThreadIds ?? []}));
     const config = uiConfig(directory, options.config);
     const scope = yield* Scope.make();
     yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));

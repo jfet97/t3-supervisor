@@ -19,7 +19,7 @@ const nativeThread = (id: string): ThreadInfo => ({id, title: `Work ${id}`, proj
   lineage: {parentThreadId: null, relationshipToParent: null}});
 
 it.effect("the overview reads retained supervision state without native calls, writes, or invented completion", () => Effect.gen(function* () {
-  const directory = yield* temporaryDirectory("supervisor-overview-");
+  const directory = yield* temporaryDirectory("supervisor-overview-", {excludedThreadIds: ["stopped"]});
   const threads = [nativeThread("active"), nativeThread("blocked"), nativeThread("stopped"), nativeThread("quiet")];
   const config: SupervisorConfig = {dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: ["stopped"], healthPort: 0};
   const run = yield* Layer.build(supervisionRun(config, forbiddenNatives({catalog: () => Effect.succeed({projects: [{project: {id: "project", title: "Project", workspaceRoot: "/work/project"}, available: true}], threads})})));

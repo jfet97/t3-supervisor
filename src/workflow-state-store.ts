@@ -1857,18 +1857,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     return receipt;
   }));
 
-  // acquisition: the workflow schema, statement for statement as the baseline constructor wrote it
-  yield* run(Effect.gen(function* () {
-    yield* sql.unsafe("CREATE TABLE IF NOT EXISTS supervisor_workflow_state (" +
-      "workflow_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,thread_id TEXT NOT NULL," +
-      "parent_workflow_id TEXT,parent_thread_id TEXT,revision INTEGER NOT NULL,document TEXT NOT NULL," +
-      "created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(project_id,main_thread_id,thread_id))");
-    yield* sql.unsafe("CREATE INDEX IF NOT EXISTS supervisor_workflow_scope ON supervisor_workflow_state(project_id,main_thread_id)");
-    yield* sql.unsafe("CREATE TABLE IF NOT EXISTS supervisor_workflow_operations (" +
-      "project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,actor_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL," +
-      "operation_namespace TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,result TEXT NOT NULL,workflow_id TEXT NOT NULL," +
-      "created_at INTEGER NOT NULL,PRIMARY KEY(project_id,main_thread_id,actor_thread_id,binding_generation,operation_namespace,operation_id))");
-  }));
+  // the workflow schema belongs to the startup upgrade (src/database-migrations.ts)
 
   return {get, getState, getByIdForOwner, listResult, list, hasNeedsAttention, apply, ensureMain, linkChild, importAcceptedAgreement,
     recordContribution, assessContribution, recordBranchSelection, applyReturn} satisfies WorkflowStateStoreShape;

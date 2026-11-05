@@ -3,12 +3,10 @@ import { SupervisionScopeService } from "../src/supervision-gate.js";
 import { engagedTask } from "./support/engaged-task.js";
 import { makeSourceProjection } from "./support/psx-submission.js";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { it } from "@effect/vitest";
 import { Deferred, Effect, Fiber } from "effect";
 import { TestClock } from "effect/testing";
-import type { GuidanceDb } from "../src/db.js";
-import { GuidanceStoreError, guidanceTransaction } from "../src/guidance-sql.js";
+import { guidanceTransaction } from "../src/guidance-sql.js";
 import { defaultSupervisorModel, prepareStopNotice } from "../src/project-supervisor-store.js";
 import { resolveSteerableRun } from "../src/supervisor-conversation.js";
 import { SUPERVISOR_SETTLE_QUIET_MS, type SupervisorLifecycle } from "../src/supervisor-lifecycle.js";
@@ -21,9 +19,9 @@ import { T3ReadError } from "../src/t3-native/index.js";
 import { completionRecordId } from "../src/workflow-progress.js";
 import type { Projection, ThreadInfo } from "../src/types.js";
 import {
-  constructSupervisorStore, lifecycleOver, openGuidanceClient, openLifecycleProcess, replaceMethod, stopChat, wallClock, type LifecycleProcess, type OperateCall, type ProjectionRead,
+  constructSupervisorStore, lifecycleOver, openLifecycleProcess, replaceMethod, stopChat, wallClock, type LifecycleProcess, type OperateCall, type ProjectionRead,
 } from "./support/g12-lifecycle.js";
-import { execute, query, temporaryDirectory } from "./support/g12-stores.js";
+import { execute, temporaryDirectory } from "./support/g12-stores.js";
 
 /* The scope resolution cases are plain tests of pure functions; the lifecycle cases are Effect tests on the production lifecycle,
  * conversation, admission gate, scope predicates and stores over real files in a temporary directory (src/supervision-live.ts),
@@ -1036,58 +1034,9 @@ it.effect("settlement starts exactly at quietSince+60000 and an uncertain one re
   assert.equal((yield* f.store.binding("p", "main"))?.settlement?.state, "uncertain");
 }), {timeout: 10_000});
 
-it.effect("the one-time disposable reset clears discovery together and preserves unrelated state", () => Effect.gen(function* () {
-  const f = yield* fixture;
-  yield* f.store.saveSettings("p", 0, {...defaultSupervisorModel, model: "chosen-default"});
-  const oldOwned = f.binding.threadId;
-  for (const statement of ["CREATE TABLE unrelated_delivery(id TEXT)", "INSERT INTO unrelated_delivery VALUES('retained')",
-    "CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL)", "INSERT INTO supervisor_project_bindings VALUES('p','{}')",
-    "DELETE FROM meta WHERE key='supervisor_scope_version'"]) yield* execute(f.sql, statement);
-  yield* constructSupervisorStore(f.process);
-  assert.equal((yield* f.store.bindings()).length, 0);assert.equal(yield* f.store.task("main"), null);assert.equal(yield* f.store.baseline(), null);assert.equal(yield* f.store.activation(), null);
-  assert.equal((yield* f.store.settings("p")).modelSelection.model, "chosen-default");assert.ok((yield* query(f.sql, "SELECT id FROM supervisor_owned_threads WHERE id=?", oldOwned))[0]);
-  assert.equal((yield* query(f.sql, "SELECT id FROM unrelated_delivery"))[0]?.id, "retained");
-  yield* f.store.baseline({snapshotSequence: 50, threads: [{id: "main", latestRunId: "old-run"}]});
-  yield* constructSupervisorStore(f.process);assert.equal((yield* f.store.baseline())?.snapshotSequence, 50, "normal restarts do not reset the new scope");
-}));
-
-
-const tableDigest = (sql: GuidanceDb["Service"]) => Effect.gen(function* () {
-  const hash = createHash("sha256");
-  for (const {name} of yield* query(sql, "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"))
-    hash.update(`${String(name)}\0${JSON.stringify(yield* query(sql, `SELECT * FROM "${String(name)}" ORDER BY rowid`))}\0`);
-  return hash.digest("hex");
-});
-
-// the CT-RESET-01: the version read, the reset and the version insert commit together, so a failed insert leaves the earlier state
-it.effect("a reset that fails at its version insert leaves every table untouched and the version absent, also after reopen, and the next construction resets (CT-RESET-01)", () => Effect.gen(function* () {
-  const f = yield* fixture;
-  yield* f.requests.prepare({projectId: "p", supervisorThreadId: f.binding.threadId, kind: "review", taskId: null, text: "Review", batch: null, completionMarker: "done"}, 1);
-  yield* f.requests.noticeSent(f.binding.threadId, 1);
-  // a pre-upgrade prototype database has no scope version
-  yield* execute(f.sql, "DELETE FROM meta WHERE key='supervisor_scope_version'");
-  const populated = yield* Effect.forEach(["supervisor_main_bindings", "supervisor_task_interpretations", "supervisor_conversation_requests", "supervisor_monitor_binding_clock"],
-    table => Effect.map(query(f.sql, `SELECT count(*) AS n FROM ${table}`), ([row]) => Number(row?.n)));
-  assert.ok(populated.every(count => count > 0), "the disposable tables hold state before the reset");
-  const before = yield* tableDigest(f.sql);
-  yield* execute(f.sql, `CREATE TEMP TRIGGER c1_fail_version BEFORE INSERT ON meta WHEN NEW.key='supervisor_scope_version'
-    BEGIN SELECT RAISE(ABORT, 'c1 injected version failure'); END`);
-  // the driver's text stays out of the typed store error (s6d contract: SqlError is mapped, never leaked raw)
-  const failure = yield* Effect.flip(constructSupervisorStore(f.process));
-  assert.ok(failure instanceof GuidanceStoreError);
-  assert.deepEqual([failure.reason, failure.sqlReason], ["sql_failed", "ConstraintError"]);
-  assert.equal(yield* tableDigest(f.sql), before);
-  const reopened = yield* openGuidanceClient(f.directory);
-  assert.equal(yield* tableDigest(reopened), before);
-  assert.equal((yield* query(reopened, "SELECT value FROM meta WHERE key='supervisor_scope_version'"))[0], undefined);
-
-  // without the failure the same construction resets those tables and answers compatible
-  yield* execute(f.sql, "DROP TRIGGER c1_fail_version");
-  const store = yield* constructSupervisorStore(f.process);
-  assert.equal(store.scopeCompatible, true, "the initialization after the failed attempt records the version and is compatible");
-  assert.notEqual(yield* tableDigest(f.sql), before);
-  assert.equal(Number((yield* query(f.sql, "SELECT count(*) AS n FROM supervisor_main_bindings"))[0]?.n), 0);
-}), {timeout: 10_000});
+// the one-time reset of the disposable prototype state, and its atomicity when the scope version insert fails (CT-RESET-01), are
+// the guidance format 1 step of the startup upgrade (test/supervisor-state-reset-service.test.ts); a store's construction only
+// reads the stored scope version
 
 it.effect("background provider work, completion delivery, goals and PR watches all prevent parking", () => Effect.gen(function* () {
   for (const kind of ["roster", "delivery", "goal", "watch"]) {

@@ -33,8 +33,7 @@ const deadline = <A, E>(call: (cancel: WorkflowCallCancel) => Effect.Effect<A, E
 const fixture = Effect.gen(function* () {
   const directory = yield* temporaryDirectory("team-review-controller-");
   const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer({dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0})),
-    ThreadPolicyStore);
+  const policy = Context.get(yield* Layer.build(policyLayer(directory)), ThreadPolicyStore);
   const {supervisors, team, sql} = stores;
   const reserved = yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1);
   const binding = {...reserved, state: "ready" as const};
@@ -347,8 +346,7 @@ const operateFixture = Effect.gen(function* () {
   const directory = yield* temporaryDirectory("team-controller-operate-");
   // the first client of the file is closed by a simulated crash, or with the test scope
   const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer({dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [], healthPort: 0})),
-    ThreadPolicyStore);
+  const policy = Context.get(yield* Layer.build(policyLayer(directory)), ThreadPolicyStore);
   const {supervisors, team, sql} = stores;
   const binding = {...(yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1)), state: "ready" as const};
   yield* supervisors.setBinding(binding);

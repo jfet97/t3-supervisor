@@ -22,6 +22,7 @@ import { ThreadPolicyStore, ThreadPolicyStoreError } from "../../src/thread-poli
 import type { GuidanceStoreError } from "../../src/guidance-sql.js";
 import type { ProjectInfo, Projection, SupervisorConfig } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { fakeNative } from "./native-access.js";
 import { clockFrom, type DbSeam } from "./psx-sql.js";
 import { openGuidance, openSupervisors, openWorkflows, type StoreOpen } from "./psx-stores.js";
@@ -199,6 +200,8 @@ export const makeFixture = (initial: ReadonlyArray<{threadId: string; projectId:
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const directory = yield* fs.makeTempDirectory({prefix: options.prefix ?? "psx-supervisor-"});
+    // the startup coordinator prepares the directory at the current formats before any store opens it, as `t3-supervisor start` does
+    yield* initializeDataDirectory(directory);
     const projections = new Map<string, Projection>();
     const turnsByThread = new Map<string, Turn[]>();
     let registeredProjects = [...projects];

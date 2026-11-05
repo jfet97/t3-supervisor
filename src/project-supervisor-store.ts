@@ -7,7 +7,7 @@ import { Clock, Context, Data, Effect, Layer, Ref, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
 import { decodeRow, documentRow, documentRows, type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, snapshotRead, storedDocument,
-  type StoredRowFinding, type StoredRowScan, tableColumns } from "./guidance-sql.js";
+  type StoredRowFinding, type StoredRowScan } from "./guidance-sql.js";
 import { fingerprint } from "./guidance-store.js";
 import { SupervisorIds } from "./ids.js";
 import { SupervisorStateReset } from "./supervisor-state-reset.js";
@@ -213,17 +213,6 @@ const decodeIdRow = decodeRow(Schema.Struct({id: Schema.String}), rowInvalid("ow
 const decodeCountRow = decodeRow(Schema.Struct({n: Schema.Finite}), rowInvalid("count"));
 const decodeEnabledAtRow = decodeRow(Schema.Struct({enabled_at: Schema.Finite}), rowInvalid("chat_enable"));
 const decodeDefinitionSaveRow = decodeRow(Schema.Struct({signature: Schema.String, saved_at: Schema.Finite, expected_revision: Schema.String}), rowInvalid("definition_save"));
-
-// the supervision schema, statement for statement as the baseline constructor wrote it (the stored DDL text is golden)
-const supervisionSchema = [
-  "CREATE TABLE IF NOT EXISTS supervisor_owned_threads(id TEXT PRIMARY KEY)",
-  "CREATE TABLE IF NOT EXISTS supervisor_project_settings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS supervisor_main_bindings(project_id TEXT NOT NULL,main_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(project_id,main_thread_id))",
-  "CREATE TABLE IF NOT EXISTS supervisor_task_interpretations(thread_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,updated_at INTEGER NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS supervisor_definition_user_saves(project_id TEXT NOT NULL,workspace_root TEXT NOT NULL,signature TEXT NOT NULL,saved_at INTEGER NOT NULL,expected_revision TEXT NOT NULL,PRIMARY KEY(project_id,workspace_root))",
-  "CREATE TABLE IF NOT EXISTS supervisor_chat_enables(thread_id TEXT PRIMARY KEY,enabled_at INTEGER NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS supervisor_tasks_project ON supervisor_task_interpretations(project_id)",
-] as const;
 
 const interruptedStartReason = "Start intake was interrupted before permission was reserved. Submit a new explicit request.";
 const activeTaskStatuses: ReadonlyArray<string> = ["queued", "dispatching", "waiting"];
@@ -784,14 +773,11 @@ const makeProjectSupervisorStore = Effect.gen(function* () {
     return expiredIds;
   }));
 
-  // ---- acquisition, in the baseline constructor's order: ddl, the column addition, the scope reset, the preparing-Start
-  // recovery and the ownership preload
+  // ---- acquisition: the scope check, the preparing-Start recovery and the ownership preload. The schema, the column addition
+  // and the one-time scope reset belong to the startup upgrade (src/database-migrations.ts)
   const scopeCompatible = yield* run(Effect.gen(function* () {
-    for (const statement of supervisionSchema) yield* sql.unsafe(statement);
-    if (!(yield* tableColumns(sql, "supervisor_definition_user_saves")).includes("expected_revision"))
-      yield* sql.unsafe("ALTER TABLE supervisor_definition_user_saves ADD COLUMN expected_revision TEXT NOT NULL DEFAULT ''");
-    // the approved one-time reset of the project-scoped prototype; an unknown stored scope disables supervision
-    const compatible = yield* reset.initializeMainSupervisionState();
+    // an unknown stored scope disables supervision
+    const compatible = yield* reset.scopeCompatible();
     // restart recovery: a Start intake that was still preparing is rejected; every other operation stays as stored
     yield* sql.withTransaction(Effect.gen(function* () {
       for (const row of yield* sql`SELECT key,value FROM meta WHERE key LIKE 'supervisor_start_operation:%'`) {

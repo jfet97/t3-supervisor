@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { Clock, Context, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
+import { decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import {
   Activity,
@@ -13,11 +13,6 @@ import {
   type GuidanceSettings,
 } from "./guidance-contract.js";
 
-// a new store's settings row: the classification generation and the evidence retention
-const defaults: GuidanceSettings = {
-  generation: 1,
-  evidenceHours: 24,
-};
 export const fingerprint = (value: unknown): string =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
@@ -61,22 +56,6 @@ export interface GuidanceStoreShape {
   readonly prune: (now?: number) => Effect.Effect<void, GuidanceStoreError>;
 }
 
-const schema = [
-  "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS rules(id TEXT PRIMARY KEY,document TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS mutes(rule_id TEXT NOT NULL,scope_id TEXT NOT NULL,PRIMARY KEY(rule_id,scope_id))",
-  "CREATE TABLE IF NOT EXISTS classifications(project_id TEXT PRIMARY KEY,classification TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS observations(thread_id TEXT PRIMARY KEY,hash TEXT NOT NULL,observed_at INTEGER NOT NULL)",
-  `CREATE TABLE IF NOT EXISTS episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,
-        notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id))`,
-  `CREATE TABLE IF NOT EXISTS notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,
-        epoch INTEGER NOT NULL,state TEXT NOT NULL,text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,
-        dispatch_started INTEGER NOT NULL DEFAULT 0)`,
-  "CREATE TABLE IF NOT EXISTS activity(id TEXT PRIMARY KEY,document TEXT NOT NULL,created_at INTEGER NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS budget(day TEXT PRIMARY KEY,tokens INTEGER NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS activity_notice ON activity(json_extract(document,'$.noticeId'),created_at)",
-];
-
 const budgetDay = (now: number): string => new Date(now).toISOString().slice(0, 10);
 
 const makeGuidanceStore = Effect.gen(function* () {
@@ -94,15 +73,9 @@ const makeGuidanceStore = Effect.gen(function* () {
     return activity;
   });
 
-  // schema, the default settings row, the column additions and the restart recovery of committed notices, in the
-  // baseline constructor's order and in one transaction
+  // the restart recovery of committed notices, in one transaction; the schema, the default settings row and the column
+  // additions belong to the startup upgrade (src/database-migrations.ts)
   yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
-    for (const statement of schema) yield* db.unsafe(statement);
-    yield* db`INSERT OR IGNORE INTO meta VALUES('settings',${JSON.stringify(defaults)})`;
-    if (!(yield* tableColumns(db, "episodes")).includes("object_id")) yield* db.unsafe("ALTER TABLE episodes ADD COLUMN object_id TEXT");
-    const noticeColumns = yield* tableColumns(db, "notices");
-    for (const column of ["rule_generation", "settings_generation"])
-      if (!noticeColumns.includes(column)) yield* db.unsafe(`ALTER TABLE notices ADD COLUMN ${column} INTEGER NOT NULL DEFAULT -1`);
     const recovering = yield* Effect.forEach(yield* db`SELECT * FROM notices WHERE state='committed'`, (row) => decodeNoticeRow(row));
     yield* db`UPDATE notices SET state=CASE WHEN dispatch_started=0 THEN 'not_delivered_restart' ELSE 'uncertain' END WHERE state='committed'`;
     const now = yield* Clock.currentTimeMillis;
@@ -176,8 +149,8 @@ const makeGuidanceStore = Effect.gen(function* () {
 });
 
 /**
- * The guidance store on the run's GuidanceDb client. Its layer creates the schema, the default settings, the column
- * additions and the restart recovery once. Every multi-statement method runs in one transaction and joins the caller's
+ * The guidance store on the run's GuidanceDb client, on a file the startup upgrade already brought to the current format; its
+ * layer runs the restart recovery once. Every multi-statement method runs in one transaction and joins the caller's
  * transaction when there is one (a savepoint); time comes from Clock and identities from SupervisorIds.
  */
 export class GuidanceStore extends Context.Service<GuidanceStore, GuidanceStoreShape>()("t3-supervisor/GuidanceStore") {
@@ -186,8 +159,8 @@ export class GuidanceStore extends Context.Service<GuidanceStore, GuidanceStoreS
 }
 
 /**
- * The rollout scan of the guidance tables (read only): every stored row through the decoder its reader uses, the open's table
- * and column additions, and the committed notices the open recovers as the baseline open did.
+ * The rollout scan of the guidance tables (read only): every stored row through the decoder its reader uses, the startup
+ * upgrade's table and column additions, and the committed notices the store's open recovers as the baseline open did.
  */
 export const checkGuidanceRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
   const db = yield* GuidanceDb;

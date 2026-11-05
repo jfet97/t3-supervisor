@@ -12,8 +12,8 @@ import { SupervisorConversationStore } from "../../src/supervisor-conversation-s
 import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
-import type { SupervisorConfig } from "../../src/types.js";
 import { WorkflowStateStore, type WorkflowEditingEnabled } from "../../src/workflow-state-store.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { guidanceLayer, ids, policyLayer, type SupervisionStoreServices } from "./g11-stores.js";
 import { dbSeam, seamWorker, type DbSeam } from "./psx-sql.js";
 
@@ -47,16 +47,12 @@ export interface StoreOpen extends GuidanceOpen {
   readonly context: Context.Context<SupervisionStoreServices | ThreadPolicyStore>;
 }
 
-const settingsOf = (directory: string, excludedThreadIds: readonly string[] = []): SupervisorConfig =>
-  ({dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused", excludedThreadIds: [...excludedThreadIds], healthPort: 0});
-
 /** The supervision stores and the thread-policy store over an open guidance client, in `scope`. */
-export const openSupervisors = (directory: string, guidance: GuidanceOpen, scope: Scope.Scope, owned = new Set<string>(),
-  excludedThreadIds: readonly string[] = []): Effect.Effect<StoreOpen> =>
+export const openSupervisors = (directory: string, guidance: GuidanceOpen, scope: Scope.Scope, owned = new Set<string>()): Effect.Effect<StoreOpen> =>
   Effect.gen(function* () {
     const built = yield* Layer.buildWithScope(SupervisionStoresLive.pipe(
       Layer.provide(Layer.succeedContext(guidance.context)), Layer.provide(Layer.succeed(SupervisorOwnership, owned))), scope).pipe(Effect.orDie);
-    const policyContext = yield* Layer.buildWithScope(policyLayer(settingsOf(directory, excludedThreadIds)), scope).pipe(Effect.orDie);
+    const policyContext = yield* Layer.buildWithScope(policyLayer(directory), scope).pipe(Effect.orDie);
     const policy = Context.get(policyContext, ThreadPolicyStore);
     const context = Context.merge(guidance.context, built).pipe(Context.add(SupervisorOwnership, owned), Context.add(ThreadPolicyStore, policy));
     return {
@@ -81,24 +77,30 @@ export interface RunFiles {
 }
 
 /** One process's guidance, supervision stores, policy and optional workflow store, in their own scope. */
-export const openRun = (directory: string, options: {readonly workflows?: boolean; readonly excludedThreadIds?: readonly string[]} = {}): Effect.Effect<RunFiles> =>
+export const openRun = (directory: string, options: {readonly workflows?: boolean} = {}): Effect.Effect<RunFiles> =>
   Effect.gen(function* () {
     const scope = yield* Scope.make();
     const close = Scope.close(scope, Exit.void);
     const opened = yield* Effect.gen(function* () {
       const guidance = yield* openGuidance(directory, scope);
-      const stores = yield* openSupervisors(directory, guidance, scope, new Set(), options.excludedThreadIds ?? []);
+      const stores = yield* openSupervisors(directory, guidance, scope, new Set());
       const workflows = options.workflows ? yield* openWorkflows(stores, scope) : null;
       return {directory, path: join(directory, "guidance.sqlite3"), stores, workflows, close};
     }).pipe(Effect.onError(() => close));
     return opened;
   }).pipe(Effect.provide(NodeFileSystem.layer), Effect.orDie);
 
-/** A temporary data directory removed with the current scope. */
+/** A temporary directory removed with the current scope; nothing is created in it, so a case can write files of any format. */
 export const temporaryDirectory = (prefix: string) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   return yield* fs.makeTempDirectoryScoped({prefix});
 }).pipe(Effect.provide(NodeFileSystem.layer));
+
+/**
+ * A temporary data directory at the current formats, with no excluded chat, prepared by the startup coordinator
+ * (test/support/data-directory.ts) as `t3-supervisor start` prepares it before any store opens it; removed with the current scope.
+ */
+export const dataDirectory = (prefix: string) => Effect.tap(temporaryDirectory(prefix), (directory) => Effect.orDie(initializeDataDirectory(directory)));
 
 export interface PssHandle {
   readonly guidance: GuidanceOpen;
@@ -110,9 +112,9 @@ export interface PssHandle {
   readonly close: Effect.Effect<void>;
 }
 
-/** One temp guidance directory. Each `open` is its own scope, closed again by the test or when this scope ends. */
+/** One temp guidance directory at the current formats. Each `open` is its own scope, closed again by the test or when this scope ends. */
 export const pssSession = (prefix: string) => Effect.gen(function* () {
-  const directory = yield* temporaryDirectory(prefix);
+  const directory = yield* dataDirectory(prefix);
   const path = join(directory, "guidance.sqlite3");
   const handles: Array<{readonly close: Effect.Effect<void>}> = [];
   const open = (before?: (guidance: GuidanceOpen) => Effect.Effect<void, never, Scope.Scope>): Effect.Effect<PssHandle, never, Scope.Scope> => Effect.gen(function* () {

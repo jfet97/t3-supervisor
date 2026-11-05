@@ -9,9 +9,10 @@ import { GuidanceConflictError, GuidanceStore, type GuidanceStoreShape } from ".
 import { guidanceDb, rows, sequentialIds, temporaryDirectory } from "./support/guidance-store-services.js";
 
 /* Target regressions of the GuidanceStore effect service on a temporary guidance.sqlite3 through the production layers:
- * the open-time schema and the one-time recovery of committed notices on reopen (CT-GDB-01; the migration of a pre-migration
- * file, CT-GDB-02, stays in test/guidance.characterization.test.ts), transactions that join the caller's (CT-GDB-06),
- * the CC-GDB-IMPLICIT sequences in one transaction, typed row and sql failures and the synchronous store's method results.
+ * the initialized schema the store opens without DDL and the one-time recovery of committed notices on reopen (CT-GDB-01; the
+ * columns a pre-migration file gains, CT-GDB-02's rule, are the guidance format 1 step in test/database-migrations.test.ts),
+ * transactions that join the caller's (CT-GDB-06), the CC-GDB-IMPLICIT sequences in one transaction, typed row and sql failures
+ * and the synchronous store's method results.
  */
 
 const layer = (directory: string) => GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDb(directory)), Layer.provide(sequentialIds()));
@@ -51,19 +52,30 @@ const conflictMessage = (error: unknown): string => {
 };
 
 describe("GuidanceStore", () => {
-  it.effect("the layer creates the schema and the default settings once and keeps a moved generation on reopen", () => Effect.gen(function* () {
+  it.effect("on an initialized file the store finds its tables and the default settings, adds no schema at open and keeps a moved generation on reopen", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
+    const schema = (db: GuidanceDb["Service"]) => rows(db, "SELECT type,name,sql FROM sqlite_master ORDER BY type,name");
+    // the schema the startup upgrade created, read through the client alone before any store is built
+    const initialized = yield* Effect.gen(function* () {
+      return yield* schema(yield* GuidanceDb);
+    }).pipe(Effect.provide(guidanceDb(directory)));
     const first = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
-      const tables = (yield* rows(db, "SELECT name FROM sqlite_master WHERE type IN ('table','index') AND name NOT LIKE 'sqlite_%' ORDER BY name")).map((row) => row.name);
       const settings = yield* store.settings();
       yield* store.classify("project-a", "scratch", settings.generation);
-      return { tables, settings, saved: yield* store.settings() };
+      return { schema: yield* schema(db), settings, saved: yield* store.settings() };
     }));
-    // the retired reminder tables stay: existing installations keep their rows
-    assert.deepEqual(first.tables, ["activity", "activity_notice", "budget", "classifications", "episodes", "meta", "mutes", "notices", "observations", "rules"]);
+    // the guidance store's own tables, the retired reminder tables among them: existing installations keep their rows
+    const tables = new Set(initialized.filter((row) => row.type === "table").map((row) => String(row.name)));
+    for (const table of ["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"])
+      assert.ok(tables.has(table), `the initialized file has ${table}`);
     assert.deepEqual(first.settings, defaults);
     assert.deepEqual(first.saved, { ...defaults, generation: 2 });
-    assert.deepEqual(yield* withGuidance(directory, (store) => store.settings()), first.saved);
+    // building the store twice ran no DDL: the schema is still the one the startup upgrade created
+    const second = yield* withGuidance(directory, (store, db) => Effect.gen(function* () {
+      return { schema: yield* schema(db), settings: yield* store.settings() };
+    }));
+    assert.deepEqual(first.schema, initialized, "the first build adds no schema");
+    assert.deepEqual(second, { schema: initialized, settings: first.saved });
   }), { timeout: 10_000 });
 
   it.live("reopening recovers each committed notice once, lists the uncertain one first and records nothing on a second reopen (CT-GDB-01)", () => Effect.gen(function* () {

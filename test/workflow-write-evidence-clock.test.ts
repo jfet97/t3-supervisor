@@ -10,7 +10,7 @@ import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowNativeItemUnavailable, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
 import { forkObserved } from "./support/clock-sleeps.js";
-import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory } from "./support/psx-stores.js";
+import { dataDirectory, openGuidance, openSupervisors, openWorkflows } from "./support/psx-stores.js";
 
 // CT-WWC-07 (target regression): the 400 ms evidence budget runs on the Effect clock (monotonic time, 50 ms pauses) instead of
 // performance.now and setTimeout, so its polls and its single 100 ms detail retry are counted exactly under the TestClock.
@@ -20,7 +20,7 @@ const thread = (id: string, projectId: string): ThreadInfo => ({id, title: id, p
   lineage: {parentThreadId: null, relationshipToParent: null}});
 
 it.effect("CT-WWC-07: with a 400 ms budget a pending write polls the projection every 50 ms nine times and retries one unavailable detail read once after 100 ms", () => Effect.gen(function* () {
-  const directory = yield* temporaryDirectory("workflow-write-evidence-clock-");
+  const directory = yield* dataDirectory("workflow-write-evidence-clock-");
   const scope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
   const guidance = yield* openGuidance(directory, scope);

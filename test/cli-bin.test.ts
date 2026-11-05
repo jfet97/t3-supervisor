@@ -34,8 +34,9 @@ const readyFiles = [
 ];
 const readyDatabases = ["access/login.sqlite3", "catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"];
 
-const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized. " +
-  "If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. Pending tokens expire after five minutes.\n";
+const forgeFailure = "Could not issue a sign-in token. Run as the account that runs T3 Supervisor, after the service has initialized; " +
+  "after an upgrade, start the service once first. If it uses a custom state directory, pass --data-dir <absolute-path> or the same DATA_DIRECTORY. " +
+  "Pending tokens expire after five minutes.\n";
 const tokenLine = { lines: 1, endsWithNewline: true, tokenLength: 43, canonical: true };
 
 const events = (stdout: string): unknown[] => stdout.split("\n").filter(Boolean).map((line) => (JSON.parse(line) as { event?: unknown }).event);
@@ -222,7 +223,9 @@ layer(installedBinLayer.pipe(Layer.provideMerge(NodeFileSystem.layer)), { timeou
         assert.deepEqual(events(result.stdout), ["supervisor_started"]);
       });
       assert.deepEqual(harness.fake.traffic.requests, [], "no subscription before a descriptor");
-      yield* assertReleased(harness, child.pid, ["catalog.sqlite3", "thread-settings.sqlite3"], ["catalog.sqlite3", "thread-settings.sqlite3"]);
+      // the startup upgrade created every store file before any store opened; no supervision run opened the guidance file
+      const storeFiles = ["catalog.sqlite3", "guidance.sqlite3", "thread-settings.sqlite3"];
+      yield* assertReleased(harness, child.pid, storeFiles, storeFiles);
     }), { timeout: 60_000 });
 
   it.effect("CT-CLI-BIN-03: SIGINT during a forge waiting on the login lock writes no grant, prints no token and leaves the lock holder unaffected",

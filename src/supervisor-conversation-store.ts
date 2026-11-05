@@ -4,7 +4,7 @@ import { projectKeys } from "./dashboard-events.js";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
+import { decodeGuidanceRow, documentRow, GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan } from "./guidance-sql.js";
 import { SupervisorIds } from "./ids.js";
 import type { SupervisorMonitorBatch } from "./supervisor-monitor.js";
 import { ReviewWait, reviewOutcomes, WorkflowProposal, type ReviewWaitInfo, type WorkflowProposalInfo } from "./project-supervisor-contract.js";
@@ -297,17 +297,6 @@ export interface SupervisorConversationStoreShape {
   readonly prune: (now: number) => Effect.Effect<void, GuidanceStoreError>;
 }
 
-const schema = [
-  "CREATE TABLE IF NOT EXISTS supervisor_planning_attempts(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS supervisor_planning_project ON supervisor_planning_attempts(project_id)",
-  "CREATE TABLE IF NOT EXISTS supervisor_conversation_requests(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL)",
-  "CREATE INDEX IF NOT EXISTS supervisor_conversation_project ON supervisor_conversation_requests(project_id)",
-  "CREATE TABLE IF NOT EXISTS supervisor_workflow_introductions(task_id TEXT PRIMARY KEY,project_id TEXT NOT NULL,document TEXT NOT NULL)",
-  "CREATE TABLE IF NOT EXISTS supervisor_workflow_agreement_candidates(task_id TEXT NOT NULL,proposal_id TEXT NOT NULL,project_id TEXT NOT NULL,document TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(task_id,proposal_id))",
-  "CREATE INDEX IF NOT EXISTS supervisor_workflow_agreement_project ON supervisor_workflow_agreement_candidates(project_id)",
-  "CREATE TABLE IF NOT EXISTS supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0)",
-];
-
 const pendingStates: ReadonlyArray<ConversationRequest["state"]> = ["prepared", "sending", "waiting", "uncertain"];
 const prunable = (request: ConversationRequest): boolean =>
   request.state === "completed" || request.state === "failed" && (request.kind !== "review" || request.failureAcknowledged === true);
@@ -317,12 +306,7 @@ const makeConversationStore = Effect.gen(function* () {
   const invalidate = yield* dashboardInvalidation(db);
   const ids = yield* SupervisorIds;
 
-  // the tables and the review_misses column addition, once, in the baseline constructor's order
-  yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
-    for (const statement of schema) yield* db.unsafe(statement);
-    if (!(yield* tableColumns(db, "supervisor_monitor_binding_clock")).includes("review_misses"))
-      yield* db.unsafe("ALTER TABLE supervisor_monitor_binding_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0");
-  })));
+  // the tables and the review_misses column belong to the startup upgrade (src/database-migrations.ts)
 
   const readRequests = (projectId: string, supervisorThreadId?: string) =>
     db`SELECT document FROM supervisor_conversation_requests WHERE project_id=${projectId} ORDER BY created_at`.pipe(

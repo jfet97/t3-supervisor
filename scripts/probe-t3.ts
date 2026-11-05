@@ -1,5 +1,6 @@
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Cause, Clock, Config, Console, Data, Effect, FileSystem, Layer, type PlatformError, Redacted, Ref, Schema } from "effect";
+import { upgradeDataDirectory } from "../src/database-upgrade.js";
 import { Store, makeStore } from "../src/store.js";
 import { T3Client, makeT3Client } from "../src/t3.js";
 import type { SourceItem } from "../src/types.js";
@@ -68,6 +69,8 @@ const probe = Effect.gen(function* () {
   const seen = yield* Ref.make<Seen>({ snapshots: new Set(), threads: 0 });
   yield* Effect.gen(function* () {
     const directory = yield* FileSystem.FileSystem.use((files) => files.makeTempDirectoryScoped({ prefix: "supervisor-t3-probe-" }));
+    // a fresh data directory, prepared by the startup upgrade as the service's first start prepares one, before the catalog opens
+    yield* upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] });
     const client = Layer.unwrap(Effect.map(t3Url, (baseUrl) => makeT3Client({ baseUrl, token: Redacted.value(token) })));
     return yield* watchSnapshots(seen).pipe(Effect.provide(Layer.mergeAll(makeStore(directory), client)), Effect.timeout("30 seconds"));
   }).pipe(

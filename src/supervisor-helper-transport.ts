@@ -181,11 +181,6 @@ export interface HelperTransportShape {
   readonly retire: (binding: BindingRecord, helperThreadId: string, cancel?: Deferred.Deferred<void>) => Effect.Effect<boolean, GuidanceStoreError>;
 }
 
-const helperSchema = [
-  "CREATE TABLE IF NOT EXISTS supervisor_helper_channels(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,helper_thread_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,helper_thread_id))",
-  "CREATE TABLE IF NOT EXISTS supervisor_helper_deliveries(\n      owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,message_id TEXT NOT NULL,document TEXT NOT NULL,\n      PRIMARY KEY(owner_thread_id,owner_generation,message_id))",
-];
-
 /**
  * Uses a genuine native webhook task, without timers or repeated tasks on the root. The webhook URL is resolved by T3Native on the
  * T3 origin.
@@ -200,8 +195,7 @@ const makeHelperTransport = Effect.gen(function* () {
   const store = yield* ProjectSupervisorStore;
   const db = yield* GuidanceDb;
   const transaction = guidanceTransaction(db);
-  // the transport's own two tables on the run's guidance client
-  yield* guidanceSql(Effect.forEach(helperSchema, (statement) => db.unsafe(statement)));
+  // the transport's two tables belong to the startup upgrade (src/database-migrations.ts)
 
   const projection = (threadId: string, cancel: Deferred.Deferred<void> | undefined): Effect.Effect<Projection, T3ReadError | T3InvalidInput | Cancelled> =>
     untilCancelled(Effect.map(native.orchestration.thread(threadId), (snapshot) => snapshot.projection), cancel);

@@ -5,6 +5,7 @@ import { it } from "@effect/vitest";
 import { Effect, Exit, FileSystem, Layer, PlatformError } from "effect";
 import { CatalogDb, catalogDbLayer } from "../src/db.js";
 import { Store } from "../src/store.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 
 // A-R12-CAT-01: a write whose permission restoration fails reports the failure and leaves no committed state (the
 // baseline restored the modes inside the transaction and rolled back); the fault is injected into the Effect FileSystem
@@ -18,6 +19,8 @@ const event = (id: string, sequence: number) => ({
 it.live("a failed permission restoration fails ingest and activation without advancing rows, revisions or cursors", () => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = join(yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-store-permissions-" }), "data");
+  // the startup coordinator creates the data directory and its files at the current formats, as `t3-supervisor start` does
+  yield* initializeDataDirectory(directory);
   let armed = false;
   const chmodCalls: string[] = [];
   const faulty = FileSystem.FileSystem.of({

@@ -32,7 +32,8 @@ export type TeamStoreServices = GuidanceDb | SupervisorIds | SupervisorOwnership
   ProjectSupervisorStore | SupervisorConversationStore | ProjectSupervisorMonitorStore | SupervisorTeamStore;
 
 // the guidance client, the ids and the ownership set, then the stores in the production order (src/supervision-live.ts): the
-// guidance store, the one-time state reset, the project supervision store, the conversation, monitor and team stores
+// guidance store, the state reset service (the scope check), the project supervision store, the conversation, monitor and team
+// stores
 const teamStoresLayer = (directory: string, ids: Layer.Layer<SupervisorIds>) => {
   const base = Layer.mergeAll(guidanceDbLayer(directory).pipe(Layer.provide(NodeFileSystem.layer)), ids,
     Layer.sync(SupervisorOwnership, () => new Set<string>()));

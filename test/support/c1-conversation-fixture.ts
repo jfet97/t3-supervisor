@@ -15,6 +15,7 @@ import type { MessageInfo, Projection, RunInfo, SupervisorSettings, ThreadInfo }
 import { compactProposalDigest } from "../../src/supervisor-workflow-agreement.js";
 import { effectiveIndex, indexSource, projectIndex, testSummary } from "../project-definitions-fixture.js";
 import { recordInterpretationSubmission } from "./interpretation-evidence-fixture.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import {
   atWallTime, makeFakeT3, noNativeRead, openConversationProcess, openProjectSupervisor, runSettings, temporaryDirectory, type ConversationProcess, type RpcCall,
 } from "./g1b-conversation.js";
@@ -275,7 +276,9 @@ const runOf = (process: ConversationProcess, mainThreadId: string, supervisor: P
 
 export const makeFixture = (clock: FixtureClock, options: FixtureOptions = {}) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("c1-conversation-");
+  // the thread policy lives in a data directory of its own, prepared at the current formats as the run's directory is
   const threadPolicyDirectory = join(directory, "thread-policy");
+  yield* Effect.orDie(initializeDataDirectory(threadPolicyDirectory));
   const definitionSnapshot = definitions();
   const projections = new Map<string, Projection>();
   const supervisorThreadIds = new Set<string>();

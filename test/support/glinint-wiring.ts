@@ -36,6 +36,7 @@ import type { ProjectInfo, SupervisorSettings, ThreadInfo } from "../../src/type
 import { WorkflowMcp } from "../../src/workflow-mcp.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import { WorkflowWriteController } from "../../src/workflow-write-controller.js";
+import { initializeDataDirectory } from "./data-directory.js";
 
 // the production object graph of one supervision run (src/guidance-application.ts with src/supervision-live.ts) built as layers
 // in the caller's scope over a loopback T3 peer and temp files: the guidance client with its store and the supervision stores,
@@ -225,9 +226,14 @@ export const mcpRawPost = (port: number, headers: Record<string, string>): Effec
   return Effect.sync(() => request.destroy());
 });
 
-/** A temporary data directory, removed with the scope. */
+/**
+ * A temporary data directory at the current formats, with no excluded chat (as the run's settings configure), prepared by the
+ * startup coordinator (test/support/data-directory.ts) before any run opens it, as `t3-supervisor start` prepares it; removed
+ * with the scope. A restart's run opens it again as it is.
+ */
 export const temporaryDirectory = (prefix: string): Effect.Effect<string, never, Scope.Scope> =>
-  Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({prefix})).pipe(Effect.provide(NodeFileSystem.layer), Effect.orDie);
+  Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({prefix})).pipe(
+    Effect.tap((directory) => initializeDataDirectory(directory)), Effect.provide(NodeFileSystem.layer), Effect.orDie);
 
 /** Runs one statement on the run's guidance client, as a suite's direct write to the file. */
 export const execute = (sql: GuidanceDb["Service"], statement: string, ...params: ReadonlyArray<unknown>): Effect.Effect<void> =>

@@ -53,7 +53,7 @@ The dashboard defaults to `127.0.0.1:9008` (`UI_HOST`, `UI_PORT`), and health to
 Both include `version` and `revision`. A source build without a recorded Git
 revision reports `revision: null`.
 
-Forge a fresh dashboard token after the instance has initialized. It is single-use
+Forge a fresh dashboard token once the installed version has started. It is single-use
 and valid for five minutes. Browser sessions survive restarts until their original
 30-day expiry or sign-out. Dashboard tokens, T3 credentials and the workflow MCP
 bearer are separate credentials. See [workflow MCP](workflow-mcp.md) before enabling
@@ -97,14 +97,53 @@ upgrading. Preserve private credential files, sessions, instance settings and th
 workflow MCP bearer. Copying live SQLite files without their WAL is not a reliable
 backup; take the backup while the service is stopped.
 
-For local installation, install the desired version with
-`npm install --global @jfet97/t3-supervisor@VERSION` (or `pnpm add --global ...`), then
-restart the service. For Compose, set `SUPERVISOR_VERSION=VERSION`, run
-`docker compose pull`, then `docker compose up -d`. Confirm `--version` and
-`/health` after restarting. Updating an alias in the registry never changes a
-running process or container by itself.
+For local installation, stop the service, install the desired version with
+`npm install --global @jfet97/t3-supervisor@VERSION` (or `pnpm add --global ...`),
+then start it again. For Compose, set `SUPERVISOR_VERSION=VERSION`, run
+`docker compose pull`, then `docker compose up -d`, which stops the old container
+before it starts the new one. Confirm `--version` and `/health` after restarting.
+Updating an alias in the registry never changes a running process or container by
+itself.
+
+### Database upgrades
+
+Each Supervisor database records its own format, independent of release versions.
+Only the service changes it, as it starts (`t3-supervisor start`, or the container):
+before it serves the dashboard or contacts T3, it brings every database to the format
+of the installed version, and it reports ready only after all of them have succeeded.
+Upgrades happen offline: stop the running service first, and never run two versions
+on the same state directory, even briefly.
+
+Before it changes an existing database, the service copies it with SQLite's online
+backup into a new backup set, `backups/<backup-set-id>/` in the state directory,
+verifies every copy and records its checksum in the set's `manifest.json`. The set
+keeps each database as it was before the upgrade. It is private (directory mode
+0700, files 0600), and Supervisor never overwrites or deletes it; remove old sets
+yourself once you no longer need them. A new installation makes no backup, and
+neither does a start whose databases already have the current format.
+
+The service refuses to start, without changing anything, on a database whose layout
+it does not recognize or whose format is newer than the installed version's. If a
+backup cannot be made or verified, or an upgrade step fails, it also exits with an
+error instead of starting. Databases already upgraded by that start keep their new
+format, and no backup is restored automatically. Correct the cause, for example a
+full disk or a wrong file owner, and start the service again: it continues with the
+databases that remain. A start that fails again while those databases are unchanged
+reuses the backup set it already verified rather than copying them again. Compose
+restarts a failed container, so stop it with `docker compose stop` while you correct
+the cause.
+
+`t3-supervisor auth forge` never creates or upgrades a database. While the login
+database is missing or not at the installed version's format, it issues no token and
+asks you to start the service once.
+
+### Rollback
+
+There is no supported downgrade. An older version may not understand state written
+by a newer one, and versions up to 0.0.27 do not check database formats at all. To
+return to an earlier version, stop the service and restore the complete pre-upgrade
+backup of the state directory.
 
 Alpha, beta and nightly are opt-in test releases. Use separate state for testing
-them. An older binary may not understand state written by a newer one; rollback
-can require restoring the matching pre-upgrade backup. Do not promise downgrade
-compatibility from a version number alone.
+them: a preview started on your usual state directory upgrades its databases, with
+no supported way back.

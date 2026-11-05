@@ -3,7 +3,7 @@ import { projectKeys } from "./dashboard-events.js";
 import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
 import type { SqlError } from "effect/sql";
 import { GuidanceDb, untracedSql } from "./db.js";
-import { changedRows, decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan, tableColumns } from "./guidance-sql.js";
+import { changedRows, decodeGuidanceRow, type GuidanceStoreError, guidanceSql, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan } from "./guidance-sql.js";
 import {
   collectSupervisorActivity,
   compareMonitorPriority,
@@ -201,42 +201,9 @@ export interface ProjectSupervisorMonitorStoreShape {
     Effect.Effect<{ acknowledged: number; stale: number }, InvalidMonitorObservation | GuidanceStoreError>;
 }
 
-const monitorSchema = [
-  `CREATE TABLE IF NOT EXISTS supervisor_monitor_threads(
-        project_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL,
-        source_ordinal INTEGER NOT NULL,
-        activation_ordinal INTEGER NOT NULL,
-        saturated INTEGER NOT NULL DEFAULT 0,
-        saturation_at INTEGER,
-        last_acknowledged_at INTEGER,
-        untracked_count INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY(project_id, thread_id)
-      )`,
-  `CREATE TABLE IF NOT EXISTS supervisor_monitor_items(
-        project_id TEXT NOT NULL,
-        thread_id TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        read_item_id TEXT,
-        type TEXT NOT NULL,
-        status TEXT NOT NULL,
-        ordinal INTEGER NOT NULL,
-        detected_at INTEGER NOT NULL,
-        version TEXT NOT NULL,
-        priority TEXT,
-        eligible INTEGER NOT NULL,
-        active INTEGER NOT NULL DEFAULT 1,
-        reviewed_version TEXT,
-        updated_at INTEGER NOT NULL,
-        PRIMARY KEY(project_id, thread_id, item_id)
-      )`,
-  `CREATE INDEX IF NOT EXISTS supervisor_monitor_pending
-        ON supervisor_monitor_items(project_id, thread_id, eligible, reviewed_version)`,
-];
-
 /**
- * Builds the monitor store on the run's GuidanceDb client with the given per-thread capacity: the tables and the
- * column additions are created once, in the baseline constructor's order.
+ * Builds the monitor store on the run's GuidanceDb client with the given per-thread capacity, on a file the startup upgrade
+ * already brought to the current format.
  */
 export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD) => Effect.gen(function* () {
   if (!Number.isSafeInteger(maxItemsPerThread) || maxItemsPerThread < 1 || maxItemsPerThread > SUPERVISOR_MONITOR_MAX_ITEMS_PER_THREAD)
@@ -244,20 +211,7 @@ export const makeProjectSupervisorMonitorStore = (maxItemsPerThread = SUPERVISOR
   const db = yield* GuidanceDb;
   const invalidate = yield* dashboardInvalidation(db);
 
-  yield* guidanceSql(db.withTransaction(Effect.gen(function* () {
-    for (const statement of monitorSchema) yield* db.unsafe(statement);
-    const threadColumns = yield* tableColumns(db, "supervisor_monitor_threads");
-    if (!threadColumns.includes("activation_ordinal")) {
-      yield* db.unsafe("ALTER TABLE supervisor_monitor_threads ADD COLUMN activation_ordinal INTEGER");
-      yield* db.unsafe(`UPDATE supervisor_monitor_threads SET activation_ordinal=source_ordinal
-        WHERE activation_ordinal IS NULL`);
-    }
-    if (!threadColumns.includes("untracked_count"))
-      yield* db.unsafe("ALTER TABLE supervisor_monitor_threads ADD COLUMN untracked_count INTEGER NOT NULL DEFAULT 0");
-    const itemColumns = yield* tableColumns(db, "supervisor_monitor_items");
-    if (!itemColumns.includes("read_item_id")) yield* db.unsafe("ALTER TABLE supervisor_monitor_items ADD COLUMN read_item_id TEXT");
-    if (!itemColumns.includes("active")) yield* db.unsafe("ALTER TABLE supervisor_monitor_items ADD COLUMN active INTEGER NOT NULL DEFAULT 1");
-  })));
+  // the tables and the column additions belong to the startup upgrade (src/database-migrations.ts)
 
   const threadRow = (projectId: string, threadId: string) =>
     db`SELECT * FROM supervisor_monitor_threads WHERE project_id=${projectId} AND thread_id=${threadId}`.pipe(

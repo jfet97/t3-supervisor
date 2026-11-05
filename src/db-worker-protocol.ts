@@ -26,8 +26,14 @@ export type StatementOperation = typeof StatementOperation.Type;
 export const WorkerRequest = Schema.Union([
   Schema.Struct({id: Schema.Number, op: Schema.Literal("open"), config: WorkerDatabaseConfig}),
   Schema.Struct({id: Schema.Number, op: StatementOperation, sql: Schema.String, params: Schema.Array(Schema.Unknown), safeIntegers: Schema.Boolean}),
+  // an online backup of the open database into `destination`, through the connection's own SQLite backup API
+  Schema.Struct({id: Schema.Number, op: Schema.Literal("backup"), destination: Schema.String}),
 ]);
 export type WorkerRequest = typeof WorkerRequest.Type;
+
+/** What a completed backup reports: the pages the source had and the pages left to copy (none once it completed). */
+export const BackupMetadata = Schema.Struct({totalPages: Schema.Number, remainingPages: Schema.Number});
+export type BackupMetadata = typeof BackupMetadata.Type;
 
 const ReasonTag = Schema.Literals(["ConnectionError", "AuthenticationError", "AuthorizationError", "SqlSyntaxError", "UniqueViolation",
   "ConstraintError", "DeadlockError", "SerializationError", "LockTimeoutError", "StatementTimeoutError", "UnknownError"]);

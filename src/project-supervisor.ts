@@ -9,7 +9,7 @@ import { readTeamViewData, supervisorTeamView } from "./supervisor-team-view.js"
 import { mainConversation, resolveSupervisorScope, supervisorScopeKey } from "./supervisor-scope.js";
 import { fingerprint } from "./guidance-store.js";
 import { GuidanceDb } from "./db.js";
-import { guidanceSql, guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
+import { guidanceTransaction, type SupervisionStoreError } from "./guidance-sql.js";
 import { hasUnansweredHuman, nativeUserMessageVisible, timestampMs, workspacePreparationPending } from "./domain.js";
 import { ThreadPolicyStore } from "./thread-policy.js";
 import { isSupervisorThread, ProjectSupervisorStore, type ProjectSupervisorStoreError, type BindingRecord, type InterpretationSourceMessage, type InterpretationSources, type TaskRecord, type SupervisorBaseline, type SupervisionFolderPresence } from "./project-supervisor-store.js";
@@ -17,7 +17,7 @@ import { conversationOriginAllowed, taskRequester, type TaskRequesterPolicy } fr
 import { modelSelection, sameModel, validModelSelection } from "./supervisor-native.js";
 import type { ProjectSupervisorChatSupervisionInput, ProjectSupervisorInfo, ProjectSupervisorSaveInput, ProjectSupervisorSaveOutcome, ProjectSupervisorRetryInput, SupervisorModelSelection } from "./project-supervisor-contract.js";
 import { prepareWorkflowRequest } from "./supervisor-workflow.js";
-import { interpretationChecks, interpretationSubmissionEvidence, readInterpretationReceipt, taskPendingStart, taskReceiptOwner, workflowWriteReceiptsTable,
+import { interpretationChecks, interpretationSubmissionEvidence, readInterpretationReceipt, taskPendingStart, taskReceiptOwner,
   type InterpretationReceipt } from "./interpretation-intake.js";
 import { interpretationAttemptId, interpretationAttemptKey, interpretationSourcePin, interpretationTextHash, retainedInterpretationAttempt,
   sameInterpretationAttemptKey, verifyInterpretationProof, type InterpretationAttempt, type InterpretationProofVerdict } from "./interpretation-submission.js";
@@ -315,8 +315,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
   // the in-flight native sends of this service (plan 3.11): closing its scope interrupts each one and keeps its receipt
   const dispatches = yield* FiberMap.make<string, void>();
   const launches = yield* FiberMap.make<string, LaunchOutcome>();
-  // the interpretation receipts the finalization reads live in the workflow write receipt table, created here as the controller creates it
-  yield* guidanceSql(db.unsafe(workflowWriteReceiptsTable));
+  // the interpretation receipts the finalization reads live in the workflow write receipt table, which the startup upgrade creates
   // the run's interpretation wake, served below; absent where a unit runs without it, which leaves the normal cycle
   const wake = Option.getOrNull(yield* Effect.serviceOption(InterpretationWake));
 

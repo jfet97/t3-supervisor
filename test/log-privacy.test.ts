@@ -162,11 +162,14 @@ const assertNoLeak = (label: string, outputs: ReadonlyArray<string>, secrets: Se
 it.live("CT-REDACT-01: native transport failures carrying a token, a native error body and a webhook URL leave only phase classifications in logs, status and spans",
   () => Effect.gen(function* () {
     const secrets = makeSecrets();
+    // the data directories are prepared at the current formats before the observation, as the startup coordinator prepares
+    // them before the run starts
+    const refusedDirectory = yield* temporaryDirectory("log-privacy-descriptor-");
+    const watchDirectory = yield* temporaryDirectory("log-privacy-watch-");
     const observation = yield* observe;
 
     // descriptor answered with a 500 whose body carries the secrets: the retry records only the phase
     const refusing = yield* fakeT3({ token: secrets.token, descriptor: "failing", failure: nativeFailure(secrets) });
-    const refusedDirectory = yield* temporaryDirectory("log-privacy-descriptor-");
     const refusedConfig = config(refusedDirectory);
     const refusedStatus = yield* liveStatus(refusedConfig);
     const refused = yield* Effect.forkChild(instrumented(supervise(services(refusedConfig, refusedStatus,
@@ -179,7 +182,6 @@ it.live("CT-REDACT-01: native transport failures carrying a token, a native erro
 
     // shell subscriptions answered with an Exit failure carrying the secrets: the guard logs the phase only
     const failing = yield* fakeT3({ token: secrets.token, failure: nativeFailure(secrets), failSubscriptions: true });
-    const watchDirectory = yield* temporaryDirectory("log-privacy-watch-");
     const watchConfig = config(watchDirectory);
     const watchStatus = yield* liveStatus(watchConfig);
     const watching = yield* Effect.forkChild(instrumented(supervise(services(watchConfig, watchStatus,
@@ -206,8 +208,9 @@ it.live("CT-REDACT-01: native transport failures carrying a token, a native erro
 it.live("CT-REDACT-01: nested causes carrying a token, a native error body and a webhook URL reach the logger only as phase classifications",
   () => Effect.gen(function* () {
     const secrets = makeSecrets();
-    const observation = yield* observe;
+    // the data directory is prepared at the current formats before the observation, as the startup coordinator prepares it
     const directory = yield* temporaryDirectory("log-privacy-nested-");
+    const observation = yield* observe;
     const nested = (): T3TransportError => {
       const error = new T3TransportError("T3 environment descriptor returned HTTP 500", 500);
       Object.assign(error, { cause: new Error(`upstream ${secrets.nativeBody}`, { cause: { authorization: `Bearer ${secrets.token}`, webhook: secrets.webhookUrl } }) });
@@ -250,6 +253,8 @@ it.live("CT-REDACT-01: nested causes carrying a token, a native error body and a
 it.live("CT-REDACT-01: native rpc, helper channel and auth failures hand callers only fixed messages and classification flags",
   () => Effect.gen(function* () {
     const secrets = makeSecrets();
+    // the data directory is prepared at the current formats before the observation, as the startup coordinator prepares it
+    const directory = yield* temporaryDirectory("log-privacy-auth-");
     const observation = yield* observe;
     const fake = yield* fakeT3({ token: secrets.token, failure: nativeFailure(secrets) });
     const rpc = yield* NativeRpc.make({ baseUrl: fake.baseUrl, token: secrets.token }).pipe(Effect.provide(NativeEnvelope.layer));
@@ -266,7 +271,6 @@ it.live("CT-REDACT-01: native rpc, helper channel and auth failures hand callers
     assert.deepEqual(fake.traffic.requests, ["orchestration.getTurnItem", "scheduledTasks.upsert"]);
 
     // auth: a seed file holding a token-like value of the wrong length, and a forge without service state
-    const directory = yield* temporaryDirectory("log-privacy-auth-");
     const auth = Effect.scoped(Layer.build(ServiceAuth.layer(directory))).pipe(Effect.provide(NodeFileSystem.layer));
     yield* auth;
     yield* Effect.flatMap(FileSystem.FileSystem, (fs) => fs.writeFileString(join(directory, "access", "workflow-mcp-token"), `${secrets.token}x`, { mode: 0o600 })).pipe(

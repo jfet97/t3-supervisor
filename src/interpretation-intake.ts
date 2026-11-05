@@ -28,19 +28,8 @@ import type { WorkflowOwner } from "./workflow-state-contract.js";
 // submission records in the workflow write receipt table (cc-wfreceipt), the source, boundary and Start checks the intake commit
 // and the finalization share, and the evidence an applied submission leaves on its task
 
-// the workflow write receipts (cc-wfreceipt): the write controller's table, keyed by owner, generation, namespace and operation
-export const workflowWriteReceiptsTable = `CREATE TABLE IF NOT EXISTS supervisor_workflow_write_receipts (
-        operation_id TEXT NOT NULL,
-        operation_namespace TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        main_thread_id TEXT NOT NULL,
-        supervisor_thread_id TEXT NOT NULL,
-        binding_generation INTEGER NOT NULL,
-        result TEXT NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id)
-      )`;
+// the workflow write receipts (cc-wfreceipt) live in the write controller's table, keyed by owner, generation, namespace and
+// operation; the startup upgrade creates it (src/database-migrations.ts)
 // the namespace of an interpretation receipt; its operation id is the attempt id and its request hash the raw-argument hash
 export const interpretationReceiptNamespace = "interpretation";
 

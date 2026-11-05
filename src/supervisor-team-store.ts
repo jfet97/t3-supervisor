@@ -983,11 +983,9 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
       members: yield* membersFor(binding), assignments: yield* assignmentsFor(binding), notifications, events } satisfies SupervisorTeamSnapshot;
   }));
 
-  // ---- acquisition: ddl and restart recovery (sending notifications become uncertain before any reconcile), once per layer
-  yield* run(Effect.gen(function* () {
-    for (const statement of teamSchema) yield* sql.unsafe(statement);
-    yield* sql`UPDATE supervisor_team_notifications SET state='uncertain',document=json_set(document,'$.state','uncertain') WHERE state='sending'`;
-  }));
+  // ---- acquisition: restart recovery (sending notifications become uncertain before any reconcile), once per layer; the
+  // schema belongs to the startup upgrade (src/database-migrations.ts)
+  yield* run(sql`UPDATE supervisor_team_notifications SET state='uncertain',document=json_set(document,'$.state','uncertain') WHERE state='sending'`);
 
   return {
     settings, setMaxHelpersPerRoot, bindingForActor, resolveActor, coverage, authorizeWrite, registerMember, markReady, assign, release,
@@ -997,20 +995,6 @@ const makeSupervisorTeamStore = Effect.gen(function* () {
     hasBlockingWork, snapshot,
   } satisfies SupervisorTeamStoreShape;
 });
-
-// the team schema, statement for statement as the baseline constructor wrote it (the stored DDL text is golden)
-const teamSchema = [
-  "CREATE INDEX IF NOT EXISTS supervisor_main_binding_thread ON supervisor_main_bindings(json_extract(document,'$.threadId'))",
-  "CREATE TABLE IF NOT EXISTS supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id))",
-  "CREATE UNIQUE INDEX IF NOT EXISTS supervisor_team_member_identity ON supervisor_team_members(member_thread_id) WHERE state<>'retired'",
-  "CREATE TABLE IF NOT EXISTS supervisor_team_assignments(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,subtree_root_thread_id TEXT NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,subtree_root_thread_id))",
-  "CREATE TABLE IF NOT EXISTS supervisor_team_notifications(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,id TEXT NOT NULL,recipient_thread_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,id))",
-  "CREATE INDEX IF NOT EXISTS supervisor_team_notifications_recipient ON supervisor_team_notifications(owner_thread_id,owner_generation,recipient_thread_id,state,created_at)",
-  "CREATE TABLE IF NOT EXISTS supervisor_team_events(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,id TEXT NOT NULL,created_at INTEGER NOT NULL,acknowledged_at INTEGER,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,id))",
-  "CREATE INDEX IF NOT EXISTS supervisor_team_events_pending ON supervisor_team_events(owner_thread_id,owner_generation,acknowledged_at,created_at)",
-  "CREATE TABLE IF NOT EXISTS supervisor_team_requests(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,request_id TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,request_id))",
-  "CREATE INDEX IF NOT EXISTS supervisor_team_requests_pending ON supervisor_team_requests(owner_thread_id,owner_generation,state,created_at)",
-] as const;
 
 // effect/sql spans carry statement text, so the construction and every operation run untraced
 export class SupervisorTeamStore extends Context.Service<SupervisorTeamStore, SupervisorTeamStoreShape>()("t3-supervisor/SupervisorTeamStore") {

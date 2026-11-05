@@ -167,7 +167,6 @@ const decodeDocument = Schema.decodeUnknownEffect(StoredDocument);
 const decodeDocumentRow = Schema.decodeUnknownEffect(Schema.Struct({ document: StoredDocument }));
 const decodeJoinedDocumentRow = Schema.decodeUnknownEffect(Schema.Struct({ document: Schema.NullOr(StoredDocument) }));
 const decodeProjectRow = Schema.decodeUnknownEffect(Schema.Struct({ document: StoredDocument, deleted: Schema.Finite }));
-const decodeStoredShellRow = Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String, document: Schema.String }));
 const decodeIdRow = Schema.decodeUnknownEffect(Schema.Struct({ id: Schema.String }));
 const decodeEnvironmentRow = Schema.decodeUnknownEffect(Schema.Struct({ environment_id: Schema.String }));
 const decodeActivationRow = Schema.decodeUnknownEffect(Schema.Struct({ activated_at: Schema.Finite }));
@@ -177,41 +176,17 @@ const decodeCountRow = Schema.decodeUnknownEffect(Schema.Struct({ count: Schema.
 const decodeTotalsRow = Schema.decodeUnknownEffect(Schema.Struct({ projects: Schema.Finite, threads: Schema.Finite }));
 const decodeDatabaseFile = Schema.decodeUnknownEffect(Schema.Tuple([Schema.Struct({ file: Schema.NonEmptyString })]));
 
-const schema = [
-  `CREATE TABLE IF NOT EXISTS activations (
-    environment_id TEXT PRIMARY KEY,
-    activated_at INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS environment_binding (
-    id INTEGER PRIMARY KEY CHECK(id=1),
-    environment_id TEXT NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS cursors (
-    stream TEXT PRIMARY KEY CHECK(stream IN ('active', 'archive')),
-    sequence INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS projects (
-    id TEXT PRIMARY KEY,
-    document TEXT NOT NULL,
-    deleted INTEGER NOT NULL DEFAULT 0
-  )`,
-  `CREATE TABLE IF NOT EXISTS shell_coverage (
-    id INTEGER PRIMARY KEY CHECK(id=1),
-    sequence INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS threads (
-    id TEXT PRIMARY KEY,
-    project_id TEXT,
-    document TEXT NOT NULL,
-    location TEXT NOT NULL CHECK(location IN ('active', 'archive', 'removed')),
-    revision INTEGER NOT NULL
-  )`,
-  `CREATE TABLE IF NOT EXISTS thread_revisions (
-    thread_id TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL
-  )`,
-  "CREATE INDEX IF NOT EXISTS threads_project ON threads(project_id)",
-];
+/**
+ * A stored thread shell rewritten through today's whitelist, as the open of every catalog up to format 0 did once per start:
+ * the format 1 upgrade (src/database-migrations.ts) applies it to each stored shell. A shell that is not readable fails.
+ */
+export const rewhitelistStoredShell = (document: string): Effect.Effect<string, StoreError> =>
+  decodeDocument(document).pipe(
+    Effect.mapError(storeFailure),
+    Effect.flatMap(readThread),
+    Effect.flatMap(whitelistThreadShell),
+    Effect.flatMap((shell) => serialize(shell, maxStoredShellChars, "thread shell")),
+  );
 
 const make = Effect.gen(function* () {
   const sql = yield* CatalogDb;
@@ -371,17 +346,8 @@ const make = Effect.gen(function* () {
     return { advance: true, paired: false };
   });
 
-  // the open-time migration re-whitelists every stored shell in one transaction; a malformed row fails the open
-  yield* write(Effect.gen(function* () {
-    for (const statement of schema) yield* sql.unsafe(statement);
-    for (const row of yield* sql`SELECT id, document FROM threads`) {
-      const stored = yield* decodeStoredShellRow(row).pipe(
-        Effect.mapError((cause) => new StoreError({ message: "stored thread metadata is malformed", cause })));
-      const sanitized = yield* whitelistThreadShell(yield* readThread(yield* decodeDocument(stored.document)));
-      const document = yield* serialize(sanitized, maxStoredShellChars, "thread shell");
-      yield* sql`UPDATE threads SET document=${document} WHERE id=${stored.id}`;
-    }
-  })).pipe(Effect.mapError(storeFailure));
+  // the schema and the one-time shell whitelisting belong to the startup upgrade: the catalog client only opens a file at
+  // the current format, and this store reads and writes its rows
 
   const catalog = () => sql.withTransaction(Effect.gen(function* () {
     const projects = yield* Effect.forEach(yield* sql`SELECT document,deleted FROM projects ORDER BY id`, (row) =>

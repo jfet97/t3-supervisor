@@ -214,10 +214,7 @@ const makeSupervisorTeamController = () => Effect.gen(function* () {
   // never joins another call's in-flight steer
   const sends = yield* Ref.make(0);
   const reconcileOffsets = yield* Ref.make(HashMap.empty<string, number>());
-  yield* guidanceSql(sql.unsafe(`CREATE TABLE IF NOT EXISTS supervisor_team_tool_receipts(
-      owner_thread_id TEXT NOT NULL,actor_thread_id TEXT NOT NULL,binding_generation INTEGER NOT NULL,actor_epoch INTEGER NOT NULL,operation_id TEXT NOT NULL,
-      request_hash TEXT NOT NULL,evidence_item_id TEXT NOT NULL,document TEXT NOT NULL,
-      PRIMARY KEY(owner_thread_id,actor_thread_id,binding_generation,actor_epoch,operation_id))`));
+  // the tool receipt table belongs to the startup upgrade (src/database-migrations.ts)
 
   const parse = (input: unknown, decode: typeof decodeTeamArguments | typeof decodeGuideArguments): Payload | null => {
     if (Exit.isFailure(decode(input, exactKeys))) return null;

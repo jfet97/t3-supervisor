@@ -1,7 +1,6 @@
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Effect, FileSystem, Layer } from "effect";
 import type { SqlClient } from "effect/sql";
-import { SupervisorConfig } from "../../src/config.js";
 import { type DatabaseOpenError, GuidanceDb, PolicyDb } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
@@ -10,17 +9,23 @@ import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { makeProjectSupervisorMonitorStore, ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-store.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
-import type { SupervisorSettings } from "../../src/types.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { withDbFile } from "./sql-db-files.js";
 
 // the store services of the g9 suites on a real database file: each open is one client through the file's production layer
 // (test/support/sql-db-files.ts) with the production store layers over it, closed when the work ends, so a second open of
-// the same directory is a restart
+// the same directory is a restart. The directory is initialized once at the current formats through the startup coordinator
+// (test/support/data-directory.ts), as `t3-supervisor start` prepares it before any store opens it
 
-/** A fresh temporary data directory, removed with the test scope. */
-export const dataDirectory = (prefix: string) => Effect.gen(function* () {
+/**
+ * A fresh temporary data directory at the current formats, its thread policy seeded with `excludedThreadIds` (none unless
+ * given), removed with the test scope.
+ */
+export const dataDirectory = (prefix: string, options: { readonly excludedThreadIds?: ReadonlyArray<string> } = {}) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix });
+  yield* Effect.orDie(initializeDataDirectory(directory, options));
+  return directory;
 }).pipe(Effect.provide(NodeFileSystem.layer));
 
 const ids = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
@@ -72,21 +77,11 @@ export const withSupervisionStores = <A, E, R>(directory: string, use: (stores: 
     return yield* use({ db, guidance: yield* GuidanceStore, supervisors: yield* ProjectSupervisorStore, team: yield* SupervisorTeamStore, owned });
   }).pipe(Effect.provide(Layer.fresh(supervisionStores(owned)))));
 
-/** The configuration of a process over `directory` with the given configured excluded chats. */
-export const settings = (directory: string, excludedThreadIds: ReadonlyArray<string> = []): SupervisorSettings => ({
-  dataDirectory: directory,
-  t3Url: "http://unused",
-  t3TokenFile: "unused",
-  excludedThreadIds: [...excludedThreadIds],
-  healthPort: 0,
-});
-
-/** `use` on the thread-policy store of `directory`, seeded with the configured excluded chats, and its client. */
-export const withThreadPolicy = <A, E, R>(directory: string, excludedThreadIds: ReadonlyArray<string>,
+/** `use` on the thread-policy store of `directory` and its client; the stored policy is the one the directory was initialized with. */
+export const withThreadPolicy = <A, E, R>(directory: string,
   use: (policy: ThreadPolicyStore["Service"], db: SqlClient.SqlClient) => Effect.Effect<A, E, R>) => {
-  const store = Layer.fresh(ThreadPolicyStore.layer.pipe(Layer.provide(Layer.succeed(SupervisorConfig, settings(directory, excludedThreadIds)))));
   const open: Effect.Effect<A, E | ThreadPolicyStoreError | DatabaseOpenError, Exclude<Exclude<R, ThreadPolicyStore>, PolicyDb> | FileSystem.FileSystem> =
     withDbFile("policy", directory, (db) => Effect.flatMap(Effect.service(ThreadPolicyStore), (policy) => use(policy, db)).pipe(
-      Effect.provide(store), Effect.provideService(PolicyDb, db)));
+      Effect.provide(Layer.fresh(ThreadPolicyStore.layer)), Effect.provideService(PolicyDb, db)));
   return Effect.provide(open, NodeFileSystem.layer);
 };

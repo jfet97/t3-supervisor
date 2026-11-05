@@ -60,7 +60,7 @@ import {
 } from "./workflow-write-evidence.js";
 import {interpretationLimits, proposalContextFromDefinitions, proposalContextMatches, redact, stepEntryGuidance, validateWorkflowApplyAgainstPinnedContext, type WorkflowApplyDiagnostic} from "./supervisor-workflow.js";
 import { commitInterpretationSubmission, interpretationChecks, interpretationReceiptOwner, rawInterpretationArguments, readInterpretationReceipt, taskPendingStart,
-  workflowWriteReceiptsTable, type InterpretationIntake } from "./interpretation-intake.js";
+  type InterpretationIntake } from "./interpretation-intake.js";
 import {
   decodeInterpretationSubmission,
   interpretationDeniedCode,
@@ -319,27 +319,6 @@ const storedResult = (text: string): Option.Option<WorkflowWriteResult> => {
   const parsed = decodeStoredJson(text);
   return Exit.isSuccess(parsed) ? Option.some(parsed.value as WorkflowWriteResult) : Option.none();
 };
-const writeSchema = [
-  workflowWriteReceiptsTable,
-  `CREATE TABLE IF NOT EXISTS supervisor_workflow_write_evidence (
-        supervisor_thread_id TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        operation_id TEXT NOT NULL,
-        operation_namespace TEXT NOT NULL,
-        request_hash TEXT NOT NULL,
-        project_id TEXT NOT NULL,
-        main_thread_id TEXT NOT NULL,
-        binding_generation INTEGER NOT NULL,
-        native_evidence TEXT NOT NULL,
-        result TEXT NOT NULL,
-        successful INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        PRIMARY KEY(supervisor_thread_id,item_id)
-      )`,
-  `CREATE INDEX IF NOT EXISTS supervisor_workflow_write_evidence_operation
-        ON supervisor_workflow_write_evidence(project_id,main_thread_id,supervisor_thread_id,binding_generation,operation_namespace,operation_id,created_at)`,
-];
-
 const maxBindingGeneration = 2_147_483_647;
 const maxWorkflowReadDocs = 50;
 const maxWorkflowReadBytes = 1024 * 1024;
@@ -1213,8 +1192,7 @@ const makeWorkflowWriteController = (options: WorkflowWriteControllerOptions = {
   // the exact native routes of this deployment's registrations of the server and its gateway
   const routes = configuredWorkflowToolRoutes(scopes.config);
   const wake = Option.getOrNull(yield* Effect.serviceOption(InterpretationWake));
-  // the controller's own receipt and evidence tables on the run's guidance client
-  yield* guidanceSql(Effect.forEach(writeSchema, (statement) => sql.unsafe(statement)));
+  // the controller's receipt and evidence tables belong to the startup upgrade (src/database-migrations.ts)
 
   // the read's own failures (an unreadable row or a failed predicate or actor read) deny the binding, as the baseline catches did
   const denyOnFailure = <A, E>(effect: Effect.Effect<A, E>): Effect.Effect<A | null> =>

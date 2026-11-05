@@ -12,12 +12,15 @@ const disposableTables = [
 
 const decodeVersionRow = decodeGuidanceRow(Schema.Struct({ value: Schema.String }), "meta");
 
-/** The Effect API of the one-time supervision state reset; both join the caller's transaction. */
+/** The Effect API of the supervision state reset; both join the caller's transaction. */
 export interface SupervisorStateResetShape {
   /** Resets the explicitly disposable prototype state, preserving defaults and permanent ownership. */
   readonly resetSupervisorTestState: () => Effect.Effect<void, GuidanceStoreError>;
-  /** Applies the approved one-time reset when upgrading the project-scoped prototype; false disables supervision. */
-  readonly initializeMainSupervisionState: () => Effect.Effect<boolean, GuidanceStoreError>;
+  /**
+   * Whether the stored supervision scope is the main-thread one; any other stored scope disables supervision. The approved
+   * one-time reset of the project-scoped prototype is part of the startup upgrade to guidance format 1, which records main-v1.
+   */
+  readonly scopeCompatible: () => Effect.Effect<boolean, GuidanceStoreError>;
 }
 
 const makeSupervisorStateReset = Effect.gen(function* () {
@@ -34,23 +37,18 @@ const makeSupervisorStateReset = Effect.gen(function* () {
 
   const resetSupervisorTestState = () => guidanceSql(db.withTransaction(reset));
 
-  // the version read, the reset and the version insert commit together, or none does (CT-RESET-01)
-  const initializeMainSupervisionState = () => guidanceSql(db.withTransaction(Effect.gen(function* () {
+  // a read only: a file at the current format always has a stored scope version
+  const scopeCompatible = () => guidanceSql(Effect.gen(function* () {
     const [row] = yield* db`SELECT value FROM meta WHERE key='supervisor_scope_version'`;
-    const version = row === undefined ? undefined : (yield* decodeVersionRow(row)).value;
-    if (version === "main-v1") return true;
-    if (version !== undefined) return false;
-    yield* reset;
-    yield* db`INSERT INTO meta VALUES('supervisor_scope_version','main-v1')`;
-    return true;
-  })));
+    return row !== undefined && (yield* decodeVersionRow(row)).value === "main-v1";
+  }));
 
-  return SupervisorStateReset.of({ resetSupervisorTestState, initializeMainSupervisionState });
+  return SupervisorStateReset.of({ resetSupervisorTestState, scopeCompatible });
 });
 
 /**
- * The one-time reset on the run's GuidanceDb client, run by the project-supervisor store's layer before any other
- * supervision store use; it needs the guidance store's meta table, so GuidanceStore.layer is built first.
+ * The scope check and the test reset on the run's GuidanceDb client; the project-supervisor store's layer reads the scope
+ * before any other supervision store use, after GuidanceStore.layer (both run on the guidance store's meta table).
  */
 export class SupervisorStateReset extends Context.Service<SupervisorStateReset, SupervisorStateResetShape>()("t3-supervisor/SupervisorStateReset") {
   static readonly layer: Layer.Layer<SupervisorStateReset, never, GuidanceDb | GuidanceStore> = Layer.effect(SupervisorStateReset, untracedSql(makeSupervisorStateReset));
@@ -58,7 +56,8 @@ export class SupervisorStateReset extends Context.Service<SupervisorStateReset, 
 
 /**
  * The rollout scan of the scope version (read only): an undecodable version fails the run's start; an unknown version disables
- * supervision; an absent one makes the open run the one-time reset, whose cleared rows are listed per table.
+ * supervision; an absent one makes the startup upgrade to guidance format 1 run the one-time reset, whose cleared rows are listed
+ * per table.
  */
 export const checkScopeVersion: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
   const db = yield* GuidanceDb;
@@ -73,9 +72,9 @@ export const checkScopeVersion: Effect.Effect<StoredRowScan, SqlError.SqlError |
   const changes = [];
   for (const table of disposableTables) {
     const [count] = yield* rowsOf(db, table, `SELECT count(*) AS n FROM ${table}`);
-    if (count !== undefined && Number(count.n) > 0) changes.push({ table, change: "cleared by the one-time reset (no stored scope version)", rows: Number(count.n) });
+    if (count !== undefined && Number(count.n) > 0) changes.push({ table, change: "cleared by the upgrade's one-time reset (no stored scope version)", rows: Number(count.n) });
   }
   const [activation] = yield* rowsOf(db, "meta", "SELECT count(*) AS n FROM meta WHERE key IN ('supervisor_activation_baseline','supervisor_activation_sequence')");
-  if (activation !== undefined && Number(activation.n) > 0) changes.push({ table: "meta", change: "activation rows cleared by the one-time reset", rows: Number(activation.n) });
+  if (activation !== undefined && Number(activation.n) > 0) changes.push({ table: "meta", change: "activation rows cleared by the upgrade's one-time reset", rows: Number(activation.n) });
   return { findings, changes };
 });
