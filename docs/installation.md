@@ -98,7 +98,7 @@ This template uses a host directory for portable ownership. Existing deployments
 using a named volume should retain that volume and its mount; do not replace it
 with an empty directory during an upgrade.
 
-## Upgrade and rollback
+## Upgrade
 
 Stop Supervisor and back up its complete state directory or volume before
 upgrading. Preserve private credential files, sessions, instance settings and the
@@ -153,12 +153,11 @@ the cause.
 database is missing or not at the installed version's format, it issues no token and
 asks you to start the service once.
 
-### Rollback
+### Older versions
 
-There is no supported downgrade. An older version may not understand state written
-by a newer one, and versions up to 0.0.27 do not check database formats at all. To
-return to an earlier version, stop the service and restore the complete pre-upgrade
-backup of the state directory.
+There is no supported downgrade: do not start an older version on state that a newer
+one has used. An older version may not understand state written by a newer one, and
+versions up to 0.0.27 do not check database formats at all.
 
 Alpha, beta and nightly are opt-in test releases. Use separate state for testing
 them: a preview started on your usual state directory upgrades its databases, with
