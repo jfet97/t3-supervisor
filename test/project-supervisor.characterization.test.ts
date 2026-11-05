@@ -214,7 +214,7 @@ it.live("CT-PS-05: concurrent control() shares one presence and boundary read; w
   }
 }), {timeout: 10_000});
 
-it.live("CT-PS-07: a failing policy save rejects the dashboard Start without an Enable; a failing guidance commit keeps only the policy change and a pending Start", () => Effect.gen(function* () {
+it.live("CT-PS-07: a failed policy save rejects Start; a failed activation rolls back policy and Enable while retaining the pending Start", () => Effect.gen(function* () {
   // clause 1: writeChatPolicy swallows the save error, activateStart returns false before any guidance write and the Start is rejected
   {
     let tick = Date.now();
@@ -229,7 +229,6 @@ it.live("CT-PS-07: a failing policy save rejects the dashboard Start without an 
     const enabled = yield* f.supervisor.setChatSupervision({projectId: "project-a", mainThreadId: "manual", policyGeneration: policyBefore.generation, enabled: true});
     assert.equal(enabled.status, "unavailable");
     assert.equal(enabled.message, "Start was not activated.");
-    assert.equal(f.policy.failedSaves, 3, "the policy write is attempted three times");
     const start = yield* f.fixture.supervisorStore.start("manual");
     assert.equal(start?.status, "rejected");
     assert.equal(start?.reason, "Start could not be committed.");
@@ -243,7 +242,7 @@ it.live("CT-PS-07: a failing policy save rejects the dashboard Start without an 
     assert.equal(enabled.snapshot?.chatSupervision?.activation, "rejected");
     assert.equal(f.fixture.operations.length, 0);
   }
-  // clause 2: the policy commit precedes the guidance transaction, so a guidance failure leaves only the policy change
+  // clause 2: activation rolls back policy and bookkeeping together; the earlier pending decision remains durable
   {
     let tick = Date.now();
     const f = yield* makeNoProjectFixture(() => ++tick);
@@ -259,8 +258,7 @@ it.live("CT-PS-07: a failing policy save rejects the dashboard Start without an 
     assert.deepEqual(result, {status: "unavailable", reason: "Start preparation failed before activation. Use a new explicit request after inspecting this outcome."});
     assert.equal(yield* db.inTransaction, false, "the guidance transaction rolled back");
     const policy = yield* f.policy.get();
-    assert.equal(policy.generation, policyBefore.generation + 1, "the policy commit persists");
-    assert.deepEqual(policy.excludedThreadIds, []);
+    assert.deepEqual(policy, policyBefore, "the failed activation rolls back the policy change");
     assert.equal(yield* f.fixture.supervisorStore.chatEnabledAt("manual"), null, "the chat Enable rolled back");
     assert.deepEqual(yield* f.fixture.supervisorStore.chatStop("manual"), stop, "the unbound Stop removal rolled back");
     const start = yield* f.fixture.supervisorStore.start("manual");

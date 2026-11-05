@@ -327,7 +327,7 @@ it.live("CT-LIN-02: a dashboard Start activation's policy commit is observed onl
   assert.deepEqual(yield* Fiber.joinAll(seen), [{stopped: false, stop: null, notice: null, enabledAt: start.intentAt, start: "active"}]);
 }), {timeout: 10_000});
 
-it.live("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the policy stop; sends stay fenced, a retry conflicts, settlement dates from observation and an MCP replay records the stop", () => Effect.gen(function* () {
+it.live("CT-LIN-03: a failed dashboard Stop rolls back both stores; its retry commits the Stop, fences sends and keeps MCP replay idempotent", () => Effect.gen(function* () {
   const f = yield* startScenario({mainTurns: [oldTurn, {id: "stop-turn", text: "Please stop supervising this chat."}]});
   const binding = yield* f.bindSupervisor;
   const checkIn = yield* f.core.requests.prepare({projectId, supervisorThreadId: binding.threadId, kind: "review", taskId: null,
@@ -337,21 +337,26 @@ it.live("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the po
     Effect.suspend(() => noticeWrites++ === 0 ? Effect.die(new Error("injected_stop_notice_failure")) : setStopNotice(...args)));
   const ui = yield* dashboard(f);
   const path = "/api/guidance/project-supervisor/chat-supervision";
-  const generation = (yield* f.core.policy.get()).generation;
+  const policyBefore = yield* f.core.policy.get();
+  const generation = policyBefore.generation;
   const first = yield* ui.post(path, {projectId, mainThreadId, enabled: false, policyGeneration: generation});
   assert.equal(first.status, 400);
   assert.deepEqual(first.body, {_tag: "UiError", message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."});
-  assert.equal(yield* f.stopped(), true);
-  assert.equal((yield* f.core.policy.get()).generation, generation + 1);
-  assert.equal((yield* f.binding).supervisionStop, undefined, "the per-binding transaction rolled back");
+  assert.equal(yield* f.stopped(), false);
+  assert.deepEqual(yield* f.core.policy.get(), policyBefore, "the policy and per-binding bookkeeping rolled back together");
+  assert.equal((yield* f.binding).supervisionStop, undefined);
   assert.equal((yield* f.binding).stopNotice, undefined);
+  assert.equal((yield* requests(f, binding.threadId)).find(request => request.id === checkIn.id)?.state, "prepared");
 
   const retry = yield* ui.post(path, {projectId, mainThreadId, enabled: false, policyGeneration: generation});
   assert.equal(retry.status, 200);
-  assert.equal((retry.body as {status: string}).status, "conflict");
-  assert.equal((retry.body as {message: string}).message, "Chat settings changed in another tab or by the Supervisor. The saved state is shown.");
-  assert.equal(noticeWrites, 1, "the retry does not rerun the bookkeeping");
-  assert.equal((yield* f.binding).supervisionStop, undefined);
+  assert.equal((retry.body as {status: string}).status, "saved");
+  assert.equal(noticeWrites, 2, "the unchanged generation permits a complete retry");
+  assert.equal(yield* f.stopped(), true);
+  assert.equal((yield* f.core.policy.get()).generation, generation + 1);
+  const committedStop = (yield* f.binding).supervisionStop;
+  assert.ok(committedStop);
+  assert.equal(committedStop.route, "ui");
 
   yield* f.runOnce;
   const fenced = (yield* requests(f, binding.threadId)).find(request => request.id === checkIn.id)!;
@@ -359,19 +364,25 @@ it.live("CT-LIN-03: a dashboard Stop whose notice bookkeeping fails keeps the po
   assert.equal(fenced.error, "Supervision was stopped for this chat before this check-in was sent; it was not sent.");
   assert.equal(yield* f.core.store.task(mainThreadId), null, "the new human request is not interpreted");
   const settled = yield* f.binding;
-  assert.equal(typeof settled.stopObservedAt, "number", "without a stop record the settlement dates from its observation");
+  assert.equal(settled.stopObservedAt, undefined, "settlement uses the committed Stop rather than an observation fallback");
   assert.equal(settled.settlement?.state, "settled");
+  assert.ok(settled.stopNotice);
+  assert.equal(settled.stopNotice.state, "accepted");
+  assert.equal(settled.stopNotice.stoppedAt, committedStop.stoppedAt);
   assert.deepEqual(dispatches(f).map(payload => ({type: payload.type, commandId: payload.commandId})),
-    [{type: "thread.settle", commandId: settled.settlement!.commandId}], "no message is sent; only the Supervisor is settled");
+    [{type: "message.dispatch", commandId: settled.stopNotice.commandId}, {type: "thread.settle", commandId: settled.settlement!.commandId}],
+    "only the committed Stop notice and settlement are dispatched; no check-in or interpretation is sent");
 
-  // an MCP stop replay finds no recorded stop and reruns the bookkeeping
+  // an older MCP stop replay keeps the committed UI Stop without another policy write or notice
+  const noticeWritesBeforeReplay = noticeWrites;
   const replay = yield* f.core.control.stopSupervision({callerThreadId: binding.threadId, targetThreadId: mainThreadId, userMessageId: "stop-turn",
     operationId: "lin-replay"}, {});
   assert.deepEqual(replay, {status: "stopped", targetThreadId: mainThreadId, route: "relay", alreadyStopped: true});
   assert.equal((yield* f.core.policy.get()).generation, generation + 1, "the replay writes no policy");
   const recorded = yield* f.binding;
-  assert.deepEqual(recorded.supervisionStop, {route: "relay", callerThreadId: binding.threadId, userMessageId: "stop-turn", stoppedAt: Date.parse(baseTime)});
-  assert.equal(recorded.stopNotice?.state, "ready");
+  assert.deepEqual(recorded.supervisionStop, committedStop);
+  assert.deepEqual(recorded.stopNotice, settled.stopNotice);
+  assert.equal(noticeWrites, noticeWritesBeforeReplay);
   assert.equal(recorded.stopObservedAt, undefined);
   assert.deepEqual(f.peer.unexpected, []);
 }), {timeout: 10_000});
@@ -385,24 +396,28 @@ const prepareDashboardEnable = (failEnable: boolean) => Effect.gen(function* () 
   yield* interpose(f.core.store, "recordChatEnable", (recordChatEnable) => (...args) =>
     failEnable ? Effect.die(new Error("injected_enable_failure")) : recordChatEnable(...args));
   const ui = yield* dashboard(f);
+  const policyBefore = yield* f.core.policy.get();
   const reply = yield* ui.post("/api/guidance/project-supervisor/chat-supervision", {projectId, mainThreadId, enabled: true,
-    policyGeneration: (yield* f.core.policy.get()).generation});
-  return {f, reply, stoppedAt};
+    policyGeneration: policyBefore.generation});
+  return {f, reply, stoppedAt, policyBefore};
 });
 
-it.live("CT-LIN-03: a dashboard Enable whose bookkeeping fails keeps a stale enable time, so a request written while stopped is interpreted", () => Effect.gen(function* () {
+it.live("CT-LIN-03: a failed dashboard Enable keeps the Stop and does not interpret a request written while stopped", () => Effect.gen(function* () {
   const failed = yield* prepareDashboardEnable(true);
   assert.equal(failed.reply.status, 400);
   assert.deepEqual(failed.reply.body, {_tag: "UiError", message: "The chat supervision change could not be confirmed. Refresh to inspect the saved state."});
-  assert.equal(yield* failed.f.stopped(), false);
+  assert.equal(yield* failed.f.stopped(), true);
+  assert.deepEqual(yield* failed.f.core.policy.get(), failed.policyBefore);
   assert.equal(yield* failed.f.core.store.chatEnabledAt(mainThreadId), null);
   assert.equal((yield* failed.f.binding).supervisionStop?.stoppedAt, failed.stoppedAt, "the stop record was not cleared");
   assert.equal((yield* failed.f.binding).stopNotice?.state, "ready", "the notice was not superseded");
   yield* failed.f.runOnce;
-  const interpreted = yield* task(failed.f);
-  assert.equal(interpreted.sourceMessageId, "stopped-turn");
-  assert.equal(interpreted.status, "waiting");
-  assert.deepEqual(dispatches(failed.f).map(payload => payload.commandId), [`supervisor-objective:${interpreted.attempt!.attemptId}`]);
+  assert.equal(yield* failed.f.core.store.task(mainThreadId), null);
+  const notice = (yield* failed.f.binding).stopNotice;
+  assert.ok(notice);
+  assert.equal(notice.state, "accepted");
+  assert.deepEqual(dispatches(failed.f).filter(payload => payload.type === "message.dispatch").map(payload => payload.commandId),
+    [notice.commandId], "only the earlier committed Stop notice is dispatched");
 }), {timeout: 10_000});
 
 // the independent control owns a separate test scope, so the failed case releases its workers before this setup

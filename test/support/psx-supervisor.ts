@@ -382,7 +382,6 @@ export const makeFixture = (initial: ReadonlyArray<{threadId: string; projectId:
 
 export interface FailingPolicy {
   failSaves: boolean;
-  failedSaves: number;
   readonly service: ThreadPolicyStore["Service"];
   readonly get: ThreadPolicyStore["Service"]["get"];
 }
@@ -392,9 +391,8 @@ export const makeNoProjectFixture = (now?: () => number) => Effect.gen(function*
   const fixture = yield* makeFixture([{threadId: "manual", projectId: "project-a", turns: []}, {threadId: "other", projectId: "project-a", turns: []}], {prefix: "psx-no-project-"});
   yield* fixture.db.prepare("INSERT INTO classifications VALUES(?,?)").run("project-a", "scratch");
   const real = fixture.stores.policy;
-  const policy: FailingPolicy = {failSaves: false, failedSaves: 0, get: real.get, service: {get: real.get, save: (input) => Effect.suspend(() => {
+  const policy: FailingPolicy = {failSaves: false, get: real.get, service: {get: real.get, save: (input) => Effect.suspend(() => {
     if (!policy.failSaves) return real.save(input);
-    policy.failedSaves += 1;
     return Effect.fail(new ThreadPolicyStoreError({reason: "sql_failed", sqlReason: "simulated thread-policy save failure"}));
   })}};
   const supervisor = yield* fixture.makeSupervisor({...(now ? {now} : {}), policy: policy.service});
