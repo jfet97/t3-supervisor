@@ -26,9 +26,11 @@ smoke checks and the production startup integration still run on the new version
 and the required aggregate `check` always runs. Any other change or uncertain
 evidence selects all four main shards and the harness too. Manual **Check Supervisor** dispatches default to full checks.
 Every version PR run, fast-tracked or fully validated, also runs the
-[published-T3 compatibility gate](docs/ci.md#version-pr-gate) from one frozen target
-lock, and `check` requires it; main reuses that gated run and never resolves T3 targets
-again.
+[version PR gate](docs/ci.md#version-pr-gate): the published-T3 compatibility from one
+frozen target lock and the [published Supervisor upgrades](docs/ci.md#published-supervisor-upgrades)
+from the latest stable and nightly images, frozen in that run's release lock, on the
+repository's T3 pin. `check` requires both; main reuses that gated run and never resolves
+T3 targets or releases again.
 
 ### Version bot authentication
 

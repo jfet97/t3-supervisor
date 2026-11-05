@@ -44,6 +44,18 @@ export const compatibilityGateJobs = [
   "t3-compatibility / stable on arm64", "t3-compatibility / nightly on arm64",
 ] as const;
 
+/*
+  The version PR's published Supervisor upgrade journeys (docs/ci.md): check.yml's `supervisor-upgrades` job calls upgrades.yml, whose jobs
+  GitHub names after that caller: the frozen locks, then the stable, nightly and baseline journeys. They belong to the same gate as the
+  compatibility jobs: a run of the version branch proves its tree only together with every job of both.
+*/
+export const upgradeGateJobs = [
+  "supervisor-upgrades / lock", "supervisor-upgrades / stable journey", "supervisor-upgrades / nightly journey", "supervisor-upgrades / baseline journey",
+] as const;
+
+/** Every job of the version PR's gate: the published-T3 compatibility and the published Supervisor upgrade journeys. */
+export const versionGateJobs = [...compatibilityGateJobs, ...upgradeGateJobs] as const;
+
 export const newestPrRun = (runs: ReadonlyArray<typeof CiRun.Type>, expected: typeof MergeProof.Type.expected) =>
   runs.filter((run) => run.workflow_id === expected.workflowId && run.head_sha === expected.head &&
     run.repository.full_name === expected.repository && run.head_repository?.full_name === expected.repository &&
@@ -55,8 +67,8 @@ export const proveMergedValidation = (input: unknown): { readonly runId: number;
   if (headTree !== expected.tree) throw new Error("merged files differ from the checked PR head");
   const run = newestPrRun(runs, expected);
   if (!run || run.status !== "completed" || run.conclusion !== "success") throw new Error("latest PR validation is not successful");
-  // a version branch run proves its tree only together with its published-T3 compatibility gate
-  for (const name of expected.branch === versionBranch ? [...requiredFullJobs, ...compatibilityGateJobs] : requiredFullJobs) {
+  // a version branch run proves its tree only together with its gate: the published-T3 compatibility and the Supervisor upgrade journeys
+  for (const name of expected.branch === versionBranch ? [...requiredFullJobs, ...versionGateJobs] : requiredFullJobs) {
     const matches = jobs.filter((job) => job.name === name);
     if (matches.length !== 1 || matches[0]!.run_id !== run.id || matches[0]!.conclusion !== "success") {
       throw new Error("full validation job is missing or unsuccessful");
@@ -143,8 +155,8 @@ export const provePushValidation = (input: unknown): {readonly runId: number} =>
 };
 
 /**
- * Main rechecks the release diff and baseline separately; this proves only that version's static validation and its published-T3
- * compatibility gate, which every release run calls.
+ * Main rechecks the release diff and baseline separately; this proves only that version's static validation and its gate, the
+ * published-T3 compatibility and the Supervisor upgrade journeys, which every release run calls.
  */
 export const proveReleaseRun = (input: unknown): {readonly runId: number; readonly tree: string} => {
   const {expected, headTree, runs, jobs} = Schema.decodeUnknownSync(MergeProof)(input);
@@ -152,7 +164,7 @@ export const proveReleaseRun = (input: unknown): {readonly runId: number; readon
   if (headTree !== expected.tree) throw new Error("merged files differ from the checked release head");
   const run = newestPrRun(runs, expected);
   if (!run || run.status !== "completed" || run.conclusion !== "success") throw new Error("latest release validation is not successful");
-  const releaseJobs: ReadonlyArray<string> = ["plan", "static", "arm64", "startup", "check", ...compatibilityGateJobs];
+  const releaseJobs: ReadonlyArray<string> = ["plan", "static", "arm64", "startup", "check", ...versionGateJobs];
   for (const name of releaseJobs) {
     const matches = jobs.filter(job => job.name === name);
     if (matches.length !== 1 || matches[0]!.run_id !== run.id || matches[0]!.conclusion !== "success") throw new Error("release validation job is missing or unsuccessful");

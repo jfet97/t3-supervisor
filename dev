@@ -26,6 +26,10 @@ usage: ./dev [--env NAME] [--port-base N] COMMAND [ARGS]
   fixture [ARGS]      the dashboard fixture: production Supervisor over scripted T3 states
   ui-fixture [ARGS]   the synthetic dashboard API fixture
   check [ARGS]        a disposable published-T3 stack check, removed when it ends
+  upgrade --journey stable|nightly|baseline [--releases FILE] [--out DIR] [--keep]
+                      a provider-free published Supervisor upgrade journey on the pinned T3: the published release runs
+                      from its official image, pinned by digest in the release lock FILE (pnpm dev:releases), or this
+                      checkout creates the directory (baseline); then this checkout upgrades it (scripts/upgrade-journey.ts)
   e2e [ARGS]          the browser journeys: builds the dashboard, then runs vitest with vitest.e2e.config.ts in the e2e
                       image (ARGS go to vitest); each journey owns its Supervisor, scripted T3 and Chromium
   soak [ARGS]         the scripted soaks: vitest with vitest.soak.config.ts in the toolchain container (ARGS go to vitest);
@@ -130,6 +134,82 @@ up() {
   summary
 }
 
+# one step of an upgrade journey in its journey container, which shares its network namespace with the published image
+in_journey() {
+  docker exec -i "$journey" node --import tsx scripts/upgrade-journey.ts "$@"
+}
+
+# the published image and the journey container are removed, and the journey folder too unless --keep was given
+upgrade_cleanup() {
+  docker rm --force "$published" >/dev/null 2>&1 || true
+  docker stop --time 60 "$journey" >/dev/null 2>&1 || true
+  docker rm --force "$journey" >/dev/null 2>&1 || true
+  if [ "$keep" = yes ]; then
+    printf '%s\n' "kept the journey folder $folder in the cache volume" >&2
+  else
+    compose run --rm -T tools node --import tsx scripts/upgrade-journey.ts discard "$folder" >/dev/null 2>&1 || true
+  fi
+}
+
+# A published upgrade journey (docs/local-stack.md, "Published upgrade journeys"). The creating Supervisor, the published release run
+# from its official image by digest or this checkout for the baseline, runs in the network namespace of a journey container whose
+# main process serves T3; then this checkout's candidate starts on the directory it left. Only this host part runs Docker: it hands
+# what only it sees, the pulled image's description, the forged sign-in token on a pipe, the image's exit code and its log, to
+# scripts/upgrade-journey.ts, which makes every judgement and reports the journey.
+upgrade_journey() {
+  keep=no
+  for argument in "$@"; do [ "$argument" != --keep ] || keep=yes; done
+  setup
+  tools pnpm build
+  plan=$(compose run --rm -T tools node --import tsx scripts/upgrade-journey.ts plan --cache-dir /cache/t3-runtime "$@")
+  folder=''
+  image=''
+  while IFS= read -r line; do
+    case $line in
+      folder=*) folder=${line#folder=} ;;
+      image=*) image=${line#image=} ;;
+    esac
+  done <<PLAN
+$plan
+PLAN
+  case $folder in /cache/xdg/t3-supervisor/local-runs/t3-supervisor-local-upgrade-*) ;; *) die "the journey plan named no journey folder" ;; esac
+  case $folder in *[!A-Za-z0-9/._-]*) die "the journey plan named an unexpected folder" ;; esac
+  case $image in
+    '') ;;
+    ghcr.io/jfet97/t3-supervisor@sha256:*)
+      case ${image#ghcr.io/jfet97/t3-supervisor@sha256:} in *[!0-9a-f]*) die "the journey plan named an unexpected image" ;; esac ;;
+    *) die "the journey plan named an unexpected image" ;;
+  esac
+  journey="$project-${folder##*/}"
+  published="$journey-published"
+  trap upgrade_cleanup EXIT
+  trap 'exit 130' INT TERM
+  compose run --detach --name "$journey" tools node --import tsx scripts/upgrade-journey.ts serve "$folder" >/dev/null
+  if in_journey setup "$folder" </dev/null; then
+    if [ -z "$image" ]; then
+      in_journey baseline "$folder" </dev/null || true
+    # Docker verifies by its digest what it pulls and runs; the journey checks the platform, version, revision and source it carries
+    elif { docker pull --quiet "$image" >/dev/null && docker image inspect "$image"; } | in_journey image "$folder" &&
+      docker run --detach --name "$published" --network "container:$journey" --user "$DEV_UID:$DEV_GID" --init --read-only \
+        --tmpfs /tmp:size=128m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+        --mount "type=volume,src=${project}_cache,dst=/cache" --env T3_URL=http://127.0.0.1:3773 \
+        --env "T3_TOKEN_FILE=$folder/secrets/t3-read-token" --env "DATA_DIRECTORY=$folder/supervisor" \
+        --env UI_HOST=127.0.0.1 --env UI_PORT=9008 --env HEALTH_HOST=127.0.0.1 --env HEALTH_PORT=9007 \
+        --env "T3_MANAGED_SCRATCH_ROOT=$folder/t3/scratch" "$image" >/dev/null; then
+      if in_journey await "$folder" </dev/null; then
+        # the sign-in token passes from the published CLI to the journey on a pipe; this host never prints or stores it
+        docker exec "$published" t3-supervisor auth forge --data-dir "$folder/supervisor" | in_journey drive "$folder" || true
+      fi
+      docker stop --time 60 "$published" >/dev/null 2>&1 || true
+      docker inspect --format '{{.State.ExitCode}}' "$published" | in_journey record "$folder" creator-exit || true
+      docker logs "$published" 2>&1 | in_journey record "$folder" creator-log || true
+    fi
+  fi
+  status=0
+  in_journey finish "$folder" </dev/null || status=$?
+  exit "$status"
+}
+
 # removes this environment's data volume after checking that Compose created it for this project
 remove_data() {
   volume="${project}_data"
@@ -176,6 +256,7 @@ case $command in
       --port "$T3SUP_DEV_UI_FIXTURE_PORT" "$@"
     ;;
   check) tools pnpm dev:stack --check --cache-dir /cache/t3-runtime "$@" ;;
+  upgrade) upgrade_journey "$@" ;;
   trial)
     running || die "the environment is not running; start it with ./dev$flag up"
     compose exec env node --import tsx scripts/provider-trial.ts "$@"
