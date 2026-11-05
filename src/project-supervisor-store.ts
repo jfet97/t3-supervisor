@@ -54,7 +54,7 @@ export type ParticipantSettlement = {taskId: string; taskRevision: string; compl
 /** A genuine human's direct request in the bound Supervisor conversation to resume its stopped main, as its verified supervision_start cited it. */
 export type SupervisionResume = {callerThreadId: string; userMessageId: string; operationId: string; resumedAt: number};
 /** One immutable notice body and native identity for an explicit Stop period; the identities come from SupervisorIds. */
-export const prepareStopNotice = (ids: SupervisorIds["Service"], binding: Pick<BindingRecord, "threadId">, stoppedAt: number, enabledAt: number | null): Effect.Effect<SupervisorStopNotice> =>
+export const prepareStopNotice = (ids: SupervisorIds["Service"], binding: Pick<BindingRecord, "threadId">, stoppedAt: number, enabledAt: number | null): Effect.Effect<SupervisorStopNotice & {state: "ready"; text: string}> =>
   Effect.map(Effect.all([ids.uuid, ids.uuid]), ([messageUuid, commandUuid]) => ({
     messageId: `supervisor-notice:stop:${messageUuid}`, commandId: `supervisor-stop-notice:${commandUuid}`, stoppedAt, enabledAt, state: "ready",
     text: `Supervision of this chat was stopped at ${new Date(stoppedAt).toISOString()}: stop sending updates, findings or workflow acceptances to Supervisor ${binding.threadId}. Your task and the user's instructions are unchanged; a later explicit Enable takes precedence. Do not reply.`,

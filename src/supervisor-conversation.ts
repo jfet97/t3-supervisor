@@ -2688,7 +2688,7 @@ Turns without a service request: do pending context/planning work, then keep the
     const first = yield* current;
     const stored = first?.stopNotice;
     // a sent or superseded notice is complete, a blocked or unconfirmed one waits for Retry: none is sent or observed here
-    if (!first || !stored || stored.state === "sent" || stored.state === "superseded" || stored.state === "blocked" || stored.state === "unconfirmed") return;
+    if (!first || !stored || (stored.state !== "ready" && stored.state !== "uncertain" && stored.state !== "accepted")) return;
     // the notice still to be sent or observed, with the body it is sent and recognized by
     const notice = stored;
     if ((notice.nextObserveAt ?? 0) > (yield* Clock.currentTimeMillis)) return;
