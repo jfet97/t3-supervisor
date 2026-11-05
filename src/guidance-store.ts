@@ -43,8 +43,9 @@ type GuidanceFailure = GuidanceStoreError | GuidanceConflictError;
 type RecordInput = Omit<GuidanceActivity, "id" | "createdAt"> & ({kind:"guidance";episodeEpoch:number;noticeId:string|null}|{kind:"owner_action"});
 
 /**
- * The guidance store: the environment binding, project classifications, retained activity history and its retention. The tables of the
- * retired reminder rules (rules, mutes, observations, episodes, notices, budget) stay as they are; only history and retention read them.
+ * The guidance store: the environment binding, project classifications, retained activity history and its retention. Of the retired
+ * reminder rules only their notices are read, by history and retention; their other tables (rules, mutes, observations, episodes,
+ * budget) stay as they are in a file that has them, and a new file no longer gets them.
  */
 export interface GuidanceStoreShape {
   readonly settings: () => Effect.Effect<GuidanceSettings, GuidanceStoreError>;
@@ -55,8 +56,6 @@ export interface GuidanceStoreShape {
   readonly activities: () => Effect.Effect<GuidanceActivity[], GuidanceStoreError>;
   readonly prune: (now?: number) => Effect.Effect<void, GuidanceStoreError>;
 }
-
-const budgetDay = (now: number): string => new Date(now).toISOString().slice(0, 10);
 
 const makeGuidanceStore = Effect.gen(function* () {
   const db = yield* GuidanceDb;
@@ -144,7 +143,6 @@ const makeGuidanceStore = Effect.gen(function* () {
     }
     const removed = yield* db`DELETE FROM activity WHERE created_at<${at - 30 * 86400_000} RETURNING id`;
     if (removed.length > 0) yield* invalidate(["snapshot"]);
-    yield* db`DELETE FROM budget WHERE day<${budgetDay(at - 7 * 86400_000)}`;
   }))));
 
   return GuidanceStore.of({settings, bind, classification, classify, record, activities, prune});
@@ -167,8 +165,7 @@ export class GuidanceStore extends Context.Service<GuidanceStore, GuidanceStoreS
 export const checkGuidanceRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, GuidanceDb> = Effect.gen(function* () {
   const db = yield* GuidanceDb;
   const changes = [
-    ...(yield* Effect.forEach(["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"],
-      (table) => schemaChanges(db, table))).flat(),
+    ...(yield* Effect.forEach(["meta", "classifications", "notices", "activity"], (table) => schemaChanges(db, table))).flat(),
   ];
   const call = {problem: "undecodable", read: "call"} as const;
   const notices = yield* rowsOf(db, "notices", "SELECT * FROM notices");

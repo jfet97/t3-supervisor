@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { Effect, Schema } from "effect";
 import type { SqlClient } from "effect/sql";
+import { schemaDifferences, type SchemaSignature } from "./database-migrations.js";
+import { liveSignature } from "./database-upgrade.js";
 import { DatabaseFormats, GuidanceDb, readFormat, readOnlyDatabase } from "./db.js";
 import { checkGitProbeRows } from "./git-probe.js";
 import { type OpenChange, rowFindings, rowKey, rowsOf, type StoredRowFinding, type StoredRowScan, tableExists } from "./guidance-sql.js";
@@ -23,7 +25,8 @@ import { checkWorkflowWriteRows } from "./workflow-write-controller.js";
  * (no file is created, no pragma or statement writes) and reported with its format, its SQLite user_version, beside the format
  * this version runs; only the service's start creates or upgrades a file (src/database-upgrade.ts). The rows of guidance.sqlite3
  * go through the decoders their readers use, and what the service's start changes in them is listed: its upgrade creates tables,
- * imports the policy and clears the one-time reset's rows, the stores' open recovers committed notices. The retired
+ * imports the policy and clears the one-time reset's rows, the stores' open recovers committed notices. At the current format
+ * nothing is upgraded, so a part of the live schema the file lacks is a finding: the start refuses the file. The retired
  * thread-settings.sqlite3, whose policy the start imports into guidance before removing it, has its one row decoded as the
  * import reads it. Nothing contacts T3
  */
@@ -104,19 +107,27 @@ type RowChecks = (sql: SqlClient.SqlClient) => ReadonlyArray<Effect.Effect<Store
 // the guidance checks on the client behind the service its stores use
 const guidanceRows: RowChecks = (sql) => guidanceChecks.map((check) => Effect.provideService(check, GuidanceDb, sql));
 
+const objectName = (key: string): string => key.slice(key.indexOf(":") + 1);
+
 /*
  * one file read only through its own read-only client (src/db.ts), or absent; a missing file is reported, never created. Its
- * format is read first (through a live write-ahead log too), its rows only at a format this version runs or upgrades
+ * format is read first (through a live write-ahead log too), its rows only at a format this version runs or upgrades. At the
+ * format this version runs, the start upgrades nothing: an object of the `live` schema the file lacks or declares differently
+ * refuses the start, and nothing the upgrade would do to such a table happens
  */
-const scanFile = (directory: string, file: string, current: number, rows?: RowChecks): Effect.Effect<FileScan, unknown> =>
-  Effect.scoped(Effect.gen(function* () {
+const scanFile = (directory: string, file: string, current: number, rows?: RowChecks, live?: Effect.Effect<SchemaSignature, unknown>):
+  Effect.Effect<FileScan, unknown> => Effect.scoped(Effect.gen(function* () {
     if (!existsSync(join(directory, file))) return {file, present: false, format: null, current, rows: null} satisfies FileScan;
     const sql = yield* readOnlyDatabase(directory, file);
     const format = yield* readFormat(sql);
     if (rows === undefined || format > current) return {file, present: true, format, current, rows: null} satisfies FileScan;
     const scans = yield* Effect.forEach(rows(sql), (check) => check);
-    return {file, present: true, format, current,
-      rows: {findings: grouped(scans.flatMap((scan) => scan.findings)), changes: scans.flatMap((scan) => scan.changes)}} satisfies FileScan;
+    const lacking: ReadonlyArray<string> = format === current && live !== undefined ? yield* schemaDifferences(sql, yield* live) : [];
+    const lackingTables = new Set(lacking.map(objectName));
+    const findings = [...scans.flatMap((scan) => scan.findings),
+      ...lacking.map((key): StoredRowFinding => ({table: objectName(key), kind: "declared schema", key, problem: "incompatible", read: "open"}))];
+    return {file, present: true, format, current, rows: {findings: grouped(findings),
+      changes: scans.flatMap((scan) => scan.changes).filter((change) => !lackingTables.has(change.table))}} satisfies FileScan;
   }));
 
 /** Scans the database files of `directory` read only, in the order the service's start upgrades them. */
@@ -124,7 +135,7 @@ export const rolloutScan = (directory: string): Effect.Effect<RolloutScan, unkno
   const files = [
     yield* scanFile(directory, accessFile, DatabaseFormats.access),
     yield* scanFile(directory, "catalog.sqlite3", DatabaseFormats.catalog),
-    yield* scanFile(directory, "guidance.sqlite3", DatabaseFormats.guidance, guidanceRows),
+    yield* scanFile(directory, "guidance.sqlite3", DatabaseFormats.guidance, guidanceRows, liveSignature("guidance")),
     yield* scanFile(directory, donorFile, donorFormat, (sql) => [checkPolicyDonorRows(sql)]),
   ];
   const blocking = files.flatMap((file) => file.rows?.findings ?? []).filter((group) => group.read !== "call").reduce((total, group) => total + group.count, 0);

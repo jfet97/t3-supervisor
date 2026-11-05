@@ -26,27 +26,25 @@ const retiredFormat = 1;
 const policyTable = "CREATE TABLE settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL);";
 
 /*
- * one row of each failing kind, written with the raw driver into a data directory the startup upgrade created; the retired reminder
- * rules' rows (rules, budget, episodes) are never read any more, so the scan reports none of them
+ * one row of each failing kind, written with the raw driver into a data directory the startup upgrade created; a JSON document
+ * whose deciding field breaks (a control's baseline, a folder detection, the global definitions flag, the No Project mode, an
+ * activation baseline's version, a Stop's time) fails the same check its reader applies
  */
 const failingRows = `
   UPDATE meta SET value='{"${marker}":1}' WHERE key='settings';
   UPDATE meta SET value='main-v0' WHERE key='supervisor_scope_version';
-  INSERT INTO rules VALUES('rule-bad','{"${marker}":1}');
   INSERT INTO activity VALUES('activity-bad','{"${marker}":1}',1);
-  INSERT INTO budget VALUES('2026-10-23','${marker}');
-  INSERT INTO episodes VALUES('thread-e','rule-e','${marker}',0,NULL);
   INSERT INTO notices VALUES('notice-open','t','r','run',0,'committed','x',NULL,'${marker}',0,-1,-1);
   INSERT INTO notices VALUES('notice-call','t','r','run',0,'visible','x',NULL,'${marker}',0,-1,-1);
   INSERT INTO meta VALUES('supervisor_start_operation:["main-a","op-bad"]','not json ${marker}');
   INSERT INTO meta VALUES('supervisor_start:main-bad','{"${marker}":1}');
-  INSERT INTO meta VALUES('supervisor_control:"project-bad"','not json');
-  INSERT INTO meta VALUES('supervisor_control_auto:"project-bad"','not json');
-  INSERT INTO meta VALUES('supervisor_no_project','not json');
-  INSERT INTO meta VALUES('supervisor_global_definitions_control','not json');
+  INSERT INTO meta VALUES('supervisor_control:"project-bad"','{"generation":1,"baseline":{"snapshotSequence":"7","threads":[]}}');
+  INSERT INTO meta VALUES('supervisor_control_auto:"project-bad"','{"status":"broken","enabled":true}');
+  INSERT INTO meta VALUES('supervisor_no_project','{"generation":1,"mode":"sometimes"}');
+  INSERT INTO meta VALUES('supervisor_global_definitions_control','{"generation":1,"enabled":"true","manual":true}');
   INSERT INTO meta VALUES('supervisor_global_definitions_event','not json');
-  INSERT INTO meta VALUES('supervisor_activation_baseline','not json');
-  INSERT INTO meta VALUES('supervisor_unbound_stop:main-bad','not json');
+  INSERT INTO meta VALUES('supervisor_activation_baseline','{"version":"2","snapshotSequence":7,"threads":[]}');
+  INSERT INTO meta VALUES('supervisor_unbound_stop:main-bad','{"route":"ui","callerThreadId":null,"userMessageId":null,"stoppedAt":"later"}');
   INSERT INTO meta VALUES('native_git_probe_sessions','[{"threadId":"${marker}"}]');
   INSERT INTO supervisor_owned_threads VALUES(NULL);
   INSERT INTO supervisor_main_bindings VALUES('project-bad','main-bad','{"${marker}":1}');
@@ -207,7 +205,7 @@ it.live("the rollout scan reports format 0 for unversioned files and lists what 
   const changes = (guidance?.rows?.changes ?? []).map((change) => `${change.table}: ${change.change} (${change.rows})`);
   for (const expectedChange of [
     "notices: committed notices recovered as not delivered or uncertain (as the baseline open did) (1)",
-    "rules: table created (0)",
+    "classifications: table created (0)",
     "supervisor_main_bindings: cleared by the upgrade's one-time reset (no stored scope version) (1)",
     "meta: activation rows cleared by the upgrade's one-time reset (1)",
     "supervisor_definition_user_saves: table created (0)",
@@ -260,4 +258,20 @@ it.live("the rollout scan reads a newer format a live writer committed to its wr
     "thread-settings.sqlite3: absent (retired: guidance.sqlite3 holds the policy)",
     "verdict: the service refuses to start on guidance.sqlite3, at a newer format than this version runs",
   ]) assert.ok(report.includes(line), report);
+}), {timeout: 30_000});
+
+it.live("the rollout scan reports a current guidance file without part of its live schema as refused at its start, not as tables its upgrade creates", () => Effect.gen(function* () {
+  const directory = yield* temporaryDirectory("rollout-scan-");
+  yield* initializeDataDirectory(directory);
+  // the policy table and a supervision table dropped from a file already at the current format: no upgrade runs to create them
+  const guidance = new DatabaseSync(join(directory, "guidance.sqlite3"));
+  guidance.exec("DROP TABLE thread_policy; DROP TABLE supervisor_definition_user_saves;");
+  guidance.close();
+  const scan = yield* rolloutScan(directory);
+  assert.deepEqual(flattened(scan), [
+    "guidance.sqlite3 | supervisor_definition_user_saves | declared schema | incompatible | open | table:supervisor_definition_user_saves",
+    "guidance.sqlite3 | thread_policy | declared schema | incompatible | open | table:thread_policy",
+  ]);
+  assert.equal(scan.blocking, 2);
+  assert.deepEqual(scan.files.find((file) => file.file === "guidance.sqlite3")?.rows?.changes, [], "no import or table creation is promised");
 }), {timeout: 30_000});
