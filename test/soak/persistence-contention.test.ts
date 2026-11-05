@@ -82,7 +82,8 @@ it.live("policy and Stop statements on the shared guidance connection: one bound
 
   /*
    * policy reads while Stop and Enable of one chat alternate: each write is an admission section and a transaction on the shared
-   * guidance connection, so a read waiting for it shows as its latency here
+   * guidance connection, so a read waiting for it shows as its latency here. Both loops yield between operations, outside the
+   * measured spans, so neither measurement fiber continuously retakes the worker permit before a waiting fiber can resume.
    */
   let writing = true;
   const during: Array<number> = [];
@@ -101,6 +102,7 @@ it.live("policy and Stop statements on the shared guidance connection: one bound
       const result = yield* f.core.control.setChatPolicy("chat-writer", cycle % 2 === 1, current.generation).pipe(Effect.orDie);
       writes.push(Number((yield* Clock.currentTimeNanos) - started) / 1e6);
       assert.equal(result.status, "saved");
+      yield* Effect.yieldNow;
     }
   }).pipe(Effect.ensuring(Effect.sync(() => { writing = false; })));
   yield* Effect.all([reader, writer], {concurrency: 2});
