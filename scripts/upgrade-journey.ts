@@ -112,8 +112,7 @@ const reason = (cause: Cause.Cause<unknown>): string => messageOf(Cause.squash(c
 
 // ---- the journey folder and its records
 
-const records = ["plan.json", "stack.json", "image.json", "creator.json", "drive.json", "creator-exit", "creator-log"] as const;
-type RecordName = typeof records[number];
+type RecordName = "plan.json" | "stack.json" | "image.json" | "creator.json" | "drive.json" | "creator-exit" | "creator-log";
 const recordPath = (folder: RunFolder, name: RecordName) => folder.dir("records", name);
 const writeRecord = (folder: RunFolder, name: RecordName, value: unknown) =>
   FileSystem.FileSystem.use((fs) => fs.writeFileString(recordPath(folder, name), `${JSON.stringify(value, null, 2)}\n`, {mode: 0o600}));
