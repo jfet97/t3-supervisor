@@ -73,7 +73,7 @@ describe("the frozen seed sets", () => {
 
   it.live("bind format 1 to the candidate's declared guidance schema", () => Effect.gen(function* () {
     const reference = yield* referenceSignature("guidance");
-    for (const [key, declaration] of Object.entries(formatOne.requires.declarations)) assert.equal(reference.get(key), compact(declaration), key);
+    for (const [key, declaration] of Object.entries(formatOne.requires.declarations)) assert.equal(compact(reference.get(key) ?? ""), compact(declaration), key);
   }));
 });
 
@@ -130,12 +130,13 @@ describe("stored rows", () => {
   });
 
   it("of the catalog keep their identities when a start rebuilds documents from T3", () => {
-    const catalog = (thread: string, document: string): FileRows => ({
-      environment_binding: [row({environment_id: "environment-1"})], activations: [row({environment_id: "environment-1"})],
+    const catalog = (thread: string, document: string, activatedAt = 1n): FileRows => ({
+      environment_binding: [row({environment_id: "environment-1"})], activations: [row({environment_id: "environment-1", activated_at: activatedAt})],
       projects: [row({id: "project-1", document})], threads: [row({id: thread, project_id: "project-1", document})],
     });
     assert.deepEqual(catalogIdentities(catalog("thread-1", "{\"a\":1}")), catalogIdentities(catalog("thread-1", "{\"b\":2}")));
     assert.notDeepEqual(catalogIdentities(catalog("thread-1", "{}")), catalogIdentities(catalog("thread-2", "{}")));
+    assert.notDeepEqual(catalogIdentities(catalog("thread-1", "{}", 1n)), catalogIdentities(catalog("thread-1", "{}", 2n)));
   });
 });
 

@@ -218,7 +218,7 @@ export const catalogIdentities = (rows: FileRows): Readonly<Record<string, Reado
     (rows[table] ?? []).map((row) => names.map((name) => text(row[name])).join(" ")).sort();
   return {
     environment: column("environment_binding", ["environment_id"]),
-    activations: column("activations", ["environment_id"]),
+    activations: column("activations", ["environment_id", "activated_at"]),
     projects: column("projects", ["id"]),
     threads: column("threads", ["id", "project_id"]),
   };
