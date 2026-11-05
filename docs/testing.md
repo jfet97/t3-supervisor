@@ -30,9 +30,12 @@ native requests per route.
 
 Stores open only database files that the startup upgrade prepared: a test that opens
 them in a temporary directory first calls `initializeDataDirectory`
-(`test/support/data-directory.ts`), which runs that production upgrade. An upgrade test
-builds its old inputs from the frozen historical fixtures in `test/fixtures/persistence/`,
-never from today's schema code.
+(`test/support/data-directory.ts`). It runs that production upgrade once per test module
+and excluded-chat list and gives every later fresh directory the same file bytes, so
+tests do not start the upgrade's database workers again for each case. The upgrade and
+guard tests call the production upgrade itself; an upgrade test builds its old inputs
+from the frozen historical fixtures in `test/fixtures/persistence/`, never from today's
+schema code.
 
 Each invariant family has one primary owner, a layer and a test file, recorded in the
 [inventory](#test-inventory). A check at another layer is complementary evidence and
