@@ -30,6 +30,19 @@ Each container build reads and writes its own GitHub Actions layer-cache scope. 
 cache only speeds up builds, so a failed cache export is logged without failing the
 check.
 
+The package smoke installs the packed archive as a user does: plain npm into an empty
+prefix, resolving every dependency afresh from the registry, with no lockfile,
+override or test pin. Before starting the installed CLI, it runs node's own module
+resolution inside the installation, from the application's entry and from every Effect
+package it reaches, and requires one copy of `effect` and of each `@effect` package,
+each at the exact version the application's manifest pins as a direct dependency. It
+prints those resolutions; a split set fails with every version and path it found. The
+installed CLI must then become ready against the scripted T3 peer, report its version
+and revision, serve the dashboard and its hashed asset, ship only the portable skills
+and exit 130 on SIGTERM. Because it resolves from the registry, an upstream release
+that breaks a fresh install of this tree fails the check. The release workflow runs
+the same smoke on the exact archive it publishes ([release guide](../RELEASING.md#what-the-workflow-verifies)).
+
 PRs explicitly check out their head commit. A successful check remains usable
 when main advances; do not update a branch solely to satisfy freshness. Changes
 to the PR itself still require a successful check on its new head. Admin bypasses

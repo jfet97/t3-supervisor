@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
 import {createRequire} from "node:module";
 import {dirname, resolve} from "node:path";
 import { randomUUID } from "node:crypto";
 import { NodeFileSystem, NodeRuntime } from "@effect/platform-node";
-import { Config, Effect, Schema } from "effect";
+import { Config, Console, Effect, Schema } from "effect";
 import { buildInfo } from "../src/version.js";
 import { supervisorHarness } from "../test/support/g8-cli.js";
 import { runProcess, startProcess } from "../test/support/g8-process.js";
-import { verifyReleaseDashboard } from "../test/support/release-smoke.js";
+import { effectFamilyProbe, verifyEffectFamily, verifyReleaseDashboard } from "../test/support/release-smoke.js";
 
 // release-only real I/O, sharing the bounded native-peer fixture; Docker is a scoped external process adapter
 const program = Effect.gen(function* () {
@@ -19,6 +20,20 @@ const program = Effect.gen(function* () {
     Effect.flatMap(Schema.decodeUnknownEffect(Schema.Literals(["linux/amd64", "linux/arm64"]))));
   const name = `supervisor-release-${randomUUID()}`;
   const dockerOptions = { env: process.env, cwd: harness.home, timeoutMs: 15_000 };
+  // the image's application directory, or the installed package as node resolves it from the bin's real file, so a local
+  // node_modules/.bin link and a global prefix's bin/ link both lead to it
+  const artifact = kind === "image" ? "/app"
+    : dirname(createRequire(realpathSync(resolve(target))).resolve("@jfet97/t3-supervisor/package.json"));
+  // a node script over the artifact's own files: inside the running image, or with this node over the installed package
+  const inspect = (script: string) => kind === "image"
+    ? runProcess("docker", ["exec", name, "node", "-e", script, artifact], dockerOptions)
+    : runProcess(process.execPath, ["-e", script, artifact], { env: harness.env, cwd: harness.home, timeoutMs: 10_000 });
+  if (kind === "package") {
+    // before the CLI starts, the installed package (in CI a fresh npm resolution) must give the application and every Effect
+    // adapter one copy of each Effect package at its exact pin; a drifted install fails here with the versions and paths it resolved
+    const family = yield* verifyEffectFamily(inspect(effectFamilyProbe));
+    yield* Console.log(`installed Effect packages as resolved by the application and its adapters: ${JSON.stringify(family.resolutions)}`);
+  }
   if (kind === "image") {
     yield* Effect.acquireRelease(Effect.void, () => runProcess("docker", ["rm", "--force", name], dockerOptions).pipe(Effect.ignore));
   }
@@ -44,9 +59,7 @@ const program = Effect.gen(function* () {
       const body=fs.readFileSync(path.join(root,'usage',name,'SKILL.md'),'utf8');
       assert.ok(body.includes('name: '+name));
     }`;
-  const skillProof = kind === "image"
-    ? yield* runProcess("docker", ["exec", name, "node", "-e", skillsCheck, "/app"], dockerOptions)
-    : yield* runProcess(process.execPath, ["-e", skillsCheck, dirname(createRequire(resolve(target)).resolve("@jfet97/t3-supervisor/package.json"))], {env: harness.env, cwd: harness.home, timeoutMs: 10_000});
+  const skillProof = yield* inspect(skillsCheck);
   assert.equal(skillProof.code, 0, "the artifact must contain only the two portable usage skills");
   process.kill(child.pid, "SIGTERM");
   const closed = yield* child.closed(30_000);
