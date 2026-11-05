@@ -141,8 +141,10 @@ const makeSupervisionControl = Effect.gen(function* () {
   }));
   const activateStart = (start: SupervisionStartRecord) => Effect.gen(function* () {
     if (!(yield* scope.validPendingStart(start))) return false;
-    // pending is durable from the decision's own transaction; the policy write and the Enable and Start bookkeeping below commit
-    // together in the caller's transaction, so no crash leaves the chat enabled without its active Start, or the reverse
+    /*
+     * Pending is durable from the decision's transaction. The policy write and Enable and Start bookkeeping below commit
+     * together, so no crash leaves the chat enabled without its active Start, or the reverse.
+     */
     const written = yield* writeChatPolicy(start.threadId, false);
     if (written.status !== "saved") return false;
     yield* store.recordChatEnable(start.threadId, start.intentAt);
@@ -184,8 +186,10 @@ const makeSupervisionControl = Effect.gen(function* () {
     const projectId = thread.projectId;
     // the task identity of a source-bound Start, allocated before the section
     const taskId = yield* ids.uuid;
-    // from the last await, the rechecks, the start record and a dashboard activation run as one admission section: the rechecks and
-    // the pending record commit first, then the activation's policy write with its bookkeeping in one transaction
+    /*
+     * From the last await, the rechecks, Start record and dashboard activation run as one admission section. The pending
+     * record commits first, then activation commits its policy and bookkeeping in one transaction.
+     */
     return yield* gate.admit(() => Effect.gen(function* () {
       const decision = yield* transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStartResult | {activate: SupervisionStartRecord}, SupervisionStoreError> {
         if (main.thread.projectId !== thread.projectId || !scope.mainShape(main.thread)) return {status: "denied", reason: "scope_changed"};
@@ -339,8 +343,10 @@ const makeSupervisionControl = Effect.gen(function* () {
         if (!read.ok) return {status: "unavailable", reason: "evidence_projection_unavailable", retryable: true};
         evidenceProjection = read.value;
       }
-      // from the last await, the source checks, the policy write and its bookkeeping run as one admission section and one guidance
-      // transaction: the policy exclusion and the recorded Stop commit together or not at all
+      /*
+       * From the last await, source checks, the policy write and bookkeeping run as one admission section and one guidance
+       * transaction. The exclusion and recorded Stop commit together or not at all.
+       */
       const outcome = yield* gate.admit(() => transaction(Effect.gen(function* (): Effect.fn.Return<SupervisionStopResult | null, SupervisionStoreError> {
         const message = genuineUserMessage(evidenceProjection, input.userMessageId);
         if (!message) return null;
@@ -389,8 +395,10 @@ const makeSupervisionControl = Effect.gen(function* () {
     }
     return {status: "denied", reason: "user_message_not_genuine"};
   });
-  // the save and its Stop/Enable bookkeeping as one admission section and one guidance transaction, which commits both or neither;
-  // a failure anywhere in it is the save's failure, with its message
+  /*
+   * The save and Stop/Enable bookkeeping share one admission section and one guidance transaction. Any failure returns the
+   * save's failure message and commits neither change.
+   */
   const saveThreadPolicy = (input: ThreadPolicySettings) => gate.admit(() => transaction(Effect.gen(function* () {
     const before = yield* policy.get();
     if (before.generation !== input.generation) return yield* new ThreadPolicySaveFailed({message: "Chat settings changed in another tab. Reload first."});

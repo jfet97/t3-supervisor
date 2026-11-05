@@ -10,7 +10,7 @@ import { Effect, FileSystem, Layer, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import { upgradeDataDirectory } from "../src/database-upgrade.js";
 import {
-  accessDbLayer, catalogDbLayer, DatabaseOpenError, DatabaseWorker, type DatabaseWorkerEntry, guidanceDbLayer, openAccessUpgradeDatabase, openUpgradeDatabase,
+  accessDbLayer, catalogDbLayer, DatabaseFormats, DatabaseOpenError, DatabaseWorker, type DatabaseWorkerEntry, guidanceDbLayer, openAccessUpgradeDatabase, openUpgradeDatabase,
   readFormat,
 } from "../src/db.js";
 import { forgeDashboardToken } from "../src/service-auth.js";
@@ -291,8 +291,8 @@ describe("database format guard", () => {
     const exact = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, SqlClient.SafeIntegers, true);
     const [row] = yield* exact(sql.unsafe<{one: unknown}>("SELECT 1 AS one"));
     assert.equal(typeof row?.one, "bigint");
-    assert.equal(yield* exact(readFormat(sql)), 1);
-    assert.equal(yield* readFormat(sql), 1);
+    assert.equal(yield* exact(readFormat(sql)), DatabaseFormats.guidance);
+    assert.equal(yield* readFormat(sql), DatabaseFormats.guidance);
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 20_000 });
 
   it.live("a negative user_version is no format: the open and the startup upgrade refuse the file and leave it as it is", () => Effect.gen(function* () {

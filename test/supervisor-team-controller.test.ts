@@ -345,7 +345,6 @@ const operateFixture = Effect.gen(function* () {
   const directory = yield* temporaryDirectory("team-controller-operate-");
   // the first client of the file is closed by a simulated crash, or with the test scope
   const stores = yield* supervisionStores(directory);
-  const policy = stores.policy;
   const {supervisors, team, sql} = stores;
   const binding = {...(yield* supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1)), state: "ready" as const};
   yield* supervisors.setBinding(binding);

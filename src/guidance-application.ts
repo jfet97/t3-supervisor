@@ -38,8 +38,10 @@ export const runGuidanceApplication = (
 ) =>
   Effect.gen(function* () {
     const updates = yield* DashboardUpdates;
-    // the run's guidance client with the guidance store (its restart recovery, once) and the thread-policy store over it, so a
-    // policy save joins the transaction of its bookkeeping; the client is released with the run, after everything built over it
+    /*
+     * The run's guidance client carries both stores, so a policy save joins its bookkeeping transaction. The client is
+     * released with the run, after everything built over it.
+     */
     const guidance = yield* Layer.build(Layer.mergeAll(GuidanceStore.layer, ThreadPolicyStore.layer).pipe(Layer.provideMerge(guidanceDbLayer(config.dataDirectory)),
       Layer.provideMerge(Layer.succeed(DashboardUpdates, updates)), Layer.provide(SupervisorIds.layer)));
     const store = Context.get(guidance, GuidanceStore);
