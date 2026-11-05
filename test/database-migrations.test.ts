@@ -267,8 +267,23 @@ describe("declared schema and recognized layouts", () => {
     assert.deepEqual(yield* guidance(guidanceCore.replace(/CREATE INDEX activity_notice[^;]*;/u, "")), { kind: "unknown", object: "activity_notice" });
     // an object or a declaration no release wrote: an unknown index or table, a prototype table, a missing or extra column
     assert.deepEqual(yield* guidance(`${guidanceCore} CREATE INDEX someone_elses ON meta(value);`), { kind: "unknown", object: "someone_elses" });
-    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL);`),
-      { kind: "unknown", object: "supervisor_project_bindings" });
+    /*
+     * the two tables builds before the first release left behind are recognized with the one declaration each has, the clock's
+     * ALTER TABLE included; any other declaration of them, or an object on them, stays unknown
+     */
+    const retained = "CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL); " +
+      "CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0);";
+    assert.deepEqual(yield* guidance(`${guidanceCore} ${retained}`), { kind: "recognized" });
+    assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);
+      ALTER TABLE supervisor_monitor_project_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0;`), { kind: "recognized" });
+    for (const [statement, object] of [
+      ["CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT);", "supervisor_project_bindings"],
+      ["CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY);", "supervisor_project_bindings"],
+      ["CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);", "supervisor_monitor_project_clock"],
+      ["CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 1);",
+        "supervisor_monitor_project_clock"],
+      [`${retained} CREATE INDEX supervisor_project_bindings_document ON supervisor_project_bindings(document);`, "supervisor_project_bindings_document"],
+    ] as const) assert.deepEqual(yield* guidance(`${guidanceCore} ${statement}`), { kind: "unknown", object }, statement);
     assert.deepEqual(yield* guidance(`${guidanceCore} CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL);`),
       { kind: "unknown", object: "supervisor_monitor_binding_clock" });
     assert.deepEqual(yield* guidance(guidanceCore.replace(", object_id TEXT", "")), { kind: "unknown", object: "episodes" });

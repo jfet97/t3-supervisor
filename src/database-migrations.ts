@@ -452,25 +452,43 @@ export const schemaDifferences = (sql: SqlClient.SqlClient, reference: SchemaSig
 /**
  * The format 0 layouts an upgrade carries forward. Every published release declared each of its objects exactly as format 1
  * does (only whole tables were added over time; test/fixtures/persistence holds the frozen layouts), so every object of a
- * recognized file has the declaration of the current format's reference, and the file has every table and index its first
- * schema transaction created in every release. Tables a later constructor would have created may be missing (a run stopped
- * before it, or the release predates it); the step creates them. Any other object or declaration (another column, type,
- * default, key, constraint or index definition) or a missing part of the first transaction was never written by a release,
- * so the file is not upgraded.
+ * recognized file has the declaration of the current format's reference, or is a retained table, and the file has every
+ * table and index its first schema transaction created in every release. Tables a later constructor would have created may
+ * be missing (a run stopped before it, or the release predates it); the step creates them. Any other object or declaration
+ * (another column, type, default, key, constraint or index definition) or a missing part of the first transaction was never
+ * written by a release or a build that installations ran, so the file is not upgraded.
  */
 export interface LegacyLayout {
   /** the tables and indexes every release created together, in the file's first transaction */
   readonly required: { readonly tables: ReadonlyArray<string>; readonly indexes: ReadonlyArray<string> };
+  /**
+   * the tables builds before the first release created and later ones stopped using without dropping them, each with the one
+   * declaration SQLite stores for it; a file keeps them and their rows as they are, and no step creates or changes them
+   */
+  readonly retained: ReadonlyArray<{ readonly table: string; readonly declaration: string }>;
 }
 
 // the whole catalog schema is one transaction; shell_coverage came with a later release
 export const catalogLegacy: LegacyLayout = {
   required: { tables: ["activations", "environment_binding", "cursors", "projects", "threads", "thread_revisions"], indexes: ["threads_project"] },
+  retained: [],
 };
 
-// the guidance store's own tables come first, in one transaction; the supervision stores add theirs later, one by one
+/*
+ * the guidance store's own tables come first, in one transaction; the supervision stores add theirs later, one by one. The
+ * project-scoped supervision of the builds before main-scoped bindings kept its bindings and its monitor's notice clock in
+ * tables that no later build dropped: the clock as those builds last declared it, review_misses included, whether created
+ * with the column or given it by their ALTER TABLE
+ */
 export const guidanceLegacy: LegacyLayout = {
   required: { tables: ["meta", "rules", "mutes", "classifications", "observations", "episodes", "notices", "activity", "budget"], indexes: ["activity_notice"] },
+  retained: [
+    { table: "supervisor_project_bindings", declaration: "CREATE TABLE supervisor_project_bindings(project_id TEXT PRIMARY KEY,document TEXT NOT NULL)" },
+    {
+      table: "supervisor_monitor_project_clock",
+      declaration: "CREATE TABLE supervisor_monitor_project_clock(project_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL,review_misses INTEGER NOT NULL DEFAULT 0)",
+    },
+  ],
 };
 
 const SchemaObject = Schema.Struct({ type: Schema.String, name: Schema.String });
@@ -490,8 +508,9 @@ export const recognizeLegacy = (sql: SqlClient.SqlClient, reference: SchemaSigna
   Effect.gen(function* () {
     const file = yield* schemaSignature(sql);
     if (file.size === 0) return { kind: "empty" } as const;
+    const retained = new Map(legacy.retained.map(({ table, declaration }): readonly [string, string] => [`table:${table}`, declarationText(declaration)]));
     for (const [key, declaration] of file)
-      if (reference.get(key) !== declaration) return { kind: "unknown", object: objectName(key) } as const;
+      if (reference.get(key) !== declaration && retained.get(key) !== declaration) return { kind: "unknown", object: objectName(key) } as const;
     const required = [...legacy.required.tables.map((name) => `table:${name}`), ...legacy.required.indexes.map((name) => `index:${name}`)];
     const missing = required.find((key) => !file.has(key));
     return missing === undefined ? { kind: "recognized" } as const : { kind: "unknown", object: objectName(missing) } as const;
