@@ -11,6 +11,7 @@ import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import type { GuidanceRuntime } from "../src/guidance.js";
 import { tsxLoader } from "./support/cli-process.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 import { forge, openServiceAuth, temporaryDirectory } from "./support/g8-auth.js";
 import { runProcess } from "./support/g8-process.js";
 import { guidanceUi } from "./support/service-auth-harness.js";
@@ -222,6 +223,8 @@ const uiConfig = (directory: string): SupervisorConfig => ({
 it.live("CT-AUTH-05: concurrent HTTP logins and child-process forges keep one session per grant and the delete-mode schema", () => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = yield* temporary;
+  // the startup coordinator prepares the data directory at the current formats before the server opens its thread policy
+  yield* initializeDataDirectory(directory);
   // the dashboard server closes with the test's scope
   const ui = yield* guidanceUi(uiConfig(directory), {} as GuidanceRuntime["Service"]);
   // the service reports its bound port where the node listener reported an address object

@@ -1,0 +1,1177 @@
+{
+  "shape": "format0-current-unversioned",
+  "format": 0,
+  "summary": "The unversioned (format 0) files exactly as Supervisor 0.0.27 creates them on a new data directory: catalog with shell_coverage, guidance with the planning attempt tables and the compact default settings row, thread-settings and the two STRICT access tables. Every published release from 0.0.15 to 0.0.27 creates this same layout.",
+  "choice": "Required: the layout of the last unversioned release (0.0.27), the input of every existing installation's first upgrade.",
+  "producedBy": {
+    "releases": [
+      "0.0.15",
+      "0.0.16",
+      "0.0.17-nightly.20261028214611.gc4251c1738a3",
+      "0.0.17",
+      "0.0.18",
+      "0.0.19-nightly.20261030003223.g72ca8dfe9056",
+      "0.0.19",
+      "0.0.20",
+      "0.0.21",
+      "0.0.22-nightly.20261030220054.gca2c85954e6f",
+      "0.0.22",
+      "0.0.23-nightly.20261031222825.g715cfbe25a51",
+      "0.0.23",
+      "0.0.24",
+      "0.0.25-nightly.20261102065106.g6292059b67e8",
+      "0.0.25",
+      "0.0.26-nightly.20261102191736.gb5b467f3f685",
+      "0.0.26",
+      "0.0.27"
+    ],
+    "commits": {
+      "0.0.15": "c738967ff8c0a88dd2e67887bf0f573d68888de4",
+      "0.0.16": "c4251c1738a31d745b7f9f4dddbf4f2953345cfa",
+      "0.0.17-nightly.20261028214611.gc4251c1738a3": "c4251c1738a31d745b7f9f4dddbf4f2953345cfa",
+      "0.0.17": "9854caf0e3dfd22a51d00dbf955aacf163bc7d40",
+      "0.0.18": "72ca8dfe9056bf8f0cca9794799f1976af55f725",
+      "0.0.19-nightly.20261030003223.g72ca8dfe9056": "72ca8dfe9056bf8f0cca9794799f1976af55f725",
+      "0.0.19": "884aa011b1576bf67dca76a82a32570fc1f59b83",
+      "0.0.20": "ef7dcff1d76f340a196691f188c9aee1240d170a",
+      "0.0.21": "ca2c85954e6f9314987c6cbf97ac1ed712f0993b",
+      "0.0.22-nightly.20261030220054.gca2c85954e6f": "ca2c85954e6f9314987c6cbf97ac1ed712f0993b",
+      "0.0.22": "715cfbe25a513e75a854f28167853f90cac134fe",
+      "0.0.23-nightly.20261031222825.g715cfbe25a51": "715cfbe25a513e75a854f28167853f90cac134fe",
+      "0.0.23": "cb874c1de63f18cd68767d35a42dea258a775ab1",
+      "0.0.24": "6292059b67e89d50c2bc4c54284612db3a4d2869",
+      "0.0.25-nightly.20261102065106.g6292059b67e8": "6292059b67e89d50c2bc4c54284612db3a4d2869",
+      "0.0.25": "b5b467f3f6856020814904ba3bd24e88766f2ca7",
+      "0.0.26-nightly.20261102191736.gb5b467f3f685": "b5b467f3f6856020814904ba3bd24e88766f2ca7",
+      "0.0.26": "fbd2a02044feaa7cce6ca76adcde90b1d3356b72",
+      "0.0.27": "4ce025945b9cc62864b0db3d8c8249d4e957b6b5"
+    },
+    "note": "Linear history. Tags are read with read-only git show; 0.0.27 is commit 4ce025945b9cc62864b0db3d8c8249d4e957b6b5 (Release 0.0.27, #93), untagged in this clone. No release writes PRAGMA user_version or application_id, so each file is format 0."
+  },
+  "provenance": {
+    "method": "Each statement's text was copied from the string literal(s) of the released source at the recorded lines (identifiers and bound parameters resolved as noted), and checked to be identical at every release listed in producedBy. Statements are in the order the released binary executed them on a new file; IF NOT EXISTS is part of the copied text. The schema files contain no comments; each statement ends with ';' directly after its last token, because SQLite keeps the text up to that token in sqlite_master.",
+    "lineRanges": "per statement for the first (0.0.15) and last (0.0.27) release of the layout",
+    "runtimeOfReleases": {
+      "node": "24.22.1 (release image node:24.22.1-bookworm-slim)",
+      "effect": "4.0.6",
+      "@effect/sql-sqlite-node": "4.0.6",
+      "engines": "node >=24.22.1"
+    }
+  },
+  "databases": [
+    {
+      "name": "catalog",
+      "path": "catalog.sqlite3",
+      "journalMode": "wal",
+      "fileMode": "0600",
+      "directoryMode": "0700",
+      "userVersion": 0,
+      "createdBy": "t3-supervisor start, when the catalog store is built: after the thread-settings store and after the T3 read-token file was read (no T3 request needed). Rows: environment_binding/activations after the first successful T3 environment read; cursors, projects, threads, shell_coverage from the native shell stream.",
+      "openPragmas": {
+        "source": "src/db.ts catalogDbLayer",
+        "statements": [
+          "journal_mode=WAL (set by the SQLite client at open; persisted in the file header)",
+          "busy_timeout=5000",
+          "synchronous=FULL",
+          "foreign_keys=ON",
+          "wal_autocheckpoint=256",
+          "secure_delete=ON",
+          "max_page_count=16384"
+        ],
+        "note": "connection settings, not part of the schema file; only the journal mode is persisted"
+      },
+      "schema": "catalog.schema.sql",
+      "rows": "catalog.rows.sql",
+      "expected": "catalog.expected.json",
+      "statements": [
+        {
+          "index": 1,
+          "id": "catalog.activations",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:181-184",
+            "0.0.27": "src/store.ts:181-184"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 2,
+          "id": "catalog.environment_binding",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:185-188",
+            "0.0.27": "src/store.ts:185-188"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 3,
+          "id": "catalog.cursors",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:189-192",
+            "0.0.27": "src/store.ts:189-192"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 4,
+          "id": "catalog.projects",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:193-197",
+            "0.0.27": "src/store.ts:193-197"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 5,
+          "id": "catalog.shell_coverage",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:198-201",
+            "0.0.27": "src/store.ts:198-201"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 6,
+          "id": "catalog.threads",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:202-208",
+            "0.0.27": "src/store.ts:202-208"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 7,
+          "id": "catalog.thread_revisions",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:209-212",
+            "0.0.27": "src/store.ts:209-212"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        },
+        {
+          "index": 8,
+          "id": "catalog.threads_project",
+          "owner": "Store (src/store.ts)",
+          "definedAt": {
+            "0.0.15": "src/store.ts:213-213",
+            "0.0.27": "src/store.ts:213-213"
+          },
+          "executedAt": {
+            "0.0.15": "src/store.ts:376",
+            "0.0.27": "src/store.ts:376"
+          }
+        }
+      ],
+      "notExecutedOnNewFile": [],
+      "openTimeDataChanges": {
+        "note": "data statements of the released open that act on existing rows; they are not in the schema file and had nothing to change on a new file. The rows file is the state BEFORE such an open.",
+        "statements": [
+          "src/store.ts: every open re-whitelists each stored thread shell in the schema transaction (UPDATE threads SET document=<whitelisted shell> WHERE id=?); a malformed row fails the open"
+        ]
+      },
+      "syntheticRows": {
+        "label": "synthetic fixture input, not old-binary output",
+        "contents": [
+          "environment_binding and activations: the first activation of the synthetic T3 environment (Store.activate)",
+          "cursors: the active stream position; shell_coverage: the sequence of the last committed paired archive snapshot",
+          "projects: two available projects whose documents carry unknown native keys (fixtureNativeField, fixtureNativeNote) and one removed project (deleted=1)",
+          "threads/thread_revisions: whitelisted shells in the whitelist's key order (active, archive and removed locations; two Supervisor roots with creationSource) whose revision equals thread_revisions.revision",
+          "threads: fixture-thread-unknown-keys carries keys outside the whitelist (fixtureNativeShellField, lineage.fixtureLineageNote, pendingBackgroundTasks[].fixtureTaskField); 0.0.27's open re-whitelisted every stored shell, so this row is input for that one-time rewrite (its unknown keys are expected to go), not a state 0.0.27 itself would leave"
+        ]
+      }
+    },
+    {
+      "name": "guidance",
+      "path": "guidance.sqlite3",
+      "journalMode": "wal",
+      "fileMode": "0600",
+      "directoryMode": "0700",
+      "userVersion": 0,
+      "createdBy": "each supervision run of t3-supervisor start (UI_PORT is always set; default 9008), after the root's T3 environment read and catalog activation: the GuidanceStore tables first; the supervision tables only after the run's own T3 environment read and bind; a run that fails before that leaves only the GuidanceStore tables.",
+      "openPragmas": {
+        "source": "src/db.ts guidanceDbLayer",
+        "statements": [
+          "journal_mode=WAL (set by the SQLite client at open; persisted in the file header)",
+          "busy_timeout=5000",
+          "synchronous=FULL",
+          "secure_delete=ON",
+          "max_page_count=16384"
+        ],
+        "note": "connection settings, not part of the schema file; only the journal mode is persisted"
+      },
+      "schema": "guidance.schema.sql",
+      "rows": "guidance.rows.sql",
+      "expected": "guidance.expected.json",
+      "statements": [
+        {
+          "index": 1,
+          "id": "guidance.meta",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:65-65",
+            "0.0.27": "src/guidance-store.ts:65-65"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 2,
+          "id": "guidance.rules",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:66-66",
+            "0.0.27": "src/guidance-store.ts:66-66"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 3,
+          "id": "guidance.mutes",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:67-67",
+            "0.0.27": "src/guidance-store.ts:67-67"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 4,
+          "id": "guidance.classifications",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:68-68",
+            "0.0.27": "src/guidance-store.ts:68-68"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 5,
+          "id": "guidance.observations",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:69-69",
+            "0.0.27": "src/guidance-store.ts:69-69"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 6,
+          "id": "guidance.episodes",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:70-71",
+            "0.0.27": "src/guidance-store.ts:70-71"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 7,
+          "id": "guidance.notices",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:72-74",
+            "0.0.27": "src/guidance-store.ts:72-74"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 8,
+          "id": "guidance.activity",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:75-75",
+            "0.0.27": "src/guidance-store.ts:75-75"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 9,
+          "id": "guidance.budget",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:76-76",
+            "0.0.27": "src/guidance-store.ts:76-76"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 10,
+          "id": "guidance.activity_notice",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:77-77",
+            "0.0.27": "src/guidance-store.ts:77-77"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:100",
+            "0.0.27": "src/guidance-store.ts:100"
+          }
+        },
+        {
+          "index": 11,
+          "id": "guidance.settings_default.compact",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:101-101",
+            "0.0.27": "src/guidance-store.ts:101-101"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:101 (executed in place)",
+            "0.0.27": "src/guidance-store.ts:101 (executed in place)"
+          },
+          "note": "bound parameter JSON.stringify(defaults) inlined; `defaults` is the source's {generation: 1, evidenceHours: 24}"
+        },
+        {
+          "index": 12,
+          "id": "guidance.alter.episodes.object_id",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:102-102",
+            "0.0.27": "src/guidance-store.ts:102-102"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:102 (executed in place)",
+            "0.0.27": "src/guidance-store.ts:102 (executed in place)"
+          },
+          "note": "conditional on PRAGMA table_info(episodes) lacking object_id; always true for a file created by this binary, since the CREATE lacks it"
+        },
+        {
+          "index": 13,
+          "id": "guidance.alter.notices.rule_generation",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:105-105",
+            "0.0.27": "src/guidance-store.ts:105-105"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:105 (executed in place)",
+            "0.0.27": "src/guidance-store.ts:105 (executed in place)"
+          },
+          "note": "loop over [rule_generation, settings_generation], conditional on PRAGMA table_info(notices) lacking the column; always true for a file created by this binary"
+        },
+        {
+          "index": 14,
+          "id": "guidance.alter.notices.settings_generation",
+          "owner": "GuidanceStore (src/guidance-store.ts makeGuidanceStore)",
+          "definedAt": {
+            "0.0.15": "src/guidance-store.ts:105-105",
+            "0.0.27": "src/guidance-store.ts:105-105"
+          },
+          "executedAt": {
+            "0.0.15": "src/guidance-store.ts:105 (executed in place)",
+            "0.0.27": "src/guidance-store.ts:105 (executed in place)"
+          },
+          "note": "second iteration of the same loop"
+        },
+        {
+          "index": 15,
+          "id": "guidance.supervisor_owned_threads",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:202-202",
+            "0.0.27": "src/project-supervisor-store.ts:219-219"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 16,
+          "id": "guidance.supervisor_project_settings",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:203-203",
+            "0.0.27": "src/project-supervisor-store.ts:220-220"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 17,
+          "id": "guidance.supervisor_main_bindings",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:204-204",
+            "0.0.27": "src/project-supervisor-store.ts:221-221"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 18,
+          "id": "guidance.supervisor_task_interpretations",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:205-205",
+            "0.0.27": "src/project-supervisor-store.ts:222-222"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 19,
+          "id": "guidance.supervisor_definition_user_saves",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:206-206",
+            "0.0.27": "src/project-supervisor-store.ts:223-223"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 20,
+          "id": "guidance.supervisor_chat_enables",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:207-207",
+            "0.0.27": "src/project-supervisor-store.ts:224-224"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 21,
+          "id": "guidance.supervisor_tasks_project",
+          "owner": "ProjectSupervisorStore (src/project-supervisor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:208-208",
+            "0.0.27": "src/project-supervisor-store.ts:225-225"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:744",
+            "0.0.27": "src/project-supervisor-store.ts:790"
+          }
+        },
+        {
+          "index": 22,
+          "id": "guidance.scope_version",
+          "owner": "SupervisorStateReset.initializeMainSupervisionState (src/supervisor-state-reset.ts), called by the ProjectSupervisorStore constructor",
+          "definedAt": {
+            "0.0.15": "src/supervisor-state-reset.ts:44-44",
+            "0.0.27": "src/supervisor-state-reset.ts:44-44"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor-store.ts:748",
+            "0.0.27": "src/project-supervisor-store.ts:794"
+          },
+          "note": "initializeMainSupervisionState on a file without a scope version: the reset (DELETE FROM each disposable table that exists, DELETE the activation meta rows; all empty here) and this insert, one transaction"
+        },
+        {
+          "index": 23,
+          "id": "guidance.supervisor_planning_attempts",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:293-293",
+            "0.0.27": "src/supervisor-conversation-store.ts:301-301"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 24,
+          "id": "guidance.supervisor_planning_project",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:294-294",
+            "0.0.27": "src/supervisor-conversation-store.ts:302-302"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 25,
+          "id": "guidance.supervisor_conversation_requests",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:295-295",
+            "0.0.27": "src/supervisor-conversation-store.ts:303-303"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 26,
+          "id": "guidance.supervisor_conversation_project",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:296-296",
+            "0.0.27": "src/supervisor-conversation-store.ts:304-304"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 27,
+          "id": "guidance.supervisor_workflow_introductions",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:297-297",
+            "0.0.27": "src/supervisor-conversation-store.ts:305-305"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 28,
+          "id": "guidance.supervisor_workflow_agreement_candidates",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:298-298",
+            "0.0.27": "src/supervisor-conversation-store.ts:306-306"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 29,
+          "id": "guidance.supervisor_workflow_agreement_project",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:299-299",
+            "0.0.27": "src/supervisor-conversation-store.ts:307-307"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 30,
+          "id": "guidance.supervisor_monitor_binding_clock",
+          "owner": "SupervisorConversationStore (src/supervisor-conversation-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:300-300",
+            "0.0.27": "src/supervisor-conversation-store.ts:308-308"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-conversation-store.ts:314",
+            "0.0.27": "src/supervisor-conversation-store.ts:322"
+          }
+        },
+        {
+          "index": 31,
+          "id": "guidance.supervisor_monitor_threads",
+          "owner": "ProjectSupervisorMonitorStore (src/supervisor-monitor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-monitor-store.ts:205-215",
+            "0.0.27": "src/supervisor-monitor-store.ts:205-215"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-monitor-store.ts:248",
+            "0.0.27": "src/supervisor-monitor-store.ts:248"
+          }
+        },
+        {
+          "index": 32,
+          "id": "guidance.supervisor_monitor_items",
+          "owner": "ProjectSupervisorMonitorStore (src/supervisor-monitor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-monitor-store.ts:216-232",
+            "0.0.27": "src/supervisor-monitor-store.ts:216-232"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-monitor-store.ts:248",
+            "0.0.27": "src/supervisor-monitor-store.ts:248"
+          }
+        },
+        {
+          "index": 33,
+          "id": "guidance.supervisor_monitor_pending",
+          "owner": "ProjectSupervisorMonitorStore (src/supervisor-monitor-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-monitor-store.ts:233-234",
+            "0.0.27": "src/supervisor-monitor-store.ts:233-234"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-monitor-store.ts:248",
+            "0.0.27": "src/supervisor-monitor-store.ts:248"
+          }
+        },
+        {
+          "index": 34,
+          "id": "guidance.supervisor_main_binding_thread",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1003-1003",
+            "0.0.27": "src/supervisor-team-store.ts:1003-1003"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 35,
+          "id": "guidance.supervisor_team_members",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1004-1004",
+            "0.0.27": "src/supervisor-team-store.ts:1004-1004"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 36,
+          "id": "guidance.supervisor_team_member_identity",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1005-1005",
+            "0.0.27": "src/supervisor-team-store.ts:1005-1005"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 37,
+          "id": "guidance.supervisor_team_assignments",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1006-1006",
+            "0.0.27": "src/supervisor-team-store.ts:1006-1006"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 38,
+          "id": "guidance.supervisor_team_notifications",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1007-1007",
+            "0.0.27": "src/supervisor-team-store.ts:1007-1007"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 39,
+          "id": "guidance.supervisor_team_notifications_recipient",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1008-1008",
+            "0.0.27": "src/supervisor-team-store.ts:1008-1008"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 40,
+          "id": "guidance.supervisor_team_events",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1009-1009",
+            "0.0.27": "src/supervisor-team-store.ts:1009-1009"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 41,
+          "id": "guidance.supervisor_team_events_pending",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1010-1010",
+            "0.0.27": "src/supervisor-team-store.ts:1010-1010"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 42,
+          "id": "guidance.supervisor_team_requests",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1011-1011",
+            "0.0.27": "src/supervisor-team-store.ts:1011-1011"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 43,
+          "id": "guidance.supervisor_team_requests_pending",
+          "owner": "SupervisorTeamStore (src/supervisor-team-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:1012-1012",
+            "0.0.27": "src/supervisor-team-store.ts:1012-1012"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-store.ts:988",
+            "0.0.27": "src/supervisor-team-store.ts:988"
+          }
+        },
+        {
+          "index": 44,
+          "id": "guidance.supervisor_workflow_state",
+          "owner": "WorkflowStateStore (src/workflow-state-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/workflow-state-store.ts:1759-1762",
+            "0.0.27": "src/workflow-state-store.ts:1862-1865"
+          },
+          "executedAt": {
+            "0.0.15": "src/workflow-state-store.ts:1759 (executed in place)",
+            "0.0.27": "src/workflow-state-store.ts:1862 (executed in place)"
+          }
+        },
+        {
+          "index": 45,
+          "id": "guidance.supervisor_workflow_scope",
+          "owner": "WorkflowStateStore (src/workflow-state-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/workflow-state-store.ts:1763-1763",
+            "0.0.27": "src/workflow-state-store.ts:1866-1866"
+          },
+          "executedAt": {
+            "0.0.15": "src/workflow-state-store.ts:1763 (executed in place)",
+            "0.0.27": "src/workflow-state-store.ts:1866 (executed in place)"
+          }
+        },
+        {
+          "index": 46,
+          "id": "guidance.supervisor_workflow_operations",
+          "owner": "WorkflowStateStore (src/workflow-state-store.ts)",
+          "definedAt": {
+            "0.0.15": "src/workflow-state-store.ts:1764-1767",
+            "0.0.27": "src/workflow-state-store.ts:1867-1870"
+          },
+          "executedAt": {
+            "0.0.15": "src/workflow-state-store.ts:1764 (executed in place)",
+            "0.0.27": "src/workflow-state-store.ts:1867 (executed in place)"
+          }
+        },
+        {
+          "index": 47,
+          "id": "guidance.supervisor_helper_channels",
+          "owner": "HelperTransport (src/supervisor-helper-transport.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-helper-transport.ts:190-190",
+            "0.0.27": "src/supervisor-helper-transport.ts:185-185"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-helper-transport.ts:207",
+            "0.0.27": "src/supervisor-helper-transport.ts:204"
+          }
+        },
+        {
+          "index": 48,
+          "id": "guidance.supervisor_helper_deliveries",
+          "owner": "HelperTransport (src/supervisor-helper-transport.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-helper-transport.ts:191-191",
+            "0.0.27": "src/supervisor-helper-transport.ts:186-186"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-helper-transport.ts:207",
+            "0.0.27": "src/supervisor-helper-transport.ts:204"
+          }
+        },
+        {
+          "index": 49,
+          "id": "guidance.supervisor_workflow_write_receipts",
+          "owner": "WorkflowWriteController (src/workflow-write-controller.ts)",
+          "definedAt": {
+            "0.0.15": "src/interpretation-intake.ts:32-43",
+            "0.0.27": "src/interpretation-intake.ts:32-43"
+          },
+          "executedAt": {
+            "0.0.15": "src/workflow-write-controller.ts:1158",
+            "0.0.27": "src/workflow-write-controller.ts:1217"
+          },
+          "note": "the constant workflowWriteReceiptsTable, defined in src/interpretation-intake.ts and executed first by the WorkflowWriteController's writeSchema"
+        },
+        {
+          "index": 50,
+          "id": "guidance.supervisor_workflow_write_evidence",
+          "owner": "WorkflowWriteController (src/workflow-write-controller.ts)",
+          "definedAt": {
+            "0.0.15": "src/workflow-write-controller.ts:317-331",
+            "0.0.27": "src/workflow-write-controller.ts:324-338"
+          },
+          "executedAt": {
+            "0.0.15": "src/workflow-write-controller.ts:1158",
+            "0.0.27": "src/workflow-write-controller.ts:1217"
+          }
+        },
+        {
+          "index": 51,
+          "id": "guidance.supervisor_workflow_write_evidence_operation",
+          "owner": "WorkflowWriteController (src/workflow-write-controller.ts)",
+          "definedAt": {
+            "0.0.15": "src/workflow-write-controller.ts:332-333",
+            "0.0.27": "src/workflow-write-controller.ts:339-340"
+          },
+          "executedAt": {
+            "0.0.15": "src/workflow-write-controller.ts:1158",
+            "0.0.27": "src/workflow-write-controller.ts:1217"
+          }
+        },
+        {
+          "index": 52,
+          "id": "guidance.supervisor_team_tool_receipts",
+          "owner": "SupervisorTeamController (src/supervisor-team-controller.ts)",
+          "definedAt": {
+            "0.0.15": "src/supervisor-team-controller.ts:223-226",
+            "0.0.27": "src/supervisor-team-controller.ts:217-220"
+          },
+          "executedAt": {
+            "0.0.15": "src/supervisor-team-controller.ts:223 (executed in place)",
+            "0.0.27": "src/supervisor-team-controller.ts:217 (executed in place)"
+          }
+        },
+        {
+          "index": 53,
+          "id": "guidance.supervisor_workflow_write_receipts.again",
+          "owner": "ProjectSupervisor (src/project-supervisor.ts)",
+          "definedAt": {
+            "0.0.15": "src/interpretation-intake.ts:32-43",
+            "0.0.27": "src/interpretation-intake.ts:32-43"
+          },
+          "executedAt": {
+            "0.0.15": "src/project-supervisor.ts:312",
+            "0.0.27": "src/project-supervisor.ts:319"
+          },
+          "note": "the ProjectSupervisor constructor executes the same constant again; IF NOT EXISTS makes it a no-op"
+        }
+      ],
+      "notExecutedOnNewFile": [
+        "src/project-supervisor-store.ts: ALTER TABLE supervisor_definition_user_saves ADD COLUMN expected_revision TEXT NOT NULL DEFAULT '' (the CREATE already has the column)",
+        "src/supervisor-conversation-store.ts: ALTER TABLE supervisor_monitor_binding_clock ADD COLUMN review_misses INTEGER NOT NULL DEFAULT 0 (the CREATE already has the column)",
+        "src/supervisor-monitor-store.ts: ALTER TABLE supervisor_monitor_threads ADD COLUMN activation_ordinal INTEGER, then UPDATE supervisor_monitor_threads SET activation_ordinal=source_ordinal WHERE activation_ordinal IS NULL (the CREATE already has the column)",
+        "src/supervisor-monitor-store.ts: ALTER TABLE supervisor_monitor_threads ADD COLUMN untracked_count INTEGER NOT NULL DEFAULT 0 (the CREATE already has the column)",
+        "src/supervisor-monitor-store.ts: ALTER TABLE supervisor_monitor_items ADD COLUMN read_item_id TEXT (the CREATE already has the column)",
+        "src/supervisor-monitor-store.ts: ALTER TABLE supervisor_monitor_items ADD COLUMN active INTEGER NOT NULL DEFAULT 1 (the CREATE already has the column)"
+      ],
+      "openTimeDataChanges": {
+        "note": "data statements of the released open that act on existing rows; they are not in the schema file and had nothing to change on a new file. The rows file is the state BEFORE such an open.",
+        "statements": [
+          "src/guidance-store.ts: UPDATE notices SET state=CASE WHEN dispatch_started=0 THEN 'not_delivered_restart' ELSE 'uncertain' END WHERE state='committed', and one process_recovery activity row per recovered notice",
+          "src/supervisor-state-reset.ts: without meta supervisor_scope_version, DELETE FROM each existing disposable table (supervisor_project_bindings, supervisor_main_bindings, supervisor_task_interpretations, supervisor_conversation_requests, supervisor_workflow_introductions, supervisor_workflow_agreement_candidates, supervisor_monitor_project_clock, supervisor_monitor_binding_clock, supervisor_monitor_items, supervisor_monitor_threads) and the activation meta rows, then insert 'main-v1'; any other stored version disables supervision",
+          "src/project-supervisor-store.ts: every supervisor_start_operation:% meta row with preparing=true is rewritten {...operation, preparing: false, status: 'rejected', reason: 'Start intake was interrupted before permission was reserved. Submit a new explicit request.'}",
+          "src/supervisor-team-store.ts: UPDATE supervisor_team_notifications SET state='uncertain',document=json_set(document,'$.state','uncertain') WHERE state='sending'"
+        ]
+      },
+      "syntheticRows": {
+        "label": "synthetic fixture input, not old-binary output",
+        "contents": [
+          "meta settings: the compact default row after two classifications (generation 3, json_set as 0.0.13+ classify)",
+          "meta environment: the run's bind of the synthetic T3 environment",
+          "meta activation: supervisor_activation_baseline (version 2) and supervisor_activation_sequence, the master control (generation 2, enabled, with its baseline), the auto-detected control of fixture-project-alpha and No Project mode on_request at generation 2",
+          "supervisor_main_bindings fixture-thread-main-a: a bound Stop (supervisionStop route ui) and its stop notice left 'uncertain' with a dispatch mode (an unknown-send identity: messageId supervisor-notice:stop:00000000-0000-4000-8000-0000000005a1, commandId supervisor-stop-notice:00000000-0000-4000-8000-0000000005a2); the two fields were added by json_set as the store wrote them",
+          "supervisor_main_bindings fixture-thread-main-f: an active binding without a Stop; supervisor_owned_threads holds both roots and the helper",
+          "meta supervisor_unbound_stop:fixture-thread-main-b: an unbound Stop (no binding for that main)",
+          "meta supervisor_start:fixture-thread-main-c: a pending source-bound Start (agent route) with its settled operation (no preparing key)",
+          "meta supervisor_start:fixture-thread-main-d: an active ui Start, its settled operation and supervisor_chat_enables row at its intent time",
+          "meta supervisor_start_operation:[\"fixture-thread-main-e\",\"fixture-start-op-e1\"]: an operation left preparing=true by a stopped process (0.0.27's open rewrote such an operation as rejected; the frozen file is the state before that open)",
+          "supervisor_conversation_requests: 00000000-0000-4000-8000-0000000000d1 'sending' (root F) and 00000000-0000-4000-8000-0000000000d2 'uncertain' (helper, team member epoch 1); their native identities supervisor-review:<id> must be kept",
+          "supervisor_team_notifications 00000000-0000-4000-8000-0000000000e1: 'sending' at delivery attempt 0 (0.0.27's open moved such a row to 'uncertain' with json_set; the frozen file is the state before that open)",
+          "supervisor_helper_deliveries: the team notice POST recorded 'posted' with its native delivery id, and the helper review POST left 'posting' (unknown outcome); hash = sha256 of the canonical {threadId, commandId, messageId, text}",
+          "supervisor_workflow_write_receipts/evidence: one applied edit; native_evidence is canonical JSON with the unknown key fixtureNativeExtension; the workflow document itself (supervisor_workflow_state) is not frozen in this fixture",
+          "notices: two 'committed' (dispatch_started 0 and 1: 0.0.27's open recovered them as not_delivered_restart and uncertain and wrote process_recovery activity) and one 'uncertain'; rule_generation/settings_generation are the ALTER-added columns",
+          "activity: a process_recovery row (detail null) and an evidence row whose detail is JSON text with an unknown native key (nativeItem.fixtureFutureField) and whose document carries an unknown key (fixtureUnknownField)"
+        ]
+      }
+    },
+    {
+      "name": "thread-settings",
+      "path": "thread-settings.sqlite3",
+      "journalMode": "wal",
+      "fileMode": "0600",
+      "directoryMode": "0700",
+      "userVersion": 0,
+      "createdBy": "t3-supervisor start, first of the store files: the thread-policy store is built before the T3 read token is read, seeded once from EXCLUDED_THREAD_IDS.",
+      "openPragmas": {
+        "source": "src/db.ts policyDbLayer",
+        "statements": [
+          "journal_mode=WAL (set by the SQLite client at open; persisted in the file header)",
+          "busy_timeout=5000",
+          "synchronous=FULL"
+        ],
+        "note": "connection settings, not part of the schema file; only the journal mode is persisted"
+      },
+      "schema": "thread-settings.schema.sql",
+      "rows": "thread-settings.rows.sql",
+      "expected": "thread-settings.expected.json",
+      "statements": [
+        {
+          "index": 1,
+          "id": "policy.settings",
+          "owner": "ThreadPolicyStore (src/thread-policy.ts makeThreadPolicyStore)",
+          "definedAt": {
+            "0.0.15": "src/thread-policy.ts:52-52",
+            "0.0.27": "src/thread-policy.ts:52-52"
+          },
+          "executedAt": {
+            "0.0.15": "src/thread-policy.ts:52 (executed in place)",
+            "0.0.27": "src/thread-policy.ts:52 (executed in place)"
+          }
+        },
+        {
+          "index": 2,
+          "id": "policy.seed",
+          "owner": "ThreadPolicyStore (src/thread-policy.ts makeThreadPolicyStore)",
+          "definedAt": {
+            "0.0.15": "src/thread-policy.ts:53-53",
+            "0.0.27": "src/thread-policy.ts:53-53"
+          },
+          "executedAt": {
+            "0.0.15": "src/thread-policy.ts:53 (executed in place)",
+            "0.0.27": "src/thread-policy.ts:53 (executed in place)"
+          },
+          "note": "bound parameter inlined with the configured seed: EXCLUDED_THREAD_IDS=fixture-thread-config-excluded at the first start (a fixture assumption)"
+        }
+      ],
+      "notExecutedOnNewFile": [],
+      "openTimeDataChanges": {
+        "note": "data statements of the released open that act on existing rows; they are not in the schema file and had nothing to change on a new file. The rows file is the state BEFORE such an open.",
+        "statements": [
+          "src/thread-policy.ts: INSERT OR IGNORE of the configured seed on every open (no effect once the row exists)"
+        ]
+      },
+      "syntheticRows": {
+        "label": "synthetic fixture input, not old-binary output",
+        "contents": [
+          "settings id=1: seeded at generation 1 from EXCLUDED_THREAD_IDS ({\"generation\":1,\"excludedThreadIds\":[\"fixture-thread-config-excluded\"]}), then six saves: generation 7 with the bound and unbound Stops of main A and main B excluded",
+          "the unknown key fixtureFutureField is tolerated by the 0.0.27 policy Schema (an Effect Schema.Struct ignores excess keys when decoding), so it stays in the stored text"
+        ]
+      }
+    },
+    {
+      "name": "access-login",
+      "path": "access/login.sqlite3",
+      "journalMode": "delete",
+      "fileMode": "0600",
+      "directoryMode": "0700",
+      "userVersion": 0,
+      "createdBy": "the dashboard's ServiceAuth layer during a supervision run (after every supervision store), never by auth forge: a private temporary file gets PRAGMA journal_mode=DELETE and both tables, is validated, then linked as access/login.sqlite3 (directory 0700, file 0600) beside the workflow-mcp-token seed file.",
+      "openPragmas": {
+        "source": "src/db.ts accessDbLayer and src/service-auth.ts initializeDatabaseFile",
+        "statements": [
+          "journal_mode=DELETE (executed by the bootstrap as PRAGMA journal_mode=DELETE on the temporary file; also the client's mode, disableWAL)",
+          "busy_timeout=5000",
+          "synchronous=FULL",
+          "max_page_count=256"
+        ],
+        "note": "connection settings, not part of the schema file; only the journal mode is persisted"
+      },
+      "schema": "access-login.schema.sql",
+      "rows": "access-login.rows.sql",
+      "expected": "access-login.expected.json",
+      "statements": [
+        {
+          "index": 1,
+          "id": "access.dashboard_login_grants",
+          "owner": "ServiceAuth bootstrap (src/service-auth.ts initializeDatabaseFile)",
+          "definedAt": {
+            "0.0.15": "src/service-auth.ts:28-32",
+            "0.0.27": "src/service-auth.ts:28-32"
+          },
+          "executedAt": {
+            "0.0.15": "src/service-auth.ts:375",
+            "0.0.27": "src/service-auth.ts:375"
+          }
+        },
+        {
+          "index": 2,
+          "id": "access.dashboard_login_sessions",
+          "owner": "ServiceAuth bootstrap (src/service-auth.ts initializeDatabaseFile)",
+          "definedAt": {
+            "0.0.15": "src/service-auth.ts:34-38",
+            "0.0.27": "src/service-auth.ts:34-38"
+          },
+          "executedAt": {
+            "0.0.15": "src/service-auth.ts:376",
+            "0.0.27": "src/service-auth.ts:376"
+          },
+          "note": "SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000 = 2592000000, concatenated into the CHECK constraint"
+        }
+      ],
+      "notExecutedOnNewFile": [],
+      "openTimeDataChanges": {
+        "note": "data statements of the released open that act on existing rows; they are not in the schema file and had nothing to change on a new file. The rows file is the state BEFORE such an open.",
+        "statements": [
+          "src/service-auth.ts: every open validates quick_check, journal_mode=delete, exactly the two tables (whitespace-insensitive schema text and table_info), at most 32 grants and 32 sessions, expires_at > issued_at and the 30 day session TTL; the file must be a regular 0600 file of at most 1 MiB"
+        ]
+      },
+      "syntheticRows": {
+        "label": "synthetic fixture input, not old-binary output",
+        "contents": [
+          "dashboard_login_grants: one pending single-use grant (5 minute TTL as auth forge issues it)",
+          "dashboard_login_sessions: two sessions at the 30 day TTL bound (expires_at - issued_at = 2592000000)",
+          "token_hash = sha256(token) in lowercase hex; the synthetic tokens are listed in the manifest (32 sequential bytes each, base64url), not credentials"
+        ]
+      }
+    }
+  ],
+  "syntheticData": {
+    "label": "synthetic fixture input, not old-binary output",
+    "statement": "Every row is invented: identities are 'fixture-...' strings or zero-filled v4 UUIDs, texts are fixture prose, timestamps lie between 2026-10-20 and 2026-11-03. No row comes from a real installation, chat, credential or person.",
+    "readerAcceptance": "Rows were written to pass the 0.0.27 readers' guards (the Schema guards of each store's rollout-scan decoder and the access validation); documents follow the key order of the released writers; documents the released writers changed with json_set/json_remove were computed with the same SQLite functions.",
+    "identities": {
+      "environment": "fixture-environment-0001",
+      "projectAlpha": "fixture-project-alpha",
+      "projectScratch": "fixture-project-scratch",
+      "projectRemoved": "fixture-project-removed",
+      "mainA": "fixture-thread-main-a",
+      "mainB": "fixture-thread-main-b",
+      "mainC": "fixture-thread-main-c",
+      "mainD": "fixture-thread-main-d",
+      "mainE": "fixture-thread-main-e",
+      "mainF": "fixture-thread-main-f",
+      "configExcluded": "fixture-thread-config-excluded",
+      "archived": "fixture-thread-archived-1",
+      "removed": "fixture-thread-removed-1",
+      "unknownShell": "fixture-thread-unknown-keys",
+      "helper": "fixture-thread-helper-1",
+      "rootA": "supervisor-root:00000000-0000-4000-8000-0000000000a1",
+      "rootF": "supervisor-root:00000000-0000-4000-8000-0000000000f1"
+    },
+    "timeline": {
+      "activated": "2026-10-20T08:00:00.000Z",
+      "baseline": "2026-10-20T08:05:00.000Z",
+      "folderChecked": "2026-10-20T08:06:00.000Z",
+      "noProjectSaved": "2026-10-20T08:10:00.000Z",
+      "bindingA": "2026-10-21T09:00:00.000Z",
+      "noticesCreated": "2026-10-21T11:00:00.000Z",
+      "bindingF": "2026-10-22T10:00:00.000Z",
+      "startD": "2026-10-25T12:00:00.000Z",
+      "stopB": "2026-10-28T15:00:00.000Z",
+      "session1": "2026-10-28T09:00:00.000Z",
+      "stopA": "2026-11-01T16:00:00.000Z",
+      "helperRegistered": "2026-11-02T10:00:00.000Z",
+      "workflowEdit": "2026-11-02T14:00:00.000Z",
+      "reviewHelper": "2026-11-03T08:30:00.000Z",
+      "teamNote": "2026-11-03T08:40:00.000Z",
+      "reviewRoot": "2026-11-03T08:45:00.000Z",
+      "startC": "2026-11-03T09:00:00.000Z",
+      "session2": "2026-11-03T09:15:00.000Z",
+      "grant": "2026-11-03T09:20:00.000Z",
+      "stopped": "2026-11-03T09:30:00.000Z"
+    },
+    "accessTokens": {
+      "note": "synthetic sign-in tokens (32 sequential bytes, base64url), not credentials; token_hash = sha256(token) lowercase hex",
+      "grant": "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA",
+      "session1": "ISIjJCUmJygpKissLS4vMDEyMzQ1Njc4OTo7PD0-P0A",
+      "session2": "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVpbXF1eX2A"
+    }
+  },
+  "assumptions": [
+    "thread-settings was first created with EXCLUDED_THREAD_IDS=fixture-thread-config-excluded (seed {\"generation\":1,\"excludedThreadIds\":[\"fixture-thread-config-excluded\"]}); the rows file then sets the policy to generation 7 as six dashboard saves would.",
+    "The data directory and access/ are 0700 and every database file 0600, as src/db.ts preparePrivateFile and the access bootstrap leave them; the WAL files were checkpointed and removed by a clean stop.",
+    "access/workflow-mcp-token (the workflow MCP seed file the auth bootstrap writes beside login.sqlite3) is not a database and is not part of the fixture; the 0.0.27 auth service creates it when missing.",
+    "The expected dumps were computed from the frozen statements, not captured from files the published binaries wrote; their sqlite_master text is that of node v24.22.1 (SQLite 3.53.4), the runtime of every release image. Comparing them once with files a published binary of each layout creates (sqlite_master, table_info, user_version and journal mode per file) is a separate manual check.",
+    "Legacy and compact guidance settings defaults: {\"generation\":1,\"guidancePaused\":false,\"monitoringPaused\":false,\"allowFollowupRace\":false,\"verifiedServerVersion\":null,\"model\":\"gpt-6-luna\",\"reasoning\":\"high\",\"dailyTokenBudget\":100000,\"evidenceHours\":24,\"maxAnchorAgeSeconds\":60} (0.0.2 .. 0.0.13-nightly) and {\"generation\":1,\"evidenceHours\":24} (0.0.13 .. 0.0.27)."
+  ],
+  "generation": {
+    "tool": "a throwaway generator outside the repository (not shipped, not run by tests): read-only git show of the released sources, node:crypto for hashes, an in-memory node:sqlite for json_set results",
+    "expectedDumps": "computed once by executing <name>.schema.sql then <name>.rows.sql with node:sqlite DatabaseSync (node v24.22.1, SQLite 3.53.4) into a new file after PRAGMA journal_mode=<journalMode>, closing it, and reading it back immutable: sqlite_master ordered by type and name, the creation order, PRAGMA table_info per table, row counts, PRAGMA user_version and the journal mode of the file header",
+    "never": "These files are frozen. They are never regenerated from today's schema constants, serializers or factories; a new layout gets a new directory."
+  },
+  "sha256": {
+    "catalog.schema.sql": "2102a39c15c95fb6d597de8cf6c09327437d32e67b6388bbce9f04f46dddcd59",
+    "catalog.rows.sql": "58c0fd9248b3936a3e58b2bd2bce6efe9ab51df53527883f18de73eb528f6b3d",
+    "catalog.expected.json": "fc66681711a584aff1552ac18e64d6582da516162f970b9db594805ad4e706ee",
+    "guidance.schema.sql": "7a1f5f9da105b5ab973a19c7bc4c8ab0913ea329bb24a33664abe819a587787c",
+    "guidance.rows.sql": "23e60b1a8b342b4dda6de7c74089be9d97626afd3a452564f9783f90bf142606",
+    "guidance.expected.json": "db7730ef924d334a0d50558a8bcefcc28e8f8310d3d2990f630161b47e749446",
+    "thread-settings.schema.sql": "132997bbf075ab06171e460c9aeccf62ea6f71b11a7d26e94dad4728f98aca7f",
+    "thread-settings.rows.sql": "01d4542ae2abc33c585d9ec8fc77d155ec5bdff351aef0e5740f0551b4b0b3a7",
+    "thread-settings.expected.json": "30e080109929898d70b200e0a8d560bd41cc7d17209108d85d453f1c48169fd6",
+    "access-login.schema.sql": "9503c64d46c16cb00e244dac9c80f04d378db45df5a9d4195e4fcdd08dc09d2a",
+    "access-login.rows.sql": "2ef7f0c933bf9b3648678ee6d7ae30656047b5e944359dbcc6b575fabe6b8711",
+    "access-login.expected.json": "7aeda23acb24b62294489d8b0b0f6e18f4f57937eaedeb994d5aa4b1fe08c467"
+  }
+}

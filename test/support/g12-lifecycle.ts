@@ -118,7 +118,7 @@ export const lifecycleOver = (process: LifecycleProcess, natives: LifecycleNativ
 
 /**
  * The project supervision store's layer built again on the process's client with a fresh ownership set, as a second
- * constructor on the same database ran the schema, the one-time reset, the Start recovery and the ownership preload.
+ * constructor on the same database runs the scope check, the Start recovery and the ownership preload.
  */
 export const constructSupervisorStore = (process: LifecycleProcess) =>
   Effect.map(Layer.build(ProjectSupervisorStore.layer.pipe(
@@ -126,11 +126,6 @@ export const constructSupervisorStore = (process: LifecycleProcess) =>
     Layer.provide(Layer.mergeAll(Layer.succeedContext(Context.pick(GuidanceDb, GuidanceStore, SupervisorIds)(process.context)),
       Layer.sync(SupervisorOwnership, () => new Set<string>()))),
   )), (context) => Context.get(context, ProjectSupervisorStore));
-
-/** Another process's guidance client and store on the files of `directory`, closed with the current scope. */
-export const openGuidanceClient = (directory: string): Effect.Effect<GuidanceDb["Service"], never, Scope.Scope> =>
-  Effect.map(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceClient(directory)), Layer.provide(supervisorIds))).pipe(Effect.orDie),
-    (context) => Context.get(context, GuidanceDb));
 
 /** Stops supervision of a chat through the instance thread policy, as the dashboard control and supervision_stop do. */
 export const stopChat = (process: LifecycleProcess, threadId: string): Effect.Effect<void> => Effect.gen(function* () {

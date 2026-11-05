@@ -5,6 +5,7 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { Effect, Exit, FileSystem, Schedule, Scope } from "effect";
 import { defaultSupervisorModel, type TaskRecord } from "../../src/project-supervisor-store.js";
 import type { Projection, SupervisorConfig, ThreadInfo } from "../../src/types.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { appConfig, buildT3Client, readToken, runApp, type AppCatalog } from "./g8-app.js";
 import { temporaryDirectory } from "./g8-auth.js";
 import { within } from "./g8-process.js";
@@ -136,6 +137,11 @@ const completedConversation = (thread: ThreadInfo, request: {id: string; text: s
 export const startupSession = (options: StartupSessionOptions = {}): Effect.Effect<StartupSession, never, Scope.Scope> => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = options.directory ?? (yield* temporaryDirectory("startup-integration-"));
+  /*
+   * the startup coordinator prepares the data directory at the current formats before the application opens any store, as
+   * `t3-supervisor start` does; a restart below finds it current
+   */
+  yield* initializeDataDirectory(directory);
   const workspaceRoot = posix.normalize(join(directory, "workspace"));
   yield* fs.makeDirectory(workspaceRoot);
   const state: NativeReadState = nativeReadState();

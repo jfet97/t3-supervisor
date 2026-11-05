@@ -13,6 +13,7 @@ import {ProjectFileError} from "../src/project-files.js";
 import {forgeDashboardToken} from "../src/service-auth.js";
 import {cancelAfter, within} from "./support/g5a-bounds.js";
 import {guidanceUi} from "./support/service-auth-harness.js";
+import {initializeDataDirectory} from "./support/data-directory.js";
 import type {GuidanceRuntime} from "../src/guidance.js";
 import type {SupervisorConfig} from "../src/types.js";
 import {requiredReferences, type DefinitionReference} from "../src/project-definitions-contract.js";
@@ -231,6 +232,8 @@ it.live("native project writer checks the regular project.yaml target and writes
 
 it.live("project-configuration endpoint keeps session, origin and CSRF checks", () => Effect.gen(function* () {
   const directory = yield* FileSystem.FileSystem.pipe(Effect.flatMap(fs => fs.makeTempDirectoryScoped({prefix: "project-config-api-"})), Effect.provide(NodeFileSystem.layer));
+  // the startup coordinator prepares the data directory at the current formats before the dashboard opens its thread policy
+  yield* initializeDataDirectory(directory);
   const f = makeDefinitionFixture();
   seedProject(f);
   // the dashboard's api handlers yield the definitions and the editor over the in-memory checkout

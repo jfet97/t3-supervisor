@@ -6,6 +6,7 @@ import { Effect, FileSystem, Layer } from "effect";
 import { CatalogDb, catalogDbLayer } from "../src/db.js";
 import { makeStore, Store, StoreError, type StoreShape } from "../src/store.js";
 import type { ProjectInfo, SourceItem, ThreadInfo } from "../src/types.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 
 const project = (id = "project-1", title = "Project one", workspaceRoot = "/work/project-one"): ProjectInfo => ({
   id,
@@ -27,9 +28,12 @@ const sourceItem = (stream: SourceItem["stream"], item: Record<string, unknown>)
 const withStore = <A>(directory: string, use: (store: StoreShape) => Effect.Effect<A, StoreError>): Effect.Effect<A, StoreError> =>
   Effect.scoped(Effect.provide(Store.use(use), Layer.fresh(makeStore(directory))));
 
+// a temporary data directory at the current formats, prepared by the startup coordinator as `t3-supervisor start` does
 const temporaryDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({prefix: "t3-supervisor-catalog-"});
+  const directory = yield* fs.makeTempDirectoryScoped({prefix: "t3-supervisor-catalog-"});
+  yield* initializeDataDirectory(directory);
+  return directory;
 });
 
 const mode = (path: string) => Effect.gen(function* () {
@@ -59,16 +63,20 @@ it.live("activation, catalog shells and source cursors persist in a private cata
   assert.equal(yield* mode(join(directory, "catalog.sqlite3")), 0o600);
 }).pipe(Effect.provide(NodeFileSystem.layer)));
 
-it.live("catalog store creates only the generic T3 and activation tables", () => Effect.gen(function* () {
+it.live("an initialized catalog holds only the generic T3 and activation tables, and opening the store changes no schema", () => Effect.gen(function* () {
   const directory = yield* temporaryDirectory;
-  yield* withStore(directory, store => store.stats());
-  // a separate client on the closed file
-  const tables = yield* Effect.gen(function* () {
+  // the file's schema through a separate client alone, without the store
+  const schema = Effect.gen(function* () {
     const database = yield* CatalogDb;
-    return (yield* database.unsafe<{ readonly name: unknown }>("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"))
-      .map(row => String(row.name));
+    return (yield* database.unsafe<{ readonly type: unknown; readonly name: unknown; readonly sql: unknown }>(
+      "SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"))
+      .map(row => ({ type: String(row.type), name: String(row.name), sql: row.sql }));
   }).pipe(Effect.provide(Layer.fresh(catalogDbLayer(directory))));
-  assert.deepEqual(tables, ["activations", "cursors", "environment_binding", "projects", "shell_coverage", "thread_revisions", "threads"]);
+  const initialized = yield* schema;
+  assert.deepEqual(initialized.filter(entry => entry.type === "table").map(entry => entry.name),
+    ["activations", "cursors", "environment_binding", "projects", "shell_coverage", "thread_revisions", "threads"]);
+  yield* withStore(directory, store => store.stats());
+  assert.deepEqual(yield* schema, initialized, "the store's open created, altered and dropped nothing");
 }).pipe(Effect.provide(NodeFileSystem.layer)));
 
 it.live("metadata enrichment updates projects without replacing inventory or rewinding the cursor", () => Effect.gen(function* () {

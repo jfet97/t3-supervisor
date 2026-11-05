@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { NodeFileSystem } from "@effect/platform-node";
 import { describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, FileSystem } from "effect";
 import { AccessDb, accessDbLayer, CatalogDb, catalogDbLayer } from "../src/db.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 import { withDbFile } from "./support/sql-db-files.js";
 
 const pragmaValue = (rows: ReadonlyArray<unknown>): unknown => Object.values(rows[0] as object)[0];
@@ -13,6 +15,8 @@ describe("CatalogDb", () => {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const directory = join(yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-db-" }), "data");
+      // only the startup upgrade creates the files; the client opens the catalog it left at the current format
+      yield* initializeDataDirectory(directory);
       const observed = yield* Effect.scoped(Effect.gen(function* () {
         const db = yield* CatalogDb;
         const pragmas: Record<string, unknown> = {};
@@ -53,6 +57,7 @@ describe("CatalogDb", () => {
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const directory = join(yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-db-" }), "data");
+        yield* initializeDataDirectory(directory);
         const observed = yield* withDbFile(kind, directory, (db) => Effect.gen(function* () {
           const pragmas: Record<string, unknown> = {};
           for (const name of Object.keys(expected)) pragmas[name] = pragmaValue(yield* db.unsafe(`PRAGMA ${name}`));
@@ -73,8 +78,19 @@ describe("CatalogDb", () => {
       const fs = yield* FileSystem.FileSystem;
       const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-access-db-" });
       const path = join(directory, "login.sqlite3");
-      // the service creates and validates the file before any client opens it; here an empty private file stands in
+      /*
+       * the service creates and validates the file before any client opens it; here an empty private database at the current
+       * access format, with the delete journal, stands in
+       */
       yield* Effect.scoped(fs.open(path, { flag: "a", mode: 0o600 }));
+      yield* Effect.sync(() => {
+        const raw = new DatabaseSync(path);
+        try {
+          raw.exec("PRAGMA journal_mode=DELETE; PRAGMA user_version=1");
+        } finally {
+          raw.close();
+        }
+      });
       const observed = yield* Effect.scoped(Effect.gen(function* () {
         const db = yield* AccessDb;
         const pragmas: Record<string, unknown> = {};

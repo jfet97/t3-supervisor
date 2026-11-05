@@ -4,6 +4,7 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { it } from "@effect/vitest";
 import { Effect, FileSystem, Layer } from "effect";
 import { FetchHttpClient, HttpBody, HttpClient } from "effect/http";
+import { initializeDataDirectory } from "./support/data-directory.js";
 import { appConfig, buildT3Client, fakeT3, runApp } from "./support/g8-app.js";
 import { temporaryDirectory } from "./support/g8-auth.js";
 import { connectRefused, within } from "./support/g8-process.js";
@@ -17,6 +18,8 @@ type McpBody = {result?: {isError?: boolean; content?: Array<{text?: string}>; t
 it.live("SUP-LIVE-01: the running application's workflow MCP endpoint lists nine tools and answers through the run's own write and team controllers", () => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = yield* temporaryDirectory("supervision-live-");
+  // the startup coordinator prepares the data directory at the current formats before the application opens any store
+  yield* initializeDataDirectory(directory);
   const peer = yield* fakeT3;
   const config = yield* appConfig(directory, peer.url);
   const app = yield* runApp(config, yield* buildT3Client(peer.url), () => ({projects: [], threads: []}));

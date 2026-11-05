@@ -1,10 +1,11 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { constants, type BigIntStats } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Cause, Clock, Context, Data, Effect, FileSystem, Layer, Option, type PlatformError, Predicate, PubSub, Redacted, Schema, Scope, Stream } from "effect";
 import type { SqlClient } from "effect/sql";
-import { AccessDb, accessDbLayer, untracedSql } from "./db.js";
+import { isSqlError } from "effect/sql/SqlError";
+import { AccessDb, accessDbLayer, DatabaseFormats, openAccessUpgradeDatabase, readFormat, readOnlyAccessDatabase, readOnlyDatabase, untracedSql, type UpgradeDatabase } from "./db.js";
 import { logEvent } from "./logging.js";
 
 const TOKEN_BYTES = 32;
@@ -319,8 +320,14 @@ const validateDatabase = (db: SqlClient.SqlClient): Effect.Effect<void, ServiceA
 const accessClient = (path: string): Effect.Effect<SqlClient.SqlClient, ServiceAuthUnavailable, Scope.Scope> =>
   Layer.build(accessDbLayer(path)).pipe(Effect.map(Context.get(AccessDb)), Effect.mapError(() => new ServiceAuthUnavailable({ part: "database" })));
 
-// identity before the open (O_NOFOLLOW handle, size bounds, fchmod 0600) and lstat re-check after it, then validation
-const openPrivateDatabase = (fs: FileSystem.FileSystem, path: string): Effect.Effect<SqlClient.SqlClient, ServiceAuthUnavailable, Scope.Scope> =>
+/*
+ * identity before the open (O_NOFOLLOW handle, size bounds, fchmod 0600) and lstat re-check after it, then `check` on the
+ * opened client (the exact validation, unless only the format is read); the client is the current-format access client, the
+ * startup upgrade's unguarded one, or a read-only one for the upgrade's admission
+ */
+const openPrivateClient = <C extends { readonly sql: SqlClient.SqlClient }>(fs: FileSystem.FileSystem, path: string,
+  client: Effect.Effect<C, unknown, Scope.Scope>, check: (db: SqlClient.SqlClient) => Effect.Effect<void, ServiceAuthUnavailable>):
+  Effect.Effect<C, ServiceAuthUnavailable, Scope.Scope> =>
   Effect.gen(function* () {
     const invalid = new ServiceAuthUnavailable({ part: "database" });
     const named = yield* fs.lstat(path);
@@ -342,12 +349,73 @@ const openPrivateDatabase = (fs: FileSystem.FileSystem, path: string): Effect.Ef
       return statIdentity(openedStat);
     }));
 
-    const db = yield* accessClient(path);
+    const opened = yield* client;
     const currentStat = yield* fs.lstat(path);
     if (currentStat.type !== "File" || !sameIdentity(infoIdentity(currentStat), identity)) return yield* invalid;
-    yield* validateDatabase(db);
-    return db;
+    yield* check(opened.sql);
+    return opened;
   }).pipe(Effect.mapError(() => new ServiceAuthUnavailable({ part: "database" })));
+
+// the first bytes of the file as stored, through a handle that does not follow a link
+const fileHeader = (path: string): Effect.Effect<Uint8Array, FileFailure> => Effect.scoped(Effect.flatMap(
+  openHandle(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK),
+  (handle) => handleCall(async () => {
+    const bytes = new Uint8Array(100);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    return bytes.subarray(0, bytesRead);
+  })));
+
+// the journal a database header records: bytes 18 and 19 are 1 for a rollback journal, 2 for a write-ahead log
+const rollbackJournalHeader = (header: Uint8Array): boolean => header.length >= 100 && header[18] === 1 && header[19] === 1;
+
+// what SQLite answers a read-only connection that meets a hot rollback journal: only a connection that can write may roll it back
+const SQLITE_READONLY_ROLLBACK = 776;
+const hotJournal = (error: unknown): boolean =>
+  isSqlError(error) && Predicate.hasProperty(error.reason.cause, "errcode") && error.reason.cause.errcode === SQLITE_READONLY_ROLLBACK;
+
+/*
+ * the admission of an existing access database before any connection that can write it (the upgrade's preflight, the service
+ * and the forge), each client behind the identity checks. Every release wrote it as a rollback-journal file: one whose header
+ * records a write-ahead log has its format read read only, through the log, so a newer one is reported as newer, and is
+ * refused otherwise. A rollback-journal file has its format and, at a format of this Supervisor, the exact validation read on
+ * one locking read-only connection, so a file that is newer or fails validation is never opened for writing, whatever lies
+ * beside it. Only when SQLite itself answers that a hot journal must be rolled back (a write a crash interrupted), and the
+ * file's own header records a format of this Supervisor, does one connection that can write complete that recovery (the write
+ * is rolled back and the journal removed; there is no log to checkpoint) before the read-only admission runs once more.
+ */
+const admitAccessDatabase = (fs: FileSystem.FileSystem, path: string): Effect.Effect<number, ServiceAuthUnavailable> =>
+  Effect.gen(function* () {
+    const unavailable = () => new ServiceAuthUnavailable({ part: "database" });
+    const formatThrough = <E>(client: Effect.Effect<SqlClient.SqlClient, E, Scope.Scope>) => Effect.scoped(Effect.flatMap(
+      openPrivateClient(fs, path, Effect.map(client, (sql) => ({ sql })), () => Effect.void),
+      ({ sql }) => readFormat(sql).pipe(Effect.mapError(unavailable))));
+    if (!rollbackJournalHeader(yield* fileHeader(path).pipe(Effect.mapError(unavailable)))) {
+      const format = yield* formatThrough(readOnlyDatabase(dirname(path), DATABASE_NAME));
+      return format > DatabaseFormats.access ? format : yield* unavailable();
+    }
+    // the hot journal's error is kept as SQLite reported it, so that only it leads to the recovery
+    const readOnlyAdmission = Effect.scoped(Effect.gen(function* () {
+      const { sql } = yield* openPrivateClient(fs, path, Effect.map(readOnlyAccessDatabase(path), (client) => ({ sql: client })), () => Effect.void);
+      const format = yield* readFormat(sql);
+      if (format <= DatabaseFormats.access) yield* validateDatabase(sql);
+      return format;
+    }));
+    return yield* readOnlyAdmission.pipe(Effect.catchIf(hotJournal, () => Effect.gen(function* () {
+      // the format the file's own header records, read immutable: a newer file is reported as it is, never recovered here
+      const format = yield* formatThrough(readOnlyDatabase(dirname(path), DATABASE_NAME));
+      if (format > DatabaseFormats.access) return format;
+      yield* Effect.scoped(openPrivateClient(fs, path, openAccessUpgradeDatabase(path),
+        (db) => readFormat(db).pipe(Effect.asVoid, Effect.mapError(unavailable))));
+      return yield* readOnlyAdmission;
+    })));
+  }).pipe(Effect.mapError(() => new ServiceAuthUnavailable({ part: "database" })));
+
+// the service's and the forge's access client: admitted read only at the current format, then opened and validated again
+const openPrivateDatabase = (fs: FileSystem.FileSystem, path: string): Effect.Effect<SqlClient.SqlClient, ServiceAuthUnavailable, Scope.Scope> =>
+  Effect.gen(function* () {
+    if ((yield* admitAccessDatabase(fs, path)) !== DatabaseFormats.access) return yield* new ServiceAuthUnavailable({ part: "database" });
+    return yield* Effect.map(openPrivateClient(fs, path, Effect.map(accessClient(path), (sql) => ({ sql })), validateDatabase), ({ sql }) => sql);
+  });
 
 // only the service bootstraps: a private temporary file gets the schema through its own short-lived client, is
 // validated, linked under the final name and the directory synced; a concurrent creator's file wins
@@ -369,11 +437,13 @@ const initializeDatabaseFile = (fs: FileSystem.FileSystem, directory: string, di
       yield* handleCall(() => handle.chmod(PRIVATE_FILE_MODE));
     }));
 
+    // the new file gets the current access format with its schema, through the unguarded client a file without it needs
     yield* Effect.scoped(Effect.gen(function* () {
-      const db = yield* accessClient(temporaryPath);
+      const { sql: db } = yield* openAccessUpgradeDatabase(temporaryPath).pipe(Effect.mapError(() => invalid));
       yield* db.unsafe("PRAGMA journal_mode=DELETE");
       yield* db.unsafe(GRANT_TABLE_SCHEMA);
       yield* db.unsafe(SESSION_TABLE_SCHEMA);
+      yield* db.unsafe(`PRAGMA user_version=${DatabaseFormats.access}`);
       yield* validateDatabase(db);
     }));
 
@@ -504,6 +574,56 @@ const makeServiceAuth = (dataDirectory: string): Effect.Effect<ServiceAuth["Serv
 
     return ServiceAuth.of({ login, authenticated, logout, sessionLifetime, mcpAuthorized });
   }).pipe(untracedSql);
+
+// the access database of `dataDirectory` behind its directory's checks, or null without the directory or the file
+const existingAccessPath = (fs: FileSystem.FileSystem, dataDirectory: string): Effect.Effect<string | null, ServiceAuthUnavailable, Scope.Scope> =>
+  Effect.gen(function* () {
+    const unavailable = (part: ServiceAuthPart) => () => new ServiceAuthUnavailable({ part });
+    if (Option.isNone(yield* lstatOption(fs, join(dataDirectory, "access")).pipe(Effect.mapError(unavailable("access directory"))))) return null;
+    yield* openAccessDirectory(fs, dataDirectory, false);
+    const path = join(dataDirectory, "access", DATABASE_NAME);
+    return Option.isNone(yield* lstatOption(fs, path).pipe(Effect.mapError(unavailable("database")))) ? null : path;
+  });
+
+/**
+ * The startup upgrade's preflight of an existing access database (src/database-upgrade.ts): its format after the read-only
+ * admission and, at a format of this Supervisor, its exact validation (see `admitAccessDatabase`); nothing opens it for writing
+ * except the recovery of a write a crash interrupted. Without the directory or the file there is nothing to upgrade (null): the
+ * service's own bootstrap creates a new file at the current format.
+ */
+export const inspectExistingAccessDatabase = (dataDirectory: string): Effect.Effect<number | null, ServiceAuthUnavailable, FileSystem.FileSystem> =>
+  Effect.scoped(Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* existingAccessPath(fs, dataDirectory);
+    return path === null ? null : yield* admitAccessDatabase(fs, path);
+  })).pipe(untracedSql);
+
+/**
+ * The startup upgrade's client on an existing access database for its backup and its format step, in the caller's scope, after
+ * the same admission: a file at a newer format is returned without a client (`database` null) and never opened for writing;
+ * an admitted one is opened with the unguarded client and validated exactly again. It never creates, repairs or bootstraps
+ * anything.
+ */
+export const openExistingAccessDatabase = (dataDirectory: string):
+  Effect.Effect<{ readonly database: UpgradeDatabase | null; readonly format: number } | null, ServiceAuthUnavailable, Scope.Scope | FileSystem.FileSystem> =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* existingAccessPath(fs, dataDirectory);
+    if (path === null) return null;
+    const admitted = yield* admitAccessDatabase(fs, path);
+    if (admitted > DatabaseFormats.access) return { database: null, format: admitted };
+    const database = yield* openPrivateClient(fs, path, openAccessUpgradeDatabase(path), validateDatabase);
+    const format = yield* readFormat(database.sql).pipe(Effect.mapError(() => new ServiceAuthUnavailable({ part: "database" })));
+    return { database, format };
+  }).pipe(untracedSql);
+
+/** Opens an existing access database the way the service and the forge do, at the current format, and releases it. */
+export const verifyAccessDatabase = (dataDirectory: string): Effect.Effect<void, ServiceAuthUnavailable, FileSystem.FileSystem> =>
+  Effect.scoped(Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    yield* openAccessDirectory(fs, dataDirectory, false);
+    yield* openPrivateDatabase(fs, join(dataDirectory, "access", DATABASE_NAME));
+  }).pipe(untracedSql));
 
 // a single-use dashboard grant on an initialized instance, over its own short-lived access client; it never creates
 // the access directory or the database

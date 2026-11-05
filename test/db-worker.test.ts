@@ -9,6 +9,7 @@ import { Cause, Clock, Context, Deferred, Effect, Exit, Fiber, FileSystem, Layer
 import { SqlClient } from "effect/sql";
 import { SqlError } from "effect/sql/SqlError";
 import { CatalogDb, catalogDbLayer, DatabaseWorker, type DatabaseWorkerEntry } from "../src/db.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 import { httpGet, loopTurn } from "./support/g8-process.js";
 
 // the database worker boundary (src/db.ts, src/db-worker-serve.ts) on real worker threads and a real catalog file: the
@@ -39,7 +40,9 @@ const catalog = (directory: string, entry?: DatabaseWorkerEntry): Effect.Effect<
   return entry ? Effect.provideService(build, DatabaseWorker, entry) : build;
 };
 
-const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-db-worker-" }));
+// a data directory the startup upgrade prepared, so the catalog client opens a file at the current format
+const temporaryDirectory = Effect.flatMap(FileSystem.FileSystem, (fs) => fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-db-worker-" })).pipe(
+  Effect.tap((directory) => initializeDataDirectory(directory)));
 
 const createTable = (db: SqlClient.SqlClient) => db.unsafe("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT UNIQUE, b BLOB, n INTEGER)");
 const insert = (db: SqlClient.SqlClient, v: string) => db.unsafe(`INSERT INTO t (v) VALUES ('${v}')`);

@@ -1,8 +1,7 @@
 import { dashboardInvalidation } from "./dashboard-updates.js";
 import { Context, Data, Effect, Layer, Schema } from "effect";
-import { SupervisorConfig as Configuration } from "./config.js";
 import { PolicyDb, untracedSql } from "./db.js";
-import { type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, schemaChanges, type StoredRowScan } from "./guidance-sql.js";
+import { type GuidanceStoreError, mapSqlError, rowFindings, rowKey, rowsOf, type StoredRowScan, tableExists } from "./guidance-sql.js";
 import type { SqlError } from "effect/sql";
 
 import { ThreadPolicy as ThreadPolicyDocument, type ThreadPolicySettings } from "./thread-policy-contract.js";
@@ -44,14 +43,14 @@ export interface ThreadPolicyStoreShape {
   readonly save: (input: ThreadPolicySettings) => Effect.Effect<ThreadPolicySettings, ThreadPolicyStoreError | ThreadPolicyInvalid | ThreadPolicyConflict>;
 }
 
-/** Builds the thread-policy store on the process's PolicyDb client; the seed is written only into a new file. */
-export const makeThreadPolicyStore = (seed: Omit<ThreadPolicySettings, "generation">) => Effect.gen(function* () {
+/**
+ * Builds the thread-policy store on the process's PolicyDb client. The table and its one row exist from the startup upgrade,
+ * which seeds the configured excluded chats only into a genuinely fresh directory; a missing or invalid row is never repaired
+ * here and fails every read as row_invalid.
+ */
+export const makeThreadPolicyStore = () => Effect.gen(function* () {
   const db = yield* PolicyDb;
   const invalidate = yield* dashboardInvalidation(db);
-  yield* policySql(db.withTransaction(Effect.gen(function* () {
-    yield* db.unsafe("CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),document TEXT NOT NULL)");
-    yield* db`INSERT OR IGNORE INTO settings VALUES(1,${JSON.stringify({ generation: 1, ...seed })})`;
-  })));
 
   const get = () => policySql(db`SELECT document FROM settings WHERE id=1`.pipe(
     Effect.flatMap(([row]) => decodePolicyRow(row).pipe(Effect.mapError(rowInvalid))),
@@ -73,20 +72,25 @@ export const makeThreadPolicyStore = (seed: Omit<ThreadPolicySettings, "generati
   return ThreadPolicyStore.of({ get, save });
 }).pipe(untracedSql);
 
-/** The thread-policy store on the process's PolicyDb client, seeded from the configured excluded chat ids. */
+/** The thread-policy store on the process's PolicyDb client. */
 export class ThreadPolicyStore extends Context.Service<ThreadPolicyStore, ThreadPolicyStoreShape>()("t3-supervisor/ThreadPolicyStore") {
-  static readonly layer: Layer.Layer<ThreadPolicyStore, ThreadPolicyStoreError, PolicyDb | Configuration> = Layer.effect(ThreadPolicyStore,
-    Effect.flatMap(Configuration, (config) => makeThreadPolicyStore({ excludedThreadIds: config.excludedThreadIds })));
+  static readonly layer: Layer.Layer<ThreadPolicyStore, never, PolicyDb> = Layer.effect(ThreadPolicyStore, makeThreadPolicyStore());
 }
 
 /**
  * The rollout scan of thread-settings.sqlite3 (read only): the stored policy row through the decoder of every read, which each
- * supervision cycle and Stop check performs; a missing table or row is created at open with the configured seed.
+ * supervision cycle and Stop check performs. Only the startup upgrade of a genuinely fresh directory creates the table and seeds
+ * the row; an existing directory without them is refused.
  */
 export const checkThreadPolicyRows: Effect.Effect<StoredRowScan, SqlError.SqlError | GuidanceStoreError, PolicyDb> = Effect.gen(function* () {
   const db = yield* PolicyDb;
   const rows = yield* rowsOf(db, "settings", "SELECT id,document FROM settings");
   const findings = yield* rowFindings(rows, { table: "settings", kind: "thread policy", problem: "undecodable", read: "cycle" }, (row) => rowKey(row, ["id"]), decodePolicyRow);
-  const changes = yield* schemaChanges(db, "settings");
-  return { findings, changes: rows.length === 0 && changes.length === 0 ? [{ table: "settings", change: "policy row seeded from the configured excluded chats", rows: 0 }] : changes };
+  /*
+   * a policy table without its row is never reseeded: the startup upgrade refuses it (a table-less file is the upgrade's to judge:
+   * part of a fresh directory, or a missing policy beside existing state)
+   */
+  const missing = rows.length === 0 && (yield* tableExists(db, "settings"))
+    ? [{ table: "settings", kind: "thread policy", key: "1", problem: "incompatible" as const, read: "open" as const }] : [];
+  return { findings: [...findings, ...missing], changes: [] };
 });

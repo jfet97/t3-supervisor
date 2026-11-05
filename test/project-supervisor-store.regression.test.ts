@@ -18,7 +18,7 @@ const live = <A, E, R>(body: Effect.Effect<A, E, R>) => body.pipe(Effect.provide
 const interruptedStartReason = "Start intake was interrupted before permission was reserved. Submit a new explicit request.";
 const metaRows = (sql: SqlClient.SqlClient) => Effect.map(sql.unsafe<{key: string; value: string}>("SELECT key,value FROM meta ORDER BY key"),
   (rows) => rows.map((row): [string, string] => [row.key, row.value]));
-// the supervision meta rows, without the guidance store's own settings row that its layer writes first
+// the supervision meta rows, without the guidance store's own settings row that the data directory's initialization writes
 const supervisionMetaRows = (sql: SqlClient.SqlClient) => Effect.map(metaRows(sql), (rows) => rows.filter(([key]) => key !== "settings"));
 const tableRows = (sql: SqlClient.SqlClient, table: string) => Effect.map(sql.unsafe<Record<string, unknown>>(`SELECT * FROM ${table} ORDER BY rowid`), (rows) => rows.map((row) => ({...row})));
 const documentOf = (sql: SqlClient.SqlClient, mainThreadId: string) =>

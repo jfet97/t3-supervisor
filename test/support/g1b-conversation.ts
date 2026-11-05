@@ -26,6 +26,7 @@ import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js"
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { fakeNativeLayer } from "./native-access.js";
 
 // the g1b conversation suites' processes: the production conversation, admission gate, workflow state and supervision stores of a
@@ -36,10 +37,15 @@ import { fakeNativeLayer } from "./native-access.js";
 /** The wall clock of a suite whose services read the real clock: a fixed instant after every time its fixtures record. */
 export const wallClock = Date.parse("2026-10-23T10:00:00.000Z");
 
-/** A temporary data directory, removed with the scope. */
+/**
+ * A temporary data directory at the current formats, with no excluded chat, prepared by the startup coordinator
+ * (test/support/data-directory.ts) as `t3-supervisor start` prepares it before any store opens it; removed with the scope.
+ */
 export const temporaryDirectory = (prefix: string): Effect.Effect<string, never, Scope.Scope> => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix });
+  yield* initializeDataDirectory(directory);
+  return directory;
 }).pipe(Effect.orDie, Effect.provide(NodeFileSystem.layer));
 
 /**

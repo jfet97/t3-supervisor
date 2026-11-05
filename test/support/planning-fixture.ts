@@ -34,8 +34,7 @@ export const planningFixture = (rpc?: NativeRpcShape, options: {
 } = {}) => Effect.gen(function* () {
   const directory = yield* temporaryDirectory("planning-controller-");
   const stores = yield* supervisionStores(directory);
-  const policy = Context.get(yield* Layer.build(policyLayer({dataDirectory: directory, t3Url: "http://unused", t3TokenFile: "unused",
-    excludedThreadIds: [], healthPort: 0})), ThreadPolicyStore);
+  const policy = Context.get(yield* Layer.build(policyLayer(directory)), ThreadPolicyStore);
   const binding = {...yield* stores.supervisors.reserve("project", "main", "main", defaultSupervisorModel, 1, 1), state: "ready" as const};
   yield* stores.supervisors.setBinding(binding);
   let task: TaskRecord = {id: "task-a", sourceHash: fingerprint("Update the application"), threadId: "main", projectId: "project", sourceRunId: "source-run",

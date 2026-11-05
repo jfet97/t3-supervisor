@@ -24,13 +24,14 @@ import { SupervisorTeamRuntime } from "../../src/supervisor-team-runtime.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { T3Client, T3TransportError, type T3ClientShape } from "../../src/t3.js";
 import { T3Native, T3ReadError } from "../../src/t3-native/index.js";
-import { makeThreadPolicyStore, ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
+import { ThreadPolicyStore, type ThreadPolicyStoreError } from "../../src/thread-policy.js";
 import type { Projection, SupervisorSettings, ThreadInfo } from "../../src/types.js";
 import { WorkflowStateStore } from "../../src/workflow-state-store.js";
 import {
   WorkflowNativeAccess, WorkflowWriteController, type SupervisionStartInput, type SupervisionStartResult, type SupervisionStopInput, type SupervisionStopResult,
   type WorkflowNativeAccessShape,
 } from "../../src/workflow-write-controller.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { installSubmission, submissionDetail, type SubmissionItemOptions } from "./interpretation-submit.js";
 import { fakeNative } from "./native-access.js";
 
@@ -106,10 +107,16 @@ const clockAt = (now: () => number) => Effect.clockWith((current) => Effect.succ
 export const atWallClock = (now: number | undefined) => <A, E, R>(work: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
   now === undefined ? work : Effect.flatMap(clockAt(() => now), (clock) => Effect.provideService(work, Clock.Clock, clock));
 
-/** A fresh temporary data directory, removed when the current scope closes. */
+/**
+ * A fresh temporary data directory at the current formats, with no excluded chat, prepared by the startup coordinator
+ * (test/support/data-directory.ts) as `t3-supervisor start` prepares it before any store opens it; removed when the current
+ * scope closes.
+ */
 export const dataDirectory = Effect.fnUntraced(function* (prefix: string) {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({prefix});
+  const directory = yield* fs.makeTempDirectoryScoped({prefix});
+  yield* initializeDataDirectory(directory);
+  return directory;
 }, Effect.provide(NodeFileSystem.layer), Effect.orDie);
 
 /** The services of one supervision run's stores. */
@@ -118,9 +125,8 @@ export type StoreServices = GuidanceDb | SupervisorIds | GuidanceStore | Supervi
 
 const ids = SupervisorIds.layer.pipe(Layer.provide(NodeCrypto.layer));
 
-// thread-settings.sqlite3 of `directory` and its store, seeded with no excluded chat
-const policyLayer = (directory: string) => Layer.effect(ThreadPolicyStore, makeThreadPolicyStore({excludedThreadIds: []})).pipe(
-  Layer.provide(policyDbLayer(directory)), Layer.provide(NodeFileSystem.layer));
+// thread-settings.sqlite3 of `directory` and its store; the stored policy is the one the directory was initialized with
+const policyLayer = (directory: string) => ThreadPolicyStore.layer.pipe(Layer.provide(policyDbLayer(directory)), Layer.provide(NodeFileSystem.layer));
 
 // guidance.sqlite3 of `directory` with the guidance store, then the supervision stores of one run in their production order
 // (src/supervision-live.ts) over the ownership set, beside the run's thread-policy store

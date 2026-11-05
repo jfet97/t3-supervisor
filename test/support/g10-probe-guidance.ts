@@ -6,6 +6,7 @@ import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
 import { NativeEnvelope } from "../../src/native-envelope.js";
 import { startFakeTerminalT3, type ProbeStatus } from "./c3a-fake-terminal-t3.js";
+import { initializeDataDirectory } from "./data-directory.js";
 import { fileNative } from "./native-file-access.js";
 
 // the git probe's guidance metadata and the production probe over a loopback T3, for the native file and probe suites (g10)
@@ -19,12 +20,13 @@ export const nativeGitProbe = (url: string, token: string) =>
 
 /**
  * The run's guidance client and store on a fresh temporary data directory, composed as src/guidance-application.ts composes
- * them; the store's layer creates the meta table the probe keeps its pending sessions in. Both close with the caller's scope,
- * before the directory is removed.
+ * them; the startup coordinator prepared the directory at the current formats (test/support/data-directory.ts), with the meta
+ * table the probe keeps its pending sessions in. Both close with the caller's scope, before the directory is removed.
  */
 export const probeGuidance = (prefix: string) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const directory = yield* fs.makeTempDirectoryScoped({ prefix });
+  yield* initializeDataDirectory(directory);
   const guidance = yield* Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer)));
   const sql = Context.get(guidance, GuidanceDb);
   return {

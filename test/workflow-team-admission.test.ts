@@ -13,7 +13,7 @@ import { WorkflowStateStore } from "../src/workflow-state-store.js";
 import { WorkflowNativeAccess, WorkflowWriteController } from "../src/workflow-write-controller.js";
 import { workflowToolNames } from "../src/workflow-write-evidence.js";
 import { fakeNative } from "./support/native-access.js";
-import { openGuidance, openSupervisors, openWorkflows, temporaryDirectory, type StoreOpen } from "./support/psx-stores.js";
+import { dataDirectory, openGuidance, openSupervisors, openWorkflows, type StoreOpen } from "./support/psx-stores.js";
 
 // CT-LIN-08 (target regression, plan 3.11): the workflow_write commit, a supervision_team mutation and a guide's reservation and
 // steer each run as one admission section. A writer that asks for the section while a Stop holds it waits: its guard reads the
@@ -33,7 +33,7 @@ class StopScope extends SupervisionScope {
 }
 
 const setup = Effect.gen(function* () {
-  const directory = yield* temporaryDirectory("workflow-team-admission-");
+  const directory = yield* dataDirectory("workflow-team-admission-");
   const scope = yield* Scope.make();
   let closed = false;
   const close = Effect.gen(function* () {

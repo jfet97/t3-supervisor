@@ -1,7 +1,6 @@
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node";
 import { Context, Effect, Exit, FileSystem, Layer, Scope } from "effect";
 import type { SqlClient } from "effect/sql";
-import { SupervisorConfig as Configuration } from "../../src/config.js";
 import { GuidanceDb, guidanceDbLayer, policyDbLayer } from "../../src/db.js";
 import { GuidanceStore } from "../../src/guidance-store.js";
 import { SupervisorIds } from "../../src/ids.js";
@@ -12,16 +11,23 @@ import { ProjectSupervisorMonitorStore } from "../../src/supervisor-monitor-stor
 import { SupervisorStateReset } from "../../src/supervisor-state-reset.js";
 import { SupervisorTeamStore } from "../../src/supervisor-team-store.js";
 import { ThreadPolicyStore } from "../../src/thread-policy.js";
-import type { SupervisorSettings } from "../../src/types.js";
+import { initializeDataDirectory } from "./data-directory.js";
 
 // the stores of the g11 suites on a temporary data directory, each built through its production layer: the run's guidance
 // client and store (src/db.ts, src/guidance-store.ts), the supervision stores over them in the run's order
-// (SupervisionStoresLive of src/supervision-live.ts) and the process's thread-policy store on its own client
+// (SupervisionStoresLive of src/supervision-live.ts) and the process's thread-policy store on its own client. The directory
+// is initialized once at the current formats through the startup coordinator (test/support/data-directory.ts), as
+// `t3-supervisor start` prepares it before any store opens it
 
-/** A fresh temporary data directory, removed with the test scope. */
-export const temporaryDirectory = (prefix: string) => Effect.gen(function* () {
+/**
+ * A fresh temporary data directory at the current formats, its thread policy seeded with `excludedThreadIds` (none unless
+ * given), removed with the test scope.
+ */
+export const temporaryDirectory = (prefix: string, options: { readonly excludedThreadIds?: ReadonlyArray<string> } = {}) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix });
+  yield* Effect.orDie(initializeDataDirectory(directory, options));
+  return directory;
 }).pipe(Effect.provide(NodeFileSystem.layer));
 
 /** The platform's v4 identities, as the root provides them. */
@@ -71,9 +77,9 @@ export const openSupervisionStores = (directory: string, owned: Set<string> = ne
 export const supervisionStores = (directory: string, owned: Set<string> = new Set()) =>
   Effect.acquireRelease(openSupervisionStores(directory, owned), (stores) => stores.close);
 
-/** The process's thread-policy store of `settings` on its own client of thread-settings.sqlite3. */
-export const policyLayer = (settings: SupervisorSettings) => Layer.fresh(ThreadPolicyStore.layer.pipe(
-  Layer.provide(policyDbLayer(settings.dataDirectory)), Layer.provide(Layer.succeed(Configuration, settings)), Layer.provide(NodeFileSystem.layer)));
+/** The process's thread-policy store of `directory` on its own client of thread-settings.sqlite3. */
+export const policyLayer = (directory: string) => Layer.fresh(ThreadPolicyStore.layer.pipe(
+  Layer.provide(policyDbLayer(directory)), Layer.provide(NodeFileSystem.layer)));
 
 /** Runs one statement on a client, as a suite's direct write to the file. */
 export const execute = (sql: SqlClient.SqlClient, statement: string, ...params: ReadonlyArray<unknown>): Effect.Effect<void> =>

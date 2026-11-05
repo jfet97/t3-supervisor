@@ -18,8 +18,8 @@ const rejects = <A, E>(effect: Effect.Effect<A, E>, expected: { readonly message
   });
 
 it.effect("CT-POLICY-01: two stores on one file saving the same generation concurrently commit exactly one", () => Effect.gen(function* () {
-  const directory = yield* dataDirectory("c1-policy-");
-  yield* withThreadPolicy(directory, ["seed"], (first) => withThreadPolicy(directory, ["ignored-seed"], (second) => Effect.gen(function* () {
+  const directory = yield* dataDirectory("c1-policy-", { excludedThreadIds: ["seed"] });
+  yield* withThreadPolicy(directory, (first) => withThreadPolicy(directory, (second) => Effect.gen(function* () {
     const base = yield* first.get();
     assert.deepEqual(yield* second.get(), base);
     const results = yield* Effect.all([
@@ -46,8 +46,8 @@ it.effect("CT-POLICY-01: two stores on one file saving the same generation concu
 }), { timeout: 10_000 });
 
 it.effect("CT-POLICY-01: concurrent saves of the same generation commit exactly one, and the loser saves after reloading", () => Effect.gen(function* () {
-  const directory = yield* dataDirectory("c1-policy-");
-  yield* withThreadPolicy(directory, ["seed"], (store) => Effect.gen(function* () {
+  const directory = yield* dataDirectory("c1-policy-", { excludedThreadIds: ["seed"] });
+  yield* withThreadPolicy(directory, (store) => Effect.gen(function* () {
     const base = yield* store.get();
     // a yield every eight operations interleaves the two fibers wherever the save is not a single statement
     const results = yield* Effect.all([
@@ -72,7 +72,7 @@ it.effect("CT-POLICY-01: concurrent saves of the same generation commit exactly 
 
 it.effect("CT-POLICY-02: 501 ids, a 513-character id and an id with a tab are rejected with the exact message and write nothing", () => Effect.gen(function* () {
   const directory = yield* dataDirectory("c1-policy-");
-  yield* withThreadPolicy(directory, [], (store) => Effect.gen(function* () {
+  yield* withThreadPolicy(directory, (store) => Effect.gen(function* () {
     const base = yield* store.get();
     const many = (count: number) => Array.from({ length: count }, (_, index) => `chat-${index}`);
     assert.ok((yield* rejects(store.save({ ...base, excludedThreadIds: many(501) }), invalidIds)) instanceof ThreadPolicyInvalid);

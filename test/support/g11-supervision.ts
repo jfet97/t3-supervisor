@@ -41,6 +41,6 @@ export const forbiddenNatives = (catalog: Pick<StoreShape, "catalog">) => {
 export const supervisionRun = (config: SupervisorConfig, natives: ReturnType<typeof forbiddenNatives>) =>
   SupervisionLive({ operateRpcAvailable: true }).pipe(
     Layer.provideMerge(natives),
-    Layer.provideMerge(Layer.mergeAll(supervisionStoresLayer(config.dataDirectory), policyLayer(config), Layer.succeed(Configuration, config))),
+    Layer.provideMerge(Layer.mergeAll(supervisionStoresLayer(config.dataDirectory), policyLayer(config.dataDirectory), Layer.succeed(Configuration, config))),
     // the run's own ids draw from the platform crypto
     Layer.provide(NodeCrypto.layer));

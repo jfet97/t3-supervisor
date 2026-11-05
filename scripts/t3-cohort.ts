@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { join, posix } from "node:path";
 import { NodeCrypto, NodeFileSystem, NodeRuntime } from "@effect/platform-node";
 import { Cause, Clock, Console, Context, Crypto, Data, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Ref, Result, Schedule, Schema } from "effect";
+import { upgradeDataDirectory } from "../src/database-upgrade.js";
 import { guidanceDbLayer } from "../src/db.js";
 import { GitProbe } from "../src/git-probe.js";
 import { GuidanceStore } from "../src/guidance-store.js";
@@ -567,10 +568,15 @@ export const setupScaffold = [
 
 type Catalog = {readonly _tag: "Ready"; readonly store: StoreShape; readonly root: string} | {readonly _tag: "Failed"; readonly result: Classified};
 
-// Supervisor's catalog store fed by the read credential's shell watch until it connected, as Supervisor's root ingests T3 (src/supervisor.ts)
+/*
+ * Supervisor's catalog store fed by the read credential's shell watch until it connected, as Supervisor's root ingests T3 (src/supervisor.ts);
+ * its fresh data directory is first prepared by the startup upgrade, as the service's first start prepares one
+ */
 const catalogOf = (ctx: ProbeContext) => Effect.gen(function* () {
   const failed = (result: Classified): Catalog => ({_tag: "Failed", result});
-  const built = yield* Effect.result(Layer.build(makeStore(ctx.stack.run.dir("cohort", "catalog"))));
+  const directory = ctx.stack.run.dir("cohort", "catalog");
+  const built = yield* Effect.result(upgradeDataDirectory({dataDirectory: directory, excludedThreadIds: []}).pipe(
+    Effect.andThen(Layer.build(makeStore(directory)))));
   if (Result.isFailure(built)) return failed(harness("the probe's catalog store could not be opened"));
   const store = Context.get(built.success, Store);
   const connected = yield* Deferred.make<void>();
@@ -672,9 +678,13 @@ const gitProbeStep = (ctx: ProbeContext, root: string) => runStep(ctx, "git-prob
   const python = yield* onT3Path(ctx.stack, "python3");
   const stty = yield* onT3Path(ctx.stack, "stty");
   if (!python || !stty) return finished<never>(harness(`python3 on T3's PATH ${python}, stty on T3's PATH ${stty}`));
-  // the probe keeps its pending sessions in a guidance database of its own, composed as src/guidance-application.ts composes the run's
-  const guidance = yield* Effect.result(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(ctx.stack.run.dir("cohort", "guidance"))),
-    Layer.provide(SupervisorIds.layer))));
+  /*
+   * the probe keeps its pending sessions in a guidance database of its own, in a fresh data directory the startup upgrade prepares as
+   * the service's first start does, composed as src/guidance-application.ts composes the run's
+   */
+  const directory = ctx.stack.run.dir("cohort", "guidance");
+  const guidance = yield* Effect.result(upgradeDataDirectory({dataDirectory: directory, excludedThreadIds: []}).pipe(
+    Effect.andThen(Layer.build(GuidanceStore.layer.pipe(Layer.provideMerge(guidanceDbLayer(directory)), Layer.provide(SupervisorIds.layer))))));
   if (Result.isFailure(guidance)) return finished<never>(harness("the probe's guidance database could not be opened"));
   const probe = yield* GitProbe.make(terminal).pipe(Effect.provide(guidance.success));
   const fresh = yield* Effect.result(probe.probe(root));

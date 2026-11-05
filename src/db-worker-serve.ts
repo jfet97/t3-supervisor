@@ -11,14 +11,21 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type { Connection } from "effect/sql/SqlConnection";
 import { isSqlError, SqlError, UnknownError } from "effect/sql/SqlError";
 import { WorkerRunnerPlatform } from "effect/workers/WorkerRunner";
-import { malformedRequestId, type WorkerReply, WorkerRequest, workerFailure } from "./db-worker-protocol.js";
+import { type BackupMetadata, malformedRequestId, type WorkerReply, WorkerRequest, workerFailure } from "./db-worker-protocol.js";
 
 // the worker side of one database client (src/db.ts): it opens the file with the same sqlite client the main thread used
 // to open in-process, leases that client's single connection for the worker's lifetime and runs the main thread's
 // statements on it one at a time. synchronous sqlite work and busy waits block only this thread. a reply never carries sql
-// text, values or native messages, and no handler fails, so the runner never logs a cause
+// text, values or native messages, and no handler fails, so the runner never logs a cause.
+//
+// a backup runs on that leased connection too: the stock client's own backup would lease the connection again and wait for
+// the lease this worker holds for its lifetime, so the worker calls the connection's backup (SQLite's online backup API)
+// directly, inside the same one-request-at-a-time permit, so no statement of the main thread interleaves with it
 
-type SqliteConnection = Connection & {readonly isTransaction: () => boolean};
+type SqliteConnection = Connection & {
+  readonly isTransaction: () => boolean;
+  readonly backup: (destination: string) => Effect.Effect<BackupMetadata, SqlError>;
+};
 
 const unexpected = (message: string): SqlError =>
   new SqlError({reason: new UnknownError({cause: "worker_defect", message, operation: "worker"})});
@@ -35,6 +42,18 @@ export const serveDatabase: Effect.Effect<void, unknown, WorkerRunnerPlatform> =
   const inTransaction = () => connection?.isTransaction() ?? false;
 
   const run = (request: WorkerRequest): Effect.Effect<unknown, SqlError> => {
+    /*
+     * the admission read: a read-only client of its own, closed before the reply, so it never writes the file or its log,
+     * never checkpoints and removes nothing; only then may the main thread send the open
+     */
+    if (request.op === "format") {
+      if (connection) return Effect.fail(unexpected("The database worker reads a format only before it opens"));
+      return Effect.scoped(Effect.gen(function* () {
+        const client = yield* SqliteClient.make({filename: request.filename, readonly: true, disableWAL: true,
+          busyTimeout: Duration.millis(request.busyTimeoutMs)});
+        return yield* client.unsafe("PRAGMA user_version");
+      })).pipe(Effect.provide(Reactivity.layer));
+    }
     if (request.op === "open") {
       if (connection) return Effect.fail(unexpected("The database worker is already open"));
       return Effect.gen(function* () {
@@ -45,6 +64,10 @@ export const serveDatabase: Effect.Effect<void, unknown, WorkerRunnerPlatform> =
     }
     const current = connection;
     if (!current) return Effect.fail(unexpected("The database worker is not open"));
+    // a backup is a snapshot of committed state only: inside an open transaction it would copy the transaction's own changes
+    if (request.op === "backup") return current.isTransaction()
+      ? Effect.fail(unexpected("The database worker cannot back up inside a transaction"))
+      : current.backup(request.destination);
     const statement = ((): Effect.Effect<unknown, SqlError> => {
       switch (request.op) {
         case "execute": return current.execute(request.sql, request.params, undefined);

@@ -7,14 +7,18 @@ import type { SqlClient } from "effect/sql";
 import { CatalogDb, catalogDbLayer } from "../src/db.js";
 import { Store } from "../src/store.js";
 import { repositoryRoot, tsxLoader } from "./support/cli-process.js";
+import { initializeDataDirectory } from "./support/data-directory.js";
 import { type DbFile, dbFiles, withDbFile } from "./support/sql-db-files.js";
 
 // target-regression sql semantics of the catalog, guidance and thread-settings clients on the real driver (plan 3.2 rules
 // 4, 6 and 7), each opened through its production layer
 
+// a temporary data directory at the current formats, prepared by the startup coordinator as `t3-supervisor start` does
 const temporaryDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
-  return yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-sql-" });
+  const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-supervisor-sql-" });
+  yield* initializeDataDirectory(directory);
+  return directory;
 });
 
 const withDb = <A, E>(file: DbFile, use: (db: SqlClient.SqlClient) => Effect.Effect<A, E>) =>

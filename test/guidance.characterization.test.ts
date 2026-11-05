@@ -20,7 +20,7 @@ import { appConfig, fakeT3, probeToken, runApp, t3Client, type AppCatalog } from
 import { definitionsOf, grant, listeners, processStores, readCsrf, runtimeOver, signIn, startUi, uiConfig, workflowController, type StartedUi } from "./support/g11-dashboard.js";
 import { blockedPort, connectRefused, exchange, exchangeJson, freePort, jsonBody, openDescriptors, openRequest, portBindable, rawRequest, within,
   type ExchangeInit, type RawResponse } from "./support/g11-http.js";
-import { execute, guidanceClient, guidanceLayer, row, rows, temporaryDirectory } from "./support/g11-stores.js";
+import { execute, guidanceClient, guidanceLayer, row, temporaryDirectory } from "./support/g11-stores.js";
 
 // the c3b characterizations of the dashboard, its stores and the running guidance application on the production layers:
 // the stores and the runtime over temporary database files, the listeners on loopback ports and the application over a
@@ -224,38 +224,10 @@ it.live("CT-APP-03: a failed descriptor read marks the dashboard disconnected wi
   assert.equal(app.rootSleeps(), 3, "no cycle ran without a clock adjustment");
 }), {timeout: 10_000});
 
-const recoveryRows = (sql: SqlClient.SqlClient) => rows(sql,
-  "SELECT json_extract(document,'$.noticeId') AS noticeId, json_extract(document,'$.state') AS state, json_extract(document,'$.episodeEpoch') AS epoch FROM activity WHERE json_extract(document,'$.reason')='process_recovery' ORDER BY noticeId",
-);
-
-it.live("CT-GDB-02: opening a pre-migration database adds the episode and notice generation columns with defaults and keeps the rows", () => Effect.gen(function* () {
-  const directory = yield* temporaryDirectory("c3b-gdb-migrate-");
-  yield* files((fs) => fs.makeDirectory(directory, {recursive: true}));
-  yield* withClient(directory, (legacy) => Effect.gen(function* () {
-    yield* execute(legacy, `CREATE TABLE episodes(thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,epoch INTEGER NOT NULL DEFAULT 0,
-      notified INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(thread_id,rule_id))`);
-    yield* execute(legacy, `CREATE TABLE notices(id TEXT PRIMARY KEY,thread_id TEXT NOT NULL,rule_id TEXT NOT NULL,run_id TEXT NOT NULL,
-      epoch INTEGER NOT NULL,state TEXT NOT NULL,text TEXT NOT NULL,message_id TEXT,created_at INTEGER NOT NULL,
-      dispatch_started INTEGER NOT NULL DEFAULT 0)`);
-    yield* execute(legacy, "INSERT INTO episodes VALUES(?,?,?,?)", "thread-a", "rule-a", 7, 1);
-    yield* execute(legacy, "INSERT INTO notices VALUES(?,?,?,?,?,?,?,?,?,?)", "notice-a", "thread-a", "rule-a", "run-a", 7, "visible", "legacy text", "message-a", 5_000, 1);
-  }));
-
-  yield* withStore(directory, (_store, sql) => Effect.gen(function* () {
-    const columns = (table: string) => Effect.map(rows(sql, `PRAGMA table_info(${table})`), (found) => found.map(item => [item.name, item.dflt_value, item.notnull]));
-    assert.deepEqual((yield* columns("episodes")).at(-1), ["object_id", null, 0]);
-    assert.deepEqual((yield* columns("notices")).slice(-2), [["rule_generation", "-1", 1], ["settings_generation", "-1", 1]]);
-    assert.deepEqual(yield* row(sql, "SELECT * FROM episodes"), {thread_id: "thread-a", rule_id: "rule-a", epoch: 7, notified: 1, object_id: null});
-    assert.deepEqual(yield* row(sql, "SELECT * FROM notices"), {id: "notice-a", thread_id: "thread-a", rule_id: "rule-a", run_id: "run-a", epoch: 7,
-      state: "visible", text: "legacy text", message_id: "message-a", created_at: 5_000, dispatch_started: 1, rule_generation: -1, settings_generation: -1});
-    assert.deepEqual(yield* recoveryRows(sql), []);
-  }));
-  // a second open finds the columns present and alters nothing
-  yield* withStore(directory, (_again, sql) => Effect.gen(function* () {
-    assert.equal((yield* rows(sql, "PRAGMA table_info(notices)")).length, 12);
-    assert.equal((yield* rows(sql, "PRAGMA table_info(episodes)")).length, 5);
-  }));
-}), {timeout: 10_000});
+/*
+ * CT-GDB-02's rule, the episode and notice generation columns a pre-migration file gains once with their defaults while it keeps
+ * its rows, is the guidance format 1 step of the startup upgrade (test/database-migrations.test.ts); the store's open adds none
+ */
 
 const securityHeaders = {"cache-control": "no-store", "x-content-type-options": "nosniff", "x-frame-options": "DENY",
   "referrer-policy": "no-referrer", "cross-origin-resource-policy": "same-origin"};

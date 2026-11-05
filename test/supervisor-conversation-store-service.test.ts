@@ -286,20 +286,16 @@ describe("SupervisorConversationStore", () => {
     assert.deepEqual(observed, { left: [0, 0, 0], before: [null, 0, 0], last: 20, misses: [1, 2, 2, 0, 1] });
   }), { timeout: 10_000 });
 
-  it.live("a prepare inside the caller's transaction rolls back with it and the layer adds the review_misses column to an older clock table", () => Effect.gen(function* () {
+  // the review_misses column an older clock table gains is the guidance format 1 step (test/database-migrations.test.ts)
+  it.live("a prepare inside the caller's transaction rolls back with it", () => Effect.gen(function* () {
     const directory = yield* temporaryDirectory;
-    yield* withStore(directory, (_store, db) => Effect.gen(function* () {
-      yield* db.unsafe("DROP TABLE supervisor_monitor_binding_clock");
-      yield* db.unsafe("CREATE TABLE supervisor_monitor_binding_clock(supervisor_thread_id TEXT PRIMARY KEY,last_notice_at INTEGER NOT NULL)");
-      yield* db`INSERT INTO supervisor_monitor_binding_clock VALUES('supervisor-a',5)`;
-    }).pipe(Effect.orDie));
     const observed = yield* withStore(directory, (store, db) => Effect.gen(function* () {
       const failed = yield* Effect.flip(db.withTransaction(Effect.gen(function* () {
         yield* store.prepare(reviewInput("supervisor-a"), baseTime);
         return yield* Effect.fail("caller failed" as const);
       })));
-      return { failed, rows: yield* requestCount(db), clock: yield* rows(db, "SELECT * FROM supervisor_monitor_binding_clock"), misses: yield* store.missedReview("supervisor-a") };
+      return { failed, rows: yield* requestCount(db), pending: yield* store.pending(projectId, "supervisor-a") };
     }));
-    assert.deepEqual(observed, { failed: "caller failed", rows: 0, clock: [{ supervisor_thread_id: "supervisor-a", last_notice_at: 5, review_misses: 0 }], misses: 1 });
+    assert.deepEqual(observed, { failed: "caller failed", rows: 0, pending: null });
   }), { timeout: 10_000 });
 });
