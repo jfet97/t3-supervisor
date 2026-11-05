@@ -1,0 +1,418 @@
+# Published Supervisor upgrades (docs/ci.md, "Published Supervisor upgrades"): the provider-free upgrade journeys from the latest stable
+# and the latest published nightly Supervisor, each run from its official image by digest, and the current-format baseline, through the
+# same ./dev command contributors run. Each journey runs against the stable slot of one frozen T3 target lock and never crosses the T3
+# matrix. It runs as the daily advisory canary, as a manual reproduction from new locks or an earlier run's frozen locks, and as the
+# version PR's gate, which check.yml calls. The lock job resolves both locks once and every journey runs from exactly those bytes. Its
+# only credential is the automatic read-only workflow token, which only the T3 resolve step hands to ./dev and only the earlier-lock job
+# uses to read another run's artifact.
+name: Published Supervisor upgrades
+
+on:
+  # the advisory canary: never part of the check aggregate and never a release gate; GitHub's ordinary notifications are its alert
+  schedule:
+    - cron: '11 6 * * *'
+      timezone: Europe/Rome
+  workflow_dispatch:
+    inputs:
+      journeys:
+        description: The journeys to run, all or a comma-separated list of stable, nightly and baseline
+        type: string
+        default: all
+        required: true
+      lock_run:
+        description: The ID of an earlier run whose frozen upgrade-lock artifact the journeys run from; empty resolves new locks
+        type: string
+        default: ''
+        required: false
+  # the version PR's gate (check.yml): every journey, from new locks
+  workflow_call:
+    inputs:
+      gate:
+        description: Run the version PR's gate
+        type: boolean
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  # a manual reproduction's frozen locks from an earlier run: that run's upgrade-lock artifact, read with this job's read-only token and
+  # handed to the lock job unchanged. It is the only job that reads another run's artifacts, and it runs nothing
+  earlier-lock:
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.gate && inputs.lock_run != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Fetch the earlier run's frozen locks
+        uses: actions/download-artifact@v4
+        with:
+          name: upgrade-lock
+          run-id: ${{ inputs.lock_run }}
+          github-token: ${{ github.token }}
+          path: earlier
+      - name: Hand the locks to this run unchanged
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-earlier-lock
+          path: |
+            earlier/t3-lock.json
+            earlier/supervisor-releases.json
+          if-no-files-found: error
+          overwrite: true
+
+  # the run's frozen locks: the published Supervisor releases and the T3 targets, resolved once here or taken over unchanged from the
+  # earlier-lock job, then recorded with their SHA-256 and kept as the run's upgrade-lock artifact, from which every journey downloads
+  # exactly these bytes. Its outcome is resolved, reused, unavailable, invalid or harness; locks that are not usable fail every journey
+  # with that outcome instead of skipping it
+  lock:
+    needs: earlier-lock
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      outcome: ${{ steps.record.outputs.outcome }}
+      message: ${{ steps.record.outputs.message }}
+      t3_sha256: ${{ steps.record.outputs.t3_sha256 }}
+      releases_sha256: ${{ steps.record.outputs.releases_sha256 }}
+    steps:
+      # the version PR's gate, the daily canary or a manual reproduction: its journeys and where its locks come from. A refused input
+      # stops the run before anything is resolved or set up
+      - name: Select the journeys and the locks
+        id: plan
+        env:
+          GATE: ${{ inputs.gate && 'true' || 'false' }}
+          EVENT: ${{ github.event_name }}
+          JOURNEYS: ${{ inputs.journeys }}
+          LOCK_RUN: ${{ inputs.lock_run }}
+        run: |
+          set -euo pipefail
+          journeys='stable nightly baseline'
+          refuse() {
+            echo "$1" >&2
+            printf '### Published Supervisor upgrades did not start\n\n%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          }
+          chosen=()
+          source=resolve
+          lock_run=
+          if [ "$GATE" = true ]; then
+            purpose=gate
+            read -r -a chosen <<< "$journeys"
+          elif [ "$EVENT" = schedule ]; then
+            purpose=canary
+            read -r -a chosen <<< "$journeys"
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            purpose=reproduction
+            case $LOCK_RUN in
+              '') ;;
+              *[!0-9]*) refuse "lock_run must be the ID of an earlier run that kept an upgrade-lock artifact, or empty" ;;
+              *) source=earlier; lock_run=$LOCK_RUN ;;
+            esac
+            requested=${JOURNEYS//[[:space:]]/}
+            [ "$requested" != all ] || requested=${journeys// /,}
+            IFS=, read -r -a chosen <<< "$requested"
+            [ "${#chosen[@]}" -gt 0 ] || refuse "choose all or at least one of stable, nightly and baseline"
+            seen=,
+            for journey in "${chosen[@]}"; do
+              case " $journeys " in *" $journey "*) ;; *) refuse "unknown journey '$journey'; choose all or from stable, nightly and baseline" ;; esac
+              case $seen in *",$journey,"*) refuse "journey $journey is chosen twice" ;; esac
+              seen="$seen$journey,"
+            done
+          else
+            refuse "unexpected event $EVENT"
+          fi
+          {
+            echo "purpose=$purpose"
+            echo "source=$source"
+            echo "lock_run=$lock_run"
+            echo "matrix=$(printf '%s\n' "${chosen[@]}" | jq -R . | jq -cs '{journey: .}')"
+          } >> "$GITHUB_OUTPUT"
+      - name: Take over the earlier run's locks
+        id: earlier
+        if: ${{ steps.plan.outputs.source == 'earlier' && needs.earlier-lock.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: upgrade-earlier-lock
+          path: upgrade/lock
+      - uses: actions/checkout@v4
+        if: ${{ steps.plan.outputs.source == 'resolve' }}
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Prepare the development environment
+        id: prepare
+        if: ${{ steps.plan.outputs.source == 'resolve' }}
+        timeout-minutes: 20
+        run: ./dev setup
+      # the automatic read-only workflow token raises GitHub's API rate limit for T3's release metadata: this step alone hands it to
+      # ./dev, and the T3 resolver sends it only with its two metadata requests, never with a download, and never prints or writes it
+      - name: Resolve the T3 targets once
+        id: targets
+        if: ${{ steps.plan.outputs.source == 'resolve' }}
+        timeout-minutes: 5
+        env:
+          T3SUP_DEV_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p upgrade/lock
+          ./dev pnpm dev:targets resolve --out upgrade/lock/t3-lock.json | tee upgrade/resolve-t3.log
+      # GHCR's anonymous pull token and npm's public record; no credential reaches this step
+      - name: Resolve the published Supervisor releases once
+        id: releases
+        if: ${{ steps.plan.outputs.source == 'resolve' && steps.targets.outcome == 'success' }}
+        timeout-minutes: 5
+        run: ./dev pnpm dev:releases resolve --out upgrade/lock/supervisor-releases.json | tee upgrade/resolve-releases.log
+      - name: Record the frozen locks
+        id: record
+        if: ${{ !cancelled() && steps.plan.outcome == 'success' }}
+        env:
+          SOURCE: ${{ steps.plan.outputs.source }}
+          PURPOSE: ${{ steps.plan.outputs.purpose }}
+          LOCK_RUN: ${{ steps.plan.outputs.lock_run }}
+          FETCHED: ${{ steps.earlier.outcome }}
+          PREPARED: ${{ steps.prepare.outcome }}
+          TARGETS: ${{ steps.targets.outcome }}
+          RELEASES: ${{ steps.releases.outcome }}
+        run: |
+          set -euo pipefail
+          t3=upgrade/lock/t3-lock.json
+          releases=upgrade/lock/supervisor-releases.json
+          outcome=harness
+          message=
+          # the last JSON line a resolver printed, when it names its unavailable or invalid outcome
+          reported() { grep '^{' "$1" 2> /dev/null | tail -n 1 | jq -c 'select(.outcome == "unavailable" or .outcome == "invalid")' 2> /dev/null || true; }
+          if [ "$SOURCE" = earlier ]; then
+            if [ "$FETCHED" = success ] && [ -s "$t3" ] && [ -s "$releases" ]; then outcome=reused
+            else outcome=unavailable; message="run $LOCK_RUN has no upgrade-lock artifact this run could read"; fi
+          elif [ "$TARGETS" = success ] && [ "$RELEASES" = success ] && [ -s "$t3" ] && [ -s "$releases" ]; then outcome=resolved
+          elif [ "$PREPARED" != success ]; then message="the checkout or the development environment could not be prepared, so nothing was resolved"
+          else
+            # the resolver whose lock is missing; a resolver's failure piped through tee leaves its step successful but writes no lock
+            failed=$( [ -s "$t3" ] && echo upgrade/resolve-releases.log || echo upgrade/resolve-t3.log )
+            line=$(reported "$failed")
+            if [ -n "$line" ]; then
+              outcome=$(jq -r '.outcome' <<< "$line")
+              message=$(jq -r '.message | tostring' <<< "$line")
+            else message="a resolver ended without reporting its outcome"; fi
+          fi
+          t3_sha256=
+          releases_sha256=
+          if [ "$outcome" = resolved ] || [ "$outcome" = reused ]; then
+            if jq -e '(.targets | map(.slot)) == ["stable", "nightly", "nightly-1", "nightly-2"] and (.targets[0].version | type) == "string"' "$t3" > /dev/null 2>&1 &&
+              jq -e '(.releases | map(.channel)) == ["stable", "nightly"] and all(.releases[]; (.version | type) == "string" and (.version | test("^[0-9A-Za-z.+-]+$")))' "$releases" > /dev/null 2>&1; then
+              t3_sha256=$(sha256sum "$t3" | cut -d ' ' -f 1)
+              releases_sha256=$(sha256sum "$releases" | cut -d ' ' -f 1)
+            else
+              outcome=invalid
+              message="the locks do not hold the T3 slots and the stable and nightly releases in order"
+            fi
+          fi
+          message=$(printf '%s' "$message" | tr '\r\n' '  ' | cut -c 1-300)
+          {
+            echo "outcome=$outcome"
+            echo "message=$message"
+            echo "t3_sha256=$t3_sha256"
+            echo "releases_sha256=$releases_sha256"
+          } >> "$GITHUB_OUTPUT"
+          case $PURPOSE in gate) run="the version PR's gate" ;; canary) run="the daily canary" ;; *) run="this manual reproduction" ;; esac
+          {
+            echo "### Frozen upgrade locks: $outcome"
+            echo
+            case $outcome in
+              resolved) echo "Resolved once for $run; every journey runs from these locks." ;;
+              reused) echo "Taken over unchanged from run $LOCK_RUN for $run; every journey runs from these locks." ;;
+              *) echo "No usable locks for $run, so every journey fails with this outcome: $message" ;;
+            esac
+            if [ -n "$releases_sha256" ]; then
+              echo
+              echo "T3 target lock SHA-256 \`$t3_sha256\`, T3 stable $(jq -r '.targets[0].version' "$t3"); release lock SHA-256 \`$releases_sha256\`."
+              echo
+              jq -r '"| Channel | Supervisor | Revision | Image index |", "| --- | --- | --- | --- |", (.releases[] | "| \(.channel) | \(.version) | \(.revision) | \(.index) |")' "$releases"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ -n "$releases_sha256" ]
+      - name: Keep the frozen locks
+        if: ${{ !cancelled() && steps.record.outputs.releases_sha256 != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-lock
+          path: |
+            upgrade/lock/t3-lock.json
+            upgrade/lock/supervisor-releases.json
+          if-no-files-found: error
+          overwrite: true
+
+  # one journey on a native x64 runner from the frozen locks, judged against both locks' SHA-256, its Supervisor release, the T3 stable
+  # slot and the checked commit, and summarized. A failing journey never stops another; its report, logs and locks stay as an artifact
+  # also when it fails or times out
+  journey:
+    needs: lock
+    if: ${{ !cancelled() && needs.lock.outputs.matrix != '' }}
+    name: ${{ matrix.journey }} journey
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.lock.outputs.matrix) }}
+    steps:
+      - name: Require a native x64 runner
+        id: native
+        run: test "$(uname -m)" = x86_64
+      - uses: actions/checkout@v4
+        if: ${{ needs.lock.outputs.releases_sha256 != '' }}
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # the evidence lies in the checkout the containers see, outside Git status
+      - name: Keep the evidence out of the checkout's status
+        id: evidence
+        if: ${{ needs.lock.outputs.releases_sha256 != '' }}
+        run: |
+          mkdir -p .git/info upgrade/lock
+          printf '%s\n' /upgrade/ >> .git/info/exclude
+      - name: Download the frozen locks
+        if: ${{ needs.lock.outputs.releases_sha256 != '' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: upgrade-lock
+          path: upgrade/lock
+      # both locks' bytes, the T3 stable slot and this journey's Supervisor release, all from the locks this run recorded
+      - name: Verify the frozen locks
+        id: lock
+        if: ${{ needs.lock.outputs.releases_sha256 != '' }}
+        env:
+          JOURNEY: ${{ matrix.journey }}
+          T3_SHA256: ${{ needs.lock.outputs.t3_sha256 }}
+          RELEASES_SHA256: ${{ needs.lock.outputs.releases_sha256 }}
+        run: |
+          set -euo pipefail
+          t3=upgrade/lock/t3-lock.json
+          releases=upgrade/lock/supervisor-releases.json
+          [ "$(sha256sum "$t3" | cut -d ' ' -f 1)" = "$T3_SHA256" ] || { echo "the downloaded T3 lock is not the frozen one" >&2; exit 1; }
+          [ "$(sha256sum "$releases" | cut -d ' ' -f 1)" = "$RELEASES_SHA256" ] || { echo "the downloaded release lock is not the frozen one" >&2; exit 1; }
+          t3_version=$(jq -er '.targets[] | select(.slot == "stable") | .version' "$t3")
+          [[ $t3_version =~ ^[0-9A-Za-z.+-]+$ ]] || { echo "the T3 lock names an unexpected stable version" >&2; exit 1; }
+          version= image=
+          if [ "$JOURNEY" != baseline ]; then
+            version=$(jq -er --arg channel "$JOURNEY" '.releases[] | select(.channel == $channel) | .version' "$releases")
+            image="ghcr.io/jfet97/t3-supervisor@$(jq -er --arg channel "$JOURNEY" '.releases[] | select(.channel == $channel) | .platforms["linux/amd64"]' "$releases")"
+            [[ $version =~ ^[0-9A-Za-z.+-]+$ && $image =~ ^ghcr\.io/jfet97/t3-supervisor@sha256:[0-9a-f]{64}$ ]] || { echo "the release lock names an unexpected $JOURNEY release" >&2; exit 1; }
+          fi
+          {
+            echo "t3_version=$t3_version"
+            echo "version=$version"
+            echo "image=$image"
+            echo "commit=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      # the journey keeps its output, exit status and wall time; ./dev upgrade sets up the environment and builds the candidate's dashboard
+      - name: Run the journey
+        id: journey
+        if: ${{ steps.lock.outcome == 'success' && steps.native.outcome == 'success' }}
+        timeout-minutes: 45
+        env:
+          JOURNEY: ${{ matrix.journey }}
+        run: |
+          set -uo pipefail
+          args=(--journey "$JOURNEY" --t3-lock upgrade/lock/t3-lock.json --out "upgrade/evidence/$JOURNEY")
+          [ "$JOURNEY" = baseline ] || args+=(--releases upgrade/lock/supervisor-releases.json)
+          started=$(date +%s)
+          status=0
+          ./dev upgrade "${args[@]}" 2> >(tee upgrade/journey.err >&2) | tee upgrade/journey.log || status=$?
+          echo "$status $(($(date +%s) - started))" > upgrade/journey.status
+      # a journey passes only when its report passed and names this journey, the frozen locks' SHA-256, the T3 stable slot, its Supervisor
+      # release and image, and the checked commit with a clean tree; a mismatch or a missing report is a harness or provenance failure
+      - name: Judge and summarize the journey
+        id: judge
+        if: ${{ always() }}
+        env:
+          JOURNEY: ${{ matrix.journey }}
+          NATIVE: ${{ steps.native.outcome }}
+          LOCK_OUTCOME: ${{ needs.lock.outputs.outcome }}
+          LOCK_MESSAGE: ${{ needs.lock.outputs.message }}
+          T3_SHA256: ${{ needs.lock.outputs.t3_sha256 }}
+          RELEASES_SHA256: ${{ needs.lock.outputs.releases_sha256 }}
+          VERIFIED: ${{ steps.lock.outcome }}
+          T3_VERSION: ${{ steps.lock.outputs.t3_version }}
+          VERSION: ${{ steps.lock.outputs.version }}
+          IMAGE: ${{ steps.lock.outputs.image }}
+          COMMIT: ${{ steps.lock.outputs.commit }}
+        run: |
+          set -uo pipefail
+          dir=upgrade
+          mkdir -p "$dir"
+          problems=()
+          report=
+          status=
+          seconds=
+          if [ -f "$dir/journey.status" ]; then read -r status seconds < "$dir/journey.status" || true; fi
+          if [ "$NATIVE" != success ]; then
+            problems+=("this runner is not a native x64 runner")
+          elif [ -z "$RELEASES_SHA256" ]; then
+            problems+=("no usable frozen locks (${LOCK_OUTCOME:-missing})${LOCK_MESSAGE:+: $LOCK_MESSAGE}")
+          elif [ "$VERIFIED" != success ]; then
+            problems+=("the downloaded locks are not the frozen locks this run recorded")
+          elif ! report=$(jq -ce 'select(type == "object")' "$dir/evidence/$JOURNEY/report.json" 2> /dev/null); then
+            report=
+            if [ -n "$status" ]; then problems+=("the journey exited $status without a report"); else problems+=("the journey did not finish"); fi
+          else
+            # what the report names instead of this journey's frozen inputs; a report jq cannot read is a mismatch too, never an empty one
+            wrong=$(jq -r --arg journey "$JOURNEY" --arg t3 "$T3_VERSION" --arg t3sha "$T3_SHA256" --arg releases "$RELEASES_SHA256" --arg version "$VERSION" \
+              --arg image "$IMAGE" --arg commit "$COMMIT" '[
+                if .journey != $journey then "journey \(.journey)" else empty end,
+                if .inputs.t3.version != $t3 or .inputs.t3.source != "lock" then "T3 \(.inputs.t3.version) from \(.inputs.t3.source)" else empty end,
+                if .inputs.t3.lock.sha256 != $t3sha then "a T3 lock with SHA-256 \(.inputs.t3.lock.sha256)" else empty end,
+                if $journey == "baseline" then (if .inputs.published != null then "a published release" else empty end)
+                else (if .inputs.published.version != $version or .inputs.published.image != $image then "Supervisor \(.inputs.published.version) at \(.inputs.published.image)" else empty end,
+                  if .inputs.published.releases.sha256 != $releases then "a release lock with SHA-256 \(.inputs.published.releases.sha256)" else empty end) end,
+                if .inputs.supervisor.revision != $commit then "commit \(.inputs.supervisor.revision)" else empty end,
+                if .inputs.supervisor.clean != true then "a tree that was not clean" else empty end
+              ] | join(", ")' <<< "$report") || wrong="inputs of an unexpected shape"
+            [ -z "$wrong" ] || problems+=("the report names $wrong instead of this journey's frozen inputs")
+            passed=$(jq -r '.passed == true and .outcome == "passed"' <<< "$report")
+            if [ "$passed" = true ] && [ "$status" != 0 ]; then problems+=("the journey exited ${status:-without a status} despite a passing report"); fi
+            if [ "$passed" != true ] && [ "$status" = 0 ]; then problems+=("the journey exited 0 despite a report that did not pass"); fi
+          fi
+          if [ "$NATIVE" = success ] && [ -z "$RELEASES_SHA256" ]; then outcome=${LOCK_OUTCOME:-harness}
+          elif [ "${#problems[@]}" -gt 0 ]; then outcome=harness
+          else outcome=$(jq -r '.outcome' <<< "$report"); fi
+          case $outcome in
+            passed) meaning="Every check passed: the candidate upgraded what this creator left and kept it across a restart." ;;
+            failed) meaning="A check did not pass against what this creator left." ;;
+            unsupported_shape) meaning="The creator left a persisted shape no frozen seed set recognizes; nothing was seeded and the candidate did not start." ;;
+            creator_unready) meaning="The published image never became ready on this T3, so nothing was seeded and the candidate did not start." ;;
+            harness) meaning="The harness or the provenance of its evidence failed; this is no verdict on the upgrade." ;;
+            *) meaning="No frozen locks were usable, so nothing ran in this journey." ;;
+          esac
+          {
+            echo "### $JOURNEY journey: $outcome"
+            echo
+            echo "$meaning"
+            echo
+            if [ -n "$T3_VERSION" ]; then
+              printf 'T3 `%s` (stable slot of the frozen T3 lock `%s`)%s, candidate `%s`%s.\n\n' "$T3_VERSION" "$T3_SHA256" \
+                "${VERSION:+, Supervisor \`$VERSION\` from \`$IMAGE\` (release lock \`$RELEASES_SHA256\`)}" "$COMMIT" "${seconds:+, $seconds s}"
+            fi
+            if [ -n "$report" ]; then
+              echo "| Check | Result | Detail |"
+              echo "| --- | --- | --- |"
+              jq -r '.checks[]? | "| \(.name) | \(if .ok then "passed" else "failed" end) | \(.detail | gsub("\\|"; "/") | .[0:400]) |"' <<< "$report"
+              echo
+              jq -r '.findings[]? | "- Separate finding, \(.name): \(.outcome). \(.detail | .[0:600])"' <<< "$report"
+              jq -r '"Stages: " + ([.stages[]? | "\(.stage) \((.durationMs // 0) / 100 | round / 10) s"] | join("; "))' <<< "$report"
+            fi
+            for problem in "${problems[@]}"; do echo "- $problem"; done
+          } | tee "$dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
+          [ "$outcome" = passed ]
+      - name: Keep the journey's report, logs and locks
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-${{ matrix.journey }}-${{ github.run_attempt }}
+          path: upgrade/
+          if-no-files-found: ignore
