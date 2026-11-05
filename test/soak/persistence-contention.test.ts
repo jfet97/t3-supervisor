@@ -88,7 +88,11 @@ it.live("policy and Stop statements on the shared guidance connection: one bound
   const during: Array<number> = [];
   const writes: Array<number> = [];
   const reader = Effect.gen(function* () {
-    while (writing) during.push(yield* timed(f.core.policy.get().pipe(Effect.orDie)));
+    for (let index = 0; index < samples && writing; index++) {
+      during.push(yield* timed(f.core.policy.get().pipe(Effect.orDie)));
+      // yield outside the timing span so a saturated reader cannot retake every released permit
+      yield* Effect.yieldNow;
+    }
   });
   const writer = Effect.gen(function* () {
     for (let cycle = 0; cycle < writeCycles; cycle++) {
