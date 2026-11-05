@@ -327,22 +327,27 @@ export const policyMigrations: ReadonlyArray<MigrationStep> = [{ from: 0, to: 1,
 
 /**
  * A file's schema as SQLite stores it: every user object (table, index, view or trigger, without SQLite's internal ones) keyed
- * as `type:name`, with its stored declaration without the whitespace between tokens. Equal signatures mean the same tables with
- * the same columns, types, defaults, keys and constraints, and the same index definitions.
+ * as `type:name`, with its stored declaration's layout normalized. Equal signatures mean the same tables with the same columns,
+ * types, defaults, keys and constraints, and the same index definitions.
  */
 export type SchemaSignature = ReadonlyMap<string, string>;
 
 const Declaration = Schema.Struct({ type: Schema.String, name: Schema.String, sql: Schema.String });
 const decodeDeclarations = Schema.decodeUnknownEffect(Schema.Array(Declaration));
 
+const wordCharacter = (char: string): boolean => /[\w$]/u.test(char);
+
 /*
- * a stored declaration without the whitespace between its tokens, so the same statement laid out differently still matches.
- * Quoted text keeps every byte, since whitespace there is data: a 'string literal' of a check, default or partial index, or a
- * "quoted", `quoted` or [quoted] identifier; a doubled quote character stays inside its quoted text, as SQLite reads it
+ * a stored declaration with its layout normalized, so the same statement laid out differently still matches: whitespace between
+ * tokens is dropped, except one space between two words, which would otherwise read as one (`document TEXT` is no
+ * `documentTEXT`). Quoted text keeps every byte, since whitespace there is data: a 'string literal' of a check, default or
+ * partial index, or a "quoted", `quoted` or [quoted] identifier; a doubled quote character stays inside its quoted text, as
+ * SQLite reads it
  */
 const declarationText = (sql: string): string => {
   let text = "";
   let close: string | null = null;
+  let separated = false;
   for (let index = 0; index < sql.length; index++) {
     const char = sql.charAt(index);
     if (close !== null) {
@@ -350,10 +355,16 @@ const declarationText = (sql: string): string => {
       if (char !== close) continue;
       if (close !== "]" && sql.charAt(index + 1) === close) text += sql.charAt(++index);
       else close = null;
-    } else if (char === "'" || char === '"' || char === "`" || char === "[") {
-      close = char === "[" ? "]" : char;
-      text += char;
-    } else if (!/\s/u.test(char)) text += char;
+      continue;
+    }
+    if (/\s/u.test(char)) {
+      separated = true;
+      continue;
+    }
+    if (separated && wordCharacter(text.charAt(text.length - 1)) && wordCharacter(char)) text += " ";
+    separated = false;
+    if (char === "'" || char === '"' || char === "`" || char === "[") close = char === "[" ? "]" : char;
+    text += char;
   }
   return text;
 };

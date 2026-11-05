@@ -66,18 +66,23 @@ const accessTables = `
 // a format 0 access database the forge must not migrate
 const legacyAccess = `PRAGMA journal_mode=DELETE; ${accessTables}`;
 
-/*
- * a separate process commits `statements` to the write-ahead log of a new file and is killed before any checkpoint or close:
- * no connection of any process is left on the file, so the next connection that can write would recover the log and
- * checkpoint it into the file when it closes
- */
+// a separate process runs `statements` on the file and is killed before any commit it left open, any checkpoint or any close
 const killedWriter = 'const { DatabaseSync } = require("node:sqlite"); const db = new DatabaseSync(process.argv[1]); db.exec(process.argv[2]); process.kill(process.pid, "SIGKILL");';
-const orphanedLog = (path: string, statements: string) => {
+const killedAfter = (path: string, statements: string) => {
   const result = spawnSync(process.execPath, ["-e", killedWriter, path, statements], { encoding: "utf8", timeout: 30_000 });
   assert.equal(result.signal, "SIGKILL", result.stderr);
+};
+
+/*
+ * the killed process committed `statements` to the write-ahead log of a new file: no connection of any process is left on it,
+ * so the next connection that can write would recover the log and checkpoint it into the file when it closes
+ */
+const orphanedLog = (path: string, statements: string) => {
+  killedAfter(path, statements);
   assert.ok(existsSync(`${path}-wal`), "the killed writer left its log");
 };
-const newerInLog = (tables: string) => `PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${tables} PRAGMA user_version=2;`;
+const inLog = (statements: string) => `PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; ${statements}`;
+const newerInLog = (tables: string) => inLog(`${tables} PRAGMA user_version=2;`);
 
 // the file and its log, byte for byte
 const fileAndLog = (path: string) => ({ main: sha256(path), log: sha256(`${path}-wal`), logBytes: statSync(`${path}-wal`).size });
@@ -86,15 +91,15 @@ const fileAndLog = (path: string) => ({ main: sha256(path), log: sha256(`${path}
  * the negative control of an orphaned log: a connection that can write, closing as the last one, checkpoints the log into the
  * file and removes it, so the byte checks before it would have seen any such open
  */
-const checkpointedByWritableClose = (path: string, before: { readonly main: string }) => {
+const checkpointedByWritableClose = (path: string, before: { readonly main: string }, format = 2) => {
   const writable = new DatabaseSync(path);
   try {
-    assert.equal(sqliteRow(writable, UserVersionRow, "PRAGMA user_version").user_version, 2);
+    assert.equal(sqliteRow(writable, UserVersionRow, "PRAGMA user_version").user_version, format);
   } finally {
     writable.close();
   }
   assert.equal(existsSync(`${path}-wal`), false, "the log was checkpointed and removed");
-  assert.equal(headerFormat(path), 2);
+  assert.equal(headerFormat(path), format);
   assert.notEqual(sha256(path), before.main);
 };
 
@@ -187,6 +192,50 @@ describe("database format guard", () => {
     assert.deepEqual(fileAndLog(path), before);
     assert.equal(existsSync(join(directory, "backups")), false);
     checkpointedByWritableClose(path, before);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
+  it.live("an access database at an older format that a killed process left in write-ahead-log mode is refused read only by the preflight and the forge", () => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* temporaryDirectory;
+    yield* fs.makeDirectory(join(directory, "access"), { mode: 0o700 });
+    const path = join(directory, "access", "login.sqlite3");
+    // the two tables every release validates, at format 0, but in a log no release writes for the access database
+    orphanedLog(path, inLog(accessTables));
+    yield* fs.chmod(path, 0o600);
+    const before = fileAndLog(path);
+    const failure = yield* Effect.flip(upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] }));
+    assert.deepEqual([failure.file, failure.reason], ["access/login.sqlite3", "access_invalid"]);
+    assert.deepEqual(fileAndLog(path), before);
+    const forged = yield* Effect.flip(forgeDashboardToken(directory));
+    assert.equal(forged.reason, "login_grant_state");
+    assert.deepEqual(fileAndLog(path), before);
+    assert.equal(existsSync(join(directory, "backups")), false);
+    checkpointedByWritableClose(path, before, 0);
+  }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
+
+  it.live("an access database that a crash left with an interrupted write is rolled back by SQLite before its read-only validation, then upgraded", () => Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const directory = yield* temporaryDirectory;
+    yield* fs.makeDirectory(join(directory, "access"), { mode: 0o700 });
+    const path = join(directory, "access", "login.sqlite3");
+    const session = "b".repeat(64);
+    raw(path, `${legacyAccess} INSERT INTO dashboard_login_sessions VALUES ('${session}', 1762300000000, 1762300000001);`);
+    yield* fs.chmod(path, 0o600);
+    // a write too large for a one-page cache spills into the file before its commit, so the killed writer leaves a hot journal
+    killedAfter(path, "PRAGMA cache_size=1; BEGIN IMMEDIATE; INSERT INTO dashboard_login_grants(token_hash, issued_at, expires_at) " +
+      "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i < 3000) SELECT printf('%064x', i), 1, 2 FROM n;");
+    assert.ok(existsSync(`${path}-journal`), "the killed writer left its rollback journal");
+    const report = yield* upgradeDataDirectory({ dataDirectory: directory, excludedThreadIds: [] });
+    assert.ok(report.files.some((file) => file.file === "access/login.sqlite3" && file.from === 0 && file.to === 1));
+    assert.equal(existsSync(`${path}-journal`), false, "the interrupted write was rolled back");
+    const db = new DatabaseSync(path, { readOnly: true });
+    try {
+      assert.equal(sqliteRow(db, UserVersionRow, "PRAGMA user_version").user_version, 1);
+      assert.deepEqual(sqliteRows(db, Schema.Struct({ token_hash: Schema.String }), "SELECT token_hash FROM dashboard_login_sessions"), [{ token_hash: session }]);
+      assert.equal(sqliteRow(db, CountRow, "SELECT count(*) AS n FROM dashboard_login_grants").n, 0);
+    } finally {
+      db.close();
+    }
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 30_000 });
 
   it.live("a file at the current format opens", () => Effect.gen(function* () {

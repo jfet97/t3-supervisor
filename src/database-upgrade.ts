@@ -11,7 +11,7 @@ import {
   policyDbLayer, readFormat, readOnlyDatabase, type UpgradeDatabase,
 } from "./db.js";
 import { logEvent } from "./logging.js";
-import { openExistingAccessDatabase, verifyAccessDatabase } from "./service-auth.js";
+import { inspectExistingAccessDatabase, openExistingAccessDatabase, verifyAccessDatabase } from "./service-auth.js";
 
 /*
  * the startup coordinator of a data directory: the only code that creates store files or moves them between formats. The
@@ -155,16 +155,16 @@ const inspect = (dataDirectory: string, spec: StoreSpec, reference: Effect.Effec
   }).pipe(asUpgradeError(file, "unreadable"));
 };
 
-// the preflight of the access database, through the auth service's own checks
+// the preflight of the access database, through the auth service's own checks, read only
 const inspectAccess = (dataDirectory: string): Effect.Effect<FileState, DatabaseUpgradeError, FileSystem.FileSystem> =>
-  Effect.scoped(openExistingAccessDatabase(dataDirectory)).pipe(
+  inspectExistingAccessDatabase(dataDirectory).pipe(
     asUpgradeError(accessFile, "access_invalid"),
-    Effect.flatMap((opened): Effect.Effect<FileState, DatabaseUpgradeError> => {
-      if (opened === null) return Effect.succeed({ state: "absent" });
-      if (opened.format === DatabaseFormats.access) return Effect.succeed({ state: "current" });
-      if (opened.format > DatabaseFormats.access) return Effect.fail(refusal(accessFile, "future_format"));
-      return stepsBetween(accessSteps, opened.format, DatabaseFormats.access) === null
-        ? Effect.fail(refusal(accessFile, "unknown_layout")) : Effect.succeed({ state: "upgradable", format: opened.format });
+    Effect.flatMap((format): Effect.Effect<FileState, DatabaseUpgradeError> => {
+      if (format === null) return Effect.succeed({ state: "absent" });
+      if (format === DatabaseFormats.access) return Effect.succeed({ state: "current" });
+      if (format > DatabaseFormats.access) return Effect.fail(refusal(accessFile, "future_format"));
+      return stepsBetween(accessSteps, format, DatabaseFormats.access) === null
+        ? Effect.fail(refusal(accessFile, "unknown_layout")) : Effect.succeed({ state: "upgradable", format });
     }));
 
 const JournalMode = Schema.Tuple([Schema.Struct({ journal_mode: Schema.String })]);

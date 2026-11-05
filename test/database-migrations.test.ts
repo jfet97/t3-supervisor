@@ -224,9 +224,14 @@ describe("declared schema and recognized layouts", () => {
     assert.deepEqual(yield* catalog(catalogTables.replace("threads (id TEXT PRIMARY KEY,", "threads (id TEXT,")), { kind: "unknown", object: "threads" });
     assert.deepEqual(yield* catalog(catalogTables.replace(" CHECK(stream IN ('active', 'archive'))", "")), { kind: "unknown", object: "cursors" });
     assert.deepEqual(yield* catalog(catalogTables.replace("ON threads(project_id)", "ON threads(document)")), { kind: "unknown", object: "threads_project" });
-    // whitespace between tokens is layout, whitespace inside a quoted literal is data: another check, another partial index
+    // whitespace between tokens is layout, whitespace inside a quoted literal is data: another check, path or partial index
     assert.deepEqual(yield* catalog(catalogTables.replace("CHECK(stream IN ('active', 'archive'))", "CHECK(stream IN ('active', 'arc hive'))")),
       { kind: "unknown", object: "cursors" });
+    assert.deepEqual(yield* catalog(catalogTables.replace("CHECK(location IN ('active', 'archive', 'removed'))", "CHECK(location IN ('act ive', 'archive', 'removed'))")),
+      { kind: "unknown", object: "threads" });
+    assert.deepEqual(yield* guidance(guidanceCore.replace("'$.noticeId'", "'$.notice Id'")), { kind: "unknown", object: "activity_notice" });
+    // and the space between two words separates two tokens: a column named documentTEXT without a type is another column
+    assert.deepEqual(yield* catalog(catalogTables.replace("document TEXT NOT NULL, deleted", "documentTEXT NOT NULL, deleted")), { kind: "unknown", object: "projects" });
     const members = (condition: string) => `${guidanceCore}
       CREATE TABLE supervisor_team_members(owner_thread_id TEXT NOT NULL,owner_generation INTEGER NOT NULL,member_thread_id TEXT NOT NULL,state TEXT NOT NULL,
         epoch INTEGER NOT NULL,document TEXT NOT NULL,PRIMARY KEY(owner_thread_id,owner_generation,member_thread_id));

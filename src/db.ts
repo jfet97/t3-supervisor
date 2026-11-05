@@ -427,6 +427,16 @@ export const memoryDatabase: Effect.Effect<SqlClient.SqlClient, DatabaseOpenErro
     Effect.mapError((cause) => new DatabaseOpenError({ file: ":memory:", reason: "open_failed", cause })), untracedSql);
 
 /**
+ * A read-only client on the access database, a rollback-journal file, for its admission and exact validation. Unlike an
+ * immutable client it takes SQLite's shared lock like any reader, so a write the service is committing is waited for rather
+ * than read half written; it creates no file and cannot roll back a hot journal (the admission recovers one first).
+ */
+export const readOnlyAccessDatabase = (path: string): Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> =>
+  workerClient({filename: path, readonly: true, disableWAL: true, busyTimeoutMs: 5_000}).pipe(
+    Effect.map(({ client }) => client),
+    Effect.mapError((cause) => new DatabaseOpenError({ file: "login.sqlite3", reason: "open_failed", cause })), untracedSql);
+
+/**
  * A read-only client on an existing store file, for the startup upgrade's preflight, the rollout scan and backup verification:
  * no statement, pragma or file creation writes, and nothing is checkpointed or removed (see `readOnlyFilename`).
  */
