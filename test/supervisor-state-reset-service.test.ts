@@ -72,7 +72,7 @@ const applyFormat1 = (directory: string) => Effect.scoped(Effect.gen(function* (
   const { sql } = yield* openUpgradeDatabase(directory, "guidance", { create: false });
   const [step] = guidanceMigrations;
   assert.ok(step !== undefined && step.from === 0 && step.to === 1);
-  yield* sql.withTransaction(step.apply(sql, { policy: { kind: "none" } }));
+  yield* sql.withTransaction(step.apply(sql, { policy: { kind: "none" }, creating: false }));
   const read = (query: string) => sql.unsafe<Record<string, unknown>>(query).pipe(Effect.map((result) => result.map((row) => ({ ...row }))));
   return {
     cleared: yield* Effect.forEach(["supervisor_task_interpretations", "supervisor_main_bindings", "supervisor_conversation_requests", "supervisor_monitor_binding_clock"],

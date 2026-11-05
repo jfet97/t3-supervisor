@@ -91,7 +91,7 @@ Previews are optional and may not exist until one has been published. For exampl
 Installing a new version does not restart your running service automatically.
 
 Back up the state directory or volume before upgrading. See
-[upgrade and rollback](docs/installation.md#upgrade-and-rollback),
+[upgrading](docs/installation.md#upgrade),
 [release notes](CHANGELOG.md) and [GitHub releases](https://github.com/jfet97/t3-supervisor/releases).
 
 ## Learn more

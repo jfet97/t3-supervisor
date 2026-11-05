@@ -289,3 +289,66 @@ it.effect("CC-CLOCK-WALL and CC-IDS: store times come from Clock and root identi
   const [marker] = yield* sql`SELECT value FROM meta WHERE key=${'supervisor_control_presence_unavailable:"project-b"'}`;
   assert.equal(marker?.value, JSON.stringify({checkedAt: 1_800_000_000_000}));
 })), {timeout: 10_000});
+
+it.effect("CT-PSS-09: a stored Stop, notice, resume, Start, Start operation, baseline or No Project mode whose deciding field breaks fails typed; a valid one is read whole", () => live(Effect.gen(function* () {
+  const directory = yield* temporaryDataDirectory("pss-service-09-");
+  const {sql, supervisors: store, close} = yield* reopenGuidanceStores(directory);
+  const put = (key: string, value: unknown) => sql`INSERT INTO meta VALUES(${key},${JSON.stringify(value)}) ON CONFLICT(key) DO UPDATE SET value=excluded.value`;
+  const invalid = <A, E>(effect: Effect.Effect<A, E>) => failsWith(effect, /supervision_row_invalid/);
+
+  // valid documents keep the fields no reader knows, opaque native evidence included
+  const stop = {route: "relay", callerThreadId: "supervisor-root:a", userMessageId: "stop-turn", stoppedAt: 200, nativeExtra: {opaque: [1, 2]}};
+  yield* put("supervisor_unbound_stop:main-a", stop);
+  assert.deepEqual(yield* store.chatStop("main-a"), stop);
+  const start = {threadId: "main-a", projectId: "project-a", operationId: "op-a", requestHash: "hash-a", route: "agent", status: "pending", reason: "Waiting.",
+    intentAt: 300, modeGeneration: 0, masterGeneration: 1, taskId: null, source: {messageId: "message-a", runId: "run-a", ordinal: 3, hash: "source-a"}, nativeExtra: "kept"};
+  yield* put("supervisor_start:main-a", start);
+  assert.deepEqual(yield* store.start("main-a"), start);
+  // an unversioned activation baseline was never read, and still is not
+  yield* put("supervisor_activation_baseline", {snapshotSequence: "old", threads: "old"});
+  assert.equal(yield* store.baseline(), null);
+
+  // each deciding field that breaks fails the read typed, as a malformed row
+  yield* put("supervisor_unbound_stop:main-b", {...stop, stoppedAt: "yesterday"});
+  yield* invalid(store.chatStop("main-b"));
+  yield* put("supervisor_unbound_stop:main-c", {...stop, route: "rumour"});
+  yield* invalid(store.chatStop("main-c"));
+  yield* put("supervisor_start:main-b", {...start, threadId: "main-b", status: "maybe"});
+  yield* invalid(store.start("main-b"));
+  yield* put("supervisor_start:main-c", {...Object.fromEntries(Object.entries(start).filter(([key]) => key !== "intentAt")), threadId: "main-c"});
+  yield* invalid(store.start("main-c"));
+  yield* put("supervisor_start:main-d", {...start, threadId: "main-d", masterGeneration: -1});
+  yield* invalid(store.start("main-d"));
+  yield* put('supervisor_start_operation:["main-b","op-b"]', {threadId: "main-b", operationId: "op-b", requestHash: "hash-b", status: "maybe", reason: "Waiting."});
+  yield* invalid(store.startOperation("main-b", "op-b"));
+  yield* put("supervisor_activation_baseline", {version: 2, snapshotSequence: 7, threads: "all"});
+  yield* invalid(store.baseline());
+  yield* put("supervisor_control:null", {generation: 1, enabled: true, manual: true, baseline: {snapshotSequence: "7", threads: []}});
+  yield* invalid(store.control(null));
+  yield* put("supervisor_no_project", {generation: 1, mode: "sometimes", baseline: pssBoundary});
+  yield* invalid(store.noProjectControl());
+  yield* put("supervisor_no_project", {generation: 1.5, mode: "automatic", baseline: pssBoundary});
+  yield* invalid(store.noProjectControl());
+  const binding = {projectId: "project-a", mainThreadId: "main-z", threadId: "supervisor-root:z", generation: 1, state: "active"};
+  const notice = {messageId: "supervisor-notice:stop:z", commandId: "supervisor-stop-notice:z", stoppedAt: 200, enabledAt: null, state: "uncertain", text: "Stopped."};
+  for (const [mainThreadId, document] of [
+    ["main-y", {...binding, mainThreadId: "main-y", stopNotice: {...notice, state: "lost"}}],
+    ["main-x", {...binding, mainThreadId: "main-x", stopNotice: {...notice, commandId: null}}],
+    ["main-w", {...binding, mainThreadId: "main-w", supervisionStop: {...stop, stoppedAt: null}}],
+    ["main-v", {...binding, mainThreadId: "main-v", supervisionResume: {callerThreadId: "supervisor-root:z", userMessageId: "resume-turn", operationId: "op-r"}}],
+  ] as const) {
+    yield* sql`INSERT INTO supervisor_main_bindings VALUES('project-a',${mainThreadId},${JSON.stringify(document)})`;
+    yield* invalid(store.binding("project-a", mainThreadId));
+    yield* sql`DELETE FROM supervisor_main_bindings WHERE main_thread_id=${mainThreadId}`;
+  }
+  const kept = {...binding, stopNotice: {...notice, dispatchMode: {type: "queue_after_active"}, nativeExtra: {opaque: true}}, supervisionStop: stop};
+  yield* sql`INSERT INTO supervisor_main_bindings VALUES('project-a','main-z',${JSON.stringify(kept)})`;
+  assert.deepEqual(yield* store.binding("project-a", "main-z"), kept);
+
+  // the Start operations are read when the stores open: a broken one fails the open, typed
+  yield* sql`DELETE FROM supervisor_main_bindings`;
+  yield* close;
+  const refused = yield* Effect.flip(Effect.scoped(reopenGuidanceStores(directory)));
+  assert.ok(refused instanceof Error);
+  assert.match(refused.message, /supervision_row_invalid/);
+})), {timeout: 10_000});

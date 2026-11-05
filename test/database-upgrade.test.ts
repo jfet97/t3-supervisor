@@ -213,6 +213,8 @@ const generationOf = (document: unknown): number => decodeJson(Schema.Struct({ g
 const withoutMarker = (rows: Rows): Rows => ({ ...rows, meta: (rows.meta ?? []).filter((row) => row.key !== "thread_policy_import") });
 // the declaration of guidance's policy table: the retired file's own table under its new name
 const threadPolicyDeclaration = () => frozenDeclarations("thread-settings")["table:settings"]?.replace("CREATE TABLE settings(", "CREATE TABLE thread_policy(");
+// the retired reminder rules' tables: an existing file keeps them with their rows, a new file no longer gets them
+const retiredTables = ["table:rules", "table:mutes", "table:observations", "table:episodes", "table:budget"];
 
 const refusedWith = (exit: Exit.Exit<UpgradeReport, DatabaseUpgradeError>, file: string | null, reason: DatabaseUpgradeError["reason"]) => {
   assert.ok(Exit.isFailure(exit), "the upgrade was refused");
@@ -333,11 +335,14 @@ describe("startup upgrade", () => {
     assert.deepEqual(policyRows(directory), [{ id: 1n, document: '{"generation":1,"excludedThreadIds":["thread-a","thread-b"]}' }]);
     assert.equal(existsSync(join(directory, donorFile)), false, "no policy file is created");
     /*
-     * a fresh file declares exactly what Supervisor 0.0.27 declared, byte for byte, plus guidance's policy table (the retired
-     * file's table under its new name): format 1 is that schema, and format 2 adds the table
+     * a fresh file declares what Supervisor 0.0.27 declared, byte for byte, without the retired reminder rules' tables, plus
+     * guidance's policy table (the retired file's table under its new name): format 1 is that schema, format 2 adds the table
      */
     assert.deepEqual(declarations(join(directory, "catalog.sqlite3")), frozenDeclarations("catalog"));
-    assert.deepEqual(declarations(join(directory, "guidance.sqlite3")), { ...frozenDeclarations("guidance"), "table:thread_policy": threadPolicyDeclaration() });
+    assert.deepEqual(declarations(join(directory, "guidance.sqlite3")), {
+      ...Object.fromEntries(Object.entries(frozenDeclarations("guidance")).filter(([key]) => !retiredTables.includes(key))),
+      "table:thread_policy": threadPolicyDeclaration(),
+    });
     // the fresh initialization completed: its pending marker is gone, and nothing was imported
     assert.deepEqual(tableRows(join(directory, "guidance.sqlite3")).meta, [
       { key: "settings", value: '{"generation":1,"evidenceHours":24}' }, { key: "supervisor_scope_version", value: "main-v1" },
@@ -532,15 +537,18 @@ describe("startup upgrade", () => {
    * the foundation's formats, as an earlier version of this upgrade left them: every file of the frozen 0.0.27 layout stamped
    * format 1 (format 1 declares exactly that schema), the policy still in its own file at format 1
    */
-  it.live("an incomplete format 1 layout is refused before backup or migration writes", () => Effect.gen(function* () {
-    const directory = yield* temporaryDirectory;
-    yield* materializeFixture("format0-current-unversioned", directory);
-    for (const file of [...allFiles, donorFile]) exec(join(directory, file), "PRAGMA user_version=1;");
-    exec(join(directory, "guidance.sqlite3"), "DROP INDEX supervisor_main_binding_thread;");
-    const before = snapshotDirectory(directory);
-    refusedWith(yield* Effect.exit(upgrade(directory)), "guidance.sqlite3", "incomplete_schema");
-    assert.deepEqual(snapshotDirectory(directory), before);
-    assert.deepEqual(backupSets(directory), []);
+  it.live("an incomplete format 1 layout is refused before backup or migration writes, a missing retired table included", () => Effect.gen(function* () {
+    // every format 1 file has the whole layout every release declared, the retired tables a new file no longer gets among it
+    for (const damage of ["DROP INDEX supervisor_main_binding_thread;", "DROP TABLE budget;"]) {
+      const directory = yield* temporaryDirectory;
+      yield* materializeFixture("format0-current-unversioned", directory);
+      for (const file of [...allFiles, donorFile]) exec(join(directory, file), "PRAGMA user_version=1;");
+      exec(join(directory, "guidance.sqlite3"), damage);
+      const before = snapshotDirectory(directory);
+      refusedWith(yield* Effect.exit(upgrade(directory)), "guidance.sqlite3", "incomplete_schema");
+      assert.deepEqual(snapshotDirectory(directory), before, damage);
+      assert.deepEqual(backupSets(directory), [], damage);
+    }
   }).pipe(Effect.scoped, Effect.provide(NodeFileSystem.layer)), { timeout: 60_000 });
 
   it.live("a directory at the foundation's formats moves guidance to format 2 with the policy file imported and removed", () => Effect.gen(function* () {
