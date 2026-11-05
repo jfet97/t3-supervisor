@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Worker as WorkerThread } from "node:worker_threads";
 import { NodeWorker } from "@effect/platform-node";
+import * as SqliteClient from "@effect/sql-sqlite-node/SqliteClient";
 import { Context, Data, Deferred, Effect, Exit, FileSystem, Layer, Option, type PlatformError as Platform, Schema, type Scope, Semaphore, Stream } from "effect";
 import { Reactivity } from "effect/reactivity";
 import { SqlClient, Statement } from "effect/sql";
@@ -415,10 +416,14 @@ export const openAccessUpgradeDatabase = (path: string): Effect.Effect<UpgradeDa
     return {sql: client, backup};
   }).pipe(untracedSql);
 
-/** A private in-memory database, for the startup upgrade's reference schema only: no file is created or opened. */
+/*
+ * a private in-memory database for the startup upgrade's reference schema only: no file is created or opened. It is the one
+ * client of this module that stays in this thread: it has no file, no lock and no busy wait, and the few statements of a
+ * format's steps run at most once per start, before anything listens, so a worker thread would only add its start-up time
+ */
 export const memoryDatabase: Effect.Effect<SqlClient.SqlClient, DatabaseOpenError, Scope.Scope> =
-  workerClient({filename: ":memory:", readonly: false, disableWAL: true, busyTimeoutMs: 5_000}).pipe(
-    Effect.map(({ client }) => client),
+  SqliteClient.make({filename: ":memory:", disableWAL: true}).pipe(
+    Effect.provide(Reactivity.layer),
     Effect.mapError((cause) => new DatabaseOpenError({ file: ":memory:", reason: "open_failed", cause })), untracedSql);
 
 /**

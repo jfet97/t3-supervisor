@@ -260,9 +260,9 @@ const backupChanging = (dataDirectory: string, access: FileState, files: Readonl
   }));
 
 /*
- * the result as the stores and the auth service will open it: each file through its guarded open, the policy with its row. The
- * declared schema needs no second comparison: the preflight compared every current file, each upgrade compared its file
- * before the commit, and a created file is the steps' own result
+ * the result as the stores and the auth service will open it: a file this start created or upgraded through its guarded
+ * open, the policy with its row. The declared schema needs no second comparison: each upgrade compared its file before the
+ * commit, and a created file is the steps' own result
  */
 const verifyStore = (spec: StoreSpec, open: Effect.Effect<SqlClient.SqlClient, unknown, Scope.Scope | FileSystem.FileSystem>) =>
   Effect.scoped(Effect.gen(function* () {
@@ -270,11 +270,16 @@ const verifyStore = (spec: StoreSpec, open: Effect.Effect<SqlClient.SqlClient, u
     if (spec.policy) yield* requirePolicyRow(sql);
   })).pipe(asUpgradeError(DatabaseFiles[spec.kind].file, "validation_failed"));
 
-const verify = (dataDirectory: string, accessPresent: boolean) => Effect.gen(function* () {
-  yield* verifyStore(stores.catalog, Effect.map(Layer.build(catalogDbLayer(dataDirectory)), (services) => Context.get(services, CatalogDb)));
-  yield* verifyStore(stores.guidance, Effect.map(Layer.build(guidanceDbLayer(dataDirectory)), (services) => Context.get(services, GuidanceDb)));
-  yield* verifyStore(stores.policy, Effect.map(Layer.build(policyDbLayer(dataDirectory)), (services) => Context.get(services, PolicyDb)));
-  if (accessPresent) yield* verifyAccessDatabase(dataDirectory).pipe(asUpgradeError(accessFile, "validation_failed"));
+// every file this start changed; a file it left as it was passed the same checks, read only, in the preflight
+const verify = (dataDirectory: string, changed: ReadonlyArray<UpgradedFile>) => Effect.gen(function* () {
+  const touched = new Set(changed.map((file) => file.file));
+  if (touched.has(DatabaseFiles.catalog.file))
+    yield* verifyStore(stores.catalog, Effect.map(Layer.build(catalogDbLayer(dataDirectory)), (services) => Context.get(services, CatalogDb)));
+  if (touched.has(DatabaseFiles.guidance.file))
+    yield* verifyStore(stores.guidance, Effect.map(Layer.build(guidanceDbLayer(dataDirectory)), (services) => Context.get(services, GuidanceDb)));
+  if (touched.has(DatabaseFiles.policy.file))
+    yield* verifyStore(stores.policy, Effect.map(Layer.build(policyDbLayer(dataDirectory)), (services) => Context.get(services, PolicyDb)));
+  if (touched.has(accessFile)) yield* verifyAccessDatabase(dataDirectory).pipe(asUpgradeError(accessFile, "validation_failed"));
 });
 
 /**
@@ -324,7 +329,7 @@ export const upgradeDataDirectory = (options: UpgradeOptions): Effect.Effect<Upg
     }
 
     // 4. the result as the stores will open it
-    yield* verify(dataDirectory, access.state !== "absent");
+    yield* verify(dataDirectory, changed);
     const report: UpgradeReport = { fresh, backupSet, files: changed };
     // an upgrade of existing files is reported; creating the files of a new directory is the ordinary first start
     if (backupSet !== null) yield* logEvent("database_upgrade_completed", {
