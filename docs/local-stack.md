@@ -27,6 +27,7 @@ directly. Images never contain source, credentials or state.
 | `./dev sign-in` | prints a one-time Supervisor dashboard sign-in token |
 | `./dev fixture`, `./dev ui-fixture` | the dashboard fixtures, below |
 | `./dev check` | the disposable published-T3 check, below |
+| `./dev upgrade --journey NAME` | a provider-free published Supervisor upgrade journey, below |
 | `./dev e2e [ARGS]` | the browser journeys, below; ARGS go to vitest |
 | `./dev soak [ARGS]` | the scripted soaks, below; ARGS go to vitest |
 | `./dev trial SCENARIO[,SCENARIO...] --budget-minutes N` | a provider trial in the running environment, below |
@@ -589,6 +590,90 @@ each slot's version and the lock file's SHA-256. Ordinary `./dev up` and `./dev 
 stay on the pinned release. CI runs these slots as a daily canary, as a manual
 reproduction from a frozen lock and as the version PR's gate
 ([published-T3 compatibility](ci.md#published-t3-compatibility)).
+
+## Published upgrade journeys
+
+```sh
+./dev pnpm dev:releases resolve --out /cache/supervisor-releases.json
+./dev pnpm dev:targets resolve --out /cache/t3-lock.json
+./dev upgrade --journey stable --releases /cache/supervisor-releases.json --t3-lock /cache/t3-lock.json [--out DIR] [--keep]
+./dev upgrade --journey nightly --releases /cache/supervisor-releases.json --t3-lock /cache/t3-lock.json [--out DIR] [--keep]
+./dev upgrade --journey baseline --t3-lock /cache/t3-lock.json [--out DIR] [--keep]
+```
+
+A journey checks, without a provider, that this checkout's candidate upgrades the data
+directory a published Supervisor left and keeps what it holds. `stable` and `nightly` start
+from the release GHCR's `latest` and `nightly` image tags name, run from their official image;
+`baseline` starts from a directory the candidate created itself, at the current formats.
+
+`resolve` writes the release lock: for each channel the image index its tag names, exactly one
+`linux/amd64` and one `linux/arm64` image in it, both stamped with the same version, source
+revision and source repository, the version's own tag naming the same index, and every index,
+manifest and configuration checked against its SHA-256 digest. It reads GHCR with an anonymous
+pull token. It also keeps npm's record of each version, its own tarball with its sha512
+integrity from the same revision, or none where npm has no such version; that record serves
+only the npm probe below. A reply of another shape, a missing tag, image or label, or images,
+tags or npm records that disagree fail the resolution as invalid; a network error, a timeout
+or an HTTP error fails it as unavailable. Nothing falls back to another tag, version or
+registry. The T3 build is the `stable` slot of `--t3-lock`, or the pin without it; a journey
+never runs another T3 slot.
+
+The journey owns one marked run folder in the cache volume: a T3 of its own, a read-only
+session issued for the journey (`orchestration:read` and `filesystem:read`, no other
+credential), a disposable project with two chats and the Supervisor data directory. Its
+journey container serves T3; `./dev upgrade`, on the host, pulls the image by its platform
+digest and runs it in that container's network namespace as the development user, with the
+template's read-only root, no capabilities, no new privileges and an init, the folder's data
+directory and the read-only session. Docker stays on the host: it hands each fact only it sees,
+the image's description, the sign-in token the image's own `t3-supervisor auth forge` prints
+(on a pipe, never printed or stored by the host), the image's exit code and its log, to
+`scripts/upgrade-journey.ts`, which makes every judgement. In turn the journey:
+
+1. checks the pulled image's platform and its version, revision and source labels against
+   the lock, waits at most three minutes for its health to answer 200 with the project and both
+   chats ingested and its reported version and revision to be the locked ones, signs in with the
+   forged token, stops and enables chat A and stops chat B in Settings, saves other monitoring
+   and helper limits for the project with its model unchanged, enters No Project mode, reads
+   each back, and stops the image, which must exit 130;
+2. reads every database file read only: its format and its declarations. The persisted format
+   and structural contract select one frozen seed set of `test/fixtures/upgrade-journeys/`,
+   never a release name, and the journey writes its statements, labelled fixture input, for
+   history a published binary cannot produce without a provider. A missing file, a newer format
+   or a layout no set recognizes fails the journey as an unsupported shape; nothing is ever
+   seeded from the candidate instead;
+3. runs the candidate's own rollout scan of the directory and starts the candidate on it: every
+   file must be at the candidate's format; files at an older format must have been copied into
+   exactly one new verified backup set whose manifest names each with its format and whose copies
+   hold the files exactly as they were, with one completed upgrade logged, and a directory at the
+   current formats must get no backup and no upgrade; the creator's dashboard session must still
+   sign in; the thread policy, the project settings and No Project mode must read as saved; the
+   rows of `access/login.sqlite3`, `guidance.sqlite3` and `thread-settings.sqlite3`, the seeded
+   identities and native evidence included, must be kept byte for byte, the catalog's
+   environment, project and chat identities kept, and the workflow MCP bearer unchanged;
+4. restarts the candidate: ready again, no new backup set, no upgrade logged, every row kept and
+   the session still signed in; each stop must exit 130.
+
+A published image that never becomes ready on this T3, for example one that cannot read its
+event stream, is recorded with what its health last reported (`ok`, `t3Connected`,
+`supervisionState`, `lastErrorPhase`) and ends the journey as `creator_unready`: nothing is
+seeded and the candidate does not start. For a published journey the journey then installs the
+same version as a person does, `npm install --prefix DIR --no-save --ignore-scripts
+@jfet97/t3-supervisor@VERSION`, with nothing patched, overridden or pinned, and starts it once on
+an empty directory. It records whether it booted, the Effect packages npm resolved and whether
+the installed tarball's integrity is the locked one. That npm-install path is a separate
+finding and never decides the journey's outcome.
+
+The journey prints one line per check and per finding, then one JSON report: its outcome
+(`passed`, `failed`, `unsupported_shape`, `creator_unready` or `harness`), the reason, its
+inputs (the release with its image digest and the release lock's SHA-256, the T3 version and
+the target lock's SHA-256 or the pin, this checkout's commit and whether its tree was clean),
+the formats it found, the seed set, every check and finding and the stage timings. `--out`
+names a folder of this checkout that receives the report and the logs. It exits non-zero unless
+it passed. The containers are removed at the end and the folder too unless `--keep` is given;
+`./dev pnpm dev:stack clean` removes a kept or abandoned folder. CI runs the three journeys as a
+daily canary and in the version PR gate ([published Supervisor upgrades](ci.md#published-supervisor-upgrades)).
+These are local stack observations: the published images and T3 are real and unmodified, no
+provider is signed in, and the seeded rows are fixture input.
 
 ## Evidence labels
 
