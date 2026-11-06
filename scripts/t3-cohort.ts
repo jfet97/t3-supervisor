@@ -35,11 +35,13 @@ import { decodeTargetLock, targetRelease, TargetSlot } from "./t3-targets.js";
   explicit-message commit, the command lifecycle of a disposable thread and the helper webhook channel. Every step records classified
   evidence (docs/testing.md): accepted only for a definite positive answer whose read-back confirms it. A command is sent at most
   once; after an answer that is not definite the probe only reads back. Evidence names ids, field names, counts, lengths, equality
-  booleans and classifications, never a token, a native body, a prompt, file contents or a raw cause. No model runs: the stack signs
-  in no provider, so model answers, the Stop of a running turn, the cancellation of a genuinely queued run (T3 queues a run only
-  behind an active or held one, and without a provider a run fails before another can queue), check-in turn items, helper model
-  behavior and compaction stay with the provider tier. Cancelling an idle thread's run is deliberately invalid input that T3 refuses,
-  which T3Native classifies as uncertain, so it is no step here.
+  booleans and classifications, never a token, a native body, a prompt, file contents or a raw cause. The stack signs in no provider
+  and qualifies native operations only. Model answers, the Stop of a running turn, the cancellation of a genuinely queued run,
+  check-in turn items, helper model behavior and compaction stay with the provider tier. Cancelling an idle thread's run is
+  deliberately invalid input that T3 refuses, which T3Native classifies
+  as uncertain, so it is no step here. Without a provider the turn a message starts may fail or stay running, so the settle and the
+  idle Stop are sent to the launched thread while a read just before each shows it idle, before its message, and nothing waits for
+  that turn to end.
 */
 
 // ---- evidence ----
@@ -56,7 +58,7 @@ export interface Classified {
 /** The steps of one probe run, in order; each appears exactly once in a complete report */
 export const plannedSteps = [
   "stack", "environment", "model-config", "files-read", "setup-scaffold", "git-probe", "commit", "thread-launch", "thread-watch",
-  "message-dispatch", "thread-settle", "thread-stop-idle", "helper-task", "helper-webhook", "helper-delete", "teardown",
+  "thread-settle", "thread-stop-idle", "message-dispatch", "helper-task", "helper-webhook", "helper-delete", "teardown",
 ] as const;
 export type StepName = typeof plannedSteps[number];
 
@@ -354,13 +356,18 @@ export const parseArguments = (args: ReadonlyArray<string>): ParsedArguments => 
 
 export class CohortProbeError extends Data.TaggedError("CohortProbeError")<{readonly message: string}> {}
 
-interface ProbeContext {
-  readonly stack: RunningStack;
-  readonly release: T3Release;
+/** What the thread lifecycle needs of a run: its T3Native, its send ledger, fresh identities, its report and the stack's project */
+export interface ThreadContext {
   readonly native: T3NativeShape;
   readonly ledger: SendLedger;
   readonly uuid: Effect.Effect<string>;
   readonly report: (evidence: StepEvidence) => Effect.Effect<void>;
+  readonly projectId: string;
+}
+
+interface ProbeContext extends ThreadContext {
+  readonly stack: RunningStack;
+  readonly release: T3Release;
 }
 
 interface StepOutcome<P> {
@@ -380,7 +387,7 @@ const defectName = (cause: Cause.Cause<unknown>): string => {
 };
 
 /** Runs one step and reports its evidence with its elapsed time; a probe defect inside it is harness, an interruption stays one */
-const runStep = <P, R>(ctx: ProbeContext, name: StepName, body: Effect.Effect<StepOutcome<P>, never, R>): Effect.Effect<P | null, never, R> =>
+const runStep = <P, R>(ctx: Pick<ThreadContext, "report">, name: StepName, body: Effect.Effect<StepOutcome<P>, never, R>): Effect.Effect<P | null, never, R> =>
   Effect.gen(function* () {
     const started = yield* Clock.monotonicTimeNanos;
     const exit = yield* Effect.exit(body);
@@ -390,7 +397,7 @@ const runStep = <P, R>(ctx: ProbeContext, name: StepName, body: Effect.Effect<St
     return outcome.provides;
   });
 
-const skip = <P>(ctx: ProbeContext, name: StepName, reason: string): Effect.Effect<P | null> =>
+const skip = <P>(ctx: Pick<ThreadContext, "report">, name: StepName, reason: string): Effect.Effect<P | null> =>
   Effect.as(ctx.report({name, operations: stepOperations[name], ...notRun(reason), elapsedMs: 0}), null);
 
 // git in the disposable project folder with T3's own environment; null when git could not run there
@@ -406,9 +413,9 @@ const gitChanges = (stack: RunningStack): Effect.Effect<ReadonlyArray<string> | 
     (result) => result !== null && result.code === 0 ? porcelainPaths(result.stdout) : null);
 
 type ThreadRead = Result.Result<ThreadSnapshot, T3ReadError | T3InvalidInput>;
-const readThread = (ctx: ProbeContext, threadId: string): Effect.Effect<ThreadRead> => Effect.result(ctx.native.orchestration.thread(threadId));
+const readThread = (ctx: Pick<ThreadContext, "native">, threadId: string): Effect.Effect<ThreadRead> => Effect.result(ctx.native.orchestration.thread(threadId));
 // read until a snapshot at or past `sequence`, a command's commit point: at most twenty more reads, half a second apart
-const readThreadAt = (ctx: ProbeContext, threadId: string, sequence: number | null): Effect.Effect<ThreadRead> =>
+const readThreadAt = (ctx: Pick<ThreadContext, "native">, threadId: string, sequence: number | null): Effect.Effect<ThreadRead> =>
   readThread(ctx, threadId).pipe(Effect.repeat({schedule: Schedule.spaced("500 millis"), times: 20,
     until: (read: ThreadRead) => Result.isSuccess(read) && (sequence === null || read.success.snapshotSequence >= sequence)}));
 const unreadableThread = (read: ThreadRead): ReadBack => inconclusive(Result.isFailure(read) ? classifyFailure(read.failure).detail : "read");
@@ -766,12 +773,12 @@ interface Launch {
 }
 
 // one launch in Supervisor's launch profile under a reserved thread identity, sent once and read back
-const launch = (ctx: ProbeContext, model: ModelChoice, title: string): Effect.Effect<Launch> => Effect.gen(function* () {
+const launch = (ctx: ThreadContext, model: ModelChoice, title: string): Effect.Effect<Launch> => Effect.gen(function* () {
   const commands = ctx.native.orchestration.commands;
   if (commands === null) return {result: harness("the guidance credential's commands are not configured"), threadId: null} satisfies Launch;
   const threadId = `t3-cohort-probe:${yield* ctx.uuid}`;
   const commandId = `t3-cohort-probe-launch:${yield* ctx.uuid}`;
-  const prepared = yield* Effect.result(commands.launchThread.prepare({commandId, threadId, projectId: ctx.stack.project.id, title,
+  const prepared = yield* Effect.result(commands.launchThread.prepare({commandId, threadId, projectId: ctx.projectId, title,
     modelSelection: {instanceId: model.instanceId, model: model.model, options: []}}));
   if (Result.isFailure(prepared)) return {result: classifyFailure(prepared.failure), threadId: null} satisfies Launch;
   const sent = yield* sendOnce(ctx.ledger, commandId, initiated(prepared.success));
@@ -779,7 +786,7 @@ const launch = (ctx: ProbeContext, model: ModelChoice, title: string): Effect.Ef
   const receipt = Result.isSuccess(sent.result) ? sent.result.success : null;
   const read = yield* readThreadAt(ctx, threadId, receipt?.sequence ?? null);
   const shown = Result.isSuccess(read) ? read.success.projection : null;
-  const inProject = shown !== null && shown.thread.id === threadId && shown.thread.projectId === ctx.stack.project.id &&
+  const inProject = shown !== null && shown.thread.id === threadId && shown.thread.projectId === ctx.projectId &&
     shown.thread.archivedAt == null && shown.thread.deletedAt == null;
   const readBack = shown === null ? (notFound(read) ? refuted("the thread is not readable (HTTP 404)") : unreadableThread(read))
     : inProject ? confirmed(`an active thread of the stack's project, ${shown.messages.length} messages, ${runSummary(shown)}`)
@@ -794,7 +801,7 @@ const launch = (ctx: ProbeContext, model: ModelChoice, title: string): Effect.Ef
     threadId: inProject ? threadId : null} satisfies Launch;
 });
 
-const threadLaunchStep = (ctx: ProbeContext, model: ModelChoice) => runStep(ctx, "thread-launch",
+const threadLaunchStep = (ctx: ThreadContext, model: ModelChoice) => runStep(ctx, "thread-launch",
   Effect.map(launch(ctx, model, "T3 cohort probe"), (launched) => finished<string>(launched.result, launched.threadId)));
 
 interface WatchedSnapshot {
@@ -804,7 +811,7 @@ interface WatchedSnapshot {
   readonly runs: number;
 }
 
-const threadWatchStep = (ctx: ProbeContext, threadId: string) => runStep(ctx, "thread-watch", Effect.scoped(Effect.gen(function* () {
+const threadWatchStep = (ctx: ThreadContext, threadId: string) => runStep(ctx, "thread-watch", Effect.scoped(Effect.gen(function* () {
   const snapshot = yield* Deferred.make<WatchedSnapshot>();
   const marker = yield* Deferred.make<void>();
   // the consumer reads each item before T3Native acknowledges its chunk; the subscription ends with this step's scope
@@ -829,7 +836,7 @@ const threadWatchStep = (ctx: ProbeContext, threadId: string) => runStep(ctx, "t
 type Dispatch = {readonly _tag: "Unsent"; readonly result: Classified} | {readonly _tag: "Sent"; readonly result: Result.Result<CommandReceipt, T3RequestError>};
 
 // one orchestration command through the operate credential, prepared and sent once under its own command identity
-const dispatch = (ctx: ProbeContext, command: OrchestrationCommand): Effect.Effect<Dispatch> => Effect.gen(function* () {
+const dispatch = (ctx: Pick<ThreadContext, "native" | "ledger">, command: OrchestrationCommand): Effect.Effect<Dispatch> => Effect.gen(function* () {
   const commands = ctx.native.orchestration.commands;
   if (commands === null) return {_tag: "Unsent", result: harness("the guidance credential's commands are not configured")} satisfies Dispatch;
   const prepared = yield* Effect.result(commands.dispatchCommand.prepare(command));
@@ -839,20 +846,20 @@ const dispatch = (ctx: ProbeContext, command: OrchestrationCommand): Effect.Effe
   return {_tag: "Sent", result: sent.result} satisfies Dispatch;
 });
 
-/** The disposable thread as last read: whether no run is live, waiting or queued, so a settle, Stop or cancel meets an idle thread */
-interface ThreadState {
-  readonly threadId: string;
-  readonly idle: boolean;
-  readonly projection: Projection | null;
-}
+/**
+ * An idle-only command is sent only while a read just before it shows the owned thread idle, with no live, waiting or queued run:
+ * null then, otherwise the step's evidence without a send, the read's own failure or not-run with the runs it showed
+ */
+const idleGate = (read: ThreadRead): Classified | null => Result.isFailure(read) ? classifyFailure(read.failure)
+  : idle(read.success.projection) ? null : notRun(`the thread was not idle when read (${runSummary(read.success.projection)}), so nothing was sent`);
 
 const messageText = "T3 Supervisor cohort probe message. No reply is needed.";
 
-const messageDispatchStep = (ctx: ProbeContext, threadId: string) => runStep(ctx, "message-dispatch", Effect.gen(function* () {
+const messageDispatchStep = (ctx: ThreadContext, threadId: string) => runStep(ctx, "message-dispatch", Effect.gen(function* () {
   const messageId = `t3-cohort-probe-message:${yield* ctx.uuid}`;
   const sending = yield* dispatch(ctx, {_tag: "MessageDispatch", commandId: `t3-cohort-probe-dispatch:${yield* ctx.uuid}`, messageId, threadId,
     text: messageText, dispatchMode: {type: "queue_after_active"}});
-  if (sending._tag === "Unsent") return finished<ThreadState>(sending.result);
+  if (sending._tag === "Unsent") return finished<never>(sending.result);
   const receipt = Result.isSuccess(sending.result) ? sending.result.success : null;
   const read = yield* readThreadAt(ctx, threadId, receipt?.sequence ?? null);
   const message = Result.isSuccess(read) ? read.success.projection.messages.find((item) => item.id === messageId) : undefined;
@@ -860,15 +867,12 @@ const messageDispatchStep = (ctx: ProbeContext, threadId: string) => runStep(ctx
     `${stated(message.createdBy)}, creationSource ${stated(message.creationSource)}`;
   const readBack = Result.isFailure(read) ? unreadableThread(read) : message === undefined ? refuted("the message is not in the thread")
     : message.role === "user" && message.text === messageText ? confirmed(`the message under its reserved id, ${facts}`) : refuted(`the message under its reserved id, ${facts}`);
-  // the run the message may have started, read until nothing is live, waiting or queued: at most 30 s
-  const later = yield* readThread(ctx, threadId).pipe(Effect.repeat({schedule: Schedule.spaced("500 millis"), times: 60,
-    until: (current: ThreadRead) => Result.isSuccess(current) && idle(current.success.projection)}));
-  const projection = Result.isSuccess(later) ? later.success.projection : null;
   const result = receipt === null
     ? afterFailure(Result.isFailure(sending.result) ? classifyFailure(sending.result.failure) : uncertain("no reply"), readBack)
     : afterAnswer(`dispatch receipt at sequence ${receipt.sequence}`, readBack);
-  return finished<ThreadState>({outcome: result.outcome, detail: `${result.detail}; runs then: ${projection === null ? "unreadable" : runSummary(projection)}`},
-    {threadId, idle: projection !== null && idle(projection), projection});
+  /* Report the turn as that same read showed it. Without a signed-in provider it may fail or stay running; nothing waits for it. */
+  return finished<never>({outcome: result.outcome,
+    detail: `${result.detail}; runs then: ${Result.isSuccess(read) ? runSummary(read.success.projection) : "unreadable"}`});
 }));
 
 // a settle as Supervisor reads it back (src/supervisor-lifecycle.ts): settledAt set or the settled override
@@ -888,41 +892,61 @@ const shellLocation = (threadId: string, shell: Result.Result<ReadonlyArray<Thre
       `settledOverride ${stated(row.settledOverride)}, settledAt ${row.settledAt == null ? "null or absent" : "set"}`);
 };
 
-const threadSettleStep = (ctx: ProbeContext, thread: ThreadState) => runStep(ctx, "thread-settle", Effect.gen(function* () {
-  const sending = yield* dispatch(ctx, {_tag: "ThreadSettle", commandId: `t3-cohort-probe-settle:${yield* ctx.uuid}`, threadId: thread.threadId});
-  if (sending._tag === "Unsent") return finished<ThreadState>(sending.result);
+const threadSettleStep = (ctx: ThreadContext, threadId: string) => runStep(ctx, "thread-settle", Effect.gen(function* () {
+  const gate = idleGate(yield* readThread(ctx, threadId));
+  if (gate !== null) return finished<never>(gate);
+  const sending = yield* dispatch(ctx, {_tag: "ThreadSettle", commandId: `t3-cohort-probe-settle:${yield* ctx.uuid}`, threadId});
+  if (sending._tag === "Unsent") return finished<never>(sending.result);
   const receipt = Result.isSuccess(sending.result) ? sending.result.success : null;
-  const read = yield* readThreadAt(ctx, thread.threadId, receipt?.sequence ?? null);
+  const read = yield* readThreadAt(ctx, threadId, receipt?.sequence ?? null);
   const readBack = settledReadBack(read);
   const command = receipt === null
     ? afterFailure(Result.isFailure(sending.result) ? classifyFailure(sending.result.failure) : uncertain("no reply"), readBack)
     : afterAnswer(`settle receipt at sequence ${receipt.sequence}`, readBack);
-  const location = shellLocation(thread.threadId, yield* Effect.result(ctx.native.orchestration.shellThreads));
-  const projection = Result.isSuccess(read) ? read.success.projection : thread.projection;
-  return finished<ThreadState>(worst([command, location]), {threadId: thread.threadId, idle: projection !== null && idle(projection), projection});
+  const location = shellLocation(threadId, yield* Effect.result(ctx.native.orchestration.shellThreads));
+  return finished<never>(worst([command, location]));
 }));
 
-const threadStopStep = (ctx: ProbeContext, thread: ThreadState) => runStep(ctx, "thread-stop-idle", Effect.gen(function* () {
-  const before = yield* readThread(ctx, thread.threadId);
-  const sending = yield* dispatch(ctx, {_tag: "ThreadStop", commandId: `t3-cohort-probe-stop:${yield* ctx.uuid}`, threadId: thread.threadId,
+const threadStopStep = (ctx: ThreadContext, threadId: string) => runStep(ctx, "thread-stop-idle", Effect.gen(function* () {
+  const before = yield* readThread(ctx, threadId);
+  if (Result.isFailure(before)) return finished<never>(classifyFailure(before.failure));
+  const gate = idleGate(before);
+  if (gate !== null) return finished<never>(gate);
+  const sending = yield* dispatch(ctx, {_tag: "ThreadStop", commandId: `t3-cohort-probe-stop:${yield* ctx.uuid}`, threadId,
     stopDelegatedTasks: true, reason: "T3 Supervisor cohort probe: Stop on an idle thread."});
-  if (sending._tag === "Unsent") return finished<ThreadState>(sending.result);
+  if (sending._tag === "Unsent") return finished<never>(sending.result);
   const receipt = Result.isSuccess(sending.result) ? sending.result.success : null;
-  const read = yield* readThreadAt(ctx, thread.threadId, receipt?.sequence ?? null);
+  const read = yield* readThreadAt(ctx, threadId, receipt?.sequence ?? null);
   const shown = Result.isSuccess(read) ? read.success.projection : null;
   const facts = shown === null ? "" : `${runSummary(shown)}, deletedAt ${shown.thread.deletedAt == null ? "null" : "set"}`;
-  const state = {threadId: thread.threadId, idle: shown !== null && idle(shown), projection: shown ?? thread.projection};
   if (receipt === null) {
     // the idle thread looks the same with or without a Stop, so what is read back neither confirms nor contradicts a refusal
     const failure = Result.isFailure(sending.result) ? classifyFailure(sending.result.failure) : uncertain("no reply");
-    return finished<ThreadState>(afterFailure(failure, shown === null ? unreadableThread(read) : inconclusive(facts)), state);
+    return finished<never>(afterFailure(failure, shown === null ? unreadableThread(read) : inconclusive(facts)));
   }
-  const earlier = Result.isSuccess(before) ? before.success.snapshotSequence : null;
-  const answer = `stop receipt at sequence ${receipt.sequence} (${earlier === null ? "the earlier sequence is unknown"
-    : receipt.sequence > earlier ? "T3 recorded new events" : "T3 recorded no new event"})`;
-  return finished<ThreadState>(afterAnswer(answer, shown === null ? unreadableThread(read)
-    : idle(shown) && shown.thread.deletedAt == null ? confirmed(`the thread stays idle: ${facts}`) : refuted(`after the Stop: ${facts}`)), state);
+  const earlier = before.success.snapshotSequence;
+  const answer = `stop receipt at sequence ${receipt.sequence} (${receipt.sequence > earlier ? "T3 recorded new events" : "T3 recorded no new event"})`;
+  return finished<never>(afterAnswer(answer, shown === null ? unreadableThread(read)
+    : idle(shown) && shown.thread.deletedAt == null ? confirmed(`the thread stays idle: ${facts}`) : refuted(`after the Stop: ${facts}`)));
 }));
+
+/**
+ * The command lifecycle of one disposable thread: launched and watched, then settled and Stopped while each read just before shows it
+ * idle, and only then given a message, whose turn is reported as read and never awaited. It provides the thread for the helper channel.
+ */
+export const threadLifecycleSteps = (ctx: ThreadContext, model: ModelChoice | null): Effect.Effect<string | null> => Effect.gen(function* () {
+  const threadId = model === null ? yield* skip<string>(ctx, "thread-launch", "model-config offered no model") : yield* threadLaunchStep(ctx, model);
+  if (threadId === null) {
+    for (const name of ["thread-watch", "thread-settle", "thread-stop-idle", "message-dispatch"] as const)
+      yield* skip(ctx, name, "thread-launch provided no readable thread");
+    return null;
+  }
+  yield* threadWatchStep(ctx, threadId);
+  yield* threadSettleStep(ctx, threadId);
+  yield* threadStopStep(ctx, threadId);
+  yield* messageDispatchStep(ctx, threadId);
+  return threadId;
+});
 
 // ---- 6. helper webhook channel ----
 
@@ -1067,7 +1091,29 @@ const helperDeleteStep = (ctx: ProbeContext, taskId: string) => runStep(ctx, "he
 
 // ---- the run ----
 
-// the run's T3Native over the stack's credential files, composed as src/guidance-application.ts composes it over the root native transport
+/** The bearer tokens of a run's T3Native: the read, operate (guidance), project-write, project-commit and Git probe credentials */
+export interface NativeTokens {
+  readonly read: string;
+  readonly operate: string;
+  readonly projectWrite: string;
+  readonly commit: string;
+  readonly probe: string;
+}
+
+/** T3Native over one T3, composed as src/guidance-application.ts composes it over the root native transport */
+export const nativeOver = (baseUrl: string, tokens: NativeTokens) => Effect.gen(function* () {
+  const endpoint = (value: string) => ({baseUrl, token: value});
+  const read = endpoint(tokens.read);
+  const access = yield* Layer.build(T3Native.layer({baseUrl, read, projectWrite: endpoint(tokens.projectWrite), commit: endpoint(tokens.commit),
+    probe: endpoint(tokens.probe)}).pipe(Layer.provideMerge(Layer.mergeAll(
+    NativeShell.layer(read).pipe(Layer.provideMerge(NativeRpc.layer(read))),
+    NativeOperateRpc.layer(endpoint(tokens.operate)),
+    T3Client.layer(read),
+  )), Layer.provideMerge(NativeTransportLive)));
+  return Context.get(access, T3Native);
+});
+
+// the run's T3Native over the stack's credential files
 const nativeAccess = (stack: RunningStack) => Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const token = (name: string): Effect.Effect<string, string> => {
@@ -1076,18 +1122,8 @@ const nativeAccess = (stack: RunningStack) => Effect.gen(function* () {
     return fs.readFileString(session.file).pipe(Effect.mapError(() => `the ${name} credential file could not be read`),
       Effect.flatMap((text) => text.trim().length > 0 ? Effect.succeed(text.trim()) : Effect.fail(`the ${name} credential file is empty`)));
   };
-  const endpoint = (value: string) => ({baseUrl: stack.t3.url, token: value});
-  const read = endpoint(yield* token("read"));
-  const operate = endpoint(yield* token("guidance"));
-  const projectWrite = endpoint(yield* token("project-write"));
-  const commit = endpoint(yield* token("project-commit"));
-  const probe = endpoint(yield* token("git-probe"));
-  const access = yield* Layer.build(T3Native.layer({baseUrl: stack.t3.url, read, projectWrite, commit, probe}).pipe(Layer.provideMerge(Layer.mergeAll(
-    NativeShell.layer(read).pipe(Layer.provideMerge(NativeRpc.layer(read))),
-    NativeOperateRpc.layer(operate),
-    T3Client.layer(read),
-  )), Layer.provideMerge(NativeTransportLive)));
-  return Context.get(access, T3Native);
+  return yield* nativeOver(stack.t3.url, {read: yield* token("read"), operate: yield* token("guidance"), projectWrite: yield* token("project-write"),
+    commit: yield* token("project-commit"), probe: yield* token("git-probe")});
 });
 
 const probeSteps = (ctx: ProbeContext) => Effect.gen(function* () {
@@ -1101,20 +1137,10 @@ const probeSteps = (ctx: ProbeContext) => Effect.gen(function* () {
   if (scaffold === null || scaffold.written.length === 0) yield* skip(ctx, "commit", "setup-scaffold wrote no file to commit");
   else yield* commitStep(ctx, scaffold);
 
-  const threadId = model === null ? yield* skip<string>(ctx, "thread-launch", "model-config offered no model") : yield* threadLaunchStep(ctx, model);
-  const noThread = "thread-launch provided no readable thread";
-  if (threadId === null) yield* skip(ctx, "thread-watch", noThread);
-  else yield* threadWatchStep(ctx, threadId);
-  const dispatched = threadId === null ? yield* skip<ThreadState>(ctx, "message-dispatch", noThread) : yield* messageDispatchStep(ctx, threadId);
-  const busy = "the thread still had a live, waiting or queued run after 30 s";
-  const settled = dispatched === null ? yield* skip<ThreadState>(ctx, "thread-settle", "message-dispatch provided no thread state")
-    : !dispatched.idle ? yield* skip<ThreadState>(ctx, "thread-settle", busy) : yield* threadSettleStep(ctx, dispatched);
-  const latest = settled ?? dispatched;
-  if (latest === null) yield* skip(ctx, "thread-stop-idle", "no thread state");
-  else if (!latest.idle) yield* skip(ctx, "thread-stop-idle", busy);
-  else yield* threadStopStep(ctx, latest);
+  const threadId = yield* threadLifecycleSteps(ctx, model);
 
-  const channel = threadId === null || model === null ? yield* skip<HelperChannel>(ctx, "helper-task", noThread) : yield* helperTaskStep(ctx, threadId, model);
+  const channel = threadId === null || model === null ? yield* skip<HelperChannel>(ctx, "helper-task", "thread-launch provided no readable thread")
+    : yield* helperTaskStep(ctx, threadId, model);
   if (channel === null || channel.path === null) yield* skip(ctx, "helper-webhook", "helper-task provided no owned task with a webhook path");
   else yield* helperWebhookStep(ctx, {...channel, path: channel.path});
   if (channel === null || !channel.exists) yield* skip(ctx, "helper-delete", "helper-task left no task to delete");
@@ -1217,7 +1243,7 @@ export const runProbe = (options: ProbeOptions) => Effect.gen(function* () {
     } else {
       const crypto = yield* Crypto.Crypto;
       const probed = yield* Effect.exit(probeSteps({stack, release: requested, native: native.success, ledger: yield* makeLedger,
-        uuid: Effect.orDie(crypto.randomUUIDv4()), report}));
+        uuid: Effect.orDie(crypto.randomUUIDv4()), report, projectId: stack.project.id}));
       // each step reports its own defect; one between the steps is reported on the next step, and the rest did not run
       if (Exit.isFailure(probed)) {
         if (Cause.hasInterrupts(probed.cause)) return yield* Effect.failCause(probed.cause);
