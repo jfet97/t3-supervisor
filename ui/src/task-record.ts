@@ -1,6 +1,6 @@
 import type { TaskInterpretationInfo, WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressObservation, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
-import { taskScopeRevision } from "../../src/supervision-conversation-contract.js";
+import { agreementCurrent, earlierAcceptedSnapshot, proposalCurrent, taskScopeRevision } from "../../src/supervision-conversation-contract.js";
 import { branchPathGroups, isPlanGroup, planChildGroups } from "../../src/workflow-plan-tree.js";
 
 // the one task workspace reads three records of the same task: the current proposal, the recorded acceptance and the live
@@ -17,15 +17,34 @@ export type OccurrenceIndex = ReadonlyMap<string, {node: PlanOccurrence; parent:
 
 const ended = (task: TaskInterpretationInfo | undefined) => !task || ["expired", "not_supervised"].includes(task.status);
 
-/** The task's recorded acceptance while the task is current. It may have accepted an earlier proposal than the latest one. */
-export const acceptedAgreement = (task: TaskInterpretationInfo | undefined): WorkflowAgreementInfo | null =>
-  task?.agreement?.status === "agreed" && !ended(task) ? task.agreement : null;
+// an acceptance of an earlier request's scope is history once the task keeps only the plan it accepted or needs no plan: a later
+// request that needs no plan neither proposes nor obliges anything. While a genuine proposal for the changed scope awaits acceptance,
+// the earlier acceptance stays the plan that proposal revises
+const acceptanceHistory = (task: TaskInterpretationInfo): boolean =>
+  !agreementCurrent(task) && (earlierAcceptedSnapshot(task) || task.supervision === "not_needed");
 
-/** The task's latest proposal when it is not the proposal the recorded acceptance covers. */
+/** The task's recorded acceptance while the task is current and the acceptance is not history. It may have accepted an earlier proposal than the latest one. */
+export const acceptedAgreement = (task: TaskInterpretationInfo | undefined): WorkflowAgreementInfo | null =>
+  task?.agreement?.status === "agreed" && !ended(task) && !acceptanceHistory(task) ? task.agreement : null;
+
+/** An acceptance the task recorded for an earlier request, kept as history: neither the current plan nor an obligation of the current request. */
+export const earlierAcceptance = (task: TaskInterpretationInfo | undefined): WorkflowAgreementInfo | null =>
+  task?.agreement?.status === "agreed" && !ended(task) && acceptanceHistory(task) ? task.agreement : null;
+
+/**
+ * The task's latest proposal when it is not the proposal the recorded acceptance covers. A task that needs no plan, or keeps only the plan
+ * accepted for an earlier request, proposes nothing.
+ */
 export const pendingProposal = (task: TaskInterpretationInfo | undefined): WorkflowProposalInfo | null => {
-  if (!task?.workflow || ended(task)) return null;
+  if (!task?.workflow || ended(task) || !proposalCurrent(task)) return null;
   const agreement = acceptedAgreement(task);
   return agreement && task.workflowProposalId === agreement.proposalId ? null : task.workflow;
+};
+
+/** Whether the task observed a newer requester message than the one its current facts were last interpreted from. */
+export const newerRequestUninterpreted = (task: TaskInterpretationInfo | undefined): boolean => {
+  const facts = task?.conversation;
+  return Boolean(facts?.observed && facts.considered && (facts.observed.messageId !== facts.considered.messageId || facts.observed.hash !== facts.considered.hash));
 };
 
 /** Every step, workflow and branch occurrence in a plan, with the workflow occurrence that contains it ("" at the root). */
@@ -170,14 +189,15 @@ export type JourneyRecord =
 /**
  * The single plan the task workspace shows: the live workflow while it is bound to this task's current scope or still is the plan the
  * recorded acceptance accepted, else the plan the recorded acceptance accepted, else the current proposal. A proposal never replaces
- * the live workflow or the accepted plan, and the workflow of an earlier scope never stands in for a later acceptance or proposal.
+ * the live workflow or the accepted plan, and the workflow of an earlier scope never stands in for a later acceptance or proposal; an
+ * acceptance that is history, and the plan it accepted, are no current plan.
  */
 export function journeyRecord(task: TaskInterpretationInfo | undefined, mainWorkflow: WorkflowProgressWorkflow | undefined): JourneyRecord {
   const agreement = acceptedAgreement(task);
   if (mainWorkflow?.plan && task?.id && mainWorkflow.assessment?.taskId === task.id && (mainWorkflow.assessment.sourceHash === taskScopeRevision(task) ||
     agreement !== null && mainWorkflow.acceptedProposalId === agreement.proposalId)) return {kind: "live", workflow: mainWorkflow, plan: mainWorkflow.plan};
   if (agreement?.workflow.plan) return {kind: "agreed", plan: agreement.workflow.plan};
-  if (task?.workflow?.plan && !ended(task)) return {kind: "proposed", plan: task.workflow.plan};
+  if (task?.workflow?.plan && !ended(task) && proposalCurrent(task)) return {kind: "proposed", plan: task.workflow.plan};
   return {kind: "none"};
 }
 

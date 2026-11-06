@@ -203,7 +203,8 @@ it("every journey fixture decodes through the production contracts, agrees acros
     const row = model.dashboardOverview({}, 1_800_000_000_000).work.find(item => item.mainThreadId === fixtureIds.threadA1)!;
     assert.equal(row.title, journeyTitle);
     assert.equal(row.objective, task.objective);
-    if (phase !== "request") assert.equal(row.objective, journeyObjective);
+    // the request is not interpreted yet, and the no-plan follow-up's objective is the later lookup's authorized outcome
+    if (phase !== "request" && phase !== "rescoped-no-plan") assert.equal(row.objective, journeyObjective);
     assert.equal(model.guidanceSnapshot(1_800_000_000_000).threads.find(thread => thread.id === fixtureIds.threadA1)!.title, journeyTitle);
     model.switchEnvironment("b");
     assert.equal(model.projectSupervisor(fixtureIds.projectA, fixtureIds.threadA1).tasks.some(item => item.id === "fixture-task-packing"), false);

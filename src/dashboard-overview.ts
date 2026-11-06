@@ -1,5 +1,5 @@
 import type { CheckoutObservationInfo } from "./checkout-observation.js";
-import { ConversationEngagement, deriveConversationEngagement } from "./supervision-conversation-contract.js";
+import { agreementCurrent, ConversationEngagement, deriveConversationEngagement, proposalCurrent } from "./supervision-conversation-contract.js";
 import { Schema } from "effect";
 import type { BindingRecord, TaskRecord } from "./project-supervisor-store.js";
 import type { TaskInterpretationInfo, SupervisorMonitoringStatus } from "./project-supervisor-contract.js";
@@ -102,8 +102,9 @@ export function workAttention(input: {
   if (task && ["needs_context", "unavailable", "uncertain"].includes(task.status)) attention.push(task.reason.slice(0, 700));
   if (assessment?.status === "needs_attention") attention.push(assessment.summary || "The current workflow needs attention.");
   if (assessment?.status === "completed" && assessment.reassessment) attention.push(assessment.reassessment);
-  if (task?.workflow && ["invalid", "stale", "unavailable"].includes(task.workflow.status)) attention.push(planStatusAttention(task.workflow.status));
-  if (task?.agreement?.status === "stale") attention.push(staleAgreementAttention);
+  // only the current request's plan and an acceptance it still needs are attention; a request that needs no plan has neither
+  if (task?.workflow && proposalCurrent(task) && ["invalid", "stale", "unavailable"].includes(task.workflow.status)) attention.push(planStatusAttention(task.workflow.status));
+  if (task?.agreement?.status === "stale" && task.supervision !== "not_needed") attention.push(staleAgreementAttention);
   if (task?.definitionReview?.status === "revert_requested") attention.push(task.definitionReview.message.slice(0, 700));
   if (task?.workflowProtocolDiagnostic) attention.push(protocolDiagnosticAttention);
   return [...new Set(attention)];
@@ -155,7 +156,10 @@ export function buildDashboardOverview(input: {
       engagement: deriveConversationEngagement({task, enabled: supervision === "enabled", available: input.available && project.available, bindingState: binding.state, monitoringState: monitoring.state}),
       objective: task?.objective?.slice(0, 800) ?? null,
       reason: (task?.reason ?? monitoring.message).slice(0, 800), taskStatus: task?.status ?? null,
-      planStatus: task?.agreement?.status ?? task?.workflow?.status ?? null, assessment,
+      // the current request's plan state: an acceptance of an earlier request, the plan it accepted and a plan kept for a request that
+      // needs no plan are history
+      planStatus: !task ? null : agreementCurrent(task) ? "agreed" : task.supervision === "not_needed" ? null : task.agreement?.status === "stale" ? "stale"
+        : proposalCurrent(task) ? task.workflow?.status ?? null : null, assessment,
       attention: [...new Set(attention)], updatedAt: task?.updatedAt ?? null});
   }
   work.sort((a, b) => Number(b.attention.length > 0) - Number(a.attention.length > 0) ||

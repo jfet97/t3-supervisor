@@ -10,7 +10,8 @@ import { confirmChatSupervisionChange, mergeLoadedDraft, ConnectedWork, progress
 import { loadProjectSupervisor, loadWorkflowProgress, ProjectSupervisorRequestError, refreshWorkflowProgressPages, retryProjectSupervisor, saveProjectSupervisor } from "../ui/src/project-supervisor-api.js";
 import { keepFetch, locationLayer, pageLayer, rejects } from "./support/g6-page.js";
 import { fixtureJourney } from "./ui-fixture/journey.js";
-import { PlanJourney } from "../ui/src/workflow-journey.js";
+import { alignmentLabel, noPlanNeeded, PlanJourney } from "../ui/src/workflow-journey.js";
+import { acceptedAgreement, earlierAcceptance, journeyRecord, newerRequestUninterpreted, pendingProposal } from "../ui/src/task-record.js";
 import { historyOperations, operationHeadline, WorkflowHistory as WorkflowHistoryView } from "../ui/src/workflow-history.js";
 
 // the client helpers are Effects on the page runtime of each test; they resolve request paths against the page location.
@@ -1510,6 +1511,51 @@ it("a revised plan accepted for a changed scope is the task's current plan, and 
   assert.match(currentHtml, /Print the carton label/);
   assert.match(currentHtml, /needs a fresh assessment before it counts here/);
   assert.doesNotMatch(currentHtml, /changed after proposal|Awaiting reconciliation|Task completed/);
+});
+
+it("a later request that needs no plan keeps the earlier request's accepted plan as history, with no pending update or reconciliation duty, beside the Stop and the unread newer request", () => {
+  // the exact stored state: the revised plan accepted for an earlier scope and kept under an unpublished proposal identity named for
+  // the lookup's scope, no plan needed, a newer request queued unread, the earlier scope's completed workflow, and the chat stopped
+  const stored = fixtureJourney("rescoped-no-plan", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const render = (task: ProjectSupervisorInfo["tasks"][number], stopped: boolean, initialView: "plan" | "history" = "plan") =>
+    renderToStaticMarkup(createElement(TaskWorkspace, {snapshot, task, initialView, threadId: "task-thread", stopped,
+      progress: {key: "no-plan-follow-up", pages: [stored.progress], loading: false, error: null}, connected: true, attention: [], readAt: null,
+      refreshing: false, onRefresh: () => {}, onLoadMore: () => {}}));
+  const task = stored.task;
+  assert.notEqual(task.workflowProposalId, task.agreement?.proposalId, "the stored proposal identity is not the acceptance's");
+  assert.deepEqual([acceptedAgreement(task), pendingProposal(task), earlierAcceptance(task)?.proposalId], [null, null, "packing-proposal-carton-label"]);
+  assert.equal(journeyRecord(task, stored.progress.workflows[0]).kind, "none", "no plan is current");
+  assert.deepEqual([noPlanNeeded(task), newerRequestUninterpreted(task)], [true, true]);
+  assert.notEqual(alignmentLabel(task), alignmentLabel({...task, conversation: {...task.conversation!, observed: task.conversation!.considered}}),
+    "the no-plan judgement is not claimed for the newer request");
+  const plan = render(task, true);
+  assert.equal(plan.includes('id="plan-changes-title"'), false, "no pending update or change card");
+  assert.equal(plan.includes("reconciliation-due"), false, "no reconciliation duty");
+  assert.ok(plan.includes("notice earlier-scope"), "the earlier scope's workflow is named as history");
+  assert.ok(plan.includes("task-outcome state-paused"), "the Stop is the current outcome");
+  assert.ok(plan.includes("task-newer-request"), "the newer request is shown apart from the last interpreted one");
+  assert.equal(plan.includes("Print the carton label"), false, "the accepted plan's own step is not shown as current");
+  // History keeps both: the plan accepted for the earlier request, never assessed, and the earlier scope's completed workflow
+  const history = render(task, true, "history");
+  assert.ok(history.includes("retained-workflow earlier-acceptance"));
+  assert.ok(history.includes("Print the carton label"), "the plan accepted for the earlier request");
+  assert.equal(history.match(/class="[^"]*retained-workflow[^"]*"/gu)?.length, 2, "the accepted plan and the earlier scope's workflow");
+  // the same stored state while supervision is on: still no update and no duty, and the newer request waits to be interpreted
+  const enabled = render({...task, engagement: {...task.engagement!, availability: "catching_up"}}, false);
+  assert.equal(enabled.includes('id="plan-changes-title"') || enabled.includes("reconciliation-due"), false);
+  assert.equal(enabled.includes("task-outcome state-paused"), false);
+  // control: the identical plan proposed anew under its own identity for a scope that needs a plan is a genuinely pending update
+  const anew = {...task, status: "inferred" as const, supervision: "needed" as const, workflowProposalId: "packing-proposal-ticket",
+    conversation: {...task.conversation!, observed: task.conversation!.considered}, engagement: {...task.engagement!, availability: "current" as const}};
+  assert.equal(pendingProposal(anew), anew.workflow, "an identical body under its own identity stays negotiable");
+  assert.ok(render(anew, false).includes('id="plan-changes-title"'), "its update card is shown");
+  // control: an acceptance of the current request while the workflow still records the earlier scope is a duty only while supervised
+  const accepted = fixtureJourney("rescoped", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const reconcile = (stopped: boolean) => renderToStaticMarkup(createElement(TaskWorkspace, {snapshot, task: accepted.task, initialView: "plan", threadId: "task-thread",
+    stopped, progress: {key: "reconcile", pages: [accepted.progress], loading: false, error: null}, connected: true, attention: [], readAt: null,
+    refreshing: false, onRefresh: () => {}, onLoadMore: () => {}}));
+  assert.ok(reconcile(false).includes("reconciliation-due"), "awaiting reconciliation while supervision is active");
+  assert.equal(reconcile(true).includes("reconciliation-due"), false, "not while the chat is stopped");
 });
 
 it("a refinement accepted in the same scope before the workflow follows it is not reported as a change after acceptance", () => {

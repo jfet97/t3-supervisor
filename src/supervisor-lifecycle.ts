@@ -1,5 +1,6 @@
 import { agreedWorkUnfinished, agreementUntracked, explicitWaitRecorded, latestExecutedRun, returnWaiting } from "./workflow-liveness.js";
 import { conversationMayContact, conversationMayObserve, taskScopeRevision } from "./supervision-conversation.js";
+import { agreementCurrent } from "./supervision-conversation-contract.js";
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
 import { fingerprint } from "./guidance-store.js";
@@ -191,10 +192,10 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
   // an idle main whose agreed workflow is unfinished parks only on an explicit current wait: the latest check-in's confirmed wait naming
   // who acts next and what resumes the work, recorded for the current task after the main's last completed run. Attention, a stale wait or the operative's own unfinished action keeps it out of standby; a
   // completion status counts only when every applicable member is settled. Following, stopped and closed scopes keep their own rules,
-  // and nothing here contacts a model
+  // and nothing here contacts a model. Only the agreement of the current scope is agreed work: an earlier scope's acceptance is history
   const unfinishedAgreedWork = (binding: BindingRecord, task: TaskRecord | null, owned: ReadonlyArray<ConversationRequest>, mainFinishedAt: number) =>
     Effect.gen(function* () {
-      if (!workflows || !task || task.supervisorThreadId !== binding.threadId || task.status !== "inferred" || task.agreement?.status !== "agreed" ||
+      if (!workflows || !task || task.supervisorThreadId !== binding.threadId || task.status !== "inferred" || !agreementCurrent(task) ||
         !conversationMayContact(task)) return false;
       const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
       if (!document) return false;

@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { canonicalStoredJson } from "./canonical-json.js";
 
 const text = (max: number) => Schema.String.check(Schema.isMaxLength(max));
 const texts = (count: number, max: number) => Schema.Array(text(max)).check(Schema.isMaxLength(count));
@@ -48,6 +49,48 @@ export const emptyConversation = (at: number): ConversationFacts => ({
 export type ConversationTask = {sourceHash?: string; status: string; supervision?: "needed" | "not_needed"; conversation?: ConversationFacts | undefined};
 export const taskScopeRevision = (task: ConversationTask): string => task.conversation?.authorization?.scopeRevision ?? task.sourceHash ?? "";
 export const conversationEngaged = (task: ConversationTask): boolean => task.conversation?.authorization?.state === "authorized";
+
+/** A task with the agreement it recorded and the plan it currently keeps, under its proposal identity */
+export type AgreementTask = ConversationTask & {
+  readonly id?: string | undefined;
+  readonly agreement?: {readonly status: string; readonly proposalId?: string; readonly workflow?: unknown} | null | undefined;
+  readonly agreementSourceHash?: string | null | undefined;
+  readonly workflow?: unknown;
+  readonly workflowProposalId?: string | undefined;
+};
+
+/**
+ * The authorized scope revision a task's agreement accepted, null without an agreement. An acceptance records its scope, and every
+ * path that changes the scope records it first, so an agreement stored without one was made under the current scope, as its
+ * acceptance evidence is also pinned.
+ */
+export const agreementScopeRevision = (task: AgreementTask): string | null => task.agreement ? task.agreementSourceHash ?? taskScopeRevision(task) : null;
+
+/** Whether the task's agreement is agreed for its current authorized scope; an acceptance of an earlier scope is history, never a current plan or duty */
+export const agreementCurrent = (task: AgreementTask): boolean => task.agreement?.status === "agreed" && agreementScopeRevision(task) === taskScopeRevision(task);
+
+// a workflow record's plan content as stored, apart from its human-facing message: what a JSON round trip drops is dropped and key order
+// is ignored; the plan's own validation bounds its depth
+const storedPlanContent = (workflow: unknown): string => canonicalStoredJson(typeof workflow === "object" && workflow !== null
+  ? Object.fromEntries(Object.entries(workflow).filter(([key]) => key !== "message")) : workflow, Number.POSITIVE_INFINITY);
+
+/**
+ * Whether the task's plan is the plan an acceptance of an earlier scope accepted, kept as history: identity decides, so a plan kept under
+ * that acceptance's own proposal identity is it. Content decides only for a current request that needs no plan, which names no proposal:
+ * the same plan content proves the accepted plan was kept, also under an unpublished identity once named for it. A changed scope that
+ * needs no plan keeps it as the base of later proposals; it is never a proposal or an obligation of the current scope. A proposal of its
+ * own identity for a scope that needs a plan stays negotiable, whatever its content.
+ */
+export const earlierAcceptedSnapshot = (task: AgreementTask): boolean => task.agreement?.status === "agreed" && task.workflow != null && !agreementCurrent(task) &&
+  ((task.workflowProposalId ?? task.id) === task.agreement.proposalId ||
+    task.supervision === "not_needed" && storedPlanContent(task.workflow) === storedPlanContent(task.agreement.workflow));
+
+/**
+ * Whether the task's plan is a proposal of its current request: a request judged to need no plan proposes nothing, whether an earlier
+ * acceptance is agreed, stale or absent, and an earlier scope's accepted plan the task keeps is history. The agreement itself stays
+ * current or history by its own scope.
+ */
+export const proposalCurrent = (task: AgreementTask): boolean => task.workflow != null && task.supervision !== "not_needed" && !earlierAcceptedSnapshot(task);
 
 /** Observation needs current requester context, never permission to act or a shared plan. */
 export const conversationMayObserve = (task: ConversationTask): boolean => task.status === "inferred" && task.conversation?.authorization?.state !== "paused" &&

@@ -236,7 +236,13 @@ export class FixtureModel {
     project.checkouts.push({origin: "project", threadId: fixtureIds.threadA3, workspaceRoot: "/fixture/worktrees/review-without-branch-name", branch: null, isGitRepository: true, folderStatus: "present"});
     project.projectConfig = {...project.projectConfig!, steps: [...project.projectConfig!.steps, ...Array.from({length: 45}, (_, i) => ({path: `steps/fixture-duty-${i + 1}.md`, summary: `Synthetic duty ${i + 1}: preserve scoped verification, evidence and documented remaining obligations.`, required: i % 7 === 0}))]};
   }
-  setJourney(phase: JourneyCase | null) {this.journey = phase;}
+  setJourney(phase: JourneyCase | null) {
+    this.journey = phase;
+    // the stored no-plan follow-up was stopped by its human, so its chat reads as stopped everywhere, like any stopped chat
+    if (phase === "rescoped-no-plan") this.inEnvironment("a", () => {
+      if (!this.data.threadPolicy.excludedThreadIds.includes(fixtureIds.threadA1)) this.applyPolicy([...this.data.threadPolicy.excludedThreadIds, fixtureIds.threadA1]);
+    });
+  }
   // the reconstructed packing journey replaces chat A1 everywhere it appears, so Home, Conversations and the task agree
   private journeyFor(threadId: string) {
     if (this.current !== "a" || !this.journey || threadId !== fixtureIds.threadA1) return null;
@@ -626,7 +632,7 @@ export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
   "journey-branch-proposal", "journey-branch-pending", "journey-branch-selected", "journey-branch-changed",
-  "journey-returned", "journey-rescoped-pending", "journey-rescoped", "journey-rescoped-current",
+  "journey-returned", "journey-rescoped-pending", "journey-rescoped", "journey-rescoped-current", "journey-rescoped-no-plan",
   "orphaned-attention", "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -678,6 +684,7 @@ export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (
   "journey-rescoped-pending": {description: "reconstructed packing example: completed, then a follow-up changed the scope; the revised plan awaits acceptance", plan: () => plan([])},
   "journey-rescoped": {description: "reconstructed packing example: the revised plan for the changed scope is accepted; the earlier scope's completed workflow awaits reconciliation", plan: () => plan([])},
   "journey-rescoped-current": {description: "reconstructed packing example: the accepted revised plan is the current workflow, planned, with the earlier completion in history", plan: () => plan([])},
+  "journey-rescoped-no-plan": {description: "reconstructed packing example: the revised plan was accepted, a later lookup needed no plan, a newer question is queued unread and the chat is stopped", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
   "session-expiry-next-call": {description: "the next /api/ call with a valid session revokes that session and answers 401", plan: () => plan([{kind: "session-expiry"}])},
   "signout-other-tab": {description: "revokes every fixture session now, as a sign-out in another tab does server-side", plan: () => plan([], true)},
