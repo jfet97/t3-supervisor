@@ -7,7 +7,7 @@ import { returnedJourney } from "./returned.js";
 // Every text is labelled; none of it records Supervisor work, native messages or a run. The plan follows a project's
 // high-level change workflow; occurrence IDs stay the same across proposals and the live plan.
 export const journeyCases = ["request", "following", "catching-up", "paused", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained",
-  "branch-proposal", "branch-pending", "branch-selected", "branch-changed", "returned", "rescoped-pending", "rescoped", "rescoped-current"] as const;
+  "branch-proposal", "branch-pending", "branch-selected", "branch-changed", "returned", "rescoped-pending", "rescoped", "rescoped-current", "rescoped-no-plan"] as const;
 export type JourneyCase = typeof journeyCases[number];
 
 export const journeyTitle = "Packing quantity scans (reconstructed example)";
@@ -144,6 +144,7 @@ function history(phase: typeof order[number], now: number) {
 export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: string, supervisorThreadId: string, now: number): {task: TaskInterpretationInfo; progress: WorkflowProgressSnapshot} {
   if (phase === "returned") return returnedJourney(fixtureJourney("nested-attention", projectId, threadId, supervisorThreadId, now), now);
   if (phase === "rescoped-pending" || phase === "rescoped" || phase === "rescoped-current") return rescopedJourney(phase, projectId, threadId, supervisorThreadId, now);
+  if (phase === "rescoped-no-plan") return noPlanFollowUp(projectId, threadId, supervisorThreadId, now);
   const revisedOrLater = ["revised", "reagreed", "verified", "nested", "nested-attention", "completed"].includes(phase);
   const v2Accepted = revisedOrLater && phase !== "revised";
   const proposalV1 = proposal(notes.verify, "Reconstructed example: the Supervisor proposed the project’s change workflow for this task.");
@@ -299,4 +300,25 @@ function rescopedJourney(phase: RescopedCase, projectId: string, threadId: strin
   const scope = earlier.progress.scope ? {...earlier.progress.scope,
     threads: earlier.progress.scope.threads.map(thread => ({...thread, lifecycle: "running" as const, lifecycleDetail: "running"}))} : null;
   return {task, progress: {...earlier.progress, scope, workflows}};
+}
+
+// the accepted revised plan while the workflow still records the completed earlier scope, then a later genuine request the Supervisor
+// judged to need no plan (a lookup that changed the authorized scope), then a newer question observed but not interpreted when the human
+// stopped the chat. Stored as the released service left it: the plan accepted for the earlier request kept as the task's plan under an
+// unpublished proposal identity named for the lookup's scope
+const lookup = {messageId: "fixture-message-packing-lookup", runId: "fixture-run-packing-lookup", ordinal: 4, hash: "fixture-packing-lookup", requester: "human" as const};
+const laterQuestion = {messageId: "fixture-message-packing-question", runId: "fixture-run-packing-question", ordinal: 5, hash: "fixture-packing-question",
+  requester: "human" as const};
+const lookupScope = "fixture-scope-packing-ticket-lookup";
+const lookupOutcome = "Reconstructed example: report the status of the packing change’s ticket.";
+function noPlanFollowUp(projectId: string, threadId: string, supervisorThreadId: string, now: number): {task: TaskInterpretationInfo; progress: WorkflowProgressSnapshot} {
+  const accepted = rescopedJourney("rescoped", projectId, threadId, supervisorThreadId, now);
+  const authorization = accepted.task.conversation!.authorization!;
+  const task: TaskInterpretationInfo = {...accepted.task, status: "queued", supervision: "not_needed", sourceRunId: laterQuestion.runId,
+    sourceMessageId: laterQuestion.messageId, sourceHash: laterQuestion.hash, objective: lookupOutcome, reason: "Waiting for the project Supervisor.",
+    agreementSourceHash: rescopedScope, workflowProposalId: `${accepted.task.id}:scope:${lookupScope.slice(0, 20)}`, updatedAt: now - 10_000,
+    conversation: {...accepted.task.conversation!, considered: lookup, observed: laterQuestion, updatedAt: now - 20_000, authorization: {...authorization,
+      scopeRevision: lookupScope, outcome: lookupOutcome, limits: ["Only look the ticket up."], scopeSources: [lookup], stateSource: lookup}},
+    engagement: {mode: "engaged", availability: "stopped", consideredAt: now - 20_000}};
+  return {task, progress: accepted.progress};
 }

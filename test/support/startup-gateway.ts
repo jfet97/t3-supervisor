@@ -56,6 +56,11 @@ export type StartupObservations = {
   readonly completeMainRun: (text: string) => void;
   // the person edits the main's original request in T3: the message and its published source item carry the new text
   readonly editRequest: (text: string) => void;
+  // the person sends a new request in the main and the operative answers it: one completed turn with its published source item, as T3
+  // projects it; returns the request's message id
+  readonly sendRequest: (text: string, reply: string) => string;
+  // a cooperative root ends each service request it is running with that request's own final marker; returns how many it answered
+  readonly answerRootRequests: () => number;
   // the main's stored workflow document as the production store keeps it, or null before one exists
   readonly mainWorkflow: () => StartupWorkflowView | null;
   readonly debug: () => unknown;
@@ -409,6 +414,54 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
       return {status: document.status, revision: document.revision, proposalId: document.sourceBinding?.proposalId ?? null,
         sourceHash: document.sourceBinding?.sourceHash ?? null, currentAgreementKey: document.currentAgreementKey, acceptedAgreements: document.acceptedAgreements.length};
     }, null),
+    sendRequest: (text, reply) => {
+      const projection = state.projections.get(startupMainThreadId);
+      assert.ok(projection, "the main");
+      const ordinal = projection.runs.length + 1;
+      const runId = `${startupMainThreadId}-run-${ordinal}`;
+      const rootNodeId = `${startupMainThreadId}-root-${ordinal}`;
+      const messageId = `${startupMainThreadId}-request-${ordinal}`;
+      const providerThreadId = `${startupMainThreadId}-provider`;
+      const at = new Date().toISOString();
+      projection.runs.push({id: runId, threadId: startupMainThreadId, ordinal, status: "completed", requestedAt: at, startedAt: at, completedAt: at, rootNodeId,
+        userMessageId: messageId, providerThreadId});
+      projection.messages.push({id: messageId, threadId: startupMainThreadId, runId, nodeId: rootNodeId, role: "user", text, streaming: false, createdAt: at, updatedAt: at,
+        createdBy: "user", creationSource: "web"}, {id: `${runId}-answer`, threadId: startupMainThreadId, runId, nodeId: `${runId}-answer`, role: "assistant", text: reply,
+        streaming: false, createdAt: at, updatedAt: at});
+      (projection.turnItems as unknown as Array<Record<string, unknown>>).push({id: `${messageId}-published-source-item`, type: "user_message", messageId,
+        threadId: startupMainThreadId, runId, status: "completed", text, streaming: false});
+      (projection.nodes as Array<Record<string, unknown>>).push({id: rootNodeId, threadId: startupMainThreadId, runId, parentNodeId: null, rootNodeId, kind: "root_turn",
+        status: "completed", providerThreadId}, {id: `${runId}-answer`, threadId: startupMainThreadId, runId, parentNodeId: rootNodeId, rootNodeId,
+        kind: "assistant_message", status: "completed", providerThreadId});
+      const shell = state.shellThreads.find((item) => item.id === startupMainThreadId);
+      if (shell) shell.latestRunId = runId;
+      return messageId;
+    },
+    answerRootRequests: () => {
+      const requests = readSqlite(guidance, (db) => (db.prepare("SELECT document FROM supervisor_conversation_requests").all() as Array<{document: string}>)
+        .map((row) => JSON.parse(row.document) as {messageId?: string; completionMarker?: string}), [] as Array<{messageId?: string; completionMarker?: string}>);
+      let answered = 0;
+      for (const projection of state.projections.values()) {
+        if (projection.thread.id === startupMainThreadId) continue;
+        for (const run of projection.runs) {
+          const marker = requests.find((request) => request.messageId === run.userMessageId)?.completionMarker;
+          if (run.status !== "running" || !marker || !run.rootNodeId) continue;
+          const at = new Date().toISOString();
+          run.status = "completed";
+          run.completedAt = at;
+          const nodes = projection.nodes as Array<Record<string, unknown>>;
+          const rootNode = nodes.find((node) => node.id === run.rootNodeId);
+          if (rootNode) rootNode.status = "completed";
+          const nodeId = `${run.id}-answer`;
+          nodes.push({id: nodeId, threadId: projection.thread.id, runId: run.id, parentNodeId: run.rootNodeId, rootNodeId: run.rootNodeId,
+            kind: "assistant_message", status: "completed", providerThreadId: run.providerThreadId});
+          projection.messages.push({id: nodeId, threadId: projection.thread.id, runId: run.id, nodeId, role: "assistant", text: `Reviewed. ${marker}`,
+            streaming: false, createdAt: at, updatedAt: at});
+          answered++;
+        }
+      }
+      return answered;
+    },
     completeRequestRun: () => {
       const task = readTask();
       const projection = task ? state.projections.get(task.supervisorThreadId) : undefined;
@@ -490,6 +543,35 @@ export const driveInterpretation = ({gateway, observe}: StartupSession, input: {
 
 /** The first value `read` returns, read every 250 ms on the live clock for at most 75 s; dies with `label` otherwise. */
 export const eventuallyValue = <A>(read: Effect.Effect<A | null>, label: () => string): Effect.Effect<A> => eventually(read, label);
+
+/**
+ * The root's interpretation of the main's request numbered `index` as a changed authorized scope that needs no plan, over the real
+ * gateway: once the root has answered what it was asked meanwhile, it reads its context, submits the source-linked decision and
+ * completes its request run. Nothing is proposed, so no notice follows.
+ */
+export const driveNoPlanInterpretation = ({gateway, observe}: StartupSession, input: {readonly index: number; readonly objective: string;
+  readonly reason: string}): Effect.Effect<StartupDispatch> => Effect.gen(function* () {
+  const objective = yield* eventually(Effect.sync(() => {
+    observe.answerRootRequests();
+    return observe.objectiveDispatches()[input.index] ?? null;
+  }), () => `the root did not receive interpretation request ${input.index}: ${JSON.stringify(observe.debug())}`);
+  const match = /with (\{"supervisorThreadId":"[^"]+","bindingGeneration":\d+\})/u.exec(objective.text);
+  if (!match?.[1]) return yield* Effect.die(new Error("the interpretation request names no workflow reader"));
+  const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
+  const context = yield* eventually(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map((value) => {
+    const view = value as {status?: string; submission?: {arguments?: Record<string, unknown>}} | null;
+    const pin = view?.status === "ok" ? view.submission?.arguments : undefined;
+    return pin?.sourcePin && pin.attemptId !== undefined ? pin : null;
+  })), () => `context ${input.index} did not expose interpretation pins`);
+  const source = (context.sourcePin as {messageId: string}).messageId;
+  const submitted = (yield* gateway.call("supervision_interpretation_submit", {...context, objective: input.objective, reason: input.reason,
+    sourceMessageIds: [source], supervision: "not_needed", workflow: null,
+    conversation: {draft: {objective: input.objective, constraints: [], questions: [], findings: [], duties: []},
+      intent: "authorize", outcome: input.objective, limits: [], sourceMessageIds: [source], antecedentMessageIds: [], scope: "changed"}})) as {status?: string};
+  if (submitted.status !== "submitted") return yield* Effect.die(new Error(`interpretation ${input.index} was not submitted: ${JSON.stringify(submitted)}`));
+  observe.completeRequestRun();
+  return objective;
+});
 
 /**
  * The root's part of a needed-work startup over the real gateway: it reads its context, submits a source-linked two-step

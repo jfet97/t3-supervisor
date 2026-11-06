@@ -7,8 +7,9 @@ import { Icon } from "./icons.js";
 import { EntityDetails, HelpDisclosure } from "./disclosure.js";
 import {GuideLink} from "./guide-link.js";
 import { ConversationStatus, ConversationUnderstanding } from "./conversation-status.js";
-import {alignmentLabel, completionTimes, currentBranchPaths, currentWork, liveProgress, PlanChanges, PlanJourney, planSteps, reachedDecisionIds, readyAfterReturn, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
-import {acceptedAgreement, earlierScopeWorkflow, journeyRecord, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
+import {alignmentLabel, completionTimes, currentBranchPaths, currentWork, liveProgress, noPlanNeeded, PlanChanges, PlanJourney, planSteps, reachedDecisionIds, readyAfterReturn, StepContributions, TaskAlignment, TaskOutcome} from "./workflow-journey.js";
+import {acceptedAgreement, earlierAcceptance, earlierScopeWorkflow, journeyRecord, newerRequestUninterpreted, pendingProposal, planChanges, recordsByStep, stepNotes} from "./task-record.js";
+import { agreementCurrent, proposalCurrent } from "../../src/supervision-conversation-contract.js";
 import {StopNotice} from "./stop-notice.js";
 import { assessmentForTask } from "../../src/workflow-assessment.js";
 import { planStatusAttention, protocolDiagnosticAttention, staleAgreementAttention, workAttention } from "../../src/dashboard-overview.js";
@@ -595,6 +596,15 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
   const liveEarlier = record.kind === "live" && accepted !== null && record.workflow.acceptedProposalId !== null && !liveAccepted;
   const changedSinceAcceptance = record.kind === "live" && accepted !== null && !liveAccepted && !liveEarlier;
   const earlierScope = earlierScopeWorkflow(task, mainWorkflow, record);
+  // a plan accepted for an earlier request is history; whether the workflow ever followed it decides how History shows it
+  const earlierAccepted = earlierAcceptance(task);
+  const earlierAcceptedFollowed = earlierAccepted !== null && earlierScope?.acceptedProposalId === earlierAccepted.proposalId;
+  // the last interpreted request is kept apart from a newer one the Supervisor has not read
+  const unneeded = noPlanNeeded(task);
+  const newer = newerRequestUninterpreted(task);
+  // only an acceptance of the current request obliges the Supervisor to bring the workflow to it, and only while it supervises the task
+  const reconciliationDue = record.kind === "agreed" && task !== undefined && agreementCurrent(task) && !stopped &&
+    snapshot.chatSupervision?.effectiveEnabled !== false && task.supervision !== "not_needed" && task.engagement?.mode !== "following";
   // a live plan counts only the steps that currently apply; a pending decision is current work and its paths are not outstanding steps
   const notApplicable = record.kind === "live" ? new Set(record.workflow.notApplicable ?? []) : undefined;
   const live = record.kind === "live" ? liveProgress(record.plan, currentBranchPaths(record.workflow), notApplicable) : null;
@@ -614,8 +624,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     : progress?.loading ? "Reading assessment…" : !view.complete ? "Assessment coverage incomplete"
     : earlierScope ? "Earlier scope assessed; not current" : mainWorkflow ? "Retained workflow; not linked to this task" : "No current workflow record";
   const fallback = task?.engagement?.mode === "following" ? "Task scope remains open" : task?.status === "not_supervised" ? "Supervision not needed"
-    : task?.supervision === "not_needed" && !task.agreement ? "No plan needed" : record.kind === "agreed" || liveAccepted ? "Plan accepted · work not yet assessed"
-    : task?.agreement?.status === "stale" ? "Plan needs acceptance again" : task?.workflow ? "Agreeing a plan"
+    : unneeded ? newer ? "Reading a newer request" : "No plan needed" : record.kind === "agreed" || liveAccepted ? "Plan accepted · work not yet assessed"
+    : task?.agreement?.status === "stale" ? "Plan needs acceptance again" : task?.workflow && proposalCurrent(task) ? "Agreeing a plan"
     : task?.status === "waiting" || task?.status === "queued" || task?.status === "dispatching" ? "Reading the request"
     : progress?.loading ? "Reading assessment…" : "No assessment recorded";
   return <div className="task-workspace stack">
@@ -623,7 +633,9 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     <section className="task-band" aria-label="Task">
       <ConversationStatus explicitlyStopped={stopped} engagement={task?.engagement} fresh={connected && snapshot.available && currentRead}/>
       <p className="task-objective">{task?.objective ?? (snapshot.available ? "No task objective has been recorded for this conversation." : "The task could not be read.")}</p>
-      {task?.reason && task.status !== "inferred" && <p className="muted">{task.reason}</p>}
+      {newer ? <p className="muted task-newer-request">{stopped ? "A newer request was not interpreted before supervision stopped; what is shown is from the last interpreted request."
+        : "A newer request is not interpreted yet; what is shown is from the last interpreted request."}</p>
+        : task?.reason && task.status !== "inferred" && <p className="muted">{task.reason}</p>}
       <TaskOutcome {...(currentAssessment && current ? {currentStep: current} : {})} assessment={currentAssessment} fallback={fallback} stopped={stopped}/>
       <div className="task-reading">
         <span><strong>{alignmentLabel(task, changedSinceAcceptance)}</strong></span>
@@ -667,11 +679,15 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           accepted plan are not accepted. The accepted plan stays under History.</p>}
         {liveEarlier && accepted && <p className="notice" role="status">Proposal {accepted.proposalId} was accepted after this plan. The Supervisor still has to bring the
           workflow to it; the accepted plan is under History.</p>}
-        {earlierScope && <p className="notice" role="status">{record.kind === "agreed"
+        {earlierScope && <p className={`notice ${reconciliationDue ? "reconciliation-due" : "earlier-scope"}`} role="status">{reconciliationDue
           ? "Awaiting reconciliation: the workflow still records an earlier scope of this task. The Supervisor still has to bring it to this accepted plan; progress recorded for the earlier scope stays under History and is not progress on this plan."
+          : record.kind === "none" ? "The workflow recorded for an earlier request of this task stays under History; it is not progress on the current request."
           : "The workflow of this task’s earlier scope stays under History; its progress is not progress on this plan."}</p>}
         {record.kind === "none"
-          ? <p className="muted">{task?.supervision === "not_needed" && !task.agreement ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
+          ? <p className="muted">{unneeded ? !newer ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
+            : `The Supervisor judged the last request it interpreted to need no plan, so it proceeds without a proposal or acceptance. ${
+              stopped ? "A newer request was not interpreted before supervision stopped." : "A newer request is not interpreted yet."}`
+            : earlierAccepted ? "No plan was proposed for the current request. The plan accepted for an earlier request stays under History."
             : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
             completions: completionTimes(record.workflow), notApplicable, attempts: new Map(record.workflow.attempts?.map(item => [item.nodeId, item.attempt])),
@@ -695,9 +711,15 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
       {liveEarlier && accepted?.workflow.plan && <EntityDetails title={<>Accepted plan (not yet in the workflow)</>} className="retained-workflow">
         <p className="notice">The plan accepted as proposal {accepted.proposalId}. The Supervisor still has to bring the workflow to it.</p>
         <PlanJourney node={accepted.workflow.plan} mode="agreed"/></EntityDetails>}
-      {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">This acceptance is history. The current plan still needs acceptance.</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
-      {retained.map(workflow => <EntityDetails title={<>{workflow === earlierScope ? "Earlier scope" : "Earlier workflow"}: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
-        <p className="notice">{workflow === earlierScope ? "Recorded for an earlier scope of this task. Its statuses and records stay as history and are not progress on the current plan."
+      {staleAgreement?.workflow.plan && <EntityDetails title={<>Earlier acceptance (out of date)</>} className="retained-workflow"><p className="notice">{unneeded
+        ? "This acceptance is history. The last interpreted request needs no plan." : "This acceptance is history. The current plan still needs acceptance."}</p><PlanJourney node={staleAgreement.workflow.plan} mode="historical"/></EntityDetails>}
+      {earlierAccepted?.workflow.plan && !earlierAcceptedFollowed && <EntityDetails title={<>Accepted for an earlier request · not assessed</>} className="retained-workflow earlier-acceptance">
+        <p className="notice">Proposal {earlierAccepted.proposalId} was accepted for an earlier request of this task. The workflow never followed it, so none of its work was assessed. It is history, not the current request’s plan or an obligation.</p>
+        <PlanJourney node={earlierAccepted.workflow.plan} mode="historical"/></EntityDetails>}
+      {retained.map(workflow => <EntityDetails title={<>{workflow === earlierScope ? earlierAcceptedFollowed ? "Accepted for an earlier request" : "Earlier scope" : "Earlier workflow"}: {workflow.objective ?? "Objective not recorded"}</>} key={workflow.workflowId} className="retained-workflow">
+        <p className="notice">{workflow === earlierScope ? earlierAcceptedFollowed && earlierAccepted
+          ? `Proposal ${earlierAccepted.proposalId}, accepted for an earlier request of this task. Its statuses and records stay as history and are not progress on the current request.`
+          : "Recorded for an earlier scope of this task. Its statuses and records stay as history and are not progress on the current plan."
           : "Retained workflow record. It is not linked to the current task."}</p>
         {workflow.plan && <PlanJourney node={workflow.plan} mode="live" notApplicable={new Set(workflow.notApplicable ?? [])} notes={{agreed: null, proposed: null, records: recordsByStep(workflow.observations), changed: new Set()}} contributions={contributionsByNode(workflow)} selections={workflow.branchSelections} completions={completionTimes(workflow)} attempts={new Map((workflow.attempts ?? []).map(item => [item.nodeId, item.attempt]))} returns={workflow.returns} ready={readyAfterReturn(workflow.plan, workflow.returns)} reached={reachedDecisionIds(workflow)}/>}
         <SupervisorRecords workflow={workflow}/></EntityDetails>)}

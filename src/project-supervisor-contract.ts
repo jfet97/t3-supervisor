@@ -405,6 +405,8 @@ export const TaskInterpretation = Schema.Struct({
   supervision: Schema.optionalKey(Schema.Literals(["needed", "not_needed"])),
   workflow: Schema.optionalKey(Schema.NullOr(WorkflowProposal)),
   agreement: Schema.optionalKey(Schema.NullOr(WorkflowAgreement)),
+  // the authorized scope revision the agreement accepted; an agreement of an earlier scope than the task's current one is history
+  agreementSourceHash: Schema.optionalKey(Schema.String),
   workflowProposalId: Schema.optionalKey(Schema.String),
   definitionReview: Schema.optionalKey(Schema.NullOr(DefinitionReview)),
   workflowProtocolDiagnostic: Schema.optionalKey(Schema.NullOr(WorkflowProtocolDiagnosticSchema)),

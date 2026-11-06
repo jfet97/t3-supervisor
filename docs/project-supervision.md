@@ -152,7 +152,11 @@ pause. Human-only Start, Stop and definition approval remain separate.
 Plans are proportionate. Before reading the catalog, the Supervisor decides whether a
 plan helps at all: quick routine work, such as bringing a checkout up to date or
 rerunning a documented refresh, is `not_needed` with no workflow, so there is no
-proposal, acceptance or Supervisor message, and Task shows No plan needed. Otherwise the
+proposal, acceptance or Supervisor message, and Task shows No plan needed. A later request
+that needs no plan proposes nothing either: a plan proposed or accepted for an earlier request
+is history, neither offered again nor owed to the workflow, and Task shows it under History. No
+plan needed describes the last interpreted request; a newer one the Supervisor has not read yet
+is shown apart from it. Otherwise the
 plan holds only the commitments the task needs. Catalog entries that do not serve it are
 absent rather than listed as not applicable, even when none applies, and task-local steps
 are added only where they help. A workflow is referenced only when its composition fits;

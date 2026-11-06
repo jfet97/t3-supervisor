@@ -352,6 +352,10 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
     // some visible element whose text contains `text`, and whether no element's text contains it right now
     textContaining: (text: string) => browser(() => page.getByText(text).filter({visible: true}).first().waitFor()),
     textAbsent: (text: string) => browser(async () => (await page.getByText(text).count()) === 0),
+    // a rendered state the page names by its structure rather than its wording: the first visible match of a selector, and how many
+    // elements match it right now
+    stateShown: (selector: string) => browser(() => page.locator(selector).filter({visible: true}).first().waitFor()),
+    stateCount: (selector: string) => browser(() => page.locator(selector).count()),
     statusShown: (text: string) => browser(() => page.getByRole("status").filter({hasText: text}).waitFor()),
     alertShown: (text: string) => browser(() => page.getByRole("alert").filter({hasText: text}).waitFor()),
     // holds a Supervisor settings save or a project.yaml save between the page and the dashboard (clickHeld)

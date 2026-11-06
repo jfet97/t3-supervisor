@@ -3895,8 +3895,53 @@ const completedNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo =>
     : node.kind === "workflow" ? {...node, status: "completed" as const, plan: node.plan ? {...node.plan, nodes: node.plan.nodes.map(completedNode)} : null}
       : node.kind === "step" ? {...node, status: "completed" as const} : node;
 
-it.effect("a completed accepted workflow follows the revised plan the operative accepts after its task changed, also when a restarted service recovers it", () => Effect.gen(function* () {
-  for (const [index, recovery] of [false, true].entries()) {
+// the root finishes what it was asked meanwhile, so the main's next requester message is dispatched for interpretation as in production
+const nextInterpretation = Effect.fnUntraced(function* (fixture: Fixture, threadId: string, at: number) {
+  const service = fixture.makeProjectSupervisor();
+  for (let round = 0; round < 4; round++) {
+    yield* service.cycle;
+    const current = (yield* fixture.projectStore.task(threadId))!;
+    if (current.status !== "queued") return current;
+    const pending = yield* fixture.conversation.requests.pending(projectId, fixture.binding.threadId);
+    for (const run of fixture.supervisor.runs) if (["preparing", "queued", "starting", "running", "waiting"].includes(run.status))
+      completeRun(fixture.supervisor, run, pending && pending.messageId === run.userMessageId ? pending.completionMarker : "Done.", at);
+  }
+  return (yield* fixture.projectStore.task(threadId))!;
+});
+
+// the root's typed interpretation of the dispatched request and its completed run, applied by the production finalization
+const interpretNext = Effect.fnUntraced(function* (fixture: Fixture, asked: TaskRecord, fields: Record<string, unknown>, at: number) {
+  const run = fixture.supervisor.runs.find(item => item.userMessageId === asked.messageId);
+  assert.ok(run, "the interpretation request reached the root");
+  const submitter = yield* interpretationSubmitter({stores: fixture.stores, workflows: fixture.workflows,
+    projections: new Map([[fixture.supervisor.thread.id, fixture.supervisor], [fixture.operative.thread.id, fixture.operative]])});
+  const submitted = yield* submitter.submit(asked, submissionArguments(asked, fields));
+  assert.equal(submitted.status, "submitted", JSON.stringify(submitted));
+  completeRun(fixture.supervisor, run, "Submitted the interpretation.", at);
+  const service = fixture.makeProjectSupervisor();
+  yield* service.cycle;
+  yield* service.cycle;
+  return (yield* fixture.projectStore.task(asked.threadId))!;
+});
+
+// a genuine later human lookup that needs no plan, which the root interprets as a changed authorized scope
+const noPlanLookup = Effect.fnUntraced(function* (fixture: Fixture, threadId: string, at: number) {
+  const lookup = appendActualUserMessage(fixture.operative, "jira-lookup", "Look up the Jira ticket for the import and tell me its status.", at);
+  const asked = yield* nextInterpretation(fixture, threadId, at + 1_000);
+  assert.deepEqual([asked.status, asked.sourceMessageId], ["waiting", lookup.id]);
+  const outcome = "Report the status of the import's Jira ticket.";
+  const answered = yield* interpretNext(fixture, asked, {objective: outcome, reason: "A lookup the requester follows without a plan.", sourceMessageIds: [lookup.id],
+    supervision: "not_needed", workflow: null, conversation: {draft: {objective: outcome, constraints: [], questions: [], findings: [], duties: []},
+      intent: "authorize", outcome, limits: ["Only look the ticket up."], sourceMessageIds: [lookup.id], antecedentMessageIds: [], scope: "changed"}}, at + 2_000);
+  assert.deepEqual([answered.status, answered.supervision, answered.conversation?.considered?.messageId], ["inferred", "not_needed", lookup.id]);
+  return {lookup, answered};
+});
+
+it.effect("a completed accepted workflow follows the revised plan the operative accepts after its task changed, also when a restarted service recovers it, " +
+  "and keeps that plan as history through a later request that needs no plan, a queued question, a Stop and a restart; a request that needs no plan before " +
+  "the revised plan is accepted proposes nothing", () => Effect.gen(function* () {
+  for (const [index, variant] of (["completed", "recovered", "no_plan_stopped", "phantom_healed", "pending_no_plan"] as const).entries()) {
+    const recovery = variant === "recovered";
     const clock = {now: baseTime + index * 1_000_000};
     const fixture = yield* makeFixture(clock);
     const task = yield* installTaskDefinitions(fixture, fixedWorkflowDefinitions(), ["reviewer"]);
@@ -3968,6 +4013,32 @@ it.effect("a completed accepted workflow follows the revised plan the operative 
     const proposalId = fresh.workflowProposalId!;
     const revisedPlan = workflowPlan(fresh);
     yield* appendSupervisorProposal(fixture, proposalId, revisedPlan, clock.now + 62_000, fresh);
+    if (variant === "pending_no_plan") {
+      // the revised plan is published, not yet accepted, when a quick lookup arrives that needs no plan: the published plan keeps its own
+      // identity beside the out-of-date acceptance, and the request that needs no plan proposes nothing, prepares no acceptance, creates no
+      // candidate and contacts nobody
+      yield* observeAgreement(fixture, clock.now + 90_000);
+      const published = (yield* fixture.projectStore.task(task.threadId))!;
+      assert.deepEqual([published.workflowProposalId, published.agreement?.status], [proposalId, "stale"]);
+      assert.ok(yield* fixture.conversation.requests.agreementCandidate(task.id, proposalId), "the revised plan was published");
+      const operativeMessages = () => fixture.calls.filter(call => call.tag === "orchestration.dispatchCommand" && call.payload.type === "message.dispatch" &&
+        call.payload.threadId === task.threadId).length;
+      const contacted = operativeMessages();
+      const candidates = (yield* fixture.conversation.requests.agreementCandidates(task.id)).length;
+      const {answered} = yield* noPlanLookup(fixture, task.threadId, clock.now + 151_000);
+      assert.notEqual(taskScopeRevision(answered), revisedScope, "the lookup is a changed authorized scope");
+      assert.equal(answered.workflowProposalId, proposalId, "the published plan keeps its own identity");
+      assert.deepEqual([answered.workflow, answered.agreement], [published.workflow, published.agreement], "and is kept as it was");
+      const context = (yield* fixture.conversation.readContextView(fixture.binding, {view: "context"})).task as {proposal: unknown; agreement: unknown};
+      assert.deepEqual([context.proposal, context.agreement], [null, {status: "stale", proposalId: task.id, current: false}],
+        "a request that needs no plan has no current proposal");
+      assert.equal(preparedAcceptanceRecord(answered), null, "and no acceptance is prepared for the unaccepted plan");
+      const section = yield* fixture.conversation.readContextView(fixture.binding, {view: "context", section: "plan"});
+      assert.deepEqual([section.proposal, section.outline], [null, null]);
+      assert.equal((yield* fixture.conversation.requests.agreementCandidates(task.id)).length, candidates, "no candidate is created");
+      assert.equal(operativeMessages(), contacted, "the operative is not contacted");
+      continue;
+    }
     const acceptance = yield* appendOperativeAcceptance(fixture, workflowRecord(fresh, proposalId, revisedPlan), clock.now + 63_000);
     yield* observeAgreement(fixture, clock.now + 90_000);
     fresh = (yield* fixture.projectStore.task(task.threadId))!;
@@ -4003,8 +4074,102 @@ it.effect("a completed accepted workflow follows the revised plan the operative 
     yield* observeAgreement(fixture, clock.now + 150_000);
     assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
     assert.deepEqual(yield* fixture.workflows.get(projectId, task.threadId), adopted);
+    if (variant === "completed" || variant === "recovered") continue;
+
+    // a later genuine request that needs no plan changes the authorized scope; the accepted revised plan keeps its own identity and
+    // stays history, with no unpublished proposal named for the new scope, no prepared acceptance, no candidate and no operative contact
+    const accepted = (yield* fixture.projectStore.task(task.threadId))!;
+    const operativeMessages = () => fixture.calls.filter(call => call.tag === "orchestration.dispatchCommand" && call.payload.type === "message.dispatch" &&
+      call.payload.threadId === task.threadId).map(call => String(call.payload.messageId));
+    const contacted = operativeMessages().length;
+    const candidates = () => Effect.map(fixture.sql.unsafe<{count: number}>("SELECT COUNT(*) AS count FROM supervisor_workflow_agreement_candidates"), rows => Number(rows[0]?.count));
+    const candidatesBefore = yield* candidates();
+    const kept = (current: TaskRecord) => {
+      assert.equal(current.workflowProposalId, proposalId, "the accepted revised plan keeps its own proposal identity");
+      assert.deepEqual([current.agreement, current.agreementSourceHash, current.workflow], [accepted.agreement, revisedScope, accepted.workflow]);
+    };
+    // nothing new is proposed, prepared or sent, and the adopted workflow, its history and its evidence stay as they were
+    const untouched = Effect.gen(function* () {
+      assert.equal(yield* candidates(), candidatesBefore, "no proposal candidate is created");
+      assert.deepEqual(operativeMessages().slice(contacted).filter(id => !id.startsWith("supervisor-notice:stop:")), [], "the operative is not contacted");
+      assert.deepEqual(yield* fixture.workflows.get(projectId, task.threadId), adopted);
+    });
+    const noProposal = (current: TaskRecord) => Effect.gen(function* () {
+      const context = (yield* fixture.conversation.readContextView(fixture.binding, {view: "context"})).task as {proposal: unknown; agreement: unknown};
+      assert.deepEqual([context.proposal, context.agreement], [null, {status: "agreed", proposalId, current: false}],
+        "an earlier scope's accepted plan is never a proposal of the current scope");
+      assert.equal(preparedAcceptanceRecord(current), null, "and no acceptance is prepared for it");
+    });
+    const {lookup, answered} = yield* noPlanLookup(fixture, task.threadId, clock.now + 151_000);
+    const lookupScope = taskScopeRevision(answered);
+    assert.notEqual(lookupScope, revisedScope, "the lookup is a changed authorized scope");
+
+    if (variant === "phantom_healed") {
+      // the unpublished identity the released service stored for this no-plan scope, with no candidate; the next permitted no-plan
+      // interpretation, a question within the same lookup, restores the accepted plan's own identity without contacting anyone
+      const phantom = `${answered.id}:scope:${lookupScope.slice(0, 20)}`;
+      yield* fixture.projectStore.saveTask({...answered, workflowProposalId: phantom});
+      const question = appendActualUserMessage(fixture.operative, "how-did-it-happen", "How did this happen?", clock.now + 160_000);
+      const asked = yield* nextInterpretation(fixture, task.threadId, clock.now + 161_000);
+      assert.deepEqual([asked.status, asked.sourceMessageId, asked.workflowProposalId], ["waiting", question.id, phantom]);
+      const healed = yield* interpretNext(fixture, asked, {objective: null, reason: "A question within the same lookup.", sourceMessageIds: [], supervision: "not_needed",
+        workflow: null, conversation: {draft: asked.conversation!.draft, intent: "following", outcome: null, limits: [], sourceMessageIds: [], antecedentMessageIds: [], scope: "same"}},
+      clock.now + 162_000);
+      assert.deepEqual([healed.status, healed.supervision, taskScopeRevision(healed), healed.conversation?.considered?.messageId],
+        ["inferred", "not_needed", lookupScope, question.id]);
+      kept(healed);
+      yield* noProposal(healed);
+      yield* untouched;
+      continue;
+    }
+
+    kept(answered);
+    yield* noProposal(answered);
+    yield* untouched;
+    const plan = yield* fixture.conversation.readContextView(fixture.binding, {view: "context", section: "plan"});
+    assert.deepEqual([plan.proposal, plan.outline], [null, null], "the current scope has no plan");
+    // a later question arrives while the root is still busy, so it is observed and queued, unassessed, when the human stops the chat
+    const busy = appendRun({projection: fixture.supervisor, id: "root-busy-run", ordinal: Math.max(...fixture.supervisor.runs.map(run => run.ordinal)) + 1,
+      status: "running", messageId: "root-busy-input", text: "Review recent activity.", createdBy: "system", creationSource: "server", now: clock.now + 160_000});
+    const question = appendActualUserMessage(fixture.operative, "how-did-it-happen", "How did this happen?", clock.now + 161_000);
+    const service = fixture.makeProjectSupervisor();
+    yield* service.cycle;
+    const queued = (yield* fixture.projectStore.task(task.threadId))!;
+    assert.deepEqual([queued.status, queued.sourceMessageId, queued.conversation?.observed?.messageId, queued.conversation?.considered?.messageId, taskScopeRevision(queued)],
+      ["queued", question.id, question.id, lookup.id, lookupScope], "the newer question is observed, not assessed");
+    kept(queued);
+    const stop = yield* service.setChatSupervision({projectId, mainThreadId: task.threadId, policyGeneration: (yield* fixture.threadPolicy.get()).generation, enabled: false});
+    assert.equal(stop.status, "saved");
+    completeRun(fixture.supervisor, busy, "Done.", clock.now + 162_000);
+    const rootTurns = () => fixture.calls.filter(call => call.tag === "orchestration.dispatchCommand" && call.payload.type === "message.dispatch" &&
+      call.payload.threadId === fixture.binding.threadId).length;
+    const turnsBefore = rootTurns();
+    for (let round = 0; round < 3; round++) {
+      yield* service.cycle;
+      yield* observeAgreement(fixture, clock.now + 170_000 + round);
+    }
+    assert.equal(rootTurns(), turnsBefore, "a stopped chat wakes no Supervisor turn");
+    const stopped = (yield* fixture.projectStore.task(task.threadId))!;
+    assert.deepEqual([stopped.status, stopped.supervision, stopped.sourceMessageId, stopped.conversation?.considered?.messageId], ["queued", "not_needed", question.id, lookup.id]);
+    kept(stopped);
+    yield* untouched;
+    assert.equal((yield* fixture.conversation.readContextView(fixture.binding, {view: "context"})).supervision, "stopped");
+    // the dashboard reads the same truth: the Stop, the newer question and the earlier scope's agreement
+    const view = yield* service.snapshot(projectId, task.threadId);
+    assert.equal(view.chatSupervision?.stopped, true);
+    const shown = view.tasks.find(item => item.id === task.id);
+    assert.deepEqual([shown?.status, shown?.supervision, shown?.workflowProposalId, shown?.agreement?.proposalId, shown?.agreementSourceHash,
+      shown?.conversation?.authorization?.scopeRevision, shown?.conversation?.observed?.messageId], ["queued", "not_needed", proposalId, proposalId, revisedScope, lookupScope, question.id]);
+    // a restarted service reads the Stop back and changes nothing
+    const calls = fixture.calls.length;
+    const restarted = yield* fixture.makeRestartedConversation();
+    assert.equal(yield* restarted.supervisionStopped(task.threadId), true);
+    yield* restarted.observe(fixture.threadList, clock.now + 200_000);
+    assert.deepEqual(yield* fixture.projectStore.task(task.threadId), stopped);
+    assert.equal(fixture.calls.length, calls, "a restarted service contacts nobody");
+    yield* untouched;
   }
-}), { timeout: 60_000 });
+}), { timeout: 120_000 });
 
 it.effect("source or definitions changes and edited native evidence make an agreement stale", () => Effect.gen(function* () {
   const scenarios = ["source", "definitions", "supervisor", "operative"] as const;

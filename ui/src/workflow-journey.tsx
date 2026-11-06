@@ -6,7 +6,8 @@ import type { WorkflowAssessmentInfo } from "../../src/workflow-assessment.js";
 import type { WorkflowProgressBranchSelection, WorkflowProgressContribution, WorkflowProgressObservation, WorkflowProgressReturn, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
 import { activePlanEntities, branchPathGroups, isPlanGroup, pendingBranchDecisions, planBranches, planEntities, planReach, reachedPendingBranchDecisions, type BranchPath, type PlanReach } from "../../src/workflow-plan-tree.js";
 import { GuideLink } from "./guide-link.js";
-import { acceptedAgreement, pendingProposal, statusRecord, type PlanChange, type PlanChangeField, type StepNotes } from "./task-record.js";
+import { agreementCurrent, proposalCurrent } from "../../src/supervision-conversation-contract.js";
+import { acceptedAgreement, earlierAcceptance, newerRequestUninterpreted, pendingProposal, statusRecord, type PlanChange, type PlanChangeField, type StepNotes } from "./task-record.js";
 
 const states = {planned: "Planned", underway: "In progress", completed: "Completed", needs_attention: "Needs attention"} as const;
 const reachText = {not_selected: "path not selected", undecided: "awaiting decision", unconditional: "", selected: ""} as const;
@@ -122,18 +123,20 @@ export const currentWork = (workflow: Pick<WorkflowProgressWorkflow, "plan" | "b
 
 export const hasCurrentAgreement = (task: TaskInterpretationInfo | undefined) => Boolean(acceptedAgreement(task) && !pendingProposal(task));
 
-// quick routine work needs no plan: nothing is proposed or awaits acceptance, unless an earlier plan was accepted
-const noPlanNeeded = (task: TaskInterpretationInfo | undefined) => task?.supervision === "not_needed" && !task.agreement;
+// quick routine work needs no plan: nothing is proposed or awaits acceptance, unless a plan was accepted for the current request. An
+// acceptance of an earlier request, current or out of date, is history. The judgement covers the last request the Supervisor
+// interpreted, never a newer one it has not read
+export const noPlanNeeded = (task: TaskInterpretationInfo | undefined) => task?.supervision === "not_needed" && !agreementCurrent(task);
 
 /** The one-line agreement state for the task band. */
 // changedSinceAcceptance: the displayed live plan no longer matches the accepted snapshot, so its contents are not accepted
 export const alignmentLabel = (task: TaskInterpretationInfo | undefined, changedSinceAcceptance = false) => hasCurrentAgreement(task)
   ? changedSinceAcceptance ? "Changes not accepted" : "Plan accepted"
   : acceptedAgreement(task) ? "Update awaiting acceptance"
+  : noPlanNeeded(task) ? newerRequestUninterpreted(task) ? "No plan needed for the last interpreted request" : "No plan needed"
   : task?.agreement?.status === "stale" ? "Acceptance needs review"
-  : noPlanNeeded(task) ? "No plan needed"
-  : task?.workflow?.status === "proposed" ? "Awaiting acceptance"
-  : task?.workflow ? "Plan being prepared" : "No plan yet";
+  : task?.workflow && proposalCurrent(task) ? task.workflow.status === "proposed" ? "Awaiting acceptance" : "Plan being prepared"
+  : "No plan yet";
 
 // active work opens its workflow: an underway or flagged step, or a pending branch decision that is reached (every undecided one when
 // the reached set is not known)
@@ -369,24 +372,32 @@ export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance 
   changedSinceAcceptance?: boolean}) {
   const accepted = acceptedAgreement(task);
   const pending = pendingProposal(task);
+  // an acceptance for an earlier request is history: its plan is neither proposed again nor accepted for the current request
+  const earlier = earlierAcceptance(task);
   // an acceptance covers only the content it accepted; later changes to the live plan are not accepted
   const changed = Boolean(accepted && !pending && changedSinceAcceptance);
   const current = Boolean(accepted && !pending) && !changed;
-  const stale = task?.agreement?.status === "stale";
-  const historical = Boolean(task && ["expired", "not_supervised"].includes(task.status));
-  const proposal = pending ?? task?.workflow ?? task?.agreement?.workflow;
-  const update = Boolean(accepted && pending);
   const unneeded = noPlanNeeded(task);
-  const supervisorLine = task?.engagement?.mode === "following" ? "Understanding and draft duties retained" : unneeded ? "No plan needed for this task"
+  // an out-of-date acceptance is an open question only while the current request needs a plan
+  const stale = task?.agreement?.status === "stale" && !unneeded;
+  const historical = Boolean(task && ["expired", "not_supervised"].includes(task.status));
+  // a plan kept for a request that needs no plan, or accepted for an earlier request, is no proposal of the current request
+  const proposal = pending ?? (earlier || task?.workflow && !proposalCurrent(task) ? null : task?.workflow ?? task?.agreement?.workflow);
+  const update = Boolean(accepted && pending);
+  const newer = newerRequestUninterpreted(task);
+  const supervisorLine = task?.engagement?.mode === "following" ? "Understanding and draft duties retained"
+    : unneeded ? newer ? "No plan needed for the last request it interpreted; a newer request is not interpreted yet" : "No plan needed for this task"
     : !proposal ? "No plan recorded yet" : update ? proposal.status === "pending" ? "Preparing an updated plan" : "Proposed an updated plan" : proposalProgress[proposal.status];
-  // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance
-  const proposalMessage = unneeded ? task?.reason ?? null : proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
+  // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance. A
+  // no-plan judgement is explained by the interpretation that made it, not by a later request's queue state
+  const proposalMessage = unneeded ? task?.status === "inferred" ? task.reason : null : proposal && (pending || !accepted) && !(stale && !pending) ? proposal.message : null;
   const agentLine = historical && task?.agreement ? "Earlier acceptance retained"
     : changed ? "Accepted an earlier version; later changes are not accepted"
     : current ? "Accepted this plan"
     : update ? "Earlier plan accepted; update awaiting acceptance"
     : stale ? "Earlier acceptance is out of date"
     : unneeded ? "Continues without a plan or acceptance"
+    : earlier ? "Accepted a plan for an earlier request"
     : "Acceptance has not been recorded";
   const agreement = task?.agreement;
   const agreedAt = agreement ? formatTime(agreement.agreedAt) : null;
@@ -400,7 +411,8 @@ export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance 
         {agreement && (current || historical) && <p className="alignment-note">{agreement.message}</p>}</div></li>
     </ol>
     <div className="alignment-links">{supervisorThreadId && <a href={`t3-thread://v1/${supervisorThreadId}`}>Open Supervisor</a>}{task && <a href={`t3-thread://v1/${task.threadId}`}>Open agent conversation</a>}</div>
-    {agreement && <EntityDetails title={<>{current ? "Acceptance record" : "Earlier acceptance record"}</>} className="small"><div className="stack">
+    {agreement && <EntityDetails title={<>{current ? "Acceptance record" : earlier ? "Acceptance for an earlier request" : "Earlier acceptance record"}</>} className="small"><div className="stack">
+      {earlier && <p>Accepted for an earlier request of this task. It is history: neither the current request’s plan nor an obligation.</p>}
       {!current && <p>{agreement.message}</p>}
       <p>Accepted <time dateTime={new Date(agreement.agreedAt).toISOString()}>{agreedAt}</time> · proposal <code>{agreement.proposalId}</code></p>
       <p>Agent message <code>{agreement.agentMessageId}</code> · {agreement.evidence.kind === "supervisor_message" ? <>Supervisor message <code>{agreement.evidence.messageId}</code></>

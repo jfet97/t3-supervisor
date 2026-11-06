@@ -296,8 +296,8 @@ it.effect("a drafter fetches the intent and the accepted current plan with its t
     assert.deepEqual(conversation.authorization.scopeSources, [{messageId: "request-a", requester: "human"}]);
     // the current plan: the accepted proposal, its outline and the task-local duty itself
     const plan = shown.plan!;
-    assert.deepEqual([(plan.proposal as {proposalId: string}).proposalId, (plan.agreement as {status: string; proposalId: string})],
-      ["proposal-accepted", {status: "agreed", proposalId: "proposal-accepted"}]);
+    assert.deepEqual([(plan.proposal as {proposalId: string}).proposalId, (plan.agreement as {status: string; proposalId: string; current: boolean})],
+      ["proposal-accepted", {status: "agreed", proposalId: "proposal-accepted", current: true}]);
     assert.deepEqual(plan.source, {kind: "proposal", proposalId: "proposal-accepted"}, "without a live workflow the plan is the proposal");
     assert.ok((plan.outline as string[]).some(line => line.includes("Notify the release owner [local:notify-the-release-owner]")), JSON.stringify(plan.outline));
     assert.deepEqual(plan.localDuties, [`- Notify the release owner [local:notify-the-release-owner]:\n  ${duty}`]);
@@ -405,7 +405,7 @@ it.effect("a drafter reads a duty added to the current live plan before and afte
   assert.ok((before.outline as string[]).some(line => line.includes("Recovery evidence [local:recovery-evidence]")));
   assert.deepEqual(before.requirements, live.requirements);
   // the earlier acceptance stays its own record: it still names the accepted proposal, which never contained the new duty
-  assert.deepEqual(before.agreement, {status: "agreed", proposalId: "proposal-accepted"});
+  assert.deepEqual(before.agreement, {status: "agreed", proposalId: "proposal-accepted", current: true});
   assert.equal(JSON.stringify(task.agreement!.workflow.plan).includes(duty), false);
   const attach = {...f.args, action: "attach_draft", operationId: "attach-current-live", attemptId: attempt.id, draftThreadId: "writer", draftTaskId: "draft-task"};
   delete (attach as {targetThreadIds?: unknown}).targetThreadIds;
@@ -425,15 +425,27 @@ it.effect("the plan section reports the imported live plan accepted while its co
   assert.deepEqual(plan.localDuties, ["- Notify the release owner [local:notify-the-release-owner]:\n  Original local duty"]);
 }));
 
-it.effect("a live plan bound to an earlier scope is not the current plan: the section falls back to the task's proposal", () => Effect.gen(function* () {
+it.effect("a live plan bound to an earlier scope is not the current plan, nor is the plan that scope accepted; the same content proposed anew for the new scope is its proposal", () => Effect.gen(function* () {
   const {f, task, live, duty} = yield* liveEdit;
   assert.equal(((yield* planSection(f)).source as {kind: string}).kind, "live");
-  // a new authorized scope unbinds the live workflow: the plan is the task's current proposal again, without the live duty
-  yield* f.stores.supervisors.saveTask({...task, conversation: {...task.conversation!, authorization: {...task.conversation!.authorization!,
-    scopeRevision: fingerprint("A reconsidered authorized scope.")}}});
-  const fallback = yield* planSection(f);
-  assert.deepEqual(fallback.source, {kind: "proposal", proposalId: "proposal-accepted"});
-  assert.equal(JSON.stringify(fallback).includes(duty), false);
+  // a new authorized scope unbinds the live workflow, and the plan the earlier scope accepted, kept under that acceptance's own proposal
+  // identity, is history: no proposal of the new scope, without the live duty
+  const rescoped: TaskRecord = {...task, conversation: {...task.conversation!, authorization: {...task.conversation!.authorization!,
+    scopeRevision: fingerprint("A reconsidered authorized scope.")}}};
+  yield* f.stores.supervisors.saveTask(rescoped);
+  const history = yield* planSection(f);
+  assert.deepEqual([history.source, history.proposal, history.agreement, history.outline],
+    [{kind: "proposal", proposalId: null}, null, {status: "agreed", proposalId: "proposal-accepted", current: false}, null]);
+  assert.equal(JSON.stringify(history).includes(duty), false);
+  // the identical plan proposed anew for the changed scope under its own identity is that scope's proposal, still to be accepted
+  yield* f.stores.supervisors.saveTask({...rescoped, workflowProposalId: "proposal-reconsidered"});
+  const proposed = yield* planSection(f);
+  assert.deepEqual(proposed.source, {kind: "proposal", proposalId: "proposal-reconsidered"});
+  const proposal = proposed.proposal as {proposalId: string; digest: string | null};
+  assert.equal(proposal.proposalId, "proposal-reconsidered");
+  assert.equal(typeof proposal.digest, "string", "an acceptance digest is prepared for it");
+  assert.deepEqual(proposed.agreement, {status: "agreed", proposalId: "proposal-accepted", current: false});
+  assert.equal(JSON.stringify(proposed).includes(duty), false);
   assert.ok(JSON.stringify(live.plan).includes(duty));
 }));
 

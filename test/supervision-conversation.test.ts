@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { deriveConversationEngagement } from "../src/supervision-conversation.js";
 import { interpretationRules } from "../src/supervisor-workflow.js";
 import { appendSourceMessage, completeSupervisorRequest, makeWorkflowFixture, sourceMessageId, sourceThreadId, submitAndComplete } from "./support/ctl-workflow.js";
-import type { ConversationDecision } from "../src/supervision-conversation-contract.js";
+import { earlierAcceptedSnapshot, proposalCurrent, type ConversationDecision } from "../src/supervision-conversation-contract.js";
 import { interpretationSubmitter } from "./support/g1a-conversation.js";
 import { submissionArguments } from "./support/interpretation-submit.js";
 import { projectId } from "./support/ctl-workflow.js";
@@ -106,6 +106,29 @@ it.live("discussion remains quiet; later grants use distinct commands through th
   assert.equal(f.dispatches().filter(call => call.payload.threadId === sourceThreadId).length, 1, "same-scope resume never reintroduces the plan");
   assert.equal(f.dispatches().filter(call => !/UNTRUSTED_MONITOR_ENVELOPE|\nCheck-in for main /u.test(String(call.payload.text))).length, 5, "four requester interpretations and one introduction; observe-only check-ins stay internal");
 }));
+
+it("identity decides whether a kept plan is an earlier scope's acceptance, a request that needs no plan proposes nothing, and an identical body proposed anew stays negotiable", () => {
+  const plan = {kind: "sequence", templatePath: null, nodes: []};
+  const accepted = {status: "proposed", message: "The operative accepted this exact proposal.", workspaceRoot: "/work", revision: "r1", plan};
+  const current = {id: "task", status: "inferred", sourceHash: "earlier-scope", agreementSourceHash: "earlier-scope", workflowProposalId: "proposal-a",
+    agreement: {status: "agreed", proposalId: "proposal-a", workflow: accepted}, workflow: {...accepted, message: "Kept as the base of later proposals."}};
+  const later = {...current, sourceHash: "later-scope"};
+  assert.deepEqual([earlierAcceptedSnapshot(current), proposalCurrent(current)], [false, true], "an acceptance of the current scope is no history");
+  assert.deepEqual([earlierAcceptedSnapshot(later), proposalCurrent(later)], [true, false], "kept under its own identity it is history, whatever its message says");
+  // the byte-identical body, message included, proposed anew under its own identity for a scope that needs a plan
+  const anew = {...later, workflowProposalId: "proposal-b", workflow: accepted};
+  assert.deepEqual([earlierAcceptedSnapshot(anew), proposalCurrent(anew)], [false, true], "an identical body proposed anew stays negotiable");
+  // a request that needs no plan proposes nothing; the same content proves the accepted plan was kept under an unpublished identity
+  const unpublished = {...later, workflowProposalId: "task:scope:later-scope", supervision: "not_needed" as const};
+  assert.deepEqual([earlierAcceptedSnapshot(unpublished), proposalCurrent(unpublished)], [true, false]);
+  const unaccepted = {...unpublished, workflow: {...accepted, revision: "r2"}};
+  assert.deepEqual([earlierAcceptedSnapshot(unaccepted), proposalCurrent(unaccepted)], [false, false], "an unaccepted plan kept for a no-plan request is neither");
+  for (const agreement of [null, {...later.agreement, status: "stale"}]) {
+    const noPlan = {...unaccepted, agreement};
+    assert.deepEqual([earlierAcceptedSnapshot(noPlan), proposalCurrent(noPlan)], [false, false], `no-plan request with ${agreement ? "a stale" : "no"} acceptance`);
+  }
+  assert.equal(proposalCurrent({...later, workflowProposalId: "proposal-b", agreement: {...later.agreement, status: "stale"}}), true, "a stale acceptance leaves a needed proposal negotiable");
+});
 
 const heldPlan = Effect.gen(function* () {
   const f = yield* makeWorkflowFixture();

@@ -1,6 +1,7 @@
 import { collectNativeReads } from "./supervisor-awareness.js";
 import { planningInstructions } from "./supervisor-planning.js";
 import { conversationAuthorityCurrent, conversationObservationCurrent, conversationMayContact, conversationMayObserve, taskScopeRevision } from "./supervision-conversation.js";
+import { agreementCurrent, proposalCurrent } from "./supervision-conversation-contract.js";
 import { Cause, Clock, Console, Context, Deferred, Effect, FiberMap, HashMap, Layer, Option, Ref } from "effect";
 import { mainRunNodeReader, hasUnansweredHuman, nativeUserMessageVisible, operativeRunStopped, timestampMs, workspacePreparationPending } from "./domain.js";
 import { activeWatchInstructions, ownInboxInstructions, hasActiveMonitoredRun, isCurrentMainGraphRun, SUPERVISOR_MONITOR_AGE_MS, SUPERVISOR_MONITOR_COOLDOWN_MS, type SupervisorMonitorThreadBatch, type SupervisorNativeChildLifecycleEvidence } from "./supervisor-monitor.js";
@@ -444,14 +445,24 @@ const formalPlanReady = (workflow: WorkflowProposalInfo): boolean => {
     !workflow.issues.some(item => blockers.has(item.code)) && groupResolved(workflow.plan);
 };
 
-/** The exact compact acceptance record for the service-prepared proposal, or null while it is provisional. */
+/**
+ * The exact compact acceptance record for the service-prepared proposal, or null while it is provisional; a plan kept for a request that
+ * needs no plan, or an earlier scope's accepted snapshot kept only as the base of later proposals, is no proposal and has none.
+ */
 export const preparedAcceptanceRecord = (task: TaskRecord): {taskId: string; proposalId: string; digest: string} | null => {
   const workflow = task.workflow;
-  if (!workflow || !formalPlanReady(workflow) || typeof workflow.workspaceRoot !== "string") return null;
+  if (!workflow || !formalPlanReady(workflow) || typeof workflow.workspaceRoot !== "string" || !proposalCurrent(task)) return null;
   const proposalId = task.workflowProposalId ?? task.id;
   return {taskId: task.id, proposalId, digest: compactProposalDigest({taskId: task.id, taskRevision: taskScopeRevision(task)},
     {workspaceRoot: workflow.workspaceRoot, revision: workflow.revision, workflow: workflowValue(workflow)})};
 };
+
+/**
+ * A task whose plan the Supervisor watches: a current proposal awaiting or under agreement, the agreement of the current scope, or a
+ * stale agreement to renegotiate. A plan kept for a request that needs no plan, or an earlier scope's accepted snapshot, is no proposal.
+ */
+const supervisedPlan = (task: TaskRecord): boolean => agreementCurrent(task) || task.agreement?.status === "stale" ||
+  (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale") && proposalCurrent(task);
 
 // the only acceptance route, told to the operative in its notice and its proposal read
 const acceptanceRouteRule = "Acceptance is the exact acceptance record in your own completed reply; a message to your Supervisor records nothing.";
@@ -669,13 +680,15 @@ const makeSupervisorConversation = Effect.gen(function* () {
     const proposalId = task.workflowProposalId ?? task.id;
     const diagnostic = task.workflowProtocolDiagnostic ?? null;
     const supervisorProblem = diagnostic?.role === "supervisor" && !operativeRecordDiagnosticCodeSet.has(diagnostic.code);
+    // a plan kept for a request that needs no plan, or an earlier scope's accepted snapshot kept as the base of later proposals, is no
+    // proposal of the current request; the agreement says whether it accepted the current scope
     return {
       taskId: task.id, taskRevision: taskScopeRevision(task), objective: redact(task.objective ?? ""), definitionsRevision: workflow?.revision ?? null,
-      proposal: workflow ? {proposalId, status: workflow.status, formal: formalPlanReady(workflow),
+      proposal: workflow && proposalCurrent(task) ? {proposalId, status: workflow.status, formal: formalPlanReady(workflow),
         digest: candidate?.compact ? candidate.planHash : preparedProposal(task, proposalId)?.digest ?? null,
         published: Boolean(candidate) && candidate?.planHash === preparedAcceptanceRecord(task)?.digest} : null,
       conversation: task.conversation ?? null,
-      agreement: task.agreement ? {status: task.agreement.status, proposalId: task.agreement.proposalId} : null,
+      agreement: task.agreement ? {status: task.agreement.status, proposalId: task.agreement.proposalId, current: agreementCurrent(task)} : null,
       protocolRepair: supervisorProblem ? {...diagnostic, blocked: (diagnostic.attempts ?? 1) >= 3} : null,
       operativeRecordProblem: diagnostic && !supervisorProblem ? diagnostic : null,
       definitionReview: task.definitionReview ?? null,
@@ -776,16 +789,18 @@ const makeSupervisorConversation = Effect.gen(function* () {
         conversation: summary.conversation};
       if (input.section === "plan") {
         // the current plan: the main's live workflow while it is bound to this task and its current scope, edits after acceptance
-        // included; otherwise the task's current proposal. accepted says whether the live content is still the accepted plan
+        // included; otherwise the task's current proposal, never a plan kept for a request that needs no plan or an earlier scope's
+        // accepted snapshot. accepted says whether the live content is still the accepted plan
         const live = workflows ? yield* workflows.get(task.projectId, task.threadId) : null;
         const bound = live?.sourceBinding?.taskId === task.id && live.sourceBinding.sourceHash === taskScopeRevision(task) ? live : null;
         const acceptedProposalId = bound ? currentAcceptedProposalId(bound) : null;
-        const plan = bound ? bound.plan : task.workflow?.plan ?? null;
+        const proposed = proposalCurrent(task) ? task.workflow : null;
+        const plan = bound ? bound.plan : proposed?.plan ?? null;
         return {status: "ok", view, section: "plan", taskId: task.id,
           source: bound ? {kind: "live", workflowId: bound.workflowId, revision: bound.revision,
             accepted: acceptedProposalId !== null && task.agreement?.status === "agreed" && task.agreement.proposalId === acceptedProposalId}
             : {kind: "proposal", proposalId: summary.proposal?.proposalId ?? null},
-          proposal: summary.proposal, agreement: summary.agreement, requirements: bound ? bound.requirements : task.workflow?.requirements ?? [],
+          proposal: summary.proposal, agreement: summary.agreement, requirements: bound ? bound.requirements : proposed?.requirements ?? [],
           outline: plan ? renderPlan(plan, "", bound ? documentBranchSelections(bound) : undefined) : null, localDuties: plan ? localDutyLines(plan) : []};
       }
       if (input.section === "diagnostics") return {status: "ok", view, section: "diagnostics", taskId: task.id, definitions: definitionState,
@@ -971,8 +986,7 @@ Turns without a service request: do pending context/planning work, then keep the
     const settings = (yield* store.settings(projectId)).monitoring;
     const lastNoticeAt = yield* requests.lastNotice(supervisorThreadId);
     const request = yield* requests.pending(projectId, supervisorThreadId);
-    const tasks = (yield* store.tasks(projectId)).filter(task => conversationMayContact(task) &&
-      (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale") &&
+    const tasks = (yield* store.tasks(projectId)).filter(task => conversationMayContact(task) && supervisedPlan(task) &&
       task.supervisorThreadId === supervisorThreadId);
     const pendingByTask = yield* Effect.forEach(tasks, (task) => monitor.pending(projectId, task.threadId));
     const pending = pendingByTask.flat();
@@ -1436,7 +1450,7 @@ Turns without a service request: do pending context/planning work, then keep the
     const rootRun = latestExecutedRun(supervisor);
     const generation = rootRun && terminalRunStatuses.has(rootRun.status) ? rootRun.id : null;
     for (const task of tasks) {
-      if (task.supervisorThreadId !== binding.threadId || task.status !== "inferred" || task.agreement?.status !== "agreed" || !conversationMayContact(task)) continue;
+      if (task.supervisorThreadId !== binding.threadId || task.status !== "inferred" || !agreementCurrent(task) || !conversationMayContact(task)) continue;
       const read = yield* attempt(projection(task.threadId));
       if (!read.ok || read.value.thread.id !== task.threadId) continue;
       const main = read.value;
@@ -1988,9 +2002,10 @@ Turns without a service request: do pending context/planning work, then keep the
         workspaceRoot: root, revision: candidate.workflow.revision, workflow: workflowValue(candidate.workflow)} : null;
       return only ? null : preparedProposal(task, proposalId);
     };
+  // never for a plan kept for a request that needs no plan or an earlier scope's accepted snapshot, which no reference makes a proposal
   const preparedProposal = (task: TaskRecord, proposalId: string): StoredProposalDigest | null => {
     const workflow = task.workflow;
-    if (!workflow || (task.workflowProposalId ?? task.id) !== proposalId || typeof workflow.workspaceRoot !== "string") return null;
+    if (!workflow || (task.workflowProposalId ?? task.id) !== proposalId || typeof workflow.workspaceRoot !== "string" || !proposalCurrent(task)) return null;
     const value = {workspaceRoot: workflow.workspaceRoot, revision: workflow.revision, workflow: workflowValue(workflow)};
     return {proposalId, digest: compactProposalDigest(proposalPins(task), value), ...value};
   };
@@ -2341,8 +2356,7 @@ Turns without a service request: do pending context/planning work, then keep the
     // the task scopes, the monitoring settings and the frozen batch are one block
     const {tasks, taskScopes, fullBatch} = yield* transaction(Effect.gen(function* () {
       const tasks = yield* Effect.filter(yield* store.tasks(binding.projectId), (task) => Effect.gen(function* () {
-        return conversationMayObserve(task) && (!conversationMayContact(task) ||
-          (task.workflow?.status === "proposed" || task.workflow?.status === "provisional" || task.workflow?.status === "stale" || task.agreement?.status === "agreed" || task.agreement?.status === "stale")) && task.supervisorThreadId === binding.threadId;
+        return conversationMayObserve(task) && (!conversationMayContact(task) || supervisedPlan(task)) && task.supervisorThreadId === binding.threadId;
       }));
       const taskScopes = new Map<string, {task: TaskRecord; scope: ReturnType<typeof resolveSupervisorScope>}>();
       const eligibleThreadIds = new Set<string>();

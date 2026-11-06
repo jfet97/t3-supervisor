@@ -1,4 +1,4 @@
-import { emptyConversation } from "./supervision-conversation-contract.js";
+import { agreementScopeRevision, earlierAcceptedSnapshot, emptyConversation } from "./supervision-conversation-contract.js";
 import { preserveOccurrenceIds, deriveConversationEngagement, requesterSources, resolveConversationDecision, taskScopeRevision } from "./supervision-conversation.js";
 import { completionRecordId } from "./workflow-progress.js";
 import { Cause, Clock, Context, Data, Deferred, Effect, Exit, FiberMap, HashMap, Layer, Option, Ref, Schedule, Schema } from "effect";
@@ -1044,9 +1044,10 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       effectiveEnabled: yield* scope.scopeEnabled(projectId, mainThreadId), activation: (yield* scope.isNoProject(projectId)) ? (yield* store.start(mainThreadId))?.status ?? "not_started" : "automatic"} : null;
     const monitoringStatus = yield* conversation.status(projectId, binding?.threadId ?? null);
     return {projectId, mainThreadId, planning: binding ? (yield* requests.planningAttempts(projectId)).filter(row => row.mainThreadId === binding.mainThreadId) : [], ...((yield* scope.isNoProject(projectId)) ? {noProjectMode: (yield* store.noProjectControl()).mode} : {}), chatSupervision, team: binding && teamData ? supervisorTeamView(teamData, binding, catalog.threads, now()) : null, modelApplication: application ? {pending: application.pending, attempts: application.applyAttempts ?? 0, message: application.applicationMessage ?? null} : null, settings: {generation: current.generation, modelSelection: current.modelSelection, pending: false, monitoring: current.monitoring, planningTimeoutMs: current.planningTimeoutMs ?? 300_000, teamSettings: current.teamSettings ?? {maxHelpersPerRoot: 5}, superviseAgentCreatedThreads: current.superviseAgentCreatedThreads}, monitoringStatus, binding: binding ? {...binding, settlementState: binding.settlement?.state ?? null, mainSettlementState: binding.mainSettlement?.state ?? null, mainSettlementBlockedBy: binding.mainSettlementBlockedBy ?? null, keptActive: Boolean(binding.manualKeepActive)} : null, modelSelection: selection, models: advertised, available, message,
-      tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map(({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic,conversation,supervision}) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt, ...(supervision ? {supervision} : {}), ...(conversation ? {conversation} : {}), engagement: deriveConversationEngagement({task: {status, sourceHash, conversation}, enabled: chatSupervision?.effectiveEnabled ?? false, available, monitoringState: monitoringStatus.state, bindingState: binding?.state, stale: !catalog.projects.find(item => item.project.id === projectId)?.available}), workflow: workflow ?? null,
-        ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null,
-        ...(definitionReview ? {definitionReview} : {})}))};
+      // each agreement names the scope it accepted, so a view can tell the current agreement from an earlier scope's
+      tasks: (binding ? yield* store.tasksFor(binding) : []).slice(-200).reverse().map((task) => [task, agreementScopeRevision(task)] as const).map(([{id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt,workflow,workflowProposalId,agreement,definitionReview,workflowProtocolDiagnostic,conversation,supervision}, agreementScope]) => ({id,sourceHash,threadId,projectId,sourceRunId,sourceMessageId,status,objective,reason,updatedAt, ...(supervision ? {supervision} : {}), ...(conversation ? {conversation} : {}), engagement: deriveConversationEngagement({task: {status, sourceHash, conversation}, enabled: chatSupervision?.effectiveEnabled ?? false, available, monitoringState: monitoringStatus.state, bindingState: binding?.state, stale: !catalog.projects.find(item => item.project.id === projectId)?.available}), workflow: workflow ?? null,
+        ...(workflowProposalId ? {workflowProposalId} : {}), agreement: agreement ?? null, ...(agreementScope !== null ? {agreementSourceHash: agreementScope} : {}),
+        workflowProtocolDiagnostic: workflowProtocolDiagnostic ?? null, ...(definitionReview ? {definitionReview} : {})}))};
   });
   const save = (input: ProjectSupervisorSaveInput): Effect.Effect<ProjectSupervisorSaveOutcome, StoreError | ProjectUnavailable | InvalidMainConversation | T3RequestError | SupervisionStoreError> => Effect.gen(function* () {
     if (!store.scopeCompatible) return {status: "unavailable", message: "Supervisor state version is unsupported; no changes were made.", snapshot: null};
@@ -1345,6 +1346,12 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           }
           const engaged = conversation?.authorization?.state === "authorized";
           const preservePlan = !scopeChanged || !engaged || payload.supervision === "not_needed";
+          // a preserved plan keeps its own identity, and an earlier scope's accepted snapshot is its agreement's proposal, which also
+          // replaces an unpublished identity once named for it. only a plan that replaces it for a changed engaged scope is a new
+          // proposal, so a changed scope that needs no plan names none
+          const retainedProposalId = retained.agreement && earlierAcceptedSnapshot(retained) ? retained.agreement.proposalId : retained.workflowProposalId;
+          const proposalId = !preservePlan && scopeChanged && engaged ? `${finished.id}:scope:${conversation!.authorization!.scopeRevision.slice(0, 20)}`
+            : preservePlan ? retainedProposalId : undefined;
           const next: TaskRecord = {...applied, ...(payload.supervision ? {supervision: payload.conversation?.intent === "following" && retained.conversation?.authorization
             ? retained.supervision ?? "needed" : payload.supervision} : {}), ...(conversation ? {conversation} : {}),
             workflow: preservePlan ? retained.workflow ?? null : applied.workflow?.plan ? {...applied.workflow, plan: preserveOccurrenceIds(applied.workflow.plan,
@@ -1352,7 +1359,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
             ...(preservePlan && retained.interpretationEvidence ? {interpretationEvidence: retained.interpretationEvidence} : {}),
             ...(!preservePlan && applied.interpretationEvidence?.kind === "interpretation_submission" && conversation?.authorization
               ? {interpretationEvidence: {...applied.interpretationEvidence, scopeRevision: conversation.authorization.scopeRevision}} : {}),
-            ...(scopeChanged && engaged ? {workflowProposalId: `${finished.id}:scope:${conversation!.authorization!.scopeRevision.slice(0, 20)}`} : {}),
+            ...(proposalId !== undefined ? {workflowProposalId: proposalId} : {}),
             objective: engaged ? conversation!.authorization!.outcome : payload.objective};
           // quiet drafts never become proposals. Same-scope pause/resume keeps the exact proposal and acceptance.
           if (preservePlan && conversation) next.protocolAnchor = {supervisorThreadId: finished.supervisorThreadId,
@@ -1364,7 +1371,7 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
           if (scopeChanged && engaged) {
             const introduced = yield* requests.introduction(retained.id);
             if (introduced?.state === "sent") yield* requests.saveIntroduction({...introduced,
-              proposalId: retained.workflowProposalId ?? retained.agreement?.proposalId ?? retained.id});
+              proposalId: retainedProposalId ?? retained.agreement?.proposalId ?? retained.id});
           }
           const status = conversation?.authorization || next.objective !== null ? "inferred" as const : "needs_context" as const;
           // the root executed this request and submitted: the full notice it carried delivered this instructions version
