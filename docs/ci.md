@@ -202,13 +202,22 @@ names that digest. Runtimes are not saved in the repository's cross-run Actions 
 
 The cohort probe exercises a provider-free set of native operations, one report step each:
 `stack`, `environment`, `model-config`, `files-read`, `setup-scaffold`, `git-probe`,
-`commit`, `thread-launch`, `thread-watch`, `message-dispatch`, `thread-settle`,
-`thread-stop-idle`, `helper-task`, `helper-webhook`, `helper-delete` and `teardown`. It does
+`commit`, `thread-launch`, `thread-watch`, `thread-settle`, `thread-stop-idle`,
+`message-dispatch`, `helper-task`, `helper-webhook`, `helper-delete` and `teardown`. It does
 not cover every native function. With no provider signed in, it proves nothing about model
 answers, the Stop of a running turn, the cancellation of a genuinely queued run (the idle
 thread Stop step does not prove it), real check-in turn items, helper model and tool
 behavior after delivery, or compaction; those stay with the provider trials
 ([where tests run](testing.md#where-tests-run)).
+
+Without a provider, the turn a message starts may fail or stay running, depending on the
+T3 build. The probe therefore settles and Stops its launched thread before giving it a
+message, each command only while a read just before it shows the thread idle. A thread that
+is not idle gets neither command and the step is `not-run`, so the run fails. The message
+follows on the same settled thread and is judged by its receipt and read-back alone. The
+turn it starts is reported as read and never awaited. `test/t3-cohort-lifecycle.test.ts`
+runs these steps through the production T3Native over a scripted native peer whose turns
+never end, together with a busy thread and a settle whose reply is lost.
 
 A slot passes only when both runs passed and both JSON reports name its slot, its T3
 version in the lock, the lock's SHA-256 and the checked commit with a clean tree. A report
