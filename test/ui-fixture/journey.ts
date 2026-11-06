@@ -7,7 +7,7 @@ import { returnedJourney } from "./returned.js";
 // Every text is labelled; none of it records Supervisor work, native messages or a run. The plan follows a project's
 // high-level change workflow; occurrence IDs stay the same across proposals and the live plan.
 export const journeyCases = ["request", "following", "catching-up", "paused", "proposal", "agreed", "working", "attention", "revised", "reagreed", "verified", "nested", "nested-attention", "completed", "stale", "retained",
-  "branch-proposal", "branch-pending", "branch-selected", "branch-changed", "returned"] as const;
+  "branch-proposal", "branch-pending", "branch-selected", "branch-changed", "returned", "rescoped-pending", "rescoped", "rescoped-current"] as const;
 export type JourneyCase = typeof journeyCases[number];
 
 export const journeyTitle = "Packing quantity scans (reconstructed example)";
@@ -143,6 +143,7 @@ function history(phase: typeof order[number], now: number) {
 /** The reconstructed packing journey through the production API contracts, with no native work or conversation messages. */
 export function fixtureJourney(phase: JourneyCase, projectId: string, threadId: string, supervisorThreadId: string, now: number): {task: TaskInterpretationInfo; progress: WorkflowProgressSnapshot} {
   if (phase === "returned") return returnedJourney(fixtureJourney("nested-attention", projectId, threadId, supervisorThreadId, now), now);
+  if (phase === "rescoped-pending" || phase === "rescoped" || phase === "rescoped-current") return rescopedJourney(phase, projectId, threadId, supervisorThreadId, now);
   const revisedOrLater = ["revised", "reagreed", "verified", "nested", "nested-attention", "completed"].includes(phase);
   const v2Accepted = revisedOrLater && phase !== "revised";
   const proposalV1 = proposal(notes.verify, "Reconstructed example: the Supervisor proposed the project’s change workflow for this task.");
@@ -252,4 +253,50 @@ function branchJourney(phase: BranchCase, base: TaskInterpretationInfo, taskBase
     coverage: threads.map(thread => ({threadId: thread.threadId, state: "root" as const, assigneeThreadId: null, assigneeTitle: null, assignmentRootThreadId: null})), incompatibleWorkflows: [], workflows,
     workflowOffset: 0, workflowHasMore: false, lineageOffset: 0, lineageHasMore: false};
   return {task, progress};
+}
+
+// the completed packing change, then a genuine follow-up request that changes the task's authorized scope: the Supervisor proposes a
+// revised plan with a carton label and the agent accepts it. Until the workflow is brought to that plan, the earlier scope's completed
+// workflow is history awaiting reconciliation; once it is, the accepted plan is current and starts planned, without the earlier completion
+type RescopedCase = "rescoped-pending" | "rescoped" | "rescoped-current";
+const rescopedScope = "fixture-scope-packing-carton-label";
+const followUp = {messageId: "fixture-message-packing-follow-up", runId: "fixture-run-packing-follow-up", ordinal: 3, hash: "fixture-packing-follow-up",
+  requester: "human" as const};
+const cartonLabel: WorkflowPlanStepInfo = {kind: "step", nodeId: "packing-carton-label", definitionId: null, localId: "carton-label", templatePath: null,
+  name: "Print the carton label", description: "Print the carton label when a carton reaches its ordered amount, and not before.", source: null,
+  resolution: "resolved", reason: "Reconstructed example: the requester’s follow-up asks for the label.", status: "planned", contributorThreadIds: []};
+const adoptedNote = "Reconstructed example: the agent accepted the follow-up’s plan for the changed scope. It starts as accepted: progress recorded " +
+  "under the earlier scope stays in its history and needs a fresh assessment before it counts here.";
+function rescopedPlan(): WorkflowPlanGroupInfo {
+  const base = plan(refinedVerify);
+  const verify = base.nodes.findIndex(node => node.kind === "step" && node.nodeId === "packing-verify");
+  return {...base, nodes: [...base.nodes.slice(0, verify), cartonLabel, ...base.nodes.slice(verify)]};
+}
+function rescopedJourney(phase: RescopedCase, projectId: string, threadId: string, supervisorThreadId: string, now: number): {task: TaskInterpretationInfo; progress: WorkflowProgressSnapshot} {
+  const earlier = fixtureJourney("completed", projectId, threadId, supervisorThreadId, now);
+  const completed = earlier.progress.workflows[0]!;
+  const revised: WorkflowProposalInfo = {...proposal(refinedVerify, "Reconstructed example: the Supervisor proposed the follow-up’s plan, adding the carton label."),
+    plan: rescopedPlan()};
+  const accepted: WorkflowAgreementInfo = {status: "agreed", message: "Reconstructed example: the agent accepted this exact proposal; acceptance is not execution evidence.",
+    proposalId: "packing-proposal-carton-label", agreedAt: now - 60_000,
+    evidence: {kind: "supervisor_message", messageId: "fixture-packing-supervisor-packing-proposal-carton-label"},
+    agentMessageId: "fixture-packing-agent-packing-proposal-carton-label", workflow: revised};
+  const conversation = {...emptyConversation(now), considered: followUp, observed: followUp, authorization: {scopeRevision: rescopedScope,
+    outcome: "Reconstructed example: also print the carton label once a carton reaches its ordered amount.", limits: [], scopeSources: [followUp],
+    state: "authorized" as const, stateSource: followUp, attemptId: "fixture-packing-follow-up"}};
+  const task: TaskInterpretationInfo = {...earlier.task, conversation, workflow: revised, workflowProposalId: accepted.proposalId, updatedAt: now - 60_000,
+    agreement: phase === "rescoped-pending" ? {...earlier.task.agreement!, status: "stale",
+      message: "Reconstructed example: the follow-up changed the authorized scope, so this acceptance is history."} : accepted};
+  // the follow-up, its acceptance and the workflow following it come after the completion recorded two minutes ago
+  const adoptedAt = now - 30_000;
+  const adoption = (nodeId: string | null, name: string | null): WorkflowProgressObservation => ({id: `packing-record-adopted-${nodeId ?? "task"}`, kind: "status_changed",
+    recordedAt: adoptedAt, targetNodeId: nodeId, targetNodeName: name, statusFrom: "completed", statusTo: "planned", sourceThreadId: null, sourceRunId: null,
+    sourceMessageId: null, sourceItemId: null, note: adoptedNote});
+  const workflows: WorkflowProgressSnapshot["workflows"] = phase !== "rescoped-current" ? [completed] : [{...completed, revision: completed.revision + 1, status: "planned",
+    plan: rescopedPlan(), acceptedProposalId: accepted.proposalId,
+    assessment: {taskId: completed.assessment!.taskId, sourceHash: rescopedScope, status: "planned", summary: adoptedNote, updatedAt: adoptedAt}, updatedAt: adoptedAt,
+    observations: [...completed.observations, ...keys.map(key => adoption(`packing-${key}`, definitions[key].name)), adoption(null, null)]}];
+  const scope = earlier.progress.scope ? {...earlier.progress.scope,
+    threads: earlier.progress.scope.threads.map(thread => ({...thread, lifecycle: "running" as const, lifecycleDetail: "running"}))} : null;
+  return {task, progress: {...earlier.progress, scope, workflows}};
 }

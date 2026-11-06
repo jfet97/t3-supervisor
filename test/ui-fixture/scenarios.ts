@@ -626,7 +626,7 @@ export const scenarioNames = [
   "journey-request", "journey-following", "journey-catching-up", "journey-paused", "journey-proposal", "journey-agreed", "journey-working", "journey-attention", "journey-revised", "journey-reagreed", "journey-verified",
   "journey-nested", "journey-nested-attention", "journey-completed", "journey-stale", "journey-retained",
   "journey-branch-proposal", "journey-branch-pending", "journey-branch-selected", "journey-branch-changed",
-  "journey-returned",
+  "journey-returned", "journey-rescoped-pending", "journey-rescoped", "journey-rescoped-current",
   "orphaned-attention", "orphaned-worktrees", "partial-inventory", "large-interface", "baseline", "session-expiry-next-call", "signout-other-tab", "mutation-never-answered", "mutation-dropped",
   "save-401", "save-403", "save-409", "save-413", "editor-conflict", "editor-uncertain", "slow-reads", "setup-race", "reload",
 ] as const;
@@ -675,6 +675,9 @@ export const scenarioCatalog: Record<ScenarioName, {description: string; plan: (
   "journey-branch-selected": {description: "reconstructed packing example: the agent selected one review; a child reviewer selected its own path", plan: () => plan([])},
   "journey-branch-changed": {description: "reconstructed packing example: completed, then the review decision changed, so completion needs reassessment", plan: () => plan([])},
   "journey-returned": {description: "reconstructed packing example: return to implementation, forward history, prior reviewer turns and released planning waits", plan: () => plan([])},
+  "journey-rescoped-pending": {description: "reconstructed packing example: completed, then a follow-up changed the scope; the revised plan awaits acceptance", plan: () => plan([])},
+  "journey-rescoped": {description: "reconstructed packing example: the revised plan for the changed scope is accepted; the earlier scope's completed workflow awaits reconciliation", plan: () => plan([])},
+  "journey-rescoped-current": {description: "reconstructed packing example: the accepted revised plan is the current workflow, planned, with the earlier completion in history", plan: () => plan([])},
   "baseline": {description: "normal synthetic behaviour", plan: () => plan([])},
   "session-expiry-next-call": {description: "the next /api/ call with a valid session revokes that session and answers 401", plan: () => plan([{kind: "session-expiry"}])},
   "signout-other-tab": {description: "revokes every fixture session now, as a sign-out in another tab does server-side", plan: () => plan([], true)},

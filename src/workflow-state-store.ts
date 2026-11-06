@@ -43,6 +43,7 @@ import {
   type ReturnBudget,
   type ReturnBudgetEvent,
   type WorkflowAgreementImport,
+  type WorkflowAgreementReconcile,
   type WorkflowApplyInput,
   type WorkflowControllerLineage,
   type WorkflowEnsureResult,
@@ -50,6 +51,7 @@ import {
   type WorkflowMutationReceipt,
   type WorkflowMutationResult,
   type WorkflowOwner,
+  type WorkflowReconcileResult,
   type WorkflowReturn,
   type WorkflowReturnApplyInput,
   type WorkflowReturnRun,
@@ -518,6 +520,19 @@ const staticPlan = (plan: WorkflowStatePlan): unknown => {
 const workflowPlanSignature = (objective: string | null, sourceBinding: WorkflowStateSourceBinding | null,
   requirements: readonly WorkflowStateRequirement[], issues: readonly WorkflowStateIssue[], plan: WorkflowStatePlan): string =>
   fingerprint(canonicalStoredJson({objective, sourceBinding, requirements, issues, plan: staticPlan(plan)}, storedPlanJsonDepth));
+
+/**
+ * Whether an accepted record supersedes the completed accepted snapshot the main workflow still tracks: the same task's later acceptance for
+ * another scope, while the document is bound to that task under its earlier scope, still is that earlier snapshot (its agreement pointer
+ * survives only while no structural edit changed it) and is completed. Ongoing work and edited plans stay as they are for the Supervisor
+ * to reconcile through apply.
+ */
+const supersedesCompletedSnapshot = (current: WorkflowStateDocument, record: AcceptedWorkflowAgreementRecord): boolean => {
+  const tracked = current.currentAgreementKey === null ? undefined : current.acceptedAgreements.find(item => item.key === current.currentAgreementKey);
+  return tracked !== undefined && tracked.key !== record.key && tracked.taskId === record.taskId && record.sourceThreadId === current.threadId &&
+    current.sourceBinding?.taskId === record.taskId && current.sourceBinding.sourceHash !== record.sourceHash && current.status === "completed" &&
+    record.plan !== null;
+};
 
 const sourceBindingOf = (workflow: WorkflowAgreementInfo["workflow"], taskId: string, proposalId: string, sourceHash: string): WorkflowStateSourceBinding => ({
   workspaceRoot: workflow.workspaceRoot ?? "",
@@ -1101,6 +1116,7 @@ export interface WorkflowStateStoreShape {
   readonly ensureMain: (owner: WorkflowOwner, operationId: string, note: string, now?: number) => WorkflowEffect<WorkflowEnsureResult>;
   readonly linkChild: (owner: WorkflowOwner, input: {operationId: string; lineage: WorkflowControllerLineage; note: string}, now?: number) => WorkflowEffect<WorkflowMutationResult>;
   readonly importAcceptedAgreement: (owner: WorkflowOwner, source: WorkflowAgreementImport, now?: number) => WorkflowEffect<WorkflowMutationResult>;
+  readonly reconcileAcceptedAgreement: (owner: WorkflowOwner, source: WorkflowAgreementReconcile, now?: number) => WorkflowEffect<WorkflowReconcileResult>;
   readonly recordContribution: (owner: WorkflowOwner, input: ExternalContributionImport, now?: number) => WorkflowEffect<ExternalContributionImportResult>;
   readonly assessContribution: (owner: WorkflowOwner, input: WorkflowContributionAssessmentInput, now?: number) => WorkflowEffect<WorkflowMutationResult>;
   readonly recordBranchSelection: (owner: WorkflowOwner, input: BranchSelectionImport, now?: number) => WorkflowEffect<BranchSelectionImportResult>;
@@ -1593,7 +1609,57 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     return receipt;
   }));
 
-  /** Imports a validated acceptance without changing an already populated broad plan; joins the caller's transaction. */
+  /**
+   * The main workflow's transition to a superseding accepted scope (supersedesCompletedSnapshot): the new scope starts exactly as accepted,
+   * its statuses planned and none carried from the earlier scope, whose completion, accepted snapshots, contributions and evidence all stay
+   * as history. The plan is the accepted snapshot itself, so the agreement pointer names content it matches; a return budget continues
+   * only under its own unchanged identity. Selections and returns follow the same rules as an applied plan; the caller writes the document.
+   */
+  const adoptAcceptedScope = (owner: WorkflowOwner, operationId: string, current: WorkflowStateDocument, record: AcceptedWorkflowAgreementRecord,
+    evidence: WorkflowStateEvidence[], at: number) => Effect.gen(function* () {
+    const plan = copyPlan(record.plan);
+    const returnBudgets = ledgerForPlan(current.returnBudgets ?? [], plan);
+    if (returnBudgets.length > workflowMutationLimits.maxReturns) return {reason: "return_budget_capacity"} as const;
+    const branchState = invalidatedSelections(current.branchSelections, plan, at);
+    const nextNodes = new Map(collectPlanEntities(plan).map(node => [node.nodeId, node]));
+    const note = `The operative accepted proposal ${record.agreement.proposalId} for the task's changed scope. It starts as accepted: progress recorded ` +
+      "under the earlier scope stays in its history and needs a fresh assessment before it counts here.";
+    for (const node of collectPlanEntities(current.plan)) {
+      const next = nextNodes.get(node.nodeId);
+      if (next?.status === node.status) continue;
+      evidence.push(yield* makeEvidence({operationId, owner, kind: next ? "status_changed" : "node_removed", now: at,
+        targetNodeId: node.nodeId, targetNodeName: next?.name ?? node.name, statusFrom: node.status, statusTo: next?.status ?? null,
+        sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: record.key, note}));
+    }
+    for (const selection of branchState.invalidated) evidence.push(yield* makeEvidence({operationId, owner, kind: "branch_selection_invalidated", now: at,
+      targetNodeId: selection.nodeId, targetNodeName: null, statusFrom: null, statusTo: null,
+      sourceThreadId: selection.sourceThreadId, sourceRunId: selection.sourceRunId, sourceMessageId: selection.sourceMessageId, sourceItemId: null, agreementKey: null,
+      note: `The accepted plan changed this branch's condition, else path or position, or left it out; selection revision ${selection.revision} (${selection.path}) no longer applies and the decision is pending again.`,
+      branch: {revision: selection.revision, path: selection.path, changed: true, condition: selection.condition}}));
+    for (const change of changedBranches(current.plan, plan)) evidence.push(yield* makeEvidence({operationId, owner, kind: "branch_changed", now: at,
+      targetNodeId: change.nodeId, targetNodeName: null, statusFrom: null, statusTo: null,
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: null,
+      note: change.condition === null ? "The branch left the plan; a selection record written before this edit never selects it."
+        : "The branch was added or its condition, else path or position changed; a selection record written before this edit never selects it."}));
+    for (const kind of ["status_changed", "plan_updated"] as const) evidence.push(yield* makeEvidence({operationId, owner, kind, now: at,
+      targetNodeId: null, targetNodeName: null, statusFrom: current.status, statusTo: "planned",
+      sourceThreadId: null, sourceRunId: null, sourceMessageId: null, sourceItemId: null, agreementKey: record.key, note}));
+    const sourceBinding = copyBinding(record.sourceBinding);
+    const synced = syncedReturns({workflowId: current.workflowId, plan, branchSelections: branchState.selections, returns: current.returns, evidence,
+      sourceBinding, returnBudgets}, at);
+    for (const event of synced.events) evidence.push(yield* returnEvidence(owner, operationId, event, plan, at));
+    if (evidence.length > workflowMutationLimits.maxEvidence) return {reason: "evidence_capacity"} as const;
+    if (synced.returns.length > workflowMutationLimits.maxReturns) return {reason: "return_capacity"} as const;
+    const document: WorkflowStateDocument = {...current, revision: current.revision + 1, status: "planned", objective: record.objective, sourceBinding,
+      requirements: copyRequirements(record.requirements), issues: copyIssues(record.issues), plan, currentAgreementKey: record.key,
+      branchSelections: branchState.selections, returns: synced.returns, returnBudgets, evidence, updatedAt: at};
+    return {document} as const;
+  });
+
+  /**
+   * Imports a validated acceptance; joins the caller's transaction. It seeds an empty plan and adopts a superseding accepted scope, and
+   * otherwise retains the acceptance as history without changing an already populated broad plan.
+   */
   const importAcceptedAgreement = (owner: WorkflowOwner, source: WorkflowAgreementImport, now?: number) => write(Effect.gen(function* () {
     const operationId = acceptedKey(source.taskId, source.agreement.proposalId);
     if (!validWorkflowAgreementImport(source)) return {status: "invalid", operationId, reason: "invalid_accepted_agreement"} satisfies WorkflowMutationResult as WorkflowMutationResult;
@@ -1639,7 +1705,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const seededBudgets = shouldSeed ? ledgerForPlan(current.returnBudgets ?? [], seededPlan) : current.returnBudgets;
     if (seededBudgets && seededBudgets.length > workflowMutationLimits.maxReturns)
       return {status: "invalid", operationId, reason: "return_budget_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
-    const next: WorkflowStateDocument = {...current, revision: current.revision + 1,
+    const retainedNext: WorkflowStateDocument = {...current, revision: current.revision + 1,
       ...(shouldSeed ? {objective: source.objective, sourceBinding: copyBinding(binding), requirements: acceptedRequirements,
         issues: acceptedIssues, plan: seededPlan, returnBudgets: seededBudgets ?? []} : {}),
       currentAgreementKey: shouldSeed || currentMatches ? key : current.currentAgreementKey,
@@ -1649,6 +1715,10 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
         sourceThreadId: source.sourceThreadId, sourceRunId: source.sourceRunId, sourceMessageId: source.sourceMessageId,
         agreementKey: key, note: "A validated workflow agreement was retained as historical source evidence."})],
       updatedAt: at};
+    const adopted = !emptyPlan && supersedesCompletedSnapshot(current, accepted)
+      ? yield* adoptAcceptedScope(owner, operationId, {...current, acceptedAgreements: retainedNext.acceptedAgreements}, accepted, [...retainedNext.evidence], at) : null;
+    if (adopted && "reason" in adopted) return {status: "invalid", operationId, reason: adopted.reason} satisfies WorkflowMutationResult as WorkflowMutationResult;
+    const next = adopted ? adopted.document : retainedNext;
     const serialized = json(next);
     if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowMutationResult as WorkflowMutationResult;
     if (!documentTextAccepted(serialized)) return {status: "invalid", operationId, reason: "invalid_workflow_document"} satisfies WorkflowMutationResult as WorkflowMutationResult;
@@ -1659,6 +1729,35 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
     const receipt = workflowReceipt("applied", operationId, next);
     yield* recordOperation(owner, "agreement", operationId, requestHash, receipt, at);
     return receipt;
+  }));
+
+  /**
+   * Brings the main workflow to the task's current accepted scope when an earlier import retained that acceptance only as history; joins
+   * the caller's transaction. It adopts the retained record through the same transition as an import, under the record's own key, and
+   * writes no operation receipt or new acceptance; once the workflow tracks that scope, or while the transition does not apply, it is a no-op.
+   */
+  const reconcileAcceptedAgreement = (owner: WorkflowOwner, source: WorkflowAgreementReconcile, now?: number) => write(Effect.gen(function* () {
+    const operationId = acceptedKey(source.taskId, source.proposalId);
+    if (!validId(source.taskId) || !validId(source.proposalId) || !validId(source.sourceThreadId) || !validText(source.sourceHash))
+      return {status: "invalid", operationId, reason: "invalid_accepted_agreement"} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    const at = yield* nowOr(now);
+    if (!(yield* currentOwner(owner))) return {status: "owner_mismatch", operationId} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    const row = yield* workflowByThread(owner, source.sourceThreadId);
+    if (!row) return {status: "not_found", operationId} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    const decoded = classifyWorkflowRow(row);
+    if (decoded.status === "incompatible") return {...decoded, operationId};
+    const current = decoded.document;
+    const record = current.acceptedAgreements.find(item => item.key === operationId);
+    if (!record || record.sourceHash !== source.sourceHash || !supersedesCompletedSnapshot(current, record))
+      return {status: "unchanged", operationId} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    const adopted = yield* adoptAcceptedScope(owner, operationId, current, record, [...current.evidence], at);
+    if ("reason" in adopted) return {status: "invalid", operationId, reason: adopted.reason} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    const serialized = json(adopted.document);
+    if (!documentFits(serialized)) return {status: "invalid", operationId, reason: "document_capacity"} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    if (!documentTextAccepted(serialized)) return {status: "invalid", operationId, reason: "invalid_workflow_document"} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    if (!(yield* casUpdate(owner, current.workflowId, adopted.document.revision, serialized, at, row.revision)))
+      return {status: "conflict", operationId, reason: "revision", currentRevision: yield* currentRevision(owner, current.workflowId)} satisfies WorkflowReconcileResult as WorkflowReconcileResult;
+    return workflowReceipt("applied", operationId, adopted.document);
   }));
 
   /**
@@ -1860,7 +1959,7 @@ const makeWorkflowStateStore = (enabledFor?: WorkflowEditingEnabled) => Effect.g
   // the workflow schema belongs to the startup upgrade (src/database-migrations.ts)
 
   return {get, getState, getByIdForOwner, listResult, list, hasNeedsAttention, apply, ensureMain, linkChild, importAcceptedAgreement,
-    recordContribution, assessContribution, recordBranchSelection, applyReturn} satisfies WorkflowStateStoreShape;
+    reconcileAcceptedAgreement, recordContribution, assessContribution, recordBranchSelection, applyReturn} satisfies WorkflowStateStoreShape;
 });
 
 // effect/sql spans carry statement text, so the construction and every operation run untraced

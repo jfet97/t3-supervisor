@@ -1477,3 +1477,50 @@ it("branch decision history names the condition each event answered, not the bra
   assert.match(html, /Then path selected \(condition not recorded with this event\)/);
   assert.doesNotMatch(html, /Then path selected for “The change touches shared carton accounting\.”/, "an old decision is never attributed to the newer condition");
 });
+
+const journeyHeading = (html: string) => /<h2 id="journey-title">(.*?)<\/h2>/su.exec(html)?.[1];
+
+it("a revised plan accepted for a changed scope is the task's current plan, and the earlier scope's completed workflow stays history", () => {
+  const journey = (phase: "rescoped-pending" | "rescoped" | "rescoped-current") => fixtureJourney(phase, "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  // the revised proposal awaits acceptance: it is the plan shown, and the earlier completion is neither current nor inherited
+  const pending = journey("rescoped-pending");
+  const pendingHtml = renderWorkspace([pending.progress], pending.task);
+  assert.equal(journeyHeading(pendingHtml), "Pending proposal");
+  assert.match(pendingHtml, /The workflow of this task’s earlier scope stays under History; its progress is not progress on this plan\./);
+  assert.doesNotMatch(pendingHtml, /Task completed|Current accepted plan|changed after proposal/);
+  // accepted while the workflow still records the earlier scope: the accepted plan awaiting reconciliation, never a change warning
+  const awaiting = journey("rescoped");
+  const awaitingHtml = renderWorkspace([awaiting.progress], awaiting.task);
+  assert.equal(journeyHeading(awaitingHtml), "Accepted plan");
+  assert.match(awaitingHtml, /Awaiting reconciliation: the workflow still records an earlier scope of this task/);
+  assert.match(awaitingHtml, /Plan accepted · work not yet assessed/);
+  assert.match(awaitingHtml, /Earlier scope assessed; not current/);
+  assert.doesNotMatch(awaitingHtml, /changed after proposal|differs from the accepted plan|Task completed/);
+  const awaitingHistory = renderWorkspace([awaiting.progress], awaiting.task, "history");
+  assert.match(awaitingHistory, /Earlier scope: /);
+  assert.match(awaitingHistory, /Recorded for an earlier scope of this task\. Its statuses and records stay as history/);
+  assert.doesNotMatch(awaitingHistory, /Accepted plan \(before later changes\)|not linked to the current task/);
+  // once the workflow follows it, the accepted plan is current and starts planned; the earlier completion stays in its records
+  const current = journey("rescoped-current");
+  const currentHtml = renderWorkspace([current.progress], current.task);
+  assert.equal(journeyHeading(currentHtml), "Current accepted plan");
+  assert.match(currentHtml, /Plan accepted · work not yet assessed/);
+  assert.doesNotMatch(currentHtml, /Agreeing a plan/);
+  assert.match(currentHtml, /0 of \d+ applicable steps assessed complete/);
+  assert.match(currentHtml, /Print the carton label/);
+  assert.match(currentHtml, /needs a fresh assessment before it counts here/);
+  assert.doesNotMatch(currentHtml, /changed after proposal|Awaiting reconciliation|Task completed/);
+});
+
+it("a refinement accepted in the same scope before the workflow follows it is not reported as a change after acceptance", () => {
+  const journey = fixtureJourney("reagreed", "project-a", "task-thread", "supervisor-thread", 1_800_000_000_000);
+  const earlier = {...journey.progress, workflows: journey.progress.workflows.map(workflow => ({...workflow, acceptedProposalId: "packing-proposal-1"}))};
+  const html = renderWorkspace([earlier], journey.task);
+  assert.equal(journeyHeading(html), "Current plan · an earlier accepted plan");
+  assert.match(html, /Proposal packing-proposal-2 was accepted after this plan\. The Supervisor still has to bring the/);
+  assert.doesNotMatch(html, /changed after proposal|Changes not accepted/);
+  assert.match(renderWorkspace([earlier], journey.task, "history"), /Accepted plan \(not yet in the workflow\)/);
+  // a genuine edit after acceptance still reads as one
+  const edited = {...journey.progress, workflows: journey.progress.workflows.map(workflow => ({...workflow, acceptedProposalId: null}))};
+  assert.match(renderWorkspace([edited], journey.task), /This plan changed after proposal packing-proposal-2 was accepted/);
+});

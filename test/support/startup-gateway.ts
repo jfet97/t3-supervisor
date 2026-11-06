@@ -52,8 +52,17 @@ export type StartupObservations = {
   // every path T3 wrote in the startup checkout, in order, and every Supervisor launch it received
   readonly checkoutWrites: () => ReadonlyArray<string>;
   readonly launches: () => ReadonlyArray<StartupLaunch>;
+  // the operative's reply in the main's latest running turn, such as the one a service notice started, as T3 projects it
+  readonly completeMainRun: (text: string) => void;
+  // the person edits the main's original request in T3: the message and its published source item carry the new text
+  readonly editRequest: (text: string) => void;
+  // the main's stored workflow document as the production store keeps it, or null before one exists
+  readonly mainWorkflow: () => StartupWorkflowView | null;
   readonly debug: () => unknown;
 };
+
+export type StartupWorkflowView = {readonly status: string; readonly revision: number; readonly proposalId: string | null; readonly sourceHash: string | null;
+  readonly currentAgreementKey: string | null; readonly acceptedAgreements: number};
 
 /** A plain native conversation beside the startup main: the user's request and the operative's completed reply. */
 export type ExtraConversation = {readonly id: string; readonly title: string; readonly request: string; readonly reply: string};
@@ -332,6 +341,14 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
         const itemId = installSubmission(root, task, args);
         state.details.set(itemId, submissionDetail(root, itemId));
       }
+      if (name === "workflow_write") {
+        const task = readTask();
+        const root = state.projections.get(String(args.supervisorThreadId));
+        const run = root?.runs.at(-1);
+        assert.ok(task && root && run, "the Supervisor's write runs in its own native turn");
+        const itemId = installSubmission(root, task, args, {tool: "write", runId: run.id});
+        state.details.set(itemId, submissionDetail(root, itemId));
+      }
       if (name === "supervision_plan") {
         const task = readTask();
         const caller = state.projections.get(String(args.callerThreadId));
@@ -360,6 +377,38 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
       return Number(row?.n ?? 0);
     }, 0),
     requestRunStatus: () => requestRun()?.status ?? null,
+    completeMainRun: (text) => {
+      const projection = state.projections.get(startupMainThreadId);
+      const run = projection?.runs.filter((item) => item.status === "running").at(-1);
+      assert.ok(projection && run?.rootNodeId, "the main has a running turn to answer in");
+      const at = new Date().toISOString();
+      run.status = "completed";
+      run.completedAt = at;
+      const nodes = projection.nodes as Array<Record<string, unknown>>;
+      const rootNode = nodes.find((node) => node.id === run.rootNodeId);
+      assert.ok(rootNode, "the turn's root node");
+      rootNode.status = "completed";
+      const nodeId = `${run.id}-answer`;
+      nodes.push({id: nodeId, threadId: projection.thread.id, runId: run.id, parentNodeId: run.rootNodeId, rootNodeId: run.rootNodeId,
+        kind: "assistant_message", status: "completed", providerThreadId: run.providerThreadId});
+      projection.messages.push({id: nodeId, threadId: projection.thread.id, runId: run.id, nodeId, role: "assistant", text, streaming: false, createdAt: at, updatedAt: at});
+    },
+    editRequest: (text) => {
+      const projection = state.projections.get(startupMainThreadId);
+      const message = projection?.messages.find((item) => item.id === humanMessageId);
+      assert.ok(projection && message, "the main's original request");
+      message.text = text;
+      message.updatedAt = new Date().toISOString();
+      for (const item of (projection.turnItems ?? []) as unknown as Array<{messageId?: string; text?: string}>) if (item.messageId === humanMessageId) item.text = text;
+    },
+    mainWorkflow: () => readSqlite(guidance, (db) => {
+      const row = db.prepare("SELECT document FROM supervisor_workflow_state WHERE thread_id=?").get(startupMainThreadId) as {document?: string} | undefined;
+      if (!row?.document) return null;
+      const document = JSON.parse(row.document) as {status: string; revision: number; currentAgreementKey: string | null; acceptedAgreements: unknown[];
+        sourceBinding: {proposalId: string; sourceHash: string} | null};
+      return {status: document.status, revision: document.revision, proposalId: document.sourceBinding?.proposalId ?? null,
+        sourceHash: document.sourceBinding?.sourceHash ?? null, currentAgreementKey: document.currentAgreementKey, acceptedAgreements: document.acceptedAgreements.length};
+    }, null),
     completeRequestRun: () => {
       const task = readTask();
       const projection = task ? state.projections.get(task.supervisorThreadId) : undefined;
@@ -399,6 +448,48 @@ export type NeededWork = {
   readonly notice: StartupDispatch;
   readonly proposal: {readonly status: string; readonly proposal?: string};
 };
+
+/** One local step of an interpretation the root submits. */
+export type InterpretationStep = {readonly localId: string; readonly name: string; readonly description: string; readonly reason: string};
+
+/**
+ * The root's interpretation of the main's request numbered `index` (0 for the first) over the real gateway, and the operative's read
+ * of the proposal the resulting notice names: it reads its context, submits a source-linked plan of local steps, and completes its
+ * request run.
+ */
+export const driveInterpretation = ({gateway, observe}: StartupSession, input: {readonly index: number; readonly objective: string;
+  readonly reason: string; readonly steps: ReadonlyArray<InterpretationStep>}): Effect.Effect<NeededWork> => Effect.gen(function* () {
+  const objective = yield* eventually(Effect.sync(() => observe.objectiveDispatches()[input.index] ?? null),
+    () => `the root did not receive interpretation request ${input.index}: ${JSON.stringify(observe.debug())}`);
+  const tools = yield* gateway.discover();
+  const match = /with (\{"supervisorThreadId":"[^"]+","bindingGeneration":\d+\})/u.exec(objective.text);
+  if (!match?.[1]) return yield* Effect.die(new Error("the interpretation request names no workflow reader"));
+  const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
+  const context = yield* eventually(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map((value) => {
+    const view = value as {status?: string; submission?: {arguments?: Record<string, unknown>}} | null;
+    const pin = view?.status === "ok" ? view.submission?.arguments : undefined;
+    return pin?.sourcePin && pin.attemptId !== undefined ? pin : null;
+  })), () => `context ${input.index} did not expose interpretation pins`);
+  const source = (context.sourcePin as {messageId: string}).messageId;
+  const fields = workflowFields(input.objective, input.reason, {
+    sourceMessageIds: [source],
+    workflow: {requirements: [], plan: {kind: "sequence", nodes: input.steps.map((step) => ({kind: "step", definitionId: null, ...step}))}},
+    conversation: {draft: {objective: input.objective, constraints: [], questions: [], findings: [], duties: []},
+      intent: "authorize", outcome: input.objective, limits: [], sourceMessageIds: [source], antecedentMessageIds: [], scope: "changed"},
+  });
+  const submitted = (yield* gateway.call("supervision_interpretation_submit", {...context, ...fields})) as {status?: string};
+  if (submitted.status !== "submitted") return yield* Effect.die(new Error(`interpretation ${input.index} was not submitted: ${JSON.stringify(submitted)}`));
+  observe.completeRequestRun();
+  const notice = yield* eventually(Effect.sync(() => observe.mainDispatches().filter((item) => item.text.includes("supervision_plan"))[input.index] ?? null),
+    () => `interpretation ${input.index} never delivered its proposal: ${JSON.stringify(observe.debug())}`);
+  const args = /supervision_plan (\{"callerThreadId":"[^"]+","taskId":"[^"]+","proposalId":"[^"]+"\})/u.exec(notice.text);
+  if (!args?.[1]) return yield* Effect.die(new Error("the notice names no operative reader arguments"));
+  const proposal = (yield* gateway.call("supervision_plan", JSON.parse(args[1]) as Record<string, unknown>)) as NeededWork["proposal"];
+  return {objective, tools, notice, proposal};
+});
+
+/** The first value `read` returns, read every 250 ms on the live clock for at most 75 s; dies with `label` otherwise. */
+export const eventuallyValue = <A>(read: Effect.Effect<A | null>, label: () => string): Effect.Effect<A> => eventually(read, label);
 
 /**
  * The root's part of a needed-work startup over the real gateway: it reads its context, submits a source-linked two-step

@@ -1,4 +1,5 @@
 import type { ReviewOutcomeRecord } from "./supervisor-conversation-store.js";
+import { taskScopeRevision, type ConversationTask } from "./supervision-conversation-contract.js";
 import type { Projection, RunInfo } from "./types.js";
 import { notApplicableNodeIds, unsettledOccurrences } from "./workflow-plan-tree.js";
 import type { WorkflowStateDocument } from "./workflow-state-contract.js";
@@ -9,6 +10,21 @@ import { documentBranchSelections } from "./workflow-state-store.js";
 
 /** A return the Supervisor still has to apply: the next attempt waits on the root, not on the operative. */
 export const returnWaiting = (document: Pick<WorkflowStateDocument, "returns">): boolean => document.returns.some(item => item.state === "pending");
+
+/**
+ * An agreement for the task's current scope that its main document does not track yet: the Supervisor still has to reconcile the
+ * workflow to it, and the completion of an earlier scope or proposal never finishes that work. A document tracks it once it is bound
+ * to the task's current scope and to the accepted proposal, or to the task's current proposal, which a write binds while a later
+ * revision awaits acceptance; an edited broader plan bound so tracks it as well.
+ */
+export const agreementUntracked = (task: ConversationTask & {id: string; agreementSourceHash?: string | null | undefined;
+  agreement?: {status: string; proposalId: string} | null | undefined; workflowProposalId?: string | null | undefined},
+  document: Pick<WorkflowStateDocument, "sourceBinding">): boolean => {
+  const scope = taskScopeRevision(task);
+  const binding = document.sourceBinding;
+  return task.agreement?.status === "agreed" && task.agreementSourceHash === scope && (binding?.taskId !== task.id || binding.sourceHash !== scope ||
+    binding.proposalId !== task.agreement.proposalId && binding.proposalId !== task.workflowProposalId);
+};
 
 /**
  * Whether the agreed work of a document is unfinished: a return waits, the document is not completed, or an applicable member is

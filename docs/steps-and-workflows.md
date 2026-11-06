@@ -474,7 +474,9 @@ and valid progress, without percentages or rerunning a whole duty. Acceptance,
 unverified reports and a command having run do not prove execution. Native actor,
 write, fixed/required and reference/skill checks still apply. Retaining progress
 into a changed scope requires an explicit assessment with actual activity references;
-the earlier completed outcome does not satisfy an expanded goal automatically.
+the earlier completed outcome does not satisfy an expanded goal automatically. When the
+agent accepts a revised plan after its completed task changed, that plan becomes the
+current one, planned and not yet assessed, and the earlier completion stays in History.
 
 Work that a step needs may also happen outside any observed conversation, through
 an external agent, tool, service or person. The main reports such work and its

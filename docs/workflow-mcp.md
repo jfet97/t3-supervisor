@@ -11,12 +11,22 @@ parent steps automatically.
 
 Editable plans are separate from accepted agreements. The existing native
 proposal/acceptance checks import each freshly validated agreement as an immutable
-historical snapshot. A first agreement seeds an empty plan; later agreements do
-not overwrite an already edited plan. Structural edits clear a plan's matching
-agreement pointer. A retained pointer only means the plan content matches a
-historical accepted snapshot; current task-source and definition validity remain
-part of the existing agreement/recovery system. Neither acceptance nor an
-observation note proves execution.
+historical snapshot. A first agreement seeds an empty plan. A later agreement for a
+changed scope of the same task becomes the plan only while the workflow still is
+that task's completed, unedited earlier accepted snapshot: the accepted plan then
+starts exactly as accepted, every status planned, and the earlier scope's
+acceptance, statuses and records stay as history that needs a fresh assessment
+before it counts. Any other later agreement does not overwrite an already populated
+plan. Until the Supervisor brings the workflow to an agreement of the current scope
+and proposal, that agreement is unfinished work, which keeps its Supervisor out of
+standby, and the dashboard shows the accepted plan with the earlier workflow as
+history. An acceptance that an earlier import kept only as history is reconciled
+on the acceptance check's next pass, after a restart as well, without another
+import or receipt. Structural edits clear a plan's matching agreement pointer. A
+retained pointer only means the plan content matches a historical accepted
+snapshot; current task-source and definition validity remain part of the existing
+agreement/recovery system. Neither acceptance nor an observation note proves
+execution.
 
 Compact `workflow_read` status also returns fresh verified native lineage and its
 `lineageOffset`/`lineageHasMore` pagination, with current team coverage when available.

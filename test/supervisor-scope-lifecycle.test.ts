@@ -653,6 +653,40 @@ it.effect("a genuine current wait, real completion and Stop keep ordinary parkin
   assert.equal(yield* parks(stopped, 10), 1, "Stop still parks the owned Supervisor");
 }));
 
+// the agreement of proposal "proposal" for the task's current scope against a completed main document bound to the given scope (an
+// earlier one or the current one) and proposal; the task's current proposal is "proposal" unless a later revision awaits acceptance
+const scopedCompletion = (f: Effect.Success<typeof fixture>, bound: {scope: "earlier" | "current"; proposalId: string}, currentProposalId = "proposal") => Effect.gen(function* () {
+  const task = (yield* f.store.task("main"))!;
+  const scope = taskScopeRevision(task);
+  yield* unfinishedAgreedTask(f, "completed", "completed", {sourceBinding: {workspaceRoot: "/workspace", revision: "definitions-1", globalRevision: null,
+    definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId: bound.proposalId,
+    sourceHash: bound.scope === "earlier" ? "an-earlier-scope" : scope}});
+  const agreed = (yield* f.store.task("main"))!;
+  yield* f.store.saveTask({...agreed, agreementSourceHash: scope, workflowProposalId: currentProposalId});
+});
+
+it.effect("a completed earlier scope or proposal never finishes the agreement accepted for the current scope, so the Supervisor stays out of standby", () => Effect.gen(function* () {
+  const earlierScope = yield* fixture;
+  yield* scopedCompletion(earlierScope, {scope: "earlier", proposalId: "proposal"});
+  assert.equal(yield* parks(earlierScope, 10), 0, "the accepted current scope still has to be reconciled into the workflow");
+  assert.equal((yield* earlierScope.store.binding("p", "main"))?.settlementBlockedBy, "unfinished_agreed_work");
+
+  const earlierProposal = yield* fixture;
+  yield* scopedCompletion(earlierProposal, {scope: "current", proposalId: "earlier-proposal"});
+  assert.equal(yield* parks(earlierProposal, 10), 0, "a refinement accepted in the same scope still has to be reconciled into the workflow");
+  assert.equal((yield* earlierProposal.store.binding("p", "main"))?.settlementBlockedBy, "unfinished_agreed_work");
+
+  const current = yield* fixture;
+  yield* scopedCompletion(current, {scope: "current", proposalId: "proposal"});
+  assert.ok((yield* parks(current, 10)) >= 1, "a completion of the accepted proposal in the current scope is finished work and parks as before");
+  assert.notEqual((yield* current.store.binding("p", "main"))?.settlementBlockedBy, "unfinished_agreed_work");
+
+  const pendingRevision = yield* fixture;
+  yield* scopedCompletion(pendingRevision, {scope: "current", proposalId: "pending-revision"}, "pending-revision");
+  assert.ok((yield* parks(pendingRevision, 10)) >= 1, "a write bound to a later revision awaiting acceptance tracks the agreement and parks as before");
+  assert.notEqual((yield* pendingRevision.store.binding("p", "main"))?.settlementBlockedBy, "unfinished_agreed_work");
+}));
+
 // J: one best-effort automatic settle attempt per T3 participant and completed execution, recorded from native evidence; what did not
 // settle is recorded once with its reason and left to manual settlement, nothing is re-read or re-sent; participants that are not local
 // T3 conversations are not applicable or unsupported
