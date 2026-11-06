@@ -286,6 +286,12 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
       await page.goto(`${origin}/#/projects/${encodeURIComponent(projectId)}/supervision?main=${encodeURIComponent(threadId)}`);
       await page.getByRole("heading", {name: "Chat supervision", exact: true}).waitFor();
     }),
+    // the task workspace of one main conversation, open at its Plan view
+    openTask: (projectId: string, threadId: string) => browser(async () => {
+      await page.goto(`${origin}/#/projects/${encodeURIComponent(projectId)}/task?main=${encodeURIComponent(threadId)}`);
+      await page.getByRole("group", {name: "Task view", exact: true}).waitFor();
+      await page.getByRole("group", {name: "Task view", exact: true}).getByRole("button", {name: "Plan", exact: true}).click();
+    }),
     openSettings: browser(async () => {
       await page.goto(`${origin}/#/settings`);
       await page.getByRole("heading", {name: "Instance settings", exact: true}).waitFor();
@@ -343,6 +349,9 @@ const operations = (page: Page, origin: string, changes: ReadonlyArray<ChatSuper
     textShown: (text: string, heading?: string) => browser(() => (heading === undefined ? page :
       page.getByRole("heading", {name: heading, exact: true}).locator("..")).getByText(text, {exact: true}).waitFor()),
     textGone: (text: string) => browser(() => page.getByText(text, {exact: true}).waitFor({state: "hidden"})),
+    // some visible element whose text contains `text`, and whether no element's text contains it right now
+    textContaining: (text: string) => browser(() => page.getByText(text).filter({visible: true}).first().waitFor()),
+    textAbsent: (text: string) => browser(async () => (await page.getByText(text).count()) === 0),
     statusShown: (text: string) => browser(() => page.getByRole("status").filter({hasText: text}).waitFor()),
     alertShown: (text: string) => browser(() => page.getByRole("alert").filter({hasText: text}).waitFor()),
     // holds a Supervisor settings save or a project.yaml save between the page and the dashboard (clickHeld)

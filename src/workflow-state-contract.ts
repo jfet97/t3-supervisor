@@ -444,6 +444,14 @@ export type WorkflowAgreementImport = {
   agreement: WorkflowAgreementInfo;
 };
 
+/** The task's current accepted proposal for its current scope, already retained by an import, that the main workflow may still have to adopt. */
+export type WorkflowAgreementReconcile = {
+  taskId: string;
+  sourceThreadId: string;
+  proposalId: string;
+  sourceHash: string;
+};
+
 export type WorkflowMutationReceipt = {
   formatVersion: 2;
   status: "applied" | "created";
@@ -476,6 +484,9 @@ export type WorkflowMutationResult = WorkflowMutationReceipt | {
   workflowId: string;
   formatVersion: number | null;
 };
+
+/** applied: the main workflow adopted the accepted scope now; unchanged: it already tracks it, or the transition does not apply. */
+export type WorkflowReconcileResult = WorkflowMutationResult | {status: "unchanged"; operationId: string};
 
 export type WorkflowEnsureResult = WorkflowMutationResult | {
   formatVersion: 2;

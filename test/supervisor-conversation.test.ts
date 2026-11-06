@@ -9,10 +9,11 @@ import { NodeFileSystem } from "@effect/platform-node";
 import { Clock, Context, Effect, Exit, Fiber, FileSystem, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { canonicalJson, canonicalStoredJson } from "../src/canonical-json.js";
-import { storedPlanJsonDepth, workflowMutationLimits } from "../src/workflow-state-contract.js";
+import { currentAcceptedProposalId, storedPlanJsonDepth, workflowMutationLimits, type WorkflowStateDocument } from "../src/workflow-state-contract.js";
+import { workflowPlanEntities } from "../src/workflow-state-store.js";
 import { fingerprint } from "../src/guidance-store.js";
 import type { ProjectDefinitionSnapshot } from "../src/project-definitions-contract.js";
-import { WorkflowPlanGroupSchema, WorkflowProposal } from "../src/project-supervisor-contract.js";
+import { WorkflowPlanGroupSchema, WorkflowProposal, type WorkflowPlanNodeInfo } from "../src/project-supervisor-contract.js";
 import { defaultSupervisorModel, type BindingRecord, type TaskRecord } from "../src/project-supervisor-store.js";
 import { supervisionInterpretationSubmitToolDefinition } from "../src/workflow-write-controller.js";
 import { externalContributionFences, firstObservedOrdinal, notAStop, preparedAcceptanceRecord, stopRequestCondition, workflowIntroductionText, workflowProposalText } from "../src/supervisor-conversation.js";
@@ -3885,6 +3886,123 @@ it.effect("editing the operative task requeues interpretation while preserving f
       assert.equal((yield* fixture.conversation.requests.agreementCandidate(task.id, task.id))?.agentMessageId, originalAcceptance.id,
         "the old exact native acceptance remains in candidate history after edited-task renegotiation");
     }
+  }
+}), { timeout: 60_000 });
+
+// every step and workflow occurrence completed, as the Supervisor records finished work
+const completedNode = (node: WorkflowPlanNodeInfo): WorkflowPlanNodeInfo =>
+  node.kind === "sequence" || node.kind === "parallel" ? {...node, nodes: node.nodes.map(completedNode)}
+    : node.kind === "workflow" ? {...node, status: "completed" as const, plan: node.plan ? {...node.plan, nodes: node.plan.nodes.map(completedNode)} : null}
+      : node.kind === "step" ? {...node, status: "completed" as const} : node;
+
+it.effect("a completed accepted workflow follows the revised plan the operative accepts after its task changed, also when a restarted service recovers it", () => Effect.gen(function* () {
+  for (const [index, recovery] of [false, true].entries()) {
+    const clock = {now: baseTime + index * 1_000_000};
+    const fixture = yield* makeFixture(clock);
+    const task = yield* installTaskDefinitions(fixture, fixedWorkflowDefinitions(), ["reviewer"]);
+    yield* appendNoticeForTask(fixture, task, fixture.operative);
+    const originalPlan = workflowPlan(task);
+    yield* appendSupervisorProposal(fixture, task.id, originalPlan, clock.now, task);
+    yield* appendOperativeAcceptance(fixture, workflowRecord(task, task.id, originalPlan), clock.now + 1);
+    yield* observeAgreement(fixture, clock.now + 30_000);
+    const original = (yield* fixture.projectStore.task(task.threadId))!;
+    assert.equal(original.agreement?.status, "agreed");
+    const originalScope = taskScopeRevision(original);
+    const owner = {projectId, mainThreadId: task.threadId, supervisorThreadId: fixture.binding.threadId, bindingGeneration: fixture.binding.generation};
+    // the Supervisor's own write: every accepted occurrence and the workflow completed under the original scope
+    const completeOriginal = (at: number) => Effect.gen(function* () {
+      const live = (yield* fixture.workflows.get(projectId, task.threadId))!;
+      const applied = yield* fixture.workflows.apply(owner, {operationId: `complete-original-${at}`, workflowId: live.workflowId, expectedRevision: live.revision,
+        status: "completed", objective: live.objective, sourceBinding: live.sourceBinding, requirements: live.requirements, issues: live.issues,
+        plan: {...live.plan!, nodes: live.plan!.nodes.map(completedNode)}, note: "The accepted work was completed.",
+        evidence: [{kind: "status_changed", targetNodeId: null, note: "The accepted work was completed."},
+          ...workflowPlanEntities(live.plan).map(node => ({kind: "status_changed" as const, targetNodeId: node.nodeId, note: `${node.name} was completed.`}))]},
+      {pinnedContext: original.definitionContext!, originalProposal: original.agreement!.workflow, expectedTaskId: original.id,
+        expectedProposalId: original.agreement!.proposalId, expectedSourceHash: originalScope,
+        acceptedTaskAgreement: original.agreement!, acceptedTaskAgreementSourceHash: original.agreementSourceHash ?? null}, at);
+      assert.equal(applied.status, "applied", JSON.stringify(applied));
+      const completed = (yield* fixture.workflows.get(projectId, task.threadId))!;
+      assert.deepEqual([completed.status, completed.sourceBinding?.sourceHash, currentAcceptedProposalId(completed)], ["completed", originalScope, task.id]);
+      return completed;
+    });
+    if (!recovery) yield* completeOriginal(clock.now + 31_000);
+
+    // a genuine change of the task's request is interpreted afresh and renegotiated
+    const sourceMessage = fixture.operative.messages.find(message => message.id === task.sourceMessageId);
+    assert.ok(sourceMessage);
+    sourceMessage.text = "Implement a separate import flow, with a dry run of what it changes first.";
+    yield* observeAgreement(fixture, clock.now + 60_000);
+    const projectControl = yield* fixture.projectStore.control(projectId);
+    yield* fixture.projectStore.saveControl(projectId, projectControl.generation, true, {snapshotSequence: 1, threads: []});
+    const projectSupervisor = fixture.makeProjectSupervisor();
+    yield* projectSupervisor.cycle;
+    const requeued = (yield* fixture.projectStore.task(task.threadId))!;
+    assert.equal(requeued.status, "waiting");
+    const interpretationRun = fixture.supervisor.runs.find(run => run.userMessageId === requeued.messageId);
+    assert.ok(interpretationRun);
+    const submitter = yield* interpretationSubmitter({stores: fixture.stores, workflows: fixture.workflows,
+      projections: new Map([[fixture.supervisor.thread.id, fixture.supervisor], [fixture.operative.thread.id, fixture.operative]])});
+    const submitted = yield* submitter.submit(requeued, submissionArguments(requeued, {objective: "Implement the separate import flow after a dry run.",
+      reason: "The edited original user message changes the task.", sourceMessageIds: [requeued.sourceMessageId], supervision: "needed", workflow: {
+        requirements: [{kind: "step", id: "test-plan", applies: true, reason: "The revised task still needs verification."}], plan: {kind: "sequence", nodes: [
+          {kind: "workflow", definitionId: "reviewer", reason: "Review the revised import flow."},
+          {kind: "step", definitionId: null, localId: "dry-run", name: "Dry run", description: "Show exactly what the import would change.",
+            reason: "The revised request asks for a dry run first."},
+          {kind: "step", definitionId: "test-plan", reason: "Verify the revised import flow."}]}}}));
+    assert.equal(submitted.status, "submitted", JSON.stringify(submitted));
+    completeRun(fixture.supervisor, interpretationRun, "Submitted the interpretation.", clock.now + 61_000);
+    yield* projectSupervisor.cycle;
+    yield* projectSupervisor.cycle;
+    let fresh = (yield* fixture.projectStore.task(task.threadId))!;
+    assert.deepEqual([fresh.status, fresh.agreement?.status, fresh.workflow?.status], ["inferred", "stale", "proposed"]);
+    const revisedScope = taskScopeRevision(fresh);
+    assert.notEqual(revisedScope, originalScope);
+    if (!recovery) {
+      // pending: the earlier completion and its history are kept, and the proposal inherits neither permission nor completion
+      const pending = (yield* fixture.workflows.get(projectId, task.threadId))!;
+      assert.deepEqual([pending.status, pending.sourceBinding?.sourceHash, currentAcceptedProposalId(pending), pending.acceptedAgreements.length],
+        ["completed", originalScope, task.id, 1]);
+      assert.ok(workflowPlanEntities(fresh.workflow!.plan).every(node => node.status === "planned"));
+    }
+
+    const proposalId = fresh.workflowProposalId!;
+    const revisedPlan = workflowPlan(fresh);
+    yield* appendSupervisorProposal(fixture, proposalId, revisedPlan, clock.now + 62_000, fresh);
+    const acceptance = yield* appendOperativeAcceptance(fixture, workflowRecord(fresh, proposalId, revisedPlan), clock.now + 63_000);
+    yield* observeAgreement(fixture, clock.now + 90_000);
+    fresh = (yield* fixture.projectStore.task(task.threadId))!;
+    assert.deepEqual([fresh.agreement?.status, fresh.agreement?.proposalId, fresh.agreement?.agentMessageId, fresh.agreementSourceHash],
+      ["agreed", proposalId, acceptance.id, revisedScope]);
+    const operations = () => Effect.map(fixture.sql.unsafe<{count: number}>("SELECT COUNT(*) AS count FROM supervisor_workflow_operations"), rows => Number(rows[0]?.count));
+    let before: WorkflowStateDocument | null = null;
+    if (recovery) {
+      // the acceptance arrived while the earlier workflow still ran, so its import kept it only as history with a durable receipt; that
+      // workflow is completed afterwards under its own scope: the stored state of an import that never adopted the accepted scope
+      const historyOnly = (yield* fixture.workflows.get(projectId, task.threadId))!;
+      assert.deepEqual([historyOnly.status, historyOnly.sourceBinding?.sourceHash, currentAcceptedProposalId(historyOnly), historyOnly.acceptedAgreements.length],
+        ["planned", originalScope, task.id, 2]);
+      before = yield* completeOriginal(clock.now + 91_000);
+      const receipts = yield* operations();
+      const agreed = (yield* fixture.projectStore.task(task.threadId))!;
+      const restarted = yield* fixture.makeRestartedConversation();
+      yield* restarted.observe(fixture.threadList, clock.now + 120_000);
+      assert.equal(yield* operations(), receipts, "recovery writes no new import receipt");
+      assert.deepEqual((yield* fixture.projectStore.task(task.threadId))?.agreement, agreed.agreement, "the acceptance itself is unchanged");
+      assert.equal((yield* restarted.requests.agreementCandidate(task.id, proposalId))?.agentMessageId, acceptance.id);
+    }
+    const adopted = (yield* fixture.workflows.get(projectId, task.threadId))!;
+    assert.deepEqual([adopted.status, adopted.sourceBinding?.sourceHash, adopted.sourceBinding?.proposalId, currentAcceptedProposalId(adopted)],
+      ["planned", revisedScope, proposalId, proposalId], "the accepted revised plan is the current workflow");
+    assert.deepEqual(adopted.plan, fresh.agreement!.workflow.plan);
+    assert.ok(workflowPlanEntities(adopted.plan).every(node => node.status === "planned"), "no completion of the earlier scope is inherited");
+    assert.deepEqual(adopted.acceptedAgreements.map(record => record.sourceHash), [originalScope, revisedScope]);
+    assert.ok(adopted.evidence.some(item => item.kind === "status_changed" && item.targetNodeId === null && item.statusTo === "completed"),
+      "the earlier completion stays in the workflow's history");
+    if (before) assert.equal(JSON.stringify(adopted.evidence.slice(0, before.evidence.length)), JSON.stringify(before.evidence));
+    // later passes keep the agreement and the adopted workflow as they are
+    yield* observeAgreement(fixture, clock.now + 150_000);
+    assert.equal((yield* fixture.projectStore.task(task.threadId))?.agreement?.status, "agreed");
+    assert.deepEqual(yield* fixture.workflows.get(projectId, task.threadId), adopted);
   }
 }), { timeout: 60_000 });
 

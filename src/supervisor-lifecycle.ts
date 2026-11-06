@@ -1,4 +1,4 @@
-import { agreedWorkUnfinished, explicitWaitRecorded, latestExecutedRun, returnWaiting } from "./workflow-liveness.js";
+import { agreedWorkUnfinished, agreementUntracked, explicitWaitRecorded, latestExecutedRun, returnWaiting } from "./workflow-liveness.js";
 import { conversationMayContact, conversationMayObserve, taskScopeRevision } from "./supervision-conversation.js";
 import { Cause, Clock, Context, Data, Effect, FiberMap, Layer, Option } from "effect";
 import { freshRuntimeRequestStatus, projectionHasOngoingWork } from "./domain.js";
@@ -198,7 +198,7 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
         !conversationMayContact(task)) return false;
       const document = yield* workflows.get(binding.projectId, binding.mainThreadId);
       if (!document) return false;
-      if (returnWaiting(document)) return true;
+      if (returnWaiting(document) || agreementUntracked(task, document)) return true;
       if (!agreedWorkUnfinished(document)) return false;
       // an open external result can coexist with the operative's own unfinished work, so only an explicit wait acknowledges the blocker
       const latest = owned.filter(request => request.kind === "review" && request.reviewPins).at(-1);

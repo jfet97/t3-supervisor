@@ -7,9 +7,11 @@ import {fingerprint} from "../src/guidance-store.js";
 import {defaultSupervisorModel, type ProjectSupervisorStore} from "../src/project-supervisor-store.js";
 import {proposalContextFromDefinitions, validateWorkflowApplyAgainstPinnedContext, validateWorkflowPlan} from "../src/supervisor-workflow.js";
 import {acceptedWorkflowPlansForBinding, parseExternalContributionRecord, type WorkflowStateStore} from "../src/workflow-state-store.js";
-import {externalContributionLimits, workflowMutationLimits} from "../src/workflow-state-contract.js";
+import {currentAcceptedProposalId, externalContributionLimits, workflowMutationLimits} from "../src/workflow-state-contract.js";
+import {workflowAssessment} from "../src/workflow-assessment.js";
 import {planEntities as treePlanEntities} from "../src/workflow-plan-tree.js";
-import type {ExternalContributionImport, WorkflowAgreementImport, WorkflowApplyInput, WorkflowOwner, WorkflowStateDocument, WorkflowStatePlan, WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
+import type {ExternalContributionImport, WorkflowAgreementImport, WorkflowAgreementReconcile, WorkflowApplyInput, WorkflowOwner, WorkflowStateDocument, WorkflowStatePlan,
+  WorkflowStateSourceBinding} from "../src/workflow-state-contract.js";
 import type {DefinitionReference, ProjectDefinitionSnapshot} from "../src/project-definitions-contract.js";
 import type {WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo} from "../src/project-supervisor-contract.js";
 import type {GuidanceDb} from "../src/db.js";
@@ -858,4 +860,144 @@ it.live("contribution capacity is bounded per document and by the evidence histo
   while (stored.evidence.length < workflowMutationLimits.maxEvidence) stored.evidence.push({...filler, id: randomUUID()});
   yield* execute(fixture.sql, "UPDATE supervisor_workflow_state SET document=? WHERE thread_id=?", JSON.stringify(stored), "main-a");
   assert.deepEqual(yield* record(fixture, contribution(first.nodeId, {contributionId: "external-1", revision: 2, state: "result"})), {status: "rejected", code: "contribution_capacity"});
+}));
+
+// the same task accepted again after a genuine later request changed its scope revision; its source message is unchanged
+const revisedScopeHash = fingerprint("Prepare the export workflow, then clean up exactly one export document after a dry run.");
+const revisedSource: WorkflowAgreementReconcile = {taskId: "task-a", sourceThreadId: "main-a", proposalId: "proposal-b", sourceHash: revisedScopeHash};
+const revisedAgreement = (fixture: Fixture, plan: unknown): WorkflowAgreementImport => {
+  const base = acceptedAgreement(makeProposal(fixture.definitions, fixture.context!, plan, []));
+  return {...base, sourceHash: revisedScopeHash, objective: "Clean up exactly one export document after a dry run.",
+    agreement: {...base.agreement, proposalId: "proposal-b", agreedAt: 456, evidence: {kind: "supervisor_message", messageId: "supervisor-message-b"},
+      agentMessageId: "agent-message-b"}};
+};
+// the revised plan keeps the earlier plan's first occurrence under its identity and adds a new one; a proposal always starts planned
+const revisedPlan = (document: WorkflowStateDocument): unknown => ({kind: "sequence", templatePath: null,
+  nodes: [{...(document.plan!.nodes[0] as Record<string, unknown>), status: "planned"}, ...localPlanInput(["clean-up"]).nodes]});
+const mainDocument = (fixture: Fixture) => Effect.map(fixture.workflows.get(fixture.owner.projectId, fixture.owner.mainThreadId), document => document!);
+// the Supervisor's own status writes on a local accepted plan: the first member started, then every member and the document completed
+const startLocalPlan = (fixture: Fixture, document: WorkflowStateDocument, at: number) => Effect.gen(function* () {
+  const first = planEntities(document.plan)[0]!;
+  const plan: WorkflowPlanGroupInfo = {...document.plan!, nodes: document.plan!.nodes.map(node => node.kind === "step" && node.nodeId === first.nodeId ? {...node, status: "underway" as const} : node)};
+  const started = yield* fixture.workflows.apply(fixture.owner, {...applyInput(fixture, document, plan, "start-a", {note: "The accepted work started.",
+    evidence: [{kind: "status_changed", targetNodeId: null, note: "The task started."}, {kind: "status_changed", targetNodeId: first.nodeId, note: "The first member is underway."}]}),
+  status: "underway"}, validationFor(fixture), at);
+  assert.equal(started.status, "applied", JSON.stringify(started));
+  return yield* mainDocument(fixture);
+});
+const completeLocalPlan = (fixture: Fixture, document: WorkflowStateDocument, operationId: string, at: number) => Effect.gen(function* () {
+  const plan: WorkflowPlanGroupInfo = {...document.plan!, nodes: document.plan!.nodes.map(node => node.kind === "step" ? {...node, status: "completed" as const} : node)};
+  const completed = yield* fixture.workflows.apply(fixture.owner, {...applyInput(fixture, document, plan, operationId, {note: "The accepted plan was completed.",
+    evidence: [{kind: "status_changed", targetNodeId: null, note: "Every accepted member was completed."},
+      ...planEntities(document.plan).map(node => ({kind: "status_changed" as const, targetNodeId: node.nodeId, note: `${node.name} was completed.`}))]}),
+  status: "completed"}, validationFor(fixture), at);
+  assert.equal(completed.status, "applied", JSON.stringify(completed));
+  return yield* mainDocument(fixture);
+});
+
+it.live("a completed accepted snapshot adopts the task's later accepted scope exactly as accepted, keeping the earlier scope as exact history", () => Effect.gen(function* () {
+  const {fixture, current} = yield* seedLocalWorkflow;
+  const completed = yield* completeLocalPlan(fixture, current, "complete-a", 200);
+  assert.deepEqual([completed.status, currentAcceptedProposalId(completed)], ["completed", "proposal-a"], "status progress keeps the accepted snapshot");
+  const [retained, removed] = planEntities(completed.plan);
+  const revised = revisedAgreement(fixture, revisedPlan(completed));
+  const operations = yield* count(fixture, "supervisor_workflow_operations");
+  const imported = yield* transaction(fixture, fixture.workflows.importAcceptedAgreement(fixture.owner, revised, 300));
+  assert.equal(imported.status, "applied", JSON.stringify(imported));
+  const adopted = yield* mainDocument(fixture);
+  // the revised scope is current: its binding, objective and exact accepted plan, planned, with the pointer naming it
+  assert.equal(adopted.revision, completed.revision + 1);
+  assert.deepEqual([adopted.status, adopted.sourceBinding?.taskId, adopted.sourceBinding?.proposalId, adopted.sourceBinding?.sourceHash, currentAcceptedProposalId(adopted)],
+    ["planned", "task-a", "proposal-b", revisedScopeHash, "proposal-b"]);
+  assert.equal(adopted.objective, revised.objective);
+  assert.deepEqual(adopted.plan, revised.agreement.workflow.plan);
+  assert.deepEqual(adopted.plan, adopted.acceptedAgreements[1]?.plan, "the live plan is the accepted snapshot itself");
+  assert.deepEqual(planEntities(adopted.plan).map(node => [node.nodeId, node.status]), [[retained!.nodeId, "planned"], [planEntities(adopted.plan)[1]!.nodeId, "planned"]],
+    "an unchanged occurrence keeps its identity and inherits no completion");
+  assert.deepEqual([workflowAssessment(adopted)?.sourceHash, workflowAssessment(adopted)?.status], [revisedScopeHash, "planned"]);
+  // the earlier scope stays exact history
+  assert.equal(JSON.stringify(adopted.acceptedAgreements[0]), JSON.stringify(completed.acceptedAgreements[0]));
+  assert.equal(JSON.stringify(adopted.evidence.slice(0, completed.evidence.length)), JSON.stringify(completed.evidence));
+  const added = adopted.evidence.slice(completed.evidence.length);
+  assert.deepEqual(added.map(item => [item.kind, item.targetNodeId, item.statusFrom, item.statusTo]), [
+    ["agreement_imported", null, null, null],
+    ["status_changed", retained!.nodeId, "completed", "planned"],
+    ["node_removed", removed!.nodeId, "completed", null],
+    ["status_changed", null, "completed", "planned"],
+    ["plan_updated", null, "completed", "planned"],
+  ]);
+  assert.ok(added.slice(1).every(item => item.sourceRunId === null && item.sourceMessageId === null && item.sourceItemId === null),
+    "the service's transition cites no native activity as an assessment");
+  // one receipt; an exact replay, a reconcile pass and a restart change nothing
+  assert.equal(yield* count(fixture, "supervisor_workflow_operations"), operations + 1);
+  assert.deepEqual(yield* transaction(fixture, fixture.workflows.importAcceptedAgreement(fixture.owner, revised, 400)), imported);
+  assert.equal((yield* transaction(fixture, fixture.workflows.reconcileAcceptedAgreement(fixture.owner, revisedSource, 500))).status, "unchanged");
+  yield* reopen(fixture);
+  assert.deepEqual(yield* mainDocument(fixture), adopted);
+}));
+
+it.live("an ongoing or edited plan stays as it is when the task's later scope is accepted, for the Supervisor to reconcile", () => Effect.gen(function* () {
+  const ongoing = yield* seedLocalWorkflow;
+  const started = yield* startLocalPlan(ongoing.fixture, ongoing.current, 200);
+  assert.equal((yield* transaction(ongoing.fixture, ongoing.fixture.workflows.importAcceptedAgreement(ongoing.fixture.owner,
+    revisedAgreement(ongoing.fixture, revisedPlan(started)), 300))).status, "applied");
+  const afterOngoing = yield* mainDocument(ongoing.fixture);
+  assert.deepEqual([afterOngoing.status, afterOngoing.sourceBinding?.sourceHash, currentAcceptedProposalId(afterOngoing), afterOngoing.acceptedAgreements.length],
+    ["underway", taskSourceHash, "proposal-a", 2]);
+  assert.deepEqual(afterOngoing.plan, started.plan, "ongoing work is never replaced");
+  assert.equal((yield* transaction(ongoing.fixture, ongoing.fixture.workflows.reconcileAcceptedAgreement(ongoing.fixture.owner, revisedSource, 400))).status, "unchanged");
+  assert.equal((yield* mainDocument(ongoing.fixture)).revision, afterOngoing.revision);
+
+  const edited = yield* seedLocalWorkflow;
+  const extra = localPlanInput(["extra"]).nodes[0]!;
+  const broadened = yield* edited.fixture.workflows.apply(edited.fixture.owner, applyInput(edited.fixture, edited.current,
+    {...edited.current.plan!, nodes: [...edited.current.plan!.nodes, extra]}, "broaden-a"), validationFor(edited.fixture), 150);
+  assert.equal(broadened.status, "applied", JSON.stringify(broadened));
+  const broad = yield* mainDocument(edited.fixture);
+  assert.equal(broad.currentAgreementKey, null, "a structural edit is no accepted snapshot");
+  const finished = yield* completeLocalPlan(edited.fixture, broad, "complete-broad", 200);
+  assert.equal((yield* transaction(edited.fixture, edited.fixture.workflows.importAcceptedAgreement(edited.fixture.owner,
+    revisedAgreement(edited.fixture, revisedPlan(finished)), 300))).status, "applied");
+  const afterEdited = yield* mainDocument(edited.fixture);
+  assert.deepEqual([afterEdited.status, afterEdited.sourceBinding?.sourceHash, afterEdited.currentAgreementKey, afterEdited.acceptedAgreements.length],
+    ["completed", taskSourceHash, null, 2]);
+  assert.deepEqual(afterEdited.plan, finished.plan, "an edited broader plan is never replaced");
+  assert.equal((yield* transaction(edited.fixture, edited.fixture.workflows.reconcileAcceptedAgreement(edited.fixture.owner, revisedSource, 400))).status, "unchanged");
+}));
+
+it.live("a later scope its import kept only as history is adopted by reconcile after a restart, with no new receipt, acceptance or record", () => Effect.gen(function* () {
+  const {fixture, current} = yield* seedLocalWorkflow;
+  // the stored incident: the import retained the revised acceptance only as history with its durable receipt, and the workflow stayed
+  // the earlier completed snapshot (reached here by completing the earlier scope after that import)
+  const started = yield* startLocalPlan(fixture, current, 200);
+  const revised = revisedAgreement(fixture, revisedPlan(started));
+  const receipt = yield* transaction(fixture, fixture.workflows.importAcceptedAgreement(fixture.owner, revised, 300));
+  assert.equal(receipt.status, "applied", JSON.stringify(receipt));
+  const completed = yield* completeLocalPlan(fixture, yield* mainDocument(fixture), "complete-a", 400);
+  assert.deepEqual([completed.status, completed.sourceBinding?.sourceHash, currentAcceptedProposalId(completed), completed.acceptedAgreements.length],
+    ["completed", taskSourceHash, "proposal-a", 2]);
+  const operations = yield* count(fixture, "supervisor_workflow_operations");
+  // an import replay answers its durable receipt and changes nothing, so it can never repair this state
+  assert.deepEqual(yield* transaction(fixture, fixture.workflows.importAcceptedAgreement(fixture.owner, revised, 500)), receipt);
+  assert.equal((yield* mainDocument(fixture)).revision, completed.revision);
+  // a reconcile naming another scope than the retained record's changes nothing
+  assert.equal((yield* transaction(fixture, fixture.workflows.reconcileAcceptedAgreement(fixture.owner, {...revisedSource, sourceHash: taskSourceHash}, 550))).status, "unchanged");
+
+  yield* reopen(fixture);
+  const reconciled = yield* transaction(fixture, fixture.workflows.reconcileAcceptedAgreement(fixture.owner, revisedSource, 600));
+  assert.equal(reconciled.status, "applied", JSON.stringify(reconciled));
+  const adopted = yield* mainDocument(fixture);
+  assert.deepEqual([adopted.status, adopted.sourceBinding?.sourceHash, currentAcceptedProposalId(adopted), adopted.revision],
+    ["planned", revisedScopeHash, "proposal-b", completed.revision + 1]);
+  assert.deepEqual(adopted.plan, completed.acceptedAgreements[1]!.plan);
+  assert.ok(planEntities(adopted.plan).every(node => node.status === "planned"), "no completion of the earlier scope is inherited");
+  assert.equal(JSON.stringify(adopted.acceptedAgreements), JSON.stringify(completed.acceptedAgreements), "no acceptance is added or rewritten");
+  assert.equal(JSON.stringify(adopted.evidence.slice(0, completed.evidence.length)), JSON.stringify(completed.evidence));
+  assert.ok(!adopted.evidence.slice(completed.evidence.length).some(item => item.kind === "agreement_imported"), "nothing is imported again");
+  assert.equal(yield* count(fixture, "supervisor_workflow_operations"), operations, "reconcile writes no receipt");
+  // repeated passes, replays and restarts converge without another write
+  assert.equal((yield* transaction(fixture, fixture.workflows.reconcileAcceptedAgreement(fixture.owner, revisedSource, 700))).status, "unchanged");
+  assert.deepEqual(yield* transaction(fixture, fixture.workflows.importAcceptedAgreement(fixture.owner, revised, 800)), receipt);
+  yield* reopen(fixture);
+  assert.deepEqual(yield* mainDocument(fixture), adopted);
 }));

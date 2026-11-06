@@ -1,5 +1,6 @@
 import type { TaskInterpretationInfo, WorkflowAgreementInfo, WorkflowPlanGroupInfo, WorkflowPlanNodeInfo, WorkflowProposalInfo } from "../../src/project-supervisor-contract.js";
 import type { WorkflowProgressObservation, WorkflowProgressWorkflow } from "../../src/workflow-progress.js";
+import { taskScopeRevision } from "../../src/supervision-conversation-contract.js";
 import { branchPathGroups, isPlanGroup, planChildGroups } from "../../src/workflow-plan-tree.js";
 
 // the one task workspace reads three records of the same task: the current proposal, the recorded acceptance and the live
@@ -167,16 +168,26 @@ export type JourneyRecord =
   | {kind: "none"};
 
 /**
- * The single plan the task workspace shows: the live workflow bound to this task, else the plan the recorded acceptance
- * accepted, else the current proposal. A proposal never replaces the live workflow or the accepted plan.
+ * The single plan the task workspace shows: the live workflow while it is bound to this task's current scope or still is the plan the
+ * recorded acceptance accepted, else the plan the recorded acceptance accepted, else the current proposal. A proposal never replaces
+ * the live workflow or the accepted plan, and the workflow of an earlier scope never stands in for a later acceptance or proposal.
  */
 export function journeyRecord(task: TaskInterpretationInfo | undefined, mainWorkflow: WorkflowProgressWorkflow | undefined): JourneyRecord {
-  if (mainWorkflow?.plan && task?.id && mainWorkflow.assessment?.taskId === task.id) return {kind: "live", workflow: mainWorkflow, plan: mainWorkflow.plan};
   const agreement = acceptedAgreement(task);
+  if (mainWorkflow?.plan && task?.id && mainWorkflow.assessment?.taskId === task.id && (mainWorkflow.assessment.sourceHash === taskScopeRevision(task) ||
+    agreement !== null && mainWorkflow.acceptedProposalId === agreement.proposalId)) return {kind: "live", workflow: mainWorkflow, plan: mainWorkflow.plan};
   if (agreement?.workflow.plan) return {kind: "agreed", plan: agreement.workflow.plan};
   if (task?.workflow?.plan && !ended(task)) return {kind: "proposed", plan: task.workflow.plan};
   return {kind: "none"};
 }
+
+/**
+ * The same task's workflow when the journey does not show it as current: the record of an earlier scope, whose progress stays history
+ * until the Supervisor brings the workflow to the task's current plan.
+ */
+export const earlierScopeWorkflow = (task: TaskInterpretationInfo | undefined, mainWorkflow: WorkflowProgressWorkflow | undefined,
+  record: JourneyRecord): WorkflowProgressWorkflow | null =>
+  record.kind !== "live" && task?.id !== undefined && mainWorkflow?.assessment?.taskId === task.id ? mainWorkflow : null;
 
 /** Plan notes and records for each shown step, from records of this same task only. */
 export type StepNotes = {

@@ -7,7 +7,7 @@ import {renderToStaticMarkup} from "react-dom/server";
 import {ProjectSupervisorSnapshot, type WorkflowPlanGroupInfo} from "../src/project-supervisor-contract.js";
 import {WorkflowProgressSnapshotSchema} from "../src/workflow-progress.js";
 import {currentBranchPaths, liveProgress, PlanChanges, PlanJourney, planSteps, reachedDecisionIds, TaskAlignment, TaskOutcome} from "../ui/src/workflow-journey.js";
-import {acceptedAgreement, journeyRecord, pendingProposal, planChanges, stepNotes} from "../ui/src/task-record.js";
+import {acceptedAgreement, earlierScopeWorkflow, journeyRecord, pendingProposal, planChanges, stepNotes} from "../ui/src/task-record.js";
 import {fixtureJourney, journeyCases, journeyObjective, journeyTitle} from "./ui-fixture/journey.js";
 import {FixtureModel, fixtureIds, isScenarioName} from "./ui-fixture/scenarios.js";
 
@@ -144,6 +144,22 @@ it("the journey shows the bound live workflow, else the accepted plan, else the 
   assert.equal(journeyRecord(revised.task, revised.progress.workflows[0]).kind, "live");
   const retained = example("retained");
   assert.equal(journeyRecord(retained.task, retained.progress.workflows[0]).kind, "agreed", "an earlier task's workflow is history");
+  // the same task's workflow of an earlier scope never stands in for a later proposal or acceptance, and is current again once it
+  // follows the accepted plan of the changed scope
+  const rescopedPending = example("rescoped-pending");
+  assert.equal(journeyRecord(rescopedPending.task, rescopedPending.progress.workflows[0]).kind, "proposed");
+  const rescoped = example("rescoped");
+  const awaiting = journeyRecord(rescoped.task, rescoped.progress.workflows[0]);
+  assert.equal(awaiting.kind, "agreed");
+  assert.equal(earlierScopeWorkflow(rescoped.task, rescoped.progress.workflows[0], awaiting), rescoped.progress.workflows[0]);
+  assert.equal(earlierScopeWorkflow(retained.task, retained.progress.workflows[0], journeyRecord(retained.task, retained.progress.workflows[0])), null,
+    "another task's workflow is not this task's earlier scope");
+  const current = example("rescoped-current");
+  assert.equal(journeyRecord(current.task, current.progress.workflows[0]).kind, "live");
+  // a scope change without a later acceptance keeps the workflow that still is the accepted plan live
+  const unchanged = example("working");
+  const moved = {...unchanged.task, conversation: example("rescoped").task.conversation!};
+  assert.equal(journeyRecord(moved, unchanged.progress.workflows[0]).kind, "live");
 });
 
 it("alignment states proposal and acceptance once, without implying an enforcement gate", () => {
