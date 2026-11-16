@@ -350,7 +350,13 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
         binding = {...binding, manualKeepActive: true};yield* store.setBinding(binding);
       }
       if (supervisor.thread.settledAt || supervisor.thread.settledOverride === "settled") {
-        if (binding.settlement && binding.settlement.state !== "settled") yield* store.setBinding({...binding, settlement: {...binding.settlement, state: "settled"}});
+        if (binding.settlementBlockedBy != null || binding.quietSince != null || binding.quietFingerprint !== undefined ||
+          binding.settlement && binding.settlement.state !== "settled") {
+          const settled = {...binding, quietSince: null, settlementBlockedBy: null};
+          delete settled.quietFingerprint;
+          if (settled.settlement) settled.settlement = {...settled.settlement, state: "settled"};
+          yield* store.setBinding(settled);
+        }
         return null;
       }
       if (stopped) {
@@ -534,7 +540,13 @@ const makeSupervisorLifecycle = Effect.gen(function* () {
       return !(yield* guard.supervisionStopped(binding.mainThreadId)) && (yield* guard.scopeEnabled(binding.projectId, binding.mainThreadId));
     }));
     if (main.thread.settledAt || main.thread.settledOverride === "settled") {
-      if (binding.mainSettlement && binding.mainSettlement.state !== "settled") yield* store.setBinding({...binding, mainSettlement: {...binding.mainSettlement, state: "settled"}});
+      if (binding.mainSettlementBlockedBy != null || binding.mainQuietSince != null || binding.mainQuietFingerprint !== undefined ||
+        binding.mainSettlement && binding.mainSettlement.state !== "settled") {
+        const settled = {...binding, mainQuietSince: null, mainSettlementBlockedBy: null};
+        delete settled.mainQuietFingerprint;
+        if (settled.mainSettlement) settled.mainSettlement = {...settled.mainSettlement, state: "settled"};
+        yield* store.setBinding(settled);
+      }
       // the main is settled; the task's other T3 participants settle, or retry, on the same completed task
       if (authorised) yield* settleParticipants((yield* store.binding(binding.projectId, binding.mainThreadId)) ?? binding, execution, main, threads, now);
       return;
