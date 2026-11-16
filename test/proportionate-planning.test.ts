@@ -76,8 +76,8 @@ it.effect("quick routine work authorized by the requester proceeds with no plan,
   assert.equal(fixture.dispatches().length, 1, "the interpretation request is the only Supervisor turn");
   assert.equal(alignmentLabel(task), "No plan needed");
   const html = renderToStaticMarkup(createElement(TaskAlignment, {task}));
-  assert.match(html, /No plan needed for this task/u);
-  assert.match(html, /Continues without a plan or acceptance/u);
+  assert.match(html, /No plan needed for the last interpreted request/u);
+  assert.match(html, /No acceptance needed for the last interpreted request/u);
   assert.doesNotMatch(html, /Plan unavailable|Acceptance has not been recorded|Plan provenance/u);
 }));
 

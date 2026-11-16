@@ -730,7 +730,7 @@ it("unavailable proposals and tasks without a recorded plan preserve uncertainty
   assert.equal(snapshot.tasks[0]!.agreement, undefined, "the task has no earlier accepted plan");
   const notNeededHtml = renderTaskView({...snapshot.tasks[0]!, supervision: "not_needed", workflow: null, reason: "A quick routine sync the agent completes and checks itself."});
   assert.match(notNeededHtml, /No plan needed/);
-  assert.match(notNeededHtml, /judged this quick task to need no plan, so it proceeds without a proposal or acceptance/);
+  assert.match(notNeededHtml, /No plan, proposal or acceptance was needed for the last interpreted request/);
   assert.match(notNeededHtml, /A quick routine sync the agent completes and checks itself\./);
   assert.doesNotMatch(notNeededHtml, /Agreeing a plan|Plan unavailable|Acceptance has not been recorded|No workflow proposal was recorded/);
 });
@@ -1276,6 +1276,7 @@ it("the chat supervision section describes the saved state, keeps one status reg
   assert.equal(on.match(/role="status"/gu)?.length ?? 0, 1, "one status region reports the saved result or error");
   const stopped = render(true, false, "Supervision is stopped for this chat.");
   assert.match(stopped, /Supervision is stopped for this chat \(asked in this chat\)/u);
+  assert.match(stopped, /This does not stop the agent conversation\./u);
   assert.match(render(true, true), /<button type="button" disabled=""[^>]*>Enable supervision<\/button>/u, "a pending change cannot be submitted twice");
   const locked = renderToStaticMarkup(createElement(ProjectSupervisorView, {
     ...viewDefaults, section: "supervision", snapshot: {...snapshot, chatSupervision: {stopped: false, policyGeneration: 4, stoppedBy: null, stoppedAt: null}},
@@ -1534,6 +1535,10 @@ it("a later request that needs no plan keeps the earlier request's accepted plan
   assert.ok(plan.includes("notice earlier-scope"), "the earlier scope's workflow is named as history");
   assert.ok(plan.includes("task-outcome state-paused"), "the Stop is the current outcome");
   assert.ok(plan.includes("task-newer-request"), "the newer request is shown apart from the last interpreted one");
+  assert.match(plan, /A newer request was not interpreted before supervision stopped\. Showing the last interpreted request\./u);
+  assert.match(plan, /No plan, proposal or acceptance was needed for the last interpreted request\./u);
+  assert.match(plan, /No acceptance needed for the last interpreted request/u);
+  assert.doesNotMatch(plan, /it proceeds|Continues without|Reading a newer request/u);
   assert.equal(plan.includes("Print the carton label"), false, "the accepted plan's own step is not shown as current");
   // History keeps both: the plan accepted for the earlier request, never assessed, and the earlier scope's completed workflow
   const history = render(task, true, "history");
@@ -1544,6 +1549,10 @@ it("a later request that needs no plan keeps the earlier request's accepted plan
   const enabled = render({...task, engagement: {...task.engagement!, availability: "catching_up"}}, false);
   assert.equal(enabled.includes('id="plan-changes-title"') || enabled.includes("reconciliation-due"), false);
   assert.equal(enabled.includes("task-outcome state-paused"), false);
+  assert.match(enabled, /A newer request is not yet interpreted\. Showing the last interpreted request\./u);
+  assert.match(enabled, /Newer request not yet interpreted/u);
+  assert.match(enabled, /No acceptance needed for the last interpreted request/u);
+  assert.doesNotMatch(enabled, /it proceeds|Continues without|Reading a newer request/u);
   // control: the identical plan proposed anew under its own identity for a scope that needs a plan is a genuinely pending update
   const anew = {...task, status: "inferred" as const, supervision: "needed" as const, workflowProposalId: "packing-proposal-ticket",
     conversation: {...task.conversation!, observed: task.conversation!.considered}, engagement: {...task.engagement!, availability: "current" as const}};
