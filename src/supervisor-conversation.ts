@@ -2169,14 +2169,16 @@ Turns without a service request: do pending context/planning work, then keep the
         binding.threadId !== task.supervisorThreadId || current.supervisorThreadId !== task.supervisorThreadId || current.sourceHash !== task.sourceHash ||
         !current.definitionSnapshot || !proposalContextMatches(context, current.definitionSnapshot) || !(yield* fixedCommitmentsPreserved(current, candidate.workflow, context))) return "conflict";
       const result = yield* requests.saveAgreementCandidate(candidate);
-      if (result === "saved" || result === "same" && !current.workflowProposalId) {
+      if (result === "saved" || result === "same" && current.workflowProposalId !== candidate.proposalId) {
+        const published = result === "same" ? yield* requests.agreementCandidate(task.id, candidate.proposalId) : candidate;
+        if (!published) return "conflict";
         const prior = current.workflowProposalId ? yield* requests.agreementCandidate(task.id, current.workflowProposalId) : null;
-        const firstId = !current.workflowProposalId || current.workflowProposalId === task.id && !prior;
-        const later = prior && (evidenceRunOrdinal(candidate.evidence) > evidenceRunOrdinal(prior.evidence) ||
-          evidenceRunOrdinal(candidate.evidence) === evidenceRunOrdinal(prior.evidence) && candidate.proposedAt > prior.proposedAt);
-        if (result === "same" || firstId || later || current.workflowProposalId === candidate.proposalId) {
-          const updated = {...current, workflow: candidate.workflow, workflowProposalId: candidate.proposalId,
-            ...(candidate.objective ? {objective: redact(candidate.objective.text)} : {}), updatedAt: now};
+        const firstId = !prior;
+        const later = prior && (evidenceRunOrdinal(published.evidence) > evidenceRunOrdinal(prior.evidence) ||
+          evidenceRunOrdinal(published.evidence) === evidenceRunOrdinal(prior.evidence) && published.proposedAt > prior.proposedAt);
+        if (firstId || later || current.workflowProposalId === candidate.proposalId) {
+          const updated = {...current, workflow: published.workflow, workflowProposalId: published.proposalId,
+            ...(published.objective ? {objective: redact(published.objective.text)} : {}), updatedAt: now};
           yield* store.saveTask(updated);
         }
       } else if (result === "full") {

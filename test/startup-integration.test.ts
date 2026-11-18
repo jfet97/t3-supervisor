@@ -4,7 +4,7 @@ import { it } from "@effect/vitest";
 import { Effect, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { localThreadToolRules, stepEntryGuidance, toolRouteReminder } from "../src/supervisor-workflow.js";
-import { driveNeededWork, startStartupSession, type StartupDispatch } from "./support/startup-gateway.js";
+import { driveNeededWork, startStartupSession, startupSession, type StartupDispatch } from "./support/startup-gateway.js";
 import { repeatedUnits } from "./support/exchange-audit.js";
 
 // one production startup: real launch, gateway reads, submitted then finalized interpretation.
@@ -135,4 +135,69 @@ it.live("a needed-work startup delivers a short notice and the operative reads i
   assert.match(text, /\.t3-supervisor\/project\.yaml/u);
   assert.match(text, /catalog-reading/u);
   assert.equal(session.observe.taskDocument()?.status, "inferred");
+}).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), {timeout: 90_000});
+
+
+it.live("the production gateway promotes a scoped provisional plan from the root's completed repair and imports only the operative's exact acceptance", () => Effect.gen(function* () {
+  const session = yield* startupSession({checkout: {
+    ".t3-supervisor/project.yaml": "workflows: []\nsteps: []\n",
+    ".t3-supervisor/steps/.gitkeep": "",
+    ".t3-supervisor/workflows/.gitkeep": "",
+  }});
+  const {gateway, observe} = session;
+  const objective = yield* waitFor(Effect.sync(() => observe.objectiveDispatches()[0] ?? null), () => "the interpretation was not dispatched");
+  const match = /with (\{"supervisorThreadId":"[^"]+","bindingGeneration":\d+\})/u.exec(objective.text);
+  assert.ok(match?.[1]);
+  const reader = JSON.parse(match[1]) as {supervisorThreadId: string; bindingGeneration: number};
+  yield* gateway.discover();
+  const initial = yield* waitFor(gateway.call("workflow_read", {...reader, view: "context"}).pipe(Effect.map(contextView)),
+    () => "the initial interpretation pins were not served");
+  const source = initial.task!.sourceMessageId!;
+  const outcome = "Inspect the checkout and explain its status.";
+  const submitted = yield* gateway.call("supervision_interpretation_submit", {...initial.submission!.arguments,
+    objective: outcome, reason: "The plan still needs to be drafted.", sourceMessageIds: [source], supervision: "needed", workflow: null,
+    conversation: {draft: {objective: outcome, constraints: [], questions: [], findings: [], duties: []}, intent: "authorize", outcome,
+      limits: [], sourceMessageIds: [source], antecedentMessageIds: [], scope: "changed"}});
+  assert.equal((submitted as {status: string}).status, "submitted");
+  observe.completeRequestRun();
+  yield* waitFor(Effect.sync(() => observe.mainDispatches().find(item => item.text.includes("supervision_plan")) ?? null),
+    () => "the provisional notice was not delivered");
+  type View = {task: {taskId: string; taskRevision: string; definitionsRevision: string;
+    proposal: {proposalId: string; published: boolean}; agreement: {status: string} | null}};
+  const context = (yield* gateway.call("workflow_read", {...reader, view: "context"})) as View;
+  assert.match(context.task.proposal.proposalId, /:scope:/u);
+  assert.equal(observe.mainWorkflow(), null, "a provisional plan grants no accepted workflow");
+  const proposalId = "complete-startup-repair";
+  const record = {taskId: context.task.taskId, taskRevision: context.task.taskRevision, proposalId, revision: context.task.definitionsRevision,
+    draft: {requirements: [], plan: {kind: "sequence", nodes: [
+      {kind: "step", definitionId: null, localId: "inspect", name: "Inspect checkout", description: "Read the checkout.", reason: "Establish the facts."},
+      {kind: "step", definitionId: null, localId: "explain", name: "Explain status", description: "Explain the observed status.", reason: "Answer the request."},
+    ]}}};
+  const checked = (yield* gateway.call("workflow_read", {...reader, view: "check", record})) as {
+    status: string; formal: boolean; published: boolean; publish: string};
+  assert.deepEqual([checked.status, checked.formal, checked.published], ["ok", true, false], JSON.stringify(checked));
+  assert.equal(typeof checked.publish, "string");
+  // the scripted root publishes the checked block in its completed native final answer, never in the database
+  observe.completeMainRun("The initial proposal is provisional; I have not accepted a plan.");
+  observe.sendRootRequest("Finish drafting the complete workflow for the current request.", checked.publish);
+  yield* waitFor(Effect.gen(function* () {
+    const current = (yield* gateway.call("workflow_read", {...reader, view: "context"})) as View;
+    return current.task.proposal.proposalId === proposalId && current.task.proposal.published ? current : null;
+  }), () => `the completed repair did not become current: ${JSON.stringify(observe.debug())}`);
+  assert.equal(observe.mainWorkflow(), null, "publication alone does not record acceptance");
+  yield* waitFor(Effect.sync(() => observe.mainDispatches().find(item => item.text.includes(proposalId)) ?? null),
+    () => "the promoted proposal was not delivered to the operative");
+  const proposal = (yield* gateway.call("supervision_plan", {callerThreadId: "startup-main", taskId: context.task.taskId, proposalId})) as {
+    status: string; proposal: string};
+  assert.equal(proposal.status, "ok");
+  const acceptance = /```workflow-acceptance\n[^\n]+\n```/u.exec(proposal.proposal)?.[0];
+  assert.ok(acceptance, "the operative's own read serves its exact acceptance record");
+  observe.completeMainRun(acceptance);
+  const agreed = yield* waitFor(Effect.sync(() => {
+    const workflow = observe.mainWorkflow();
+    return workflow?.proposalId === proposalId && workflow.currentAgreementKey ? workflow : null;
+  }), () => `the operative acceptance was not imported: ${JSON.stringify(observe.debug())}`);
+  assert.equal(agreed.acceptedAgreements, 1);
+  yield* session.restart;
+  assert.deepEqual(observe.mainWorkflow(), agreed, "restart keeps the accepted repair and its one receipt");
 }).pipe(Effect.provide(Layer.mergeAll(NodeFileSystem.layer, FetchHttpClient.layer))), {timeout: 90_000});

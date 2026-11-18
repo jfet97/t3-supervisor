@@ -60,6 +60,16 @@ it.effect("a ready helper reads only its own check-in's frozen rows with view re
   assert.deepEqual(yield* f.reader.readTool({...rootAuthority, view: "request", requestId: own.id}, cancel), {status: "denied", view: "request", reason: "request_not_owned"});
 }));
 
+it.effect("a planning pause reports a missing reason separately from its supplied targets", () => Effect.gen(function* () {
+  const f = yield* fixture();
+  const args: Record<string, unknown> = {...f.args};
+  delete args.reason;
+  f.proof(args);
+  const result = yield* f.controller.call(args);
+  assert.deepEqual(result, {status: "invalid", reason: "planning_reason_required"});
+  assert.deepEqual(yield* f.stores.requests.planningAttempts("project"), []);
+}));
+
 it.effect("a planning pause needs its exact native owner call and preserves one identity on replay", () => Effect.gen(function* () {
   const f = yield* fixture();
   const unproven = (yield* f.controller.call(f.args)) as {status: string};

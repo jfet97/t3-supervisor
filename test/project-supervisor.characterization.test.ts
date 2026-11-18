@@ -8,6 +8,8 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { DatabaseFormats, DatabaseOpenError, guidanceDbLayer } from "../src/db.js";
 import { defaultSupervisorModel, ProjectSupervisorStoreError, type BindingRecord, type SupervisionFolderPresence, type TaskRecord } from "../src/project-supervisor-store.js";
 import type { NativeRpcShape } from "../src/supervisor-native.js";
+import { fingerprint } from "../src/guidance-store.js";
+import { emptyConversation } from "../src/supervision-conversation-contract.js";
 import type { SupervisorConfig } from "../src/types.js";
 import { failsWith, metaRows, readerRows, sqlText, tableRows, withMillis, type DbSeam } from "./support/psx-sql.js";
 import { openWorkflows, pssSession, readOnlyDatabase } from "./support/psx-stores.js";
@@ -59,6 +61,48 @@ const deadRpc = (native: string[], name: string): NativeRpcShape => ({
   call: () => Effect.sync(() => {native.push(name); throw new Error(`${name} must not be called`);}),
   initiate: () => Effect.sync(() => {native.push(name); throw new Error(`${name} must not be called`);}),
 });
+
+it.live("an unsent interpretation recovers when its genuine request moves below a cancelled queued run", () => Effect.gen(function* () {
+  const f = yield* makeFixture(sourceTask);
+  const binding = yield* f.reserveReadyBinding(mainThreadId, "project-a");
+  const main = f.projections.get(mainThreadId)!;
+  const source = main.messages.find(message => message.id === "source-task")!;
+  const run = main.runs.find(run => run.id === source.runId)!;
+  const cancelled = {...run, id: "cancelled-queued-run", ordinal: run.ordinal + 1, status: "cancelled", startedAt: null,
+    completedAt: run.completedAt, userMessageId: source.id};
+  main.runs.push(cancelled);
+  const prior = {...queuedTask(mainThreadId, binding.threadId, null), id: "retained-scope", status: "unavailable" as const,
+    sourceRunId: cancelled.id, sourceOrdinal: cancelled.ordinal, sourceMessageId: source.id, sourceHash: fingerprint(source.text),
+    conversation: emptyConversation(Date.now()), updatedAt: Date.now()};
+  yield* f.supervisorStore.saveTask(prior);
+  const supervisor = yield* f.makeSupervisor();
+  yield* supervisor.cycle;
+  const recovered = (yield* f.supervisorStore.task(mainThreadId))!;
+  assert.equal(recovered.status, "waiting");
+  assert.equal(recovered.id, prior.id);
+  assert.equal(recovered.sourceRunId, run.id);
+  assert.equal(recovered.sourceOrdinal, run.ordinal);
+  assert.equal(f.messageDispatches().length, 1);
+  yield* supervisor.cycle;
+  assert.equal(f.messageDispatches().length, 1, "the recovered interpretation is sent once");
+}));
+
+it.live("a previously sent unavailable interpretation is not replayed when its request moves to an older run", () => Effect.gen(function* () {
+  for (const delivery of [{dispatchedAt: 50}, {dispatchedAt: null, sourceReadRetryFor: "source-task"}]) {
+    const f = yield* makeFixture(sourceTask);
+    const binding = yield* f.reserveReadyBinding(mainThreadId, "project-a");
+    const main = f.projections.get(mainThreadId)!;
+    const source = main.messages.find(message => message.id === "source-task")!;
+    const run = main.runs.find(run => run.id === source.runId)!;
+    yield* f.supervisorStore.saveTask({...queuedTask(mainThreadId, binding.threadId, delivery.dispatchedAt), ...delivery, status: "unavailable",
+      sourceRunId: "old-queued-run", sourceOrdinal: run.ordinal + 1, sourceMessageId: source.id, sourceHash: fingerprint(source.text),
+      conversation: emptyConversation(Date.now()), updatedAt: Date.now()});
+    const supervisor = yield* f.makeSupervisor();
+    yield* supervisor.cycle;
+    assert.equal(f.messageDispatches().length, 0);
+    assert.equal((yield* f.supervisorStore.task(mainThreadId))?.status, "unavailable");
+  }
+}));
 
 it.live("CT-PS-03: concurrent runOnce and runOnce with retry for one main launch one Supervisor and dispatch one interpretation", () => Effect.gen(function* () {
   {

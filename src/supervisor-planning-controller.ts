@@ -277,8 +277,9 @@ const make = Effect.gen(function* () {
       if (released === "unscoped") return denied("planning_target_unscoped");
       return released ? {status: "recorded", attempt: answer(released)} : denied("planning_scope_changed");
     }
-    if (!payload.targetThreadIds?.length || !payload.reason || new Set(payload.targetThreadIds).size !== payload.targetThreadIds.length)
+    if (!payload.targetThreadIds?.length || new Set(payload.targetThreadIds).size !== payload.targetThreadIds.length)
       return {status: "invalid", reason: "planning_targets_required"};
+    if (!payload.reason) return {status: "invalid", reason: "planning_reason_required"};
     const replay = existing.find(row => row.operationId === payload.operationId && row.bindingGeneration === binding.generation);
     if (replay) return replay.requestHash === workflowRequestHash(input) ? {status: "recorded", attempt: answer(replay, true)} : denied("operation_id_conflict");
     if (existing.some(row => row.state === "open")) return denied("planning_attempt_inflight");
