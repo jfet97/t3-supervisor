@@ -2933,6 +2933,40 @@ it.effect("repeating an older saved proposal reference cannot rewind the current
     "the candidate's original native evidence stays immutable");
 }));
 
+it.effect("an earlier scope's saved reference cannot replace a new provisional plan or block its fresh repair", () => Effect.gen(function* () {
+  const clock = {now: baseTime};
+  const fixture = yield* makeFixture(clock, {operativeActive: false});
+  yield* appendNoticeToOperative(fixture);
+  yield* appendSupervisorProposal(fixture, "earlier-scope-plan", workflowPlan(fixture.task), clock.now + 1);
+  yield* observeAgreement(fixture, clock.now + 30_000);
+  const earlier = (yield* fixture.conversation.requests.agreementCandidate(fixture.task.id, "earlier-scope-plan"))!;
+  assert.ok(earlier);
+  const control = yield* fixture.projectStore.control(projectId);
+  if (!control.effectiveEnabled) yield* fixture.projectStore.saveControl(projectId, control.generation, true, {snapshotSequence: 1, threads: []});
+  const source = appendActualUserMessage(fixture.operative, "expanded-request", "Implement the export with a dry run first.", clock.now + 31_000);
+  const asked = yield* nextInterpretation(fixture, fixture.task.threadId, clock.now + 32_000);
+  assert.equal(asked.sourceMessageId, source.id);
+  const outcome = "Implement the export after a dry run.";
+  const current = yield* interpretNext(fixture, asked, {objective: outcome, reason: "A new plan must cover the dry run.",
+    sourceMessageIds: [source.id], supervision: "needed", workflow: null,
+    conversation: {draft: {objective: outcome, constraints: [], questions: [], findings: [], duties: []}, intent: "authorize", outcome,
+      limits: [], sourceMessageIds: [source.id], antecedentMessageIds: [], scope: "changed"}}, clock.now + 33_000);
+  assert.equal(current.workflow?.status, "provisional");
+  assert.notEqual(taskScopeRevision(current), taskScopeRevision(fixture.task));
+  appendAssistantTurn(fixture.supervisor, "old-scope-echo", workflowFence("workflow-proposal", {
+    taskId: current.id, proposalId: earlier.proposalId, digest: earlier.planHash,
+  }), clock.now + 34_000);
+  yield* observeAgreement(fixture, clock.now + 60_000);
+  const afterEcho = (yield* fixture.projectStore.task(current.threadId))!;
+  assert.equal(afterEcho.workflowProposalId, current.workflowProposalId, "the old digest grants nothing for the new request");
+  assert.equal(afterEcho.workflow?.plan, null);
+  yield* appendSupervisorProposal(fixture, "current-scope-repair", workflowPlan(fixture.task), clock.now + 61_000, afterEcho);
+  yield* observeAgreement(fixture, clock.now + 90_000);
+  assert.equal((yield* fixture.projectStore.task(current.threadId))?.workflowProposalId, "current-scope-repair");
+  assert.deepEqual(yield* fixture.conversation.requests.agreementCandidate(current.id, earlier.proposalId), earlier,
+    "the earlier native evidence remains intact");
+}));
+
 it.effect("an applicable required reference omitted from the initial plan still completes provisional dialogue", () => Effect.gen(function* () {
   const clock = {now: baseTime};
   const fixture = yield* makeFixture(clock, {operativeActive: false});

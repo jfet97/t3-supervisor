@@ -179,6 +179,8 @@ export const resolveCompactProposal = (value: unknown, pins: CompactProposalPins
     if (!idText(value.proposalId) || typeof value.digest !== "string") return failure("record_fields", value.proposalId);
     const stored = known(value.proposalId);
     if (!stored || stored.digest !== value.digest) return failure("proposal_reference_unknown", value.proposalId, "/digest", "the digest of a service-prepared or stored proposal");
+    if (compactProposalDigest(pins, stored) !== stored.digest)
+      return failure("task_revision_mismatch", value.proposalId, "/digest", "a proposal for the current task revision");
     return {ok: true, proposal: {taskId: pins.taskId, proposalId: stored.proposalId, workspaceRoot: stored.workspaceRoot, revision: stored.revision,
       workflow: stored.workflow, digest: stored.digest, formal: formalRecord(stored.workflow, context), objective: null}};
   }
