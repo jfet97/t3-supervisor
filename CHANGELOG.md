@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.33
+
+### Patch Changes
+
+- d094447: Recover workflow negotiation when a valid proposal replaces a provisional plan or T3 moves an unsent request out of a cancelled queued run. Report a missing planning-pause reason accurately, while retaining exact acceptance and uncertain-delivery safeguards.
+
 ## 0.0.32
 
 ### Patch Changes
