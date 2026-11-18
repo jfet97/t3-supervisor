@@ -777,6 +777,10 @@ no check-in or message is sent for it. Following, stopped and closed scopes keep
 parking rules. A request cancelled before it started executed nothing, so the
 latest executed run decides whether the main finished. The binding records the first
 gate that keeps an owned Supervisor active as `settlementBlockedBy`, shown in Supervision.
+The service attempts automatic settlement after a 60-second quiet period. Completing
+a turn does not itself settle the chat. A native settled observation clears earlier
+busy reasons and quiet-window metadata, without creating an automatic-settlement receipt
+or sending another settle command.
 A following scope may stay open until its new activity is assessed, even when no plan
 is needed. An unresolved interpretation starts no check-ins. Activity retained from an
 earlier request, or a replaced request's known-unsent draft, stays as history and does

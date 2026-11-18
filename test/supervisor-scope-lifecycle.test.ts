@@ -1206,6 +1206,31 @@ it.effect("a later human stop supersedes every earlier keep-active choice for th
 }), { timeout: 60_000 });
 
 
+it.effect("native settlement clears stale busy reasons without sending another command or fabricating an automatic receipt", () => Effect.gen(function* () {
+  const f = yield* fixture;
+  const task = (yield* f.store.task("main"))!;
+  yield* Context.get(f.process.context, SupervisionScopeService).rememberCatalog([{id: "p", workspaceRoot: "/workspace"}], f.threads);
+  yield* unfinishedAgreedTask(f, "completed", "completed", {sourceBinding: {workspaceRoot: "/workspace", revision: "definitions-1", globalRevision: null,
+    definitionsStatus: "ready", definitionsComplete: true, requirementsKnown: true, taskId: task.id, proposalId: "proposal", sourceHash: taskScopeRevision(task)}});
+  yield* f.store.setBinding({...f.binding, settlementBlockedBy: "supervisor_busy", mainSettlementBlockedBy: "main_busy",
+    quietSince: 1, quietFingerprint: "earlier-root", mainQuietSince: 1, mainQuietFingerprint: "earlier-main"});
+  f.main.thread.settledAt = "2026-10-14T11:00:00Z";
+  f.supervisor.thread.settledAt = "2026-10-14T11:01:00Z";
+  yield* f.check(10);
+  yield* f.check(20);
+  const binding = (yield* f.store.binding("p", "main"))!;
+  assert.equal(binding.settlementBlockedBy, null);
+  assert.equal(binding.mainSettlementBlockedBy, null);
+  assert.equal(binding.quietSince, null);
+  assert.equal(binding.mainQuietSince, null);
+  assert.equal(binding.quietFingerprint, undefined);
+  assert.equal(binding.mainQuietFingerprint, undefined);
+  assert.equal(binding.settlement, undefined);
+  assert.equal(binding.mainSettlement, undefined);
+  assert.equal(binding.threadId, f.binding.threadId);
+  assert.equal(f.calls.length, 0);
+}));
+
 it.effect("completed source-bound work settles its main independently of a pinned Supervisor", () => Effect.gen(function* () {
   const f = yield* fixture;
   const task = (yield* f.store.task("main"))!;
