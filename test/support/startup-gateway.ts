@@ -61,6 +61,8 @@ export type StartupObservations = {
   readonly sendRequest: (text: string, reply: string) => string;
   // a cooperative root ends each service request it is running with that request's own final marker; returns how many it answered
   readonly answerRootRequests: () => number;
+  // a genuine human turn in the root and its completed reply, as T3 projects them
+  readonly sendRootRequest: (text: string, reply: string) => void;
   // the main's stored workflow document as the production store keeps it, or null before one exists
   readonly mainWorkflow: () => StartupWorkflowView | null;
   readonly debug: () => unknown;
@@ -436,6 +438,28 @@ export const startupSession = (options: StartupSessionOptions = {}): Effect.Effe
       const shell = state.shellThreads.find((item) => item.id === startupMainThreadId);
       if (shell) shell.latestRunId = runId;
       return messageId;
+    },
+    sendRootRequest: (text, reply) => {
+      const task = readTask();
+      const projection = task ? state.projections.get(task.supervisorThreadId) : undefined;
+      assert.ok(projection, "the root");
+      const ordinal = projection.runs.length + 1;
+      const runId = `${projection.thread.id}-human-run-${ordinal}`;
+      const rootNodeId = `${runId}-root`;
+      const messageId = `${runId}-request`;
+      const answerId = `${runId}-answer`;
+      const providerThreadId = `${projection.thread.id}-provider`;
+      const at = new Date().toISOString();
+      projection.runs.push({id: runId, threadId: projection.thread.id, ordinal, status: "completed", requestedAt: at, startedAt: at, completedAt: at,
+        rootNodeId, userMessageId: messageId, providerThreadId});
+      projection.messages.push({id: messageId, threadId: projection.thread.id, runId, nodeId: rootNodeId, role: "user", text, streaming: false,
+        createdAt: at, updatedAt: at, createdBy: "user", creationSource: "web"},
+      {id: answerId, threadId: projection.thread.id, runId, nodeId: answerId, role: "assistant", text: reply, streaming: false, createdAt: at, updatedAt: at});
+      (projection.nodes as Array<Record<string, unknown>>).push({id: rootNodeId, threadId: projection.thread.id, runId, parentNodeId: null, rootNodeId,
+        kind: "root_turn", status: "completed", providerThreadId}, {id: answerId, threadId: projection.thread.id, runId, parentNodeId: rootNodeId,
+        rootNodeId, kind: "assistant_message", status: "completed", providerThreadId});
+      const shell = state.shellThreads.find(item => item.id === projection.thread.id);
+      if (shell) shell.latestRunId = runId;
     },
     answerRootRequests: () => {
       const requests = readSqlite(guidance, (db) => (db.prepare("SELECT document FROM supervisor_conversation_requests").all() as Array<{document: string}>)

@@ -1707,8 +1707,11 @@ const makeProjectSupervisor = (options: ProjectSupervisorOptions = {}) => Effect
       }));
     }
     if (priorUnresolved || previous && inFlight(previous.status)) return;
+    const reassociated = latest && previous?.status === "unavailable" && previous.dispatchedAt === null &&
+      previous.sourceReadRetryFor !== latest.messageId &&
+      latest.messageId === previous.sourceMessageId && latest.hash === previous.sourceHash && latest.runId !== previous.sourceRunId;
     const task = latest && (latest.ordinal > Math.max(baseline, previous?.sourceOrdinal ?? 0) || latest.ordinal > baseline &&
-      latest.ordinal === previous?.sourceOrdinal && (latest.hash !== previous.sourceHash || latest.messageId !== previous.sourceMessageId))
+      (reassociated || latest.ordinal === previous?.sourceOrdinal && (latest.hash !== previous.sourceHash || latest.messageId !== previous.sourceMessageId)))
       ? {run: main.runs.find(item => item.id === latest.runId)!, message: main.messages.find(item => item.id === latest.messageId)!,
         requester: taskRequester(main, main.runs.find(item => item.id === latest.runId)!, main.messages.find(item => item.id === latest.messageId)!, policy)!} : null;
     // a launching conversation listed here must be outside every Supervisor's lineage, so no Supervisor or helper, nor anything they
