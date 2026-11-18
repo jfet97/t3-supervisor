@@ -1,5 +1,11 @@
 # T3 Supervisor
 
+## 0.0.32
+
+### Patch Changes
+
+- ef702a1: Clear stale busy reasons after a conversation is settled and explain the Supervisor's best-effort quiet-period settlement.
+
 ## 0.0.31
 
 ### Patch Changes
