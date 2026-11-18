@@ -176,7 +176,7 @@ it.live("a revised plan the agent accepts after a completed task changed is the 
     ["queued", "dispatching", "waiting"].includes(task.status ?? "") ? task : null),
   () => `the newer question was not observed separately from the lookup: ${JSON.stringify(observe.debug())}`);
   yield* noPlanShown(false);
-  yield* ui.textContaining("A newer request is not interpreted yet.");
+  yield* ui.textContaining("A newer request is not yet interpreted.");
 
   // the person stops supervision of the chat in the dashboard: the Stop is the current outcome and nothing else changes, also after a
   // restart; the agent hears only of the Stop and the Supervisor is not woken

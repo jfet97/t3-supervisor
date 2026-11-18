@@ -384,9 +384,8 @@ export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance 
   // a plan kept for a request that needs no plan, or accepted for an earlier request, is no proposal of the current request
   const proposal = pending ?? (earlier || task?.workflow && !proposalCurrent(task) ? null : task?.workflow ?? task?.agreement?.workflow);
   const update = Boolean(accepted && pending);
-  const newer = newerRequestUninterpreted(task);
   const supervisorLine = task?.engagement?.mode === "following" ? "Understanding and draft duties retained"
-    : unneeded ? newer ? "No plan needed for the last request it interpreted; a newer request is not interpreted yet" : "No plan needed for this task"
+    : unneeded ? "No plan needed for the last interpreted request"
     : !proposal ? "No plan recorded yet" : update ? proposal.status === "pending" ? "Preparing an updated plan" : "Proposed an updated plan" : proposalProgress[proposal.status];
   // the proposal's own message is shown only while it is the open question; an accepted plan is described by its acceptance. A
   // no-plan judgement is explained by the interpretation that made it, not by a later request's queue state
@@ -396,7 +395,7 @@ export function TaskAlignment({task, supervisorThreadId, changedSinceAcceptance 
     : current ? "Accepted this plan"
     : update ? "Earlier plan accepted; update awaiting acceptance"
     : stale ? "Earlier acceptance is out of date"
-    : unneeded ? "Continues without a plan or acceptance"
+    : unneeded ? "No acceptance needed for the last interpreted request"
     : earlier ? "Accepted a plan for an earlier request"
     : "Acceptance has not been recorded";
   const agreement = task?.agreement;

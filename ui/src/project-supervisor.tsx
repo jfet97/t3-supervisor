@@ -624,7 +624,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     : progress?.loading ? "Reading assessment…" : !view.complete ? "Assessment coverage incomplete"
     : earlierScope ? "Earlier scope assessed; not current" : mainWorkflow ? "Retained workflow; not linked to this task" : "No current workflow record";
   const fallback = task?.engagement?.mode === "following" ? "Task scope remains open" : task?.status === "not_supervised" ? "Supervision not needed"
-    : unneeded ? newer ? "Reading a newer request" : "No plan needed" : record.kind === "agreed" || liveAccepted ? "Plan accepted · work not yet assessed"
+    : unneeded ? newer ? "Newer request not yet interpreted" : "No plan needed" : record.kind === "agreed" || liveAccepted ? "Plan accepted · work not yet assessed"
     : task?.agreement?.status === "stale" ? "Plan needs acceptance again" : task?.workflow && proposalCurrent(task) ? "Agreeing a plan"
     : task?.status === "waiting" || task?.status === "queued" || task?.status === "dispatching" ? "Reading the request"
     : progress?.loading ? "Reading assessment…" : "No assessment recorded";
@@ -633,8 +633,8 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
     <section className="task-band" aria-label="Task">
       <ConversationStatus explicitlyStopped={stopped} engagement={task?.engagement} fresh={connected && snapshot.available && currentRead}/>
       <p className="task-objective">{task?.objective ?? (snapshot.available ? "No task objective has been recorded for this conversation." : "The task could not be read.")}</p>
-      {newer ? <p className="muted task-newer-request">{stopped ? "A newer request was not interpreted before supervision stopped; what is shown is from the last interpreted request."
-        : "A newer request is not interpreted yet; what is shown is from the last interpreted request."}</p>
+      {newer ? <p className="muted task-newer-request">{stopped ? "A newer request was not interpreted before supervision stopped. Showing the last interpreted request."
+        : "A newer request is not yet interpreted. Showing the last interpreted request."}</p>
         : task?.reason && task.status !== "inferred" && <p className="muted">{task.reason}</p>}
       <TaskOutcome {...(currentAssessment && current ? {currentStep: current} : {})} assessment={currentAssessment} fallback={fallback} stopped={stopped}/>
       <div className="task-reading">
@@ -684,9 +684,7 @@ export function TaskWorkspace({snapshot, task, threadId, progress, connected, at
           : record.kind === "none" ? "The workflow recorded for an earlier request of this task stays under History; it is not progress on the current request."
           : "The workflow of this task’s earlier scope stays under History; its progress is not progress on this plan."}</p>}
         {record.kind === "none"
-          ? <p className="muted">{unneeded ? !newer ? "The Supervisor judged this quick task to need no plan, so it proceeds without a proposal or acceptance."
-            : `The Supervisor judged the last request it interpreted to need no plan, so it proceeds without a proposal or acceptance. ${
-              stopped ? "A newer request was not interpreted before supervision stopped." : "A newer request is not interpreted yet."}`
+          ? <p className="muted">{unneeded ? "No plan, proposal or acceptance was needed for the last interpreted request."
             : earlierAccepted ? "No plan was proposed for the current request. The plan accepted for an earlier request stays under History."
             : task?.workflow ? "No plan structure is available for this proposal." : task ? "No workflow proposal was recorded for this task." : snapshot.available ? "No task interpretation or plan has been recorded for this conversation." : "Task and plan state could not be read. Their absence has not been established."}</p>
           : <PlanJourney node={record.plan} mode={record.kind} notes={notes} {...(record.kind === "live" ? {contributions: contributionsByNode(record.workflow), selections: record.workflow.branchSelections,
@@ -863,7 +861,7 @@ export function ProjectSupervisorView({
     <div hidden={section !== "all" && section !== "supervision"} className="conversation-supervision stack">      {snapshot.mainThreadId && snapshot.chatSupervision && <div className="stack">
         <h4>Chat supervision</h4>
         <p>{snapshot.chatSupervision.stopped
-          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again; the chat itself is not changed.`
+          ? `Supervision is stopped for this chat${snapshot.chatSupervision.stoppedBy ? ` (${{direct: "asked directly in the Supervisor conversation", relay: "asked in this chat", chat: "asked from another chat", ui: "stopped here"}[snapshot.chatSupervision.stoppedBy]})` : ""}. It stays off until you enable it again. This does not stop the agent conversation.`
           : snapshot.chatSupervision.activation === "not_started" ? "Not started. Choose this chat from Home to start supervision." : snapshot.chatSupervision.activation === "pending" ? "Start pending. No supervision effects are authorized yet." : "Allowed for this chat; project/global settings still apply."}</p>
         {(!snapshot.chatSupervision.stopped || snapshot.chatSupervision.stoppedAt === null) && <div><button type="button" className={snapshot.chatSupervision.stopped ? "primary" : "danger-button"} disabled={!connected || chatSupervisionBusy || chatSupervisionLocked} aria-busy={chatSupervisionBusy || undefined}
           onClick={() => onChatSupervision(snapshot.chatSupervision!.stopped)}>
